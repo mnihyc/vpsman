@@ -31,6 +31,11 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+
       - name: Cache Cargo
         uses: actions/cache@v5
         with:
@@ -43,7 +48,7 @@ jobs:
             release-cargo-${{ runner.os }}-
 
       - name: Build server binaries
-        run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker -p vpsctl
+        run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker
 
       - name: Build static agent and CLI
         run: |
@@ -55,21 +60,22 @@ jobs:
       - name: Stage binaries
         run: |
           set -euo pipefail
-          mkdir -p release-artifacts
-          cp target/release/vpsman-api release-artifacts/vpsman-api-linux-x86_64
-          cp target/release/vpsman-gateway release-artifacts/vpsman-gateway-linux-x86_64
-          cp target/release/vpsman-worker release-artifacts/vpsman-worker-linux-x86_64
-          cp target/release/vpsctl release-artifacts/vpsctl-linux-x86_64-gnu
-          cp target/x86_64-unknown-linux-musl/release/vpsman-agent release-artifacts/vpsman-agent-linux-x86_64-musl
-          cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/vpsman-agent-linux-aarch64-musl
-          cp target/x86_64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-x86_64-musl
-          cp target/aarch64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-aarch64-musl
+          mkdir -p release-artifacts/assets release-artifacts/server/bin release-artifacts/server/migrations
+          cp target/release/vpsman-api release-artifacts/server/bin/vpsman-api
+          cp target/release/vpsman-gateway release-artifacts/server/bin/vpsman-gateway
+          cp target/release/vpsman-worker release-artifacts/server/bin/vpsman-worker
+          cp migrations/*.sql release-artifacts/server/migrations/
+          (cd release-artifacts/server && zip -qr ../assets/vpsman-server-linux-x86_64.zip .)
+          cp target/x86_64-unknown-linux-musl/release/vpsman-agent release-artifacts/assets/vpsman-agent-linux-x86_64-musl
+          cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/assets/vpsman-agent-linux-aarch64-musl
+          cp target/x86_64-unknown-linux-musl/release/vpsctl release-artifacts/assets/vpsctl-linux-x86_64-musl
+          cp target/aarch64-unknown-linux-musl/release/vpsctl release-artifacts/assets/vpsctl-linux-aarch64-musl
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v6
         with:
           name: vpsman-linux-binaries
-          path: release-artifacts/*
+          path: release-artifacts/assets/*
 
   frontend:
     name: Frontend artifact
@@ -145,19 +151,20 @@ jobs:
 
           root = Path("release-assets")
           assets = sorted(path.name for path in root.iterdir() if path.is_file())
+          metadata_path = Path("version.json")
+          metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+          metadata.update(
+              {
+                  "schema_version": 1,
+                  "project": "vpsman",
+                  "tag": os.environ["RELEASE_TAG"],
+                  "version": os.environ["RELEASE_TAG"].removeprefix("v"),
+                  "commit": os.environ["GITHUB_SHA"],
+                  "assets": assets,
+              }
+          )
           (root / "version.json").write_text(
-              json.dumps(
-                  {
-                      "schema_version": 1,
-                      "project": "vpsman",
-                      "tag": os.environ["RELEASE_TAG"],
-                      "commit": os.environ["GITHUB_SHA"],
-                      "assets": assets,
-                  },
-                  indent=2,
-                  sort_keys=True,
-              )
-              + "\n"
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n"
           )
           '
           (cd release-assets && sha256sum * > SHA256SUMS)
@@ -168,6 +175,15 @@ jobs:
           RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            expected_assets="$(mktemp)"
+            current_assets="$(mktemp)"
+            find release-assets -maxdepth 1 -type f -printf '%f\n' | sort > "$expected_assets"
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > "$current_assets"
+            while IFS= read -r asset; do
+              if ! grep -Fxq "$asset" "$expected_assets"; then
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+              fi
+            done < "$current_assets"
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
             gh release edit "$RELEASE_TAG" \
               --title "vpsman $RELEASE_TAG" \

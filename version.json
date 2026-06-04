@@ -1,0 +1,14 @@
+{
+  "assets": [
+    "vpsctl-linux-aarch64-musl",
+    "vpsctl-linux-x86_64-musl",
+    "vpsman-agent-linux-aarch64-musl",
+    "vpsman-agent-linux-x86_64-musl",
+    "vpsman-frontend-dist.tar.gz",
+    "vpsman-server-linux-x86_64.zip"
+  ],
+  "project": "vpsman",
+  "schema_version": 1,
+  "tag": "v0.1.0",
+  "version": "0.1.0"
+}

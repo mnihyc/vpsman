@@ -84,42 +84,20 @@ jobs:
         working-directory: frontend
         run: npm audit --audit-level=moderate
 
-      - name: Install Chrome for Playwright channel tests
-        working-directory: frontend
-        run: npx playwright install --with-deps chrome
-
-      - name: Console layout smoke
-        run: bash scripts/smoke-frontend-console-layout.sh
-
   docs-and-deploy:
-    name: Documentation and deploy checks
+    name: Repository and deploy checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install shell audit tools
+      - name: Public tree hygiene
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
-
-      - name: Tutorial audit
-        run: bash scripts/audit-tutorials.sh
-
-      - name: Migration compatibility audit
-        run: bash scripts/audit-migrations.sh
-
-      - name: Large-file audit
-        run: bash scripts/audit-large-files.sh
-
-      - name: Customizability audit
-        run: bash scripts/audit-customizability.sh
-
-      - name: Security sweep
-        run: bash scripts/security-sweep.sh
-
-      - name: Repository hygiene
-        run: bash scripts/scan-repo-hygiene.sh
+          set -euo pipefail
+          if git ls-files | grep -E '^(AGENTS\.md|DESIGN\.md|PROGRESS\.md|TODO_LIST\.md|DESIGN_GOAL\.md|docs/|tutorials/|scripts/|example_legacy_bird2_config\.zip)$|^(docs|tutorials|scripts)/'; then
+            echo "private/local-only files must not be tracked"
+            exit 1
+          fi
 
       - name: Docker Compose config
         run: docker compose -f deploy/compose.yml config

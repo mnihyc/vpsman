@@ -1,5 +1,9 @@
 /target/
 /AGENTS.md
+/DESIGN.md
+/docs/
+/tutorials/
+/scripts/
 /frontend/node_modules/
 /frontend/dist/
 /frontend/test-results/

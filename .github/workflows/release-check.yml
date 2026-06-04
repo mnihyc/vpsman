@@ -2,12 +2,6 @@ name: Full Release Check
 
 on:
   workflow_dispatch:
-    inputs:
-      run_s3_smokes:
-        description: Run optional S3/MinIO smokes
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -37,25 +31,44 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
-      - name: Install release-check shell tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep jq
+      - name: Rust format
+        run: cargo fmt --all -- --check
 
-      - name: Install frontend dependencies and Chrome for Playwright channel tests
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Build release server binaries
+        run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker
+
+      - name: Build static agent and CLI
+        run: |
+          cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
+          cargo build --release -p vpsman-agent --target aarch64-unknown-linux-musl
+          cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
+          cargo build --release -p vpsctl --target aarch64-unknown-linux-musl
+
+      - name: Install frontend dependencies
         working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+      - name: Public tree hygiene
         run: |
-          npm ci
-          npx playwright install --with-deps chrome
+          set -euo pipefail
+          if git ls-files | grep -E '^(AGENTS\.md|DESIGN\.md|PROGRESS\.md|TODO_LIST\.md|DESIGN_GOAL\.md|docs/|tutorials/|scripts/|example_legacy_bird2_config\.zip)$|^(docs|tutorials|scripts)/'; then
+            echo "private/local-only files must not be tracked"
+            exit 1
+          fi
 
-      - name: Run aggregate release check
-        env:
-          VPSMAN_RELEASE_RUN_S3_SMOKES: ${{ inputs.run_s3_smokes && '1' || '0' }}
-        run: bash scripts/release-check.sh
-
-      - name: Upload release-check logs
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-check-logs
-          path: target/release-check/
+      - name: Docker Compose config
+        run: docker compose -f deploy/compose.yml config
