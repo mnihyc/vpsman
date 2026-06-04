@@ -1,0 +1,833 @@
+use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_json::Value;
+use sqlx::Row;
+use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
+
+use crate::{
+    model::JobOutputView, model_file_transfer::FileTransferSessionView, repository::Repository,
+};
+
+const FILE_TRANSFER_COMMAND_TYPES: &[&str] = &[
+    "file_transfer_start",
+    "file_transfer_chunk",
+    "file_transfer_commit",
+    "file_transfer_abort",
+    "file_transfer_download_start",
+    "file_transfer_download_chunk",
+];
+
+impl Repository {
+    pub(crate) async fn list_file_transfer_sessions(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+        session_id: Option<Uuid>,
+    ) -> Result<Vec<FileTransferSessionView>> {
+        let limit = limit.clamp(1, 200);
+        let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
+        match self {
+            Self::Memory(memory) => {
+                let command_types = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .map(|job| (job.id, job.command_type.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let mut outputs = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter_map(|output| {
+                        if output.stream != "status" {
+                            return None;
+                        }
+                        if let Some(client_id) = client_id {
+                            if output.client_id != client_id {
+                                return None;
+                            }
+                        }
+                        let command_type = command_types.get(&output.job_id)?;
+                        if !is_file_transfer_command(command_type) {
+                            return None;
+                        }
+                        Some(FileTransferStatusOutput {
+                            job_id: output.job_id,
+                            client_id: output.client_id.clone(),
+                            seq: output.seq,
+                            data: BASE64.decode(&output.data_base64).ok()?,
+                            created_at: output.created_at.clone(),
+                            command_type: command_type.clone(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                outputs.sort_by(|left, right| {
+                    right
+                        .created_at
+                        .cmp(&left.created_at)
+                        .then_with(|| right.job_id.cmp(&left.job_id))
+                        .then_with(|| right.seq.cmp(&left.seq))
+                });
+                Ok(build_file_transfer_sessions(outputs, limit, session_id))
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        output.job_id,
+                        output.client_id,
+                        output.seq,
+                        output.data,
+                        output.created_at::text AS created_at,
+                        job.command_type
+                    FROM job_outputs output
+                    JOIN jobs job ON job.id = output.job_id
+                    WHERE output.stream = 'status'
+                      AND job.command_type IN (
+                        'file_transfer_start',
+                        'file_transfer_chunk',
+                        'file_transfer_commit',
+                        'file_transfer_abort',
+                        'file_transfer_download_start',
+                        'file_transfer_download_chunk'
+                      )
+                      AND ($2::text IS NULL OR output.client_id = $2)
+                    ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(scan_limit)
+                .bind(client_id)
+                .fetch_all(pool)
+                .await?;
+                let outputs = rows
+                    .into_iter()
+                    .map(|row| {
+                        Ok(FileTransferStatusOutput {
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                            seq: row.try_get("seq")?,
+                            data: row.try_get("data")?,
+                            created_at: row.try_get("created_at")?,
+                            command_type: row.try_get("command_type")?,
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+                Ok(build_file_transfer_sessions(outputs, limit, session_id))
+            }
+        }
+    }
+
+    pub(crate) async fn list_file_transfer_download_handoff_chunks(
+        &self,
+        client_id: &str,
+        session_id: Uuid,
+    ) -> Result<Vec<FileTransferDownloadHandoffChunk>> {
+        let outputs = self
+            .list_file_transfer_download_chunk_outputs(client_id)
+            .await?;
+        Ok(build_file_transfer_download_handoff_chunks(
+            outputs, session_id,
+        ))
+    }
+
+    async fn list_file_transfer_download_chunk_outputs(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<FileTransferChunkOutput>> {
+        match self {
+            Self::Memory(memory) => {
+                let command_types = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .map(|job| (job.id, job.command_type.clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let mut outputs = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter_map(|output| {
+                        if output.client_id != client_id {
+                            return None;
+                        }
+                        let command_type = command_types.get(&output.job_id)?;
+                        if command_type != "file_transfer_download_chunk" {
+                            return None;
+                        }
+                        Some(FileTransferChunkOutput {
+                            output: output.clone(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                outputs.sort_by(|left, right| {
+                    left.output
+                        .job_id
+                        .cmp(&right.output.job_id)
+                        .then_with(|| left.output.seq.cmp(&right.output.seq))
+                });
+                Ok(outputs)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        output.job_id,
+                        output.client_id,
+                        output.seq,
+                        output.stream,
+                        output.data,
+                        output.storage,
+                        output.object_key,
+                        output.data_sha256_hex,
+                        output.data_size_bytes,
+                        output.exit_code,
+                        output.done,
+                        output.created_at::text AS created_at
+                    FROM job_outputs output
+                    JOIN jobs job ON job.id = output.job_id
+                    WHERE output.client_id = $1
+                      AND job.command_type = 'file_transfer_download_chunk'
+                    ORDER BY output.job_id, output.seq
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let data: Vec<u8> = row.try_get("data")?;
+                        Ok(FileTransferChunkOutput {
+                            output: JobOutputView {
+                                job_id: row.try_get("job_id")?,
+                                client_id: row.try_get("client_id")?,
+                                seq: row.try_get("seq")?,
+                                stream: row.try_get("stream")?,
+                                data_base64: BASE64.encode(data),
+                                storage: row.try_get("storage")?,
+                                artifact_object_key: row.try_get("object_key")?,
+                                artifact_sha256_hex: row.try_get("data_sha256_hex")?,
+                                artifact_size_bytes: row.try_get("data_size_bytes")?,
+                                exit_code: row.try_get("exit_code")?,
+                                done: row.try_get("done")?,
+                                created_at: row.try_get("created_at")?,
+                            },
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+                    .map_err(Into::into)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FileTransferStatusOutput {
+    job_id: Uuid,
+    client_id: String,
+    seq: i32,
+    data: Vec<u8>,
+    created_at: String,
+    command_type: String,
+}
+
+#[derive(Clone, Debug)]
+struct FileTransferEvent {
+    session_id: Uuid,
+    client_id: String,
+    direction: &'static str,
+    status: &'static str,
+    path: String,
+    size_bytes: Option<i64>,
+    progress_bytes: i64,
+    sha256_hex: Option<String>,
+    chunk_size_bytes: Option<i64>,
+    last_chunk_size_bytes: Option<i64>,
+    last_chunk_sha256_hex: Option<String>,
+    rate_limit_kbps: Option<i64>,
+    resumed: Option<bool>,
+    event_type: String,
+    job_id: Uuid,
+    command_type: String,
+    seq: i32,
+    created_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct FileTransferChunkOutput {
+    output: JobOutputView,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileTransferDownloadHandoffChunk {
+    pub(crate) job_id: Uuid,
+    pub(crate) offset: i64,
+    pub(crate) size_bytes: i64,
+    pub(crate) sha256_hex: String,
+    pub(crate) outputs: Vec<JobOutputView>,
+}
+
+#[derive(Clone, Debug)]
+struct FileTransferAggregate {
+    latest: FileTransferEvent,
+    path: String,
+    size_bytes: Option<i64>,
+    sha256_hex: Option<String>,
+    chunk_size_bytes: Option<i64>,
+    last_chunk_size_bytes: Option<i64>,
+    last_chunk_sha256_hex: Option<String>,
+    rate_limit_kbps: Option<i64>,
+    resumed: Option<bool>,
+}
+
+impl FileTransferAggregate {
+    fn new(event: FileTransferEvent) -> Self {
+        Self {
+            path: event.path.clone(),
+            size_bytes: event.size_bytes,
+            sha256_hex: event.sha256_hex.clone(),
+            chunk_size_bytes: event.chunk_size_bytes,
+            last_chunk_size_bytes: event.last_chunk_size_bytes,
+            last_chunk_sha256_hex: event.last_chunk_sha256_hex.clone(),
+            rate_limit_kbps: event.rate_limit_kbps,
+            resumed: event.resumed,
+            latest: event,
+        }
+    }
+
+    fn merge_older(&mut self, event: FileTransferEvent) {
+        if self.path.is_empty() {
+            self.path = event.path;
+        }
+        self.size_bytes = self.size_bytes.or(event.size_bytes);
+        self.sha256_hex = self.sha256_hex.take().or(event.sha256_hex);
+        self.chunk_size_bytes = self.chunk_size_bytes.or(event.chunk_size_bytes);
+        self.last_chunk_size_bytes = self.last_chunk_size_bytes.or(event.last_chunk_size_bytes);
+        self.last_chunk_sha256_hex = self
+            .last_chunk_sha256_hex
+            .take()
+            .or(event.last_chunk_sha256_hex);
+        self.rate_limit_kbps = self.rate_limit_kbps.or(event.rate_limit_kbps);
+        self.resumed = self.resumed.or(event.resumed);
+    }
+
+    fn into_view(self) -> FileTransferSessionView {
+        let progress_ratio = self.size_bytes.and_then(|size| {
+            if size > 0 {
+                Some((self.latest.progress_bytes as f64 / size as f64).clamp(0.0, 1.0))
+            } else {
+                None
+            }
+        });
+        let handoff_available = self.latest.direction == "download"
+            && self.latest.status == "completed"
+            && self.size_bytes.is_some()
+            && self.sha256_hex.is_some();
+        let handoff_object_key = self.handoff_object_key().filter(|_| handoff_available);
+        let handoff_download_path = self.handoff_download_path().filter(|_| handoff_available);
+        FileTransferSessionView {
+            session_id: self.latest.session_id,
+            client_id: self.latest.client_id,
+            direction: self.latest.direction.to_string(),
+            status: self.latest.status.to_string(),
+            path: self.path,
+            size_bytes: self.size_bytes,
+            progress_bytes: self.latest.progress_bytes,
+            progress_ratio,
+            sha256_hex: self.sha256_hex,
+            chunk_size_bytes: self.chunk_size_bytes,
+            last_chunk_size_bytes: self.last_chunk_size_bytes,
+            last_chunk_sha256_hex: self.last_chunk_sha256_hex,
+            rate_limit_kbps: self.rate_limit_kbps,
+            resumed: self.resumed,
+            last_event: self.latest.event_type,
+            last_job_id: self.latest.job_id,
+            last_command_type: self.latest.command_type,
+            last_seq: self.latest.seq,
+            observed_at: self.latest.created_at,
+            handoff_available,
+            handoff_object_key,
+            handoff_download_path,
+        }
+    }
+
+    fn handoff_object_key(&self) -> Option<String> {
+        let sha256_hex = self.sha256_hex.as_deref()?;
+        Some(file_transfer_handoff_object_key(
+            &self.latest.client_id,
+            self.latest.session_id,
+            sha256_hex,
+        ))
+    }
+
+    fn handoff_download_path(&self) -> Option<String> {
+        self.sha256_hex.as_ref()?;
+        Some(file_transfer_handoff_download_path(
+            &self.latest.client_id,
+            self.latest.session_id,
+        ))
+    }
+}
+
+fn build_file_transfer_sessions(
+    outputs: Vec<FileTransferStatusOutput>,
+    limit: i64,
+    session_filter: Option<Uuid>,
+) -> Vec<FileTransferSessionView> {
+    let mut order = Vec::<(String, Uuid)>::new();
+    let mut aggregates = BTreeMap::<(String, Uuid), FileTransferAggregate>::new();
+
+    for output in outputs {
+        let Some(event) = parse_file_transfer_event(output) else {
+            continue;
+        };
+        if session_filter.is_some_and(|session_id| event.session_id != session_id) {
+            continue;
+        }
+        let key = (event.client_id.clone(), event.session_id);
+        if let Some(aggregate) = aggregates.get_mut(&key) {
+            aggregate.merge_older(event);
+        } else {
+            order.push(key.clone());
+            aggregates.insert(key, FileTransferAggregate::new(event));
+        }
+    }
+
+    let limit = limit.clamp(1, 200) as usize;
+    let mut views = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for key in order {
+        if !emitted.insert(key.clone()) {
+            continue;
+        }
+        if let Some(aggregate) = aggregates.remove(&key) {
+            views.push(aggregate.into_view());
+            if views.len() >= limit {
+                break;
+            }
+        }
+    }
+    views
+}
+
+fn parse_file_transfer_event(output: FileTransferStatusOutput) -> Option<FileTransferEvent> {
+    let value = serde_json::from_slice::<Value>(&output.data).ok()?;
+    let event_type = value.get("type")?.as_str()?.to_string();
+    if !is_file_transfer_status_event(&event_type) {
+        return None;
+    }
+    let session_id = value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let extra = value.get("extra").unwrap_or(&Value::Null);
+    let direction = if event_type.starts_with("file_transfer_download") {
+        "download"
+    } else {
+        "upload"
+    };
+    let status = transfer_status(&event_type, extra);
+    let size_bytes = value.get("size_bytes").and_then(json_i64);
+    let progress_bytes = value
+        .get("next_offset")
+        .and_then(json_i64)
+        .unwrap_or_default()
+        .max(0);
+
+    Some(FileTransferEvent {
+        session_id,
+        client_id: output.client_id,
+        direction,
+        status,
+        path: value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        size_bytes,
+        progress_bytes,
+        sha256_hex: first_json_string(extra, &["sha256_hex", "file_sha256_hex"])
+            .or_else(|| first_json_string(&value, &["sha256_hex"])),
+        chunk_size_bytes: match event_type.as_str() {
+            "file_transfer_start" | "file_transfer_download_start" => {
+                extra.get("chunk_size_bytes").and_then(json_i64)
+            }
+            _ => None,
+        },
+        last_chunk_size_bytes: first_json_i64(extra, &["ack_size_bytes", "chunk_size_bytes"]),
+        last_chunk_sha256_hex: first_json_string(extra, &["chunk_sha256_hex"]),
+        rate_limit_kbps: extra.get("rate_limit_kbps").and_then(json_i64),
+        resumed: extra.get("resumed").and_then(Value::as_bool),
+        event_type,
+        job_id: output.job_id,
+        command_type: output.command_type,
+        seq: output.seq,
+        created_at: output.created_at,
+    })
+}
+
+fn transfer_status(event_type: &str, extra: &Value) -> &'static str {
+    match event_type {
+        "file_transfer_commit" => "completed",
+        "file_transfer_abort" => "aborted",
+        "file_transfer_download_chunk"
+            if extra
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            "completed"
+        }
+        "file_transfer_chunk_ack" | "file_transfer_download_chunk" => "transferring",
+        "file_transfer_start" | "file_transfer_download_start" => "started",
+        _ => "unknown",
+    }
+}
+
+fn first_json_string(value: &Value, fields: &[&str]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn first_json_i64(value: &Value, fields: &[&str]) -> Option<i64> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(json_i64))
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn is_file_transfer_command(command_type: &str) -> bool {
+    FILE_TRANSFER_COMMAND_TYPES.contains(&command_type)
+}
+
+fn is_file_transfer_status_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "file_transfer_start"
+            | "file_transfer_chunk_ack"
+            | "file_transfer_commit"
+            | "file_transfer_abort"
+            | "file_transfer_download_start"
+            | "file_transfer_download_chunk"
+    )
+}
+
+fn build_file_transfer_download_handoff_chunks(
+    outputs: Vec<FileTransferChunkOutput>,
+    session_id: Uuid,
+) -> Vec<FileTransferDownloadHandoffChunk> {
+    let mut by_job = BTreeMap::<Uuid, Vec<FileTransferChunkOutput>>::new();
+    for output in outputs {
+        by_job.entry(output.output.job_id).or_default().push(output);
+    }
+    let mut chunks = Vec::new();
+    for (job_id, outputs) in by_job {
+        let Some(status) = outputs.iter().find_map(|output| {
+            if output.output.stream != "status" {
+                return None;
+            }
+            parse_download_chunk_status(&output.output, session_id)
+        }) else {
+            continue;
+        };
+        let data_outputs = outputs
+            .into_iter()
+            .filter(|output| output.output.stream == "stdout")
+            .map(|output| output.output)
+            .collect::<Vec<_>>();
+        if data_outputs.is_empty() {
+            continue;
+        }
+        chunks.push(FileTransferDownloadHandoffChunk {
+            job_id,
+            offset: status.offset,
+            size_bytes: status.size_bytes,
+            sha256_hex: status.sha256_hex,
+            outputs: data_outputs,
+        });
+    }
+    chunks.sort_by(|left, right| {
+        left.offset
+            .cmp(&right.offset)
+            .then_with(|| left.job_id.cmp(&right.job_id))
+    });
+    chunks
+}
+
+#[derive(Clone, Debug)]
+struct DownloadChunkStatus {
+    offset: i64,
+    size_bytes: i64,
+    sha256_hex: String,
+}
+
+fn parse_download_chunk_status(
+    output: &JobOutputView,
+    expected_session_id: Uuid,
+) -> Option<DownloadChunkStatus> {
+    let value = serde_json::from_slice::<Value>(&BASE64.decode(&output.data_base64).ok()?).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("file_transfer_download_chunk") {
+        return None;
+    }
+    let session_id = value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    if session_id != expected_session_id {
+        return None;
+    }
+    let extra = value.get("extra")?;
+    Some(DownloadChunkStatus {
+        offset: extra.get("offset").and_then(json_i64)?,
+        size_bytes: first_json_i64(extra, &["chunk_size_bytes"])?,
+        sha256_hex: first_json_string(extra, &["chunk_sha256_hex"])?,
+    })
+}
+
+pub(crate) fn file_transfer_handoff_object_key(
+    client_id: &str,
+    session_id: Uuid,
+    sha256_hex: &str,
+) -> String {
+    format!(
+        "file-transfers/{}/{session_id}/{sha256_hex}.bin",
+        hex::encode(client_id.as_bytes())
+    )
+}
+
+pub(crate) fn file_transfer_handoff_download_path(client_id: &str, session_id: Uuid) -> String {
+    format!(
+        "/api/v1/file-transfers/{}/{session_id}/handoff/artifact",
+        percent_encode_path_segment(client_id)
+    )
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_file_transfer_sessions, file_transfer_handoff_download_path,
+        file_transfer_handoff_object_key, FileTransferStatusOutput,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn builds_latest_upload_session_with_start_metadata() {
+        let session_id = Uuid::new_v4();
+        let start_job = Uuid::new_v4();
+        let chunk_job = Uuid::new_v4();
+        let commit_job = Uuid::new_v4();
+        let outputs = vec![
+            status_output(
+                commit_job,
+                "edge-a",
+                0,
+                "300",
+                "file_transfer_commit",
+                "file_transfer_commit",
+                serde_json::json!({
+                    "type": "file_transfer_commit",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 12,
+                    "size_bytes": 12,
+                    "extra": {"sha256_hex": "b".repeat(64), "mode": 420}
+                }),
+            ),
+            status_output(
+                chunk_job,
+                "edge-a",
+                0,
+                "200",
+                "file_transfer_chunk",
+                "file_transfer_chunk_ack",
+                serde_json::json!({
+                    "type": "file_transfer_chunk_ack",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 12,
+                    "size_bytes": 12,
+                    "extra": {"ack_offset": 0, "ack_size_bytes": 12}
+                }),
+            ),
+            status_output(
+                start_job,
+                "edge-a",
+                0,
+                "100",
+                "file_transfer_start",
+                "file_transfer_start",
+                serde_json::json!({
+                    "type": "file_transfer_start",
+                    "session_id": session_id,
+                    "path": "/opt/app.bin",
+                    "next_offset": 0,
+                    "size_bytes": 12,
+                    "extra": {"resumed": false, "chunk_size_bytes": 65536, "rate_limit_kbps": 1000}
+                }),
+            ),
+        ];
+
+        let sessions = build_file_transfer_sessions(outputs, 20, None);
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.session_id, session_id);
+        assert_eq!(session.client_id, "edge-a");
+        assert_eq!(session.direction, "upload");
+        assert_eq!(session.status, "completed");
+        assert_eq!(session.path, "/opt/app.bin");
+        assert_eq!(session.progress_bytes, 12);
+        assert_eq!(session.progress_ratio, Some(1.0));
+        assert_eq!(session.chunk_size_bytes, Some(65536));
+        assert_eq!(session.last_chunk_size_bytes, Some(12));
+        assert_eq!(session.rate_limit_kbps, Some(1000));
+        assert_eq!(session.last_job_id, commit_job);
+        assert_eq!(session.last_event, "file_transfer_commit");
+    }
+
+    #[test]
+    fn filters_download_sessions_and_marks_final_chunk_complete() {
+        let wanted = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let outputs = vec![
+            status_output(
+                Uuid::new_v4(),
+                "edge-b",
+                1,
+                "300",
+                "file_transfer_download_chunk",
+                "file_transfer_download_chunk",
+                serde_json::json!({
+                    "type": "file_transfer_download_chunk",
+                    "session_id": wanted,
+                    "path": "/var/log/app.log",
+                    "next_offset": 100,
+                    "size_bytes": 100,
+                    "extra": {"offset": 64, "chunk_size_bytes": 36, "chunk_sha256_hex": "a".repeat(64), "complete": true, "file_sha256_hex": "c".repeat(64)}
+                }),
+            ),
+            status_output(
+                Uuid::new_v4(),
+                "edge-b",
+                0,
+                "200",
+                "file_transfer_download_start",
+                "file_transfer_download_start",
+                serde_json::json!({
+                    "type": "file_transfer_download_start",
+                    "session_id": wanted,
+                    "path": "/var/log/app.log",
+                    "next_offset": 0,
+                    "size_bytes": 100,
+                    "extra": {"resumed": true, "sha256_hex": "c".repeat(64), "chunk_size_bytes": 64, "rate_limit_kbps": 0}
+                }),
+            ),
+            status_output(
+                Uuid::new_v4(),
+                "edge-c",
+                0,
+                "100",
+                "file_transfer_download_start",
+                "file_transfer_download_start",
+                serde_json::json!({
+                    "type": "file_transfer_download_start",
+                    "session_id": other,
+                    "path": "/tmp/other",
+                    "next_offset": 0,
+                    "size_bytes": 1,
+                    "extra": {"chunk_size_bytes": 1}
+                }),
+            ),
+        ];
+
+        let sessions = build_file_transfer_sessions(outputs, 20, Some(wanted));
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.session_id, wanted);
+        assert_eq!(session.direction, "download");
+        assert_eq!(session.status, "completed");
+        assert_eq!(session.chunk_size_bytes, Some(64));
+        assert_eq!(session.last_chunk_size_bytes, Some(36));
+        assert_eq!(session.resumed, Some(true));
+        let expected_file_hash = "c".repeat(64);
+        let expected_chunk_hash = "a".repeat(64);
+        assert_eq!(
+            session.sha256_hex.as_deref(),
+            Some(expected_file_hash.as_str())
+        );
+        assert_eq!(
+            session.last_chunk_sha256_hex.as_deref(),
+            Some(expected_chunk_hash.as_str())
+        );
+        assert!(session.handoff_available);
+        assert_eq!(
+            session.handoff_object_key.as_deref(),
+            Some(file_transfer_handoff_object_key("edge-b", wanted, &expected_file_hash).as_str())
+        );
+        assert_eq!(
+            session.handoff_download_path.as_deref(),
+            Some(file_transfer_handoff_download_path("edge-b", wanted).as_str())
+        );
+    }
+
+    #[test]
+    fn handoff_download_path_percent_encodes_client_id() {
+        let session_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+
+        assert_eq!(
+            file_transfer_handoff_download_path("edge a/ignored", session_id),
+            "/api/v1/file-transfers/edge%20a%2Fignored/11111111-2222-4333-8444-555555555555/handoff/artifact"
+        );
+    }
+
+    fn status_output(
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        created_at: &str,
+        command_type: &str,
+        expected_type: &str,
+        value: serde_json::Value,
+    ) -> FileTransferStatusOutput {
+        assert_eq!(
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap(),
+            expected_type
+        );
+        FileTransferStatusOutput {
+            job_id,
+            client_id: client_id.to_string(),
+            seq,
+            data: serde_json::to_vec(&value).unwrap(),
+            created_at: created_at.to_string(),
+            command_type: command_type.to_string(),
+        }
+    }
+}

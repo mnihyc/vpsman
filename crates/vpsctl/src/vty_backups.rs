@@ -1,0 +1,965 @@
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use uuid::Uuid;
+use vpsman_common::JobCommand;
+
+use crate::{
+    commands_backups::{
+        restore_artifact_bytes, restore_rollback_operation_from_api, restore_run_operation,
+    },
+    http::http_post_json,
+    proof::build_envelopes_for_job_command,
+    vty_jobs::{
+        vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyProofContext,
+    },
+};
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyBackupRequest {
+    pub(crate) client_id: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) recipient_public_key_hex: Option<String>,
+    pub(crate) confirmed: bool,
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyRestorePlanRequest {
+    pub(crate) source_backup_request_id: Uuid,
+    pub(crate) target_client_id: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) destination_root: Option<String>,
+    pub(crate) confirmed: bool,
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyRestoreRunRequest {
+    pub(crate) source_backup_request_id: Uuid,
+    pub(crate) target_client_id: String,
+    pub(crate) artifact_file: Option<PathBuf>,
+    pub(crate) private_key_env: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) destination_root: Option<String>,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyRestoreRollbackRequest {
+    pub(crate) restore_job_id: Uuid,
+    pub(crate) target_client_id: String,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyBackupRunRequest {
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) recipient_public_key_hex: Option<String>,
+    pub(crate) selection: VtyJobSelection,
+    pub(crate) timeout_secs: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyBackupPolicyUpsert {
+    pub(crate) name: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) recipient_public_key_hex: Option<String>,
+    pub(crate) selection: VtyJobSelection,
+    pub(crate) interval_secs: u64,
+    pub(crate) enabled: bool,
+    pub(crate) catch_up_policy: String,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+    pub(crate) retention_days: Option<i32>,
+    pub(crate) keep_last: Option<i32>,
+    pub(crate) rotation_generation: Option<String>,
+}
+
+pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupRequest> {
+    let client_id = tokens
+        .first()
+        .context("usage: backup-request <client_id> [--path <abs>] [--include-config] [--confirmed] [--note <text>]")?
+        .to_string();
+    let mut request = VtyBackupRequest {
+        client_id,
+        paths: Vec::new(),
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: false,
+        note: None,
+    };
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--include-config" => {
+                request.include_config = true;
+                index += 1;
+            }
+            "--confirmed" => {
+                request.confirmed = true;
+                index += 1;
+            }
+            "--path" => {
+                request.paths.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--path requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                request
+                    .paths
+                    .push(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--note" => {
+                request.note = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--note requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--note=") => {
+                request.note = Some(value.trim_start_matches("--note=").to_string());
+                index += 1;
+            }
+            "--recipient-public-key-hex" => {
+                request.recipient_public_key_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--recipient-public-key-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--recipient-public-key-hex=") => {
+                request.recipient_public_key_hex = Some(
+                    value
+                        .trim_start_matches("--recipient-public-key-hex=")
+                        .to_string(),
+                );
+                index += 1;
+            }
+            other => anyhow::bail!("unknown backup-request flag {other}"),
+        }
+    }
+    ensure_backup_scope(&request.paths, request.include_config, "backup-request")?;
+    ensure_backup_recipient_public_key(request.recipient_public_key_hex.as_deref())?;
+    Ok(request)
+}
+
+pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunRequest> {
+    let mut paths = Vec::new();
+    let mut include_config = false;
+    let mut recipient_public_key_hex = None;
+    let mut timeout_secs = 60_u64;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--include-config" => {
+                include_config = true;
+                index += 1;
+            }
+            "--path" => {
+                paths.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--path requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                paths.push(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--recipient-public-key-hex" => {
+                recipient_public_key_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--recipient-public-key-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--recipient-public-key-hex=") => {
+                recipient_public_key_hex = Some(
+                    value
+                        .trim_start_matches("--recipient-public-key-hex=")
+                        .to_string(),
+                );
+                index += 1;
+            }
+            "--timeout" => {
+                timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--timeout requires a value")?
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 2;
+            }
+            value if value.starts_with("--timeout=") => {
+                timeout_secs = value
+                    .trim_start_matches("--timeout=")
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 1;
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    ensure_backup_scope(&paths, include_config, "backup-run")?;
+    ensure_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
+    anyhow::ensure!(
+        (1..=3600).contains(&timeout_secs),
+        "backup timeout out of range"
+    );
+    Ok(VtyBackupRunRequest {
+        paths,
+        include_config,
+        recipient_public_key_hex,
+        selection: VtyJobSelection::parse(&target_tokens)?,
+        timeout_secs,
+    })
+}
+
+pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
+    let name = tokens
+        .first()
+        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--interval <secs>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <client:id|pool:uuid|tag:name>... --confirmed")?
+        .to_string();
+    let mut paths = Vec::new();
+    let mut include_config = false;
+    let mut recipient_public_key_hex = None;
+    let mut interval_secs = 86_400_u64;
+    let mut enabled = true;
+    let mut catch_up_policy = "skip_missed".to_string();
+    let mut catch_up_limit = 1_i32;
+    let mut retry_delay_secs = 300_i64;
+    let mut max_failures = 3_i32;
+    let mut retention_days = None;
+    let mut keep_last = None;
+    let mut rotation_generation = None;
+    let mut target_tokens = Vec::new();
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--include-config" => {
+                include_config = true;
+                index += 1;
+            }
+            "--disabled" => {
+                enabled = false;
+                index += 1;
+            }
+            "--path" => {
+                paths.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--path requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                paths.push(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--recipient-public-key-hex" => {
+                recipient_public_key_hex = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--recipient-public-key-hex requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--recipient-public-key-hex=") => {
+                recipient_public_key_hex = Some(
+                    value
+                        .trim_start_matches("--recipient-public-key-hex=")
+                        .to_string(),
+                );
+                index += 1;
+            }
+            "--interval" => {
+                interval_secs = tokens
+                    .get(index + 1)
+                    .context("--interval requires a value")?
+                    .parse()
+                    .context("invalid --interval")?;
+                index += 2;
+            }
+            value if value.starts_with("--interval=") => {
+                interval_secs = value
+                    .trim_start_matches("--interval=")
+                    .parse()
+                    .context("invalid --interval")?;
+                index += 1;
+            }
+            "--retention-days" => {
+                retention_days = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--retention-days requires a value")?
+                        .parse()
+                        .context("invalid --retention-days")?,
+                );
+                index += 2;
+            }
+            value if value.starts_with("--retention-days=") => {
+                retention_days = Some(
+                    value
+                        .trim_start_matches("--retention-days=")
+                        .parse()
+                        .context("invalid --retention-days")?,
+                );
+                index += 1;
+            }
+            "--keep-last" => {
+                keep_last = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--keep-last requires a value")?
+                        .parse()
+                        .context("invalid --keep-last")?,
+                );
+                index += 2;
+            }
+            value if value.starts_with("--keep-last=") => {
+                keep_last = Some(
+                    value
+                        .trim_start_matches("--keep-last=")
+                        .parse()
+                        .context("invalid --keep-last")?,
+                );
+                index += 1;
+            }
+            "--rotation-generation" => {
+                rotation_generation = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--rotation-generation requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--rotation-generation=") => {
+                rotation_generation = Some(
+                    value
+                        .trim_start_matches("--rotation-generation=")
+                        .to_string(),
+                );
+                index += 1;
+            }
+            "--catch-up-policy" => {
+                catch_up_policy = tokens
+                    .get(index + 1)
+                    .context("--catch-up-policy requires a value")?
+                    .to_string();
+                index += 2;
+            }
+            value if value.starts_with("--catch-up-policy=") => {
+                catch_up_policy = value.trim_start_matches("--catch-up-policy=").to_string();
+                index += 1;
+            }
+            "--catch-up-limit" => {
+                catch_up_limit = tokens
+                    .get(index + 1)
+                    .context("--catch-up-limit requires a value")?
+                    .parse()
+                    .context("invalid --catch-up-limit")?;
+                index += 2;
+            }
+            value if value.starts_with("--catch-up-limit=") => {
+                catch_up_limit = value
+                    .trim_start_matches("--catch-up-limit=")
+                    .parse()
+                    .context("invalid --catch-up-limit")?;
+                index += 1;
+            }
+            "--retry-delay" => {
+                retry_delay_secs = tokens
+                    .get(index + 1)
+                    .context("--retry-delay requires a value")?
+                    .parse()
+                    .context("invalid --retry-delay")?;
+                index += 2;
+            }
+            value if value.starts_with("--retry-delay=") => {
+                retry_delay_secs = value
+                    .trim_start_matches("--retry-delay=")
+                    .parse()
+                    .context("invalid --retry-delay")?;
+                index += 1;
+            }
+            "--max-failures" => {
+                max_failures = tokens
+                    .get(index + 1)
+                    .context("--max-failures requires a value")?
+                    .parse()
+                    .context("invalid --max-failures")?;
+                index += 2;
+            }
+            value if value.starts_with("--max-failures=") => {
+                max_failures = value
+                    .trim_start_matches("--max-failures=")
+                    .parse()
+                    .context("invalid --max-failures")?;
+                index += 1;
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    ensure_backup_scope(&paths, include_config, "backup-policy-upsert")?;
+    ensure_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
+    anyhow::ensure!(
+        (1..=31_536_000).contains(&interval_secs),
+        "backup policy interval out of range"
+    );
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "backup-policy-upsert requires --confirmed"
+    );
+    Ok(VtyBackupPolicyUpsert {
+        name,
+        paths,
+        include_config,
+        recipient_public_key_hex,
+        selection,
+        interval_secs,
+        enabled,
+        catch_up_policy,
+        catch_up_limit,
+        retry_delay_secs,
+        max_failures,
+        retention_days,
+        keep_last,
+        rotation_generation,
+    })
+}
+
+pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRequest> {
+    let source_backup_request_id = tokens
+        .first()
+        .context("usage: restore-plan <source_backup_uuid> <target_client_id> [--path <abs>] [--include-config] [--destination-root <abs>] [--confirmed] [--note <text>]")?;
+    let target_client_id = tokens.get(1).context(
+        "usage: restore-plan <source_backup_uuid> <target_client_id> [--path <abs>] [--include-config] [--destination-root <abs>] [--confirmed] [--note <text>]",
+    )?;
+    let mut request = VtyRestorePlanRequest {
+        source_backup_request_id: Uuid::parse_str(source_backup_request_id)
+            .context("invalid source backup request UUID")?,
+        target_client_id: (*target_client_id).to_string(),
+        paths: Vec::new(),
+        include_config: false,
+        destination_root: None,
+        confirmed: false,
+        note: None,
+    };
+    let mut index = 2;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--include-config" => {
+                request.include_config = true;
+                index += 1;
+            }
+            "--confirmed" => {
+                request.confirmed = true;
+                index += 1;
+            }
+            "--path" => {
+                request.paths.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--path requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                request
+                    .paths
+                    .push(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--destination-root" => {
+                request.destination_root = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--destination-root requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--destination-root=") => {
+                request.destination_root =
+                    Some(value.trim_start_matches("--destination-root=").to_string());
+                index += 1;
+            }
+            "--note" => {
+                request.note = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--note requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--note=") => {
+                request.note = Some(value.trim_start_matches("--note=").to_string());
+                index += 1;
+            }
+            other => anyhow::bail!("unknown restore-plan flag {other}"),
+        }
+    }
+    ensure_backup_scope(&request.paths, request.include_config, "restore-plan")?;
+    if let Some(destination_root) = &request.destination_root {
+        anyhow::ensure!(
+            destination_root.starts_with('/'),
+            "restore destination root must be absolute"
+        );
+    }
+    Ok(request)
+}
+
+pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
+    let source_backup_request_id = tokens
+        .first()
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+    let target_client_id = tokens.get(1).context(
+        "usage: restore-run <source_backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+    )?;
+    let mut request = VtyRestoreRunRequest {
+        source_backup_request_id: Uuid::parse_str(source_backup_request_id)
+            .context("invalid source backup request UUID")?,
+        target_client_id: (*target_client_id).to_string(),
+        artifact_file: None,
+        private_key_env: "VPSMAN_BACKUP_PRIVATE_KEY_HEX".to_string(),
+        paths: Vec::new(),
+        include_config: false,
+        destination_root: None,
+        timeout_secs: 60,
+        confirmed: false,
+        force_unprivileged: false,
+    };
+    let mut index = 2;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--artifact-file" => {
+                request.artifact_file = Some(PathBuf::from(
+                    tokens
+                        .get(index + 1)
+                        .context("--artifact-file requires a value")?,
+                ));
+                index += 2;
+            }
+            value if value.starts_with("--artifact-file=") => {
+                request.artifact_file =
+                    Some(PathBuf::from(value.trim_start_matches("--artifact-file=")));
+                index += 1;
+            }
+            "--private-key-env" => {
+                request.private_key_env = tokens
+                    .get(index + 1)
+                    .context("--private-key-env requires a value")?
+                    .to_string();
+                index += 2;
+            }
+            value if value.starts_with("--private-key-env=") => {
+                request.private_key_env =
+                    value.trim_start_matches("--private-key-env=").to_string();
+                index += 1;
+            }
+            "--include-config" => {
+                request.include_config = true;
+                index += 1;
+            }
+            "--confirmed" => {
+                request.confirmed = true;
+                index += 1;
+            }
+            "--force-unprivileged" => {
+                request.force_unprivileged = true;
+                index += 1;
+            }
+            "--path" => {
+                request.paths.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--path requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--path=") => {
+                request
+                    .paths
+                    .push(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--destination-root" => {
+                request.destination_root = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--destination-root requires a value")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--destination-root=") => {
+                request.destination_root =
+                    Some(value.trim_start_matches("--destination-root=").to_string());
+                index += 1;
+            }
+            "--timeout" => {
+                request.timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--timeout requires a value")?
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 2;
+            }
+            value if value.starts_with("--timeout=") => {
+                request.timeout_secs = value
+                    .trim_start_matches("--timeout=")
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 1;
+            }
+            other => anyhow::bail!("unknown restore-run flag {other}"),
+        }
+    }
+    ensure_backup_scope(&request.paths, request.include_config, "restore-run")?;
+    if let Some(destination_root) = &request.destination_root {
+        anyhow::ensure!(
+            destination_root.starts_with('/'),
+            "restore destination root must be absolute"
+        );
+    }
+    anyhow::ensure!(
+        !request.include_config || request.destination_root.is_some(),
+        "restore-run --include-config requires --destination-root"
+    );
+    anyhow::ensure!(
+        (1..=3600).contains(&request.timeout_secs),
+        "restore timeout out of range"
+    );
+    anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
+    Ok(request)
+}
+
+pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRollbackRequest> {
+    let restore_job_id = tokens
+        .first()
+        .context("usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+    let target_client_id = tokens.get(1).context(
+        "usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+    )?;
+    let mut request = VtyRestoreRollbackRequest {
+        restore_job_id: Uuid::parse_str(restore_job_id).context("invalid restore job UUID")?,
+        target_client_id: (*target_client_id).to_string(),
+        timeout_secs: 60,
+        confirmed: false,
+        force_unprivileged: false,
+    };
+    let mut index = 2;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--confirmed" => {
+                request.confirmed = true;
+                index += 1;
+            }
+            "--force-unprivileged" => {
+                request.force_unprivileged = true;
+                index += 1;
+            }
+            "--timeout" => {
+                request.timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--timeout requires a value")?
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 2;
+            }
+            value if value.starts_with("--timeout=") => {
+                request.timeout_secs = value
+                    .trim_start_matches("--timeout=")
+                    .parse()
+                    .context("invalid --timeout")?;
+                index += 1;
+            }
+            other => anyhow::bail!("unknown restore-rollback flag {other}"),
+        }
+    }
+    anyhow::ensure!(
+        (1..=3600).contains(&request.timeout_secs),
+        "restore rollback timeout out of range"
+    );
+    anyhow::ensure!(request.confirmed, "restore-rollback requires --confirmed");
+    Ok(request)
+}
+
+pub(crate) fn submit_vty_backup_request(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyBackupRequest,
+) -> Result<String> {
+    let operation = JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        recipient_public_key_hex: request
+            .recipient_public_key_hex
+            .clone()
+            .map(|value| value.to_ascii_lowercase()),
+    };
+    let mut envelopes = build_envelopes_for_job_command(
+        std::slice::from_ref(&request.client_id),
+        &operation,
+        password,
+        salt_hex,
+        300,
+    )?
+    .1;
+    let envelope = envelopes
+        .remove(&request.client_id)
+        .context("failed to build backup proof envelope")?;
+    http_post_json(
+        api_url,
+        "/api/v1/backups",
+        token,
+        &serde_json::json!({
+            "client_id": request.client_id,
+            "paths": request.paths,
+            "include_config": request.include_config,
+            "recipient_public_key_hex": request.recipient_public_key_hex,
+            "confirmed": request.confirmed,
+            "note": request.note,
+            "envelope": envelope,
+        }),
+    )
+}
+
+pub(crate) fn submit_vty_backup_run(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    request: VtyBackupRunRequest,
+) -> Result<String> {
+    let operation = JobCommand::Backup {
+        paths: request.paths,
+        include_config: request.include_config,
+        recipient_public_key_hex: request
+            .recipient_public_key_hex
+            .map(|value| value.to_ascii_lowercase()),
+    };
+    anyhow::ensure!(
+        request.selection.confirmed,
+        "backup-run requires --confirmed"
+    );
+    vty_submit_operation(
+        api_url,
+        token,
+        proof_context,
+        "backup",
+        &operation,
+        request.selection,
+        request.timeout_secs,
+    )
+}
+
+pub(crate) fn submit_vty_backup_policy_upsert(
+    api_url: &str,
+    token: Option<&str>,
+    request: VtyBackupPolicyUpsert,
+) -> Result<String> {
+    http_post_json(
+        api_url,
+        "/api/v1/backup-policies",
+        token,
+        &serde_json::json!({
+            "name": request.name,
+            "paths": request.paths,
+            "include_config": request.include_config,
+            "recipient_public_key_hex": request.recipient_public_key_hex,
+            "clients": request.selection.clients,
+            "pools": request.selection.pools,
+            "tags": request.selection.tags,
+            "interval_secs": request.interval_secs,
+            "start_at_unix": null,
+            "enabled": request.enabled,
+            "catch_up_policy": request.catch_up_policy,
+            "catch_up_limit": request.catch_up_limit,
+            "retry_delay_secs": request.retry_delay_secs,
+            "max_failures": request.max_failures,
+            "retention_days": request.retention_days,
+            "keep_last": request.keep_last,
+            "rotation_generation": request.rotation_generation,
+            "confirmed": request.selection.confirmed,
+        }),
+    )
+}
+
+pub(crate) fn submit_vty_restore_plan(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyRestorePlanRequest,
+) -> Result<String> {
+    let operation = JobCommand::Restore {
+        source_backup_request_id: request.source_backup_request_id,
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        destination_root: request.destination_root.clone(),
+        archive_path: None,
+        archive_base64: None,
+        archive_size_bytes: None,
+        archive_sha256_hex: None,
+        dry_run: false,
+        post_restore_argv: Vec::new(),
+    };
+    let mut envelopes = build_envelopes_for_job_command(
+        std::slice::from_ref(&request.target_client_id),
+        &operation,
+        password,
+        salt_hex,
+        300,
+    )?
+    .1;
+    let envelope = envelopes
+        .remove(&request.target_client_id)
+        .context("failed to build restore proof envelope")?;
+    http_post_json(
+        api_url,
+        "/api/v1/restore-plans",
+        token,
+        &serde_json::json!({
+            "source_backup_request_id": request.source_backup_request_id,
+            "target_client_id": request.target_client_id,
+            "paths": request.paths,
+            "include_config": request.include_config,
+            "destination_root": request.destination_root,
+            "confirmed": request.confirmed,
+            "note": request.note,
+            "envelope": envelope,
+        }),
+    )
+}
+
+pub(crate) fn submit_vty_restore_run(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    request: VtyRestoreRunRequest,
+) -> Result<String> {
+    let artifact_bytes = restore_artifact_bytes(
+        api_url,
+        token,
+        request.source_backup_request_id,
+        request.artifact_file.as_ref(),
+    )?;
+    let operation = restore_run_operation(
+        request.source_backup_request_id,
+        &artifact_bytes,
+        &request.private_key_env,
+        request.paths,
+        request.include_config,
+        request.destination_root,
+    )?;
+    vty_submit_operation_with_force(
+        api_url,
+        token,
+        proof_context,
+        "restore",
+        &operation,
+        VtyJobSelection {
+            clients: vec![request.target_client_id],
+            pools: Vec::new(),
+            tags: Vec::new(),
+            destructive: true,
+            confirmed: request.confirmed,
+        },
+        request.timeout_secs,
+        request.force_unprivileged,
+    )
+}
+
+pub(crate) fn submit_vty_restore_rollback(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    request: VtyRestoreRollbackRequest,
+) -> Result<String> {
+    let operation = restore_rollback_operation_from_api(
+        api_url,
+        token,
+        request.restore_job_id,
+        &request.target_client_id,
+    )?;
+    vty_submit_operation_with_force(
+        api_url,
+        token,
+        proof_context,
+        "restore_rollback",
+        &operation,
+        VtyJobSelection {
+            clients: vec![request.target_client_id],
+            pools: Vec::new(),
+            tags: Vec::new(),
+            destructive: true,
+            confirmed: request.confirmed,
+        },
+        request.timeout_secs,
+        request.force_unprivileged,
+    )
+}
+
+fn ensure_backup_scope(paths: &[String], include_config: bool, command: &str) -> Result<()> {
+    anyhow::ensure!(
+        include_config || !paths.is_empty(),
+        "{command} needs --include-config or at least one --path"
+    );
+    for path in paths {
+        anyhow::ensure!(
+            path.starts_with('/'),
+            "{} paths must be absolute",
+            command.trim_end_matches("-plan")
+        );
+    }
+    Ok(())
+}
+
+fn ensure_backup_recipient_public_key(value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        anyhow::ensure!(
+            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "backup recipient public key must be 32-byte hex"
+        );
+    }
+    Ok(())
+}

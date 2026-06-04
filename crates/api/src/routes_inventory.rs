@@ -1,0 +1,677 @@
+use axum::{
+    extract::{Path, Query, State},
+    http::HeaderMap,
+    Json,
+};
+
+use crate::{
+    data_source_builtin_presets::DATA_SOURCE_DOMAINS,
+    error::ApiError,
+    model::{
+        AgentView, AssignDataSourcePresetRequest, AssignPoolRequest, AssignTagRequest,
+        BulkResolveRequest, BulkResolveResponse, CloneDataSourcePresetRequest,
+        CreateDataSourcePresetRequest, CreatePoolRequest, CreateTagRequest,
+        DataSourceHotConfigQuery, DataSourceHotConfigView, DataSourcePresetAssignmentQuery,
+        DataSourcePresetAssignmentView, DataSourcePresetDiffRequest, DataSourcePresetDiffView,
+        DataSourcePresetQuery, DataSourcePresetTestView, DataSourcePresetView,
+        DataSourceStatusQuery, DataSourceStatusView, FleetSummary, GatewaySessionView,
+        HistoryQuery, ResourcePoolView, TagView, TelemetryNetworkRateQuery,
+        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery,
+        TelemetryTunnelView, TestDataSourcePresetRequest, UpdateAgentAliasRequest,
+        UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse, WsEvent,
+    },
+    state::AppState,
+    util::limit_or_default,
+};
+
+const MAX_PRESET_NAME_BYTES: usize = 128;
+const MAX_PRESET_DESCRIPTION_BYTES: usize = 1024;
+const MAX_PRESET_DEFINITION_BYTES: usize = 16 * 1024;
+const MAX_PRESET_ARGV_ITEMS: usize = 32;
+const MAX_PRESET_ARG_BYTES: usize = 512;
+
+pub(crate) async fn fleet_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<FleetSummary>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.fleet_summary().await?))
+}
+
+pub(crate) async fn list_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.list_agents().await?))
+}
+
+pub(crate) async fn update_agent_alias(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<UpdateAgentAliasRequest>,
+) -> Result<Json<AgentView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_agent_alias(&request.display_name)?;
+    let agent = state
+        .repo
+        .update_agent_alias(&client_id, request.display_name.trim())
+        .await?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id,
+        gateway_id: "inventory_alias".to_string(),
+    });
+    Ok(Json(agent))
+}
+
+pub(crate) async fn list_gateway_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Vec<GatewaySessionView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(
+        state
+            .repo
+            .list_gateway_sessions(limit_or_default(query.limit))
+            .await?,
+    ))
+}
+
+pub(crate) async fn list_telemetry_rollups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TelemetryRollupQuery>,
+) -> Result<Json<Vec<TelemetryRollupView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_telemetry_rollup_query(&query)?;
+    Ok(Json(
+        state
+            .repo
+            .list_telemetry_rollups(
+                limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.bucket_secs,
+            )
+            .await?,
+    ))
+}
+
+pub(crate) async fn list_telemetry_network_rates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TelemetryNetworkRateQuery>,
+) -> Result<Json<Vec<TelemetryNetworkRateView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_telemetry_network_rate_query(&query)?;
+    Ok(Json(
+        state
+            .repo
+            .list_telemetry_network_rates(
+                limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.interface.as_deref(),
+                query.bucket_secs,
+            )
+            .await?,
+    ))
+}
+
+pub(crate) async fn list_telemetry_tunnels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TelemetryTunnelQuery>,
+) -> Result<Json<Vec<TelemetryTunnelView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_telemetry_tunnel_query(&query)?;
+    Ok(Json(
+        state
+            .repo
+            .list_telemetry_tunnels(
+                limit_or_default(query.limit),
+                query.client_id.as_deref(),
+                query.interface.as_deref(),
+            )
+            .await?,
+    ))
+}
+
+pub(crate) async fn list_pools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ResourcePoolView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.list_pools().await?))
+}
+
+pub(crate) async fn create_pool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePoolRequest>,
+) -> Result<Json<ResourcePoolView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    Ok(Json(state.repo.create_pool(request).await?))
+}
+
+pub(crate) async fn list_tags(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TagView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.list_tags().await?))
+}
+
+pub(crate) async fn list_data_source_presets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DataSourcePresetQuery>,
+) -> Result<Json<Vec<DataSourcePresetView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_optional_domain(query.domain.as_deref())?;
+    Ok(Json(
+        state
+            .repo
+            .list_data_source_presets(query.domain.as_deref())
+            .await?,
+    ))
+}
+
+pub(crate) async fn create_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateDataSourcePresetRequest>,
+) -> Result<Json<DataSourcePresetView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_create_data_source_preset(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .create_data_source_preset(&request, &operator)
+            .await?,
+    ))
+}
+
+pub(crate) async fn clone_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(preset_id): Path<uuid::Uuid>,
+    Json(request): Json<CloneDataSourcePresetRequest>,
+) -> Result<Json<DataSourcePresetView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_clone_data_source_preset(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .clone_data_source_preset(preset_id, &request, &operator)
+            .await
+            .map_err(data_source_preset_lifecycle_error)?,
+    ))
+}
+
+pub(crate) async fn diff_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(preset_id): Path<uuid::Uuid>,
+    Json(request): Json<DataSourcePresetDiffRequest>,
+) -> Result<Json<DataSourcePresetDiffView>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_data_source_preset_candidate(&request.description, &request.definition)?;
+    Ok(Json(
+        state
+            .repo
+            .diff_data_source_preset(preset_id, &request)
+            .await
+            .map_err(data_source_preset_lifecycle_error)?,
+    ))
+}
+
+pub(crate) async fn test_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(preset_id): Path<uuid::Uuid>,
+    Json(request): Json<TestDataSourcePresetRequest>,
+) -> Result<Json<DataSourcePresetTestView>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_preset_definition(&request.definition)?;
+    Ok(Json(
+        state
+            .repo
+            .test_data_source_preset(preset_id, &request)
+            .await
+            .map_err(data_source_preset_lifecycle_error)?,
+    ))
+}
+
+pub(crate) async fn update_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(preset_id): Path<uuid::Uuid>,
+    Json(request): Json<UpdateDataSourcePresetRequest>,
+) -> Result<Json<UpdateDataSourcePresetResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_data_source_preset_candidate(&request.description, &request.definition)?;
+    Ok(Json(
+        state
+            .repo
+            .update_data_source_preset(preset_id, &request, &operator)
+            .await
+            .map_err(data_source_preset_lifecycle_error)?,
+    ))
+}
+
+pub(crate) async fn list_data_source_assignments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DataSourcePresetAssignmentQuery>,
+) -> Result<Json<Vec<DataSourcePresetAssignmentView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_optional_domain(query.domain.as_deref())?;
+    if query
+        .client_id
+        .as_ref()
+        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
+    {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    Ok(Json(
+        state
+            .repo
+            .list_data_source_assignments(query.client_id.as_deref(), query.domain.as_deref())
+            .await?,
+    ))
+}
+
+pub(crate) async fn list_data_source_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DataSourceStatusQuery>,
+) -> Result<Json<Vec<DataSourceStatusView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_optional_domain(query.domain.as_deref())?;
+    if let Some(client_id) = query.client_id.as_deref() {
+        validate_client_id(client_id)?;
+    }
+    Ok(Json(
+        state
+            .list_data_source_status(query.client_id.as_deref(), query.domain.as_deref())
+            .await?,
+    ))
+}
+
+pub(crate) async fn render_data_source_hot_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DataSourceHotConfigQuery>,
+) -> Result<Json<DataSourceHotConfigView>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_client_id(&query.client_id)?;
+    Ok(Json(
+        state
+            .repo
+            .render_data_source_hot_config(&query.client_id)
+            .await?,
+    ))
+}
+
+pub(crate) async fn assign_data_source_preset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AssignDataSourcePresetRequest>,
+) -> Result<Json<crate::model::AssignDataSourcePresetResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_assign_data_source_preset(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .assign_data_source_preset(&request, &operator)
+            .await?,
+    ))
+}
+
+fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
+    if client_id.is_empty() || client_id.len() > 128 {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn create_tag(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTagRequest>,
+) -> Result<Json<TagView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    Ok(Json(state.repo.create_tag(request).await?))
+}
+
+fn validate_create_data_source_preset(
+    request: &CreateDataSourcePresetRequest,
+) -> Result<(), ApiError> {
+    validate_domain(&request.domain)?;
+    validate_preset_name(&request.name)?;
+    validate_data_source_preset_scope(&request.scope, request.owner_client_id.as_deref())?;
+    validate_data_source_preset_candidate(&request.description, &request.definition)
+}
+
+fn validate_clone_data_source_preset(
+    request: &CloneDataSourcePresetRequest,
+) -> Result<(), ApiError> {
+    validate_preset_name(&request.name)?;
+    validate_data_source_preset_scope(&request.scope, request.owner_client_id.as_deref())?;
+    if request
+        .description
+        .as_ref()
+        .is_some_and(|description| description.len() > MAX_PRESET_DESCRIPTION_BYTES)
+    {
+        return Err(ApiError::bad_request(
+            "data_source_preset_description_too_large",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_data_source_preset_candidate(
+    description: &Option<String>,
+    definition: &serde_json::Value,
+) -> Result<(), ApiError> {
+    if description
+        .as_ref()
+        .is_some_and(|description| description.len() > MAX_PRESET_DESCRIPTION_BYTES)
+    {
+        return Err(ApiError::bad_request(
+            "data_source_preset_description_too_large",
+        ));
+    }
+    validate_preset_definition(definition)
+}
+
+fn validate_data_source_preset_scope(
+    scope: &str,
+    owner_client_id: Option<&str>,
+) -> Result<(), ApiError> {
+    match scope {
+        "shared" => {
+            if owner_client_id.is_some() {
+                return Err(ApiError::bad_request(
+                    "shared_preset_must_not_have_owner_client",
+                ));
+            }
+        }
+        "vps_local" => {
+            let Some(owner) = owner_client_id else {
+                return Err(ApiError::bad_request(
+                    "vps_local_preset_requires_owner_client",
+                ));
+            };
+            if owner.is_empty() || owner.len() > 128 {
+                return Err(ApiError::bad_request("invalid_owner_client_id"));
+            }
+        }
+        "built_in" => {
+            return Err(ApiError::bad_request(
+                "built_in_presets_are_managed_by_server",
+            ));
+        }
+        _ => return Err(ApiError::bad_request("invalid_data_source_preset_scope")),
+    }
+    Ok(())
+}
+
+fn validate_assign_data_source_preset(
+    request: &AssignDataSourcePresetRequest,
+) -> Result<(), ApiError> {
+    validate_domain(&request.domain)?;
+    if request.clients.is_empty() && request.pools.is_empty() && request.tags.is_empty() {
+        return Err(ApiError::bad_request(
+            "data_source_assignment_targets_required",
+        ));
+    }
+    for client_id in &request.clients {
+        if client_id.is_empty() || client_id.len() > 128 {
+            return Err(ApiError::bad_request("invalid_client_id"));
+        }
+    }
+    for tag in &request.tags {
+        if tag.is_empty() || tag.len() > 128 {
+            return Err(ApiError::bad_request("invalid_tag_name"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_domain(domain: Option<&str>) -> Result<(), ApiError> {
+    if let Some(domain) = domain {
+        validate_domain(domain)?;
+    }
+    Ok(())
+}
+
+fn validate_domain(domain: &str) -> Result<(), ApiError> {
+    if DATA_SOURCE_DOMAINS
+        .iter()
+        .any(|candidate| candidate == &domain)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("invalid_data_source_domain"))
+    }
+}
+
+fn validate_preset_name(name: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty() || name.len() > MAX_PRESET_NAME_BYTES {
+        return Err(ApiError::bad_request("invalid_data_source_preset_name"));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.'))
+    {
+        return Err(ApiError::bad_request("invalid_data_source_preset_name"));
+    }
+    Ok(())
+}
+
+fn validate_preset_definition(definition: &serde_json::Value) -> Result<(), ApiError> {
+    if !definition.is_object() {
+        return Err(ApiError::bad_request(
+            "data_source_preset_definition_must_be_object",
+        ));
+    }
+    let size = serde_json::to_vec(definition)
+        .map_err(|_| ApiError::bad_request("invalid_data_source_preset_definition"))?
+        .len();
+    if size > MAX_PRESET_DEFINITION_BYTES {
+        return Err(ApiError::bad_request(
+            "data_source_preset_definition_too_large",
+        ));
+    }
+    validate_argv_fields(definition)
+}
+
+fn validate_argv_fields(value: &serde_json::Value) -> Result<(), ApiError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(argv) = map.get("argv") {
+                validate_argv_array(argv)?;
+            }
+            for child in map.values() {
+                validate_argv_fields(child)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                validate_argv_fields(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_argv_array(value: &serde_json::Value) -> Result<(), ApiError> {
+    let Some(items) = value.as_array() else {
+        return Err(ApiError::bad_request(
+            "data_source_preset_argv_must_be_array",
+        ));
+    };
+    if items.is_empty() || items.len() > MAX_PRESET_ARGV_ITEMS {
+        return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+    }
+    for item in items {
+        let Some(arg) = item.as_str() else {
+            return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+        };
+        if arg.is_empty() || arg.len() > MAX_PRESET_ARG_BYTES {
+            return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+        }
+    }
+    let executable = items[0].as_str().unwrap_or_default();
+    if !executable.starts_with('/') {
+        return Err(ApiError::bad_request(
+            "data_source_preset_argv_executable_must_be_absolute",
+        ));
+    }
+    Ok(())
+}
+
+fn data_source_preset_lifecycle_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("data_source_preset_not_found") {
+        ApiError::not_found("data_source_preset_not_found")
+    } else if message.contains("data_source_preset_builtin_immutable")
+        || message.contains("data_source_preset_clone_target_exists")
+    {
+        ApiError::conflict("data_source_preset_lifecycle_conflict")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+pub(crate) async fn assign_agent_tag(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<AssignTagRequest>,
+) -> Result<Json<TagView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    Ok(Json(
+        state
+            .repo
+            .assign_agent_tag(&client_id, &request.tag)
+            .await?,
+    ))
+}
+
+pub(crate) async fn assign_agent_pool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<AssignPoolRequest>,
+) -> Result<Json<ResourcePoolView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    Ok(Json(
+        state
+            .repo
+            .assign_agent_pool(&client_id, request.pool_id)
+            .await?,
+    ))
+}
+
+pub(crate) async fn resolve_bulk_targets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkResolveRequest>,
+) -> Result<Json<BulkResolveResponse>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.resolve_bulk_targets(&request).await?))
+}
+
+fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), ApiError> {
+    if query
+        .client_id
+        .as_ref()
+        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
+    {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    if query
+        .bucket_secs
+        .is_some_and(|bucket_secs| !(60..=86_400).contains(&bucket_secs))
+    {
+        return Err(ApiError::bad_request("invalid_bucket_secs"));
+    }
+    Ok(())
+}
+
+fn validate_agent_alias(display_name: &str) -> Result<(), ApiError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty()
+        || display_name.len() > 160
+        || display_name.chars().any(|character| character.is_control())
+    {
+        return Err(ApiError::bad_request("agent_alias_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_telemetry_network_rate_query(
+    query: &TelemetryNetworkRateQuery,
+) -> Result<(), ApiError> {
+    if query
+        .client_id
+        .as_ref()
+        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
+    {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    if query
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.is_empty() || interface.len() > 64)
+    {
+        return Err(ApiError::bad_request("invalid_network_interface"));
+    }
+    if query
+        .bucket_secs
+        .is_some_and(|bucket_secs| !(60..=86_400).contains(&bucket_secs))
+    {
+        return Err(ApiError::bad_request("invalid_bucket_secs"));
+    }
+    Ok(())
+}
+
+fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), ApiError> {
+    if query
+        .client_id
+        .as_ref()
+        .is_some_and(|client_id| client_id.is_empty() || client_id.len() > 128)
+    {
+        return Err(ApiError::bad_request("invalid_client_id"));
+    }
+    if query
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.is_empty() || interface.len() > 64)
+    {
+        return Err(ApiError::bad_request("invalid_tunnel_interface"));
+    }
+    Ok(())
+}

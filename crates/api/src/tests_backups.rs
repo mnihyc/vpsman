@@ -1,0 +1,1767 @@
+use axum::{
+    body::to_bytes,
+    extract::{Path, State},
+    http::HeaderMap,
+    Json,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use ed25519_dalek::SigningKey;
+use std::{collections::HashMap, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::broadcast,
+};
+use uuid::Uuid;
+use vpsman_common::{
+    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_proof, AgentHello,
+    CommandEnvelope, CommandOutput, GatewayCommandDispatch, GatewayCommandDispatchResult,
+    JobCommand, OutputStream,
+};
+
+use crate::{
+    gateway_client::GatewayDispatchClient,
+    job_request::validate_job_command,
+    model::{
+        AuthContext, BackupArtifactHandoffRequest, BackupArtifactUploadChunkRequest,
+        BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
+        BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
+        CreateBackupRequest, CreateJobRequest, DispatchScheduledJobRequest, JobHistoryView,
+        JobOutputView, JobTargetView, OperatorView, RecordBackupArtifactMetadataRequest,
+        ScheduledJobDispatchRecord, UploadBackupArtifactRequest,
+    },
+    object_store::BackupObjectStore,
+    repository::{MemoryState, Repository},
+    repository_backups::BackupRequestSourceLink,
+    repository_ingest::upsert_memory_agent,
+    routes_backups::{
+        abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
+        create_backup_artifact_handoff, create_backup_artifact_upload_session,
+        create_backup_policy, create_backup_request, download_backup_artifact,
+        list_backup_policies, prune_backup_policies, record_backup_artifact_metadata,
+        upload_backup_artifact, upload_backup_artifact_session_chunk,
+        validate_backup_artifact_metadata_request, validate_create_backup_policy_request,
+        validate_create_backup_request,
+    },
+    routes_jobs::{create_job, dispatch_scheduled_job},
+    state::{AppState, EnrollmentSettings},
+    unix_now,
+};
+
+#[test]
+fn backup_request_validation_requires_safe_scope_and_confirmation() {
+    let missing_scope = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: Vec::new(),
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: None,
+        envelope: None,
+    };
+    assert_eq!(
+        validate_create_backup_request(&missing_scope)
+            .unwrap_err()
+            .code,
+        "backup_scope_required"
+    );
+
+    let relative_path = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["relative".to_string()],
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: None,
+        envelope: None,
+    };
+    assert_eq!(
+        validate_create_backup_request(&relative_path)
+            .unwrap_err()
+            .code,
+        "file_path_must_be_absolute"
+    );
+
+    let unconfirmed = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: false,
+        note: None,
+        envelope: None,
+    };
+    assert_eq!(
+        validate_create_backup_request(&unconfirmed)
+            .unwrap_err()
+            .code,
+        "backup_confirmation_required"
+    );
+}
+
+#[test]
+fn backup_policy_validation_requires_targets_retention_and_confirmation() {
+    let mut request = CreateBackupPolicyRequest {
+        name: "nightly".to_string(),
+        clients: Vec::new(),
+        pools: Vec::new(),
+        tags: vec!["edge".to_string()],
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: Some("a".repeat(64)),
+        retention_days: Some(30),
+        keep_last: Some(7),
+        rotation_generation: Some("keyring/v2".to_string()),
+        interval_secs: 3600,
+        start_at_unix: None,
+        enabled: true,
+        catch_up_policy: "skip_missed".to_string(),
+        catch_up_limit: 1,
+        retry_delay_secs: 300,
+        max_failures: 3,
+        confirmed: true,
+    };
+
+    validate_create_backup_policy_request(&request).unwrap();
+    request.confirmed = false;
+    assert_eq!(
+        validate_create_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_policy_confirmation_required"
+    );
+    request.confirmed = true;
+    request.retention_days = Some(0);
+    assert_eq!(
+        validate_create_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_policy_retention_days_out_of_range"
+    );
+    request.retention_days = Some(30);
+    request.keep_last = Some(0);
+    assert_eq!(
+        validate_create_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_policy_keep_last_out_of_range"
+    );
+    request.keep_last = Some(7);
+    request.recipient_public_key_hex = Some("bad".to_string());
+    assert_eq!(
+        validate_create_backup_policy_request(&request)
+            .unwrap_err()
+            .code,
+        "backup_recipient_public_key_hex_invalid"
+    );
+}
+
+#[test]
+fn backup_artifact_metadata_validation_requires_encrypted_safe_metadata() {
+    let unconfirmed = RecordBackupArtifactMetadataRequest {
+        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
+        sha256_hex: "a".repeat(64),
+        encrypted: true,
+        size_bytes: 128,
+        confirmed: false,
+    };
+    assert_eq!(
+        validate_backup_artifact_metadata_request(&unconfirmed)
+            .unwrap_err()
+            .code,
+        "backup_artifact_confirmation_required"
+    );
+
+    let unsafe_key = RecordBackupArtifactMetadataRequest {
+        object_key: "../artifact".to_string(),
+        sha256_hex: "a".repeat(64),
+        encrypted: true,
+        size_bytes: 128,
+        confirmed: true,
+    };
+    assert_eq!(
+        validate_backup_artifact_metadata_request(&unsafe_key)
+            .unwrap_err()
+            .code,
+        "backup_artifact_object_key_invalid"
+    );
+
+    let unencrypted = RecordBackupArtifactMetadataRequest {
+        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
+        sha256_hex: "a".repeat(64),
+        encrypted: false,
+        size_bytes: 128,
+        confirmed: true,
+    };
+    assert_eq!(
+        validate_backup_artifact_metadata_request(&unencrypted)
+            .unwrap_err()
+            .code,
+        "backup_artifact_must_be_encrypted"
+    );
+
+    let bad_hash = RecordBackupArtifactMetadataRequest {
+        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
+        sha256_hex: "not-a-hash".to_string(),
+        encrypted: true,
+        size_bytes: 128,
+        confirmed: true,
+    };
+    assert_eq!(
+        validate_backup_artifact_metadata_request(&bad_hash)
+            .unwrap_err()
+            .code,
+        "backup_artifact_invalid_sha256"
+    );
+}
+
+#[test]
+fn backup_job_command_validates_executable_scope() {
+    validate_job_command(&JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+    })
+    .unwrap();
+    assert_eq!(
+        validate_job_command(&JobCommand::Backup {
+            paths: Vec::new(),
+            include_config: false,
+            recipient_public_key_hex: None,
+        })
+        .unwrap_err()
+        .code,
+        "backup_scope_required"
+    );
+    assert_eq!(
+        validate_job_command(&JobCommand::Backup {
+            paths: vec!["relative".to_string()],
+            include_config: false,
+            recipient_public_key_hex: None,
+        })
+        .unwrap_err()
+        .code,
+        "file_path_must_be_absolute"
+    );
+}
+
+#[tokio::test]
+async fn backup_job_dispatch_requires_confirmation() {
+    let request = CreateJobRequest {
+        targets: Vec::new(),
+        clients: vec!["client-a".to_string()],
+        pools: Vec::new(),
+        tags: Vec::new(),
+        tag_mode: None,
+        destructive: false,
+        confirmed: false,
+        command: "backup".to_string(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::Backup {
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            recipient_public_key_hex: None,
+        }),
+        timeout_secs: Some(30),
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+        idempotency_key: None,
+        reconnect_policy: None,
+        envelope: None,
+        envelopes: HashMap::new(),
+    };
+
+    let error = create_job(
+        State(test_state(Repository::Memory(MemoryState::default()))),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "backup_confirmation_required");
+}
+
+#[tokio::test]
+async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-job-auto-record-{}",
+        Uuid::new_v4()
+    ));
+    let artifact_bytes = encrypted_artifact_bytes_with_ciphertext("client-a", &vec![b'x'; 48_000]);
+    let (gateway_url, gateway_task) = spawn_backup_gateway_once(artifact_bytes.clone()).await;
+    let mut state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[31_u8; 32])));
+    let operation = JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+    };
+    let request = CreateJobRequest {
+        targets: Vec::new(),
+        clients: vec!["client-a".to_string()],
+        pools: Vec::new(),
+        tags: Vec::new(),
+        tag_mode: None,
+        destructive: false,
+        confirmed: true,
+        command: "backup".to_string(),
+        argv: Vec::new(),
+        operation: Some(operation.clone()),
+        timeout_secs: Some(30),
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+        idempotency_key: None,
+        reconnect_policy: None,
+        envelope: Some(command_envelope_for_job(
+            Uuid::new_v4(),
+            "client-a",
+            &operation,
+        )),
+        envelopes: HashMap::new(),
+    };
+
+    let (status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(request))
+        .await
+        .unwrap();
+    let dispatch = gateway_task.await.unwrap();
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
+    let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "completed");
+    assert_eq!(dispatch.client_id, "client-a");
+    assert_eq!(
+        encode_json(&dispatch.request.command).unwrap(),
+        encode_json(&operation).unwrap()
+    );
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].client_id, "client-a");
+    assert_eq!(backups[0].paths, vec!["/etc/hostname"]);
+    assert!(backups[0].include_config);
+    assert_eq!(backups[0].status, "artifact_metadata_recorded");
+    let expected_note = format!("auto-linked from backup job {}", response.job_id);
+    assert_eq!(backups[0].note.as_deref(), Some(expected_note.as_str()));
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(backups[0].artifact_id, Some(artifacts[0].id));
+    assert_eq!(artifacts[0].sha256_hex, payload_hash(&artifact_bytes));
+    let stdout_output = outputs
+        .iter()
+        .find(|output| output.stream == "stdout")
+        .expect("backup stdout job output");
+    assert_eq!(stdout_output.storage, "object_store");
+    assert_eq!(
+        stdout_output.artifact_sha256_hex.as_deref(),
+        Some(payload_hash(&artifact_bytes).as_str())
+    );
+    assert_eq!(
+        stdout_output.artifact_size_bytes,
+        Some(artifact_bytes.len() as i64)
+    );
+    assert_eq!(
+        tokio::fs::read(object_root.join(&artifacts[0].object_key))
+            .await
+            .unwrap(),
+        artifact_bytes
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_job_dispatch_reuses_existing_open_backup_request() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let request_state = test_state(repo.clone());
+    let manual_request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: Some("operator-requested".to_string()),
+        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+    };
+    let (_, Json(manual_backup)) =
+        create_backup_request(State(request_state), HeaderMap::new(), Json(manual_request))
+            .await
+            .unwrap();
+    let operation = JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+    };
+    let (gateway_url, gateway_task) =
+        spawn_backup_gateway_once(encrypted_artifact_bytes("client-a")).await;
+    let mut state = test_state(repo.clone());
+    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[33_u8; 32])));
+    let job_request = CreateJobRequest {
+        targets: Vec::new(),
+        clients: vec!["client-a".to_string()],
+        pools: Vec::new(),
+        tags: Vec::new(),
+        tag_mode: None,
+        destructive: false,
+        confirmed: true,
+        command: "backup".to_string(),
+        argv: Vec::new(),
+        operation: Some(operation.clone()),
+        timeout_secs: Some(30),
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+        idempotency_key: None,
+        reconnect_policy: None,
+        envelope: Some(command_envelope_for_job(
+            Uuid::new_v4(),
+            "client-a",
+            &operation,
+        )),
+        envelopes: HashMap::new(),
+    };
+
+    let (_status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(job_request))
+        .await
+        .unwrap();
+    let _dispatch = gateway_task.await.unwrap();
+    let backups = repo.list_backup_requests(10).await.unwrap();
+
+    assert_eq!(response.status, "completed");
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].id, manual_backup.id);
+    assert_eq!(backups[0].note.as_deref(), Some("operator-requested"));
+    assert_eq!(backups[0].status, "requested_metadata_only");
+}
+
+#[tokio::test]
+async fn scheduled_backup_dispatch_auto_records_request_and_object_artifact() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let memory = match &repo {
+        Repository::Memory(memory) => memory.clone(),
+        Repository::Postgres(_) => unreachable!("test uses memory repository"),
+    };
+    let job_id = Uuid::new_v4();
+    let operation = JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: Some("d".repeat(64)),
+    };
+    let payload = encode_json(&operation).unwrap();
+    let command_hash = payload_hash(&payload);
+    memory.jobs.write().await.push(JobHistoryView {
+        id: job_id,
+        actor_id: Some(Uuid::nil()),
+        command_type: "scheduled_backup".to_string(),
+        privileged: true,
+        status: "approval_required".to_string(),
+        target_count: 1,
+        payload_hash: command_hash.clone(),
+        created_at: unix_now().to_string(),
+        completed_at: None,
+    });
+    memory.job_targets.write().await.push(JobTargetView {
+        job_id,
+        client_id: "client-a".to_string(),
+        status: "approval_required".to_string(),
+        exit_code: None,
+        started_at: None,
+        completed_at: None,
+    });
+    memory.scheduled_jobs.write().await.insert(
+        job_id,
+        ScheduledJobDispatchRecord {
+            job_id,
+            source_schedule_id: Some(Uuid::new_v4()),
+            actor_id: Some(Uuid::nil()),
+            command_type: "scheduled_backup".to_string(),
+            operation: operation.clone(),
+            payload_hash: command_hash.clone(),
+            targets: vec!["client-a".to_string()],
+        },
+    );
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-scheduled-backup-auto-record-{}",
+        Uuid::new_v4()
+    ));
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let (gateway_url, gateway_task) = spawn_backup_gateway_once(artifact_bytes.clone()).await;
+    let mut state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[32_u8; 32])));
+    let request = DispatchScheduledJobRequest {
+        confirmed: true,
+        timeout_secs: Some(30),
+        force_unprivileged: false,
+        envelope: Some(command_envelope_for_job(job_id, "client-a", &operation)),
+        envelopes: HashMap::new(),
+    };
+
+    let (status, Json(response)) =
+        dispatch_scheduled_job(State(state), HeaderMap::new(), Path(job_id), Json(request))
+            .await
+            .unwrap();
+    let dispatch = gateway_task.await.unwrap();
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "completed");
+    assert_eq!(dispatch.client_id, "client-a");
+    assert_eq!(
+        encode_json(&dispatch.request.command).unwrap(),
+        encode_json(&operation).unwrap()
+    );
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].payload_hash, command_hash);
+    assert_eq!(backups[0].status, "artifact_metadata_recorded");
+    assert_eq!(backups[0].artifact_id, Some(artifacts[0].id));
+    assert_eq!(artifacts[0].sha256_hex, payload_hash(&artifact_bytes));
+    assert_eq!(
+        tokio::fs::read(object_root.join(&artifacts[0].object_key))
+            .await
+            .unwrap(),
+        artifact_bytes
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_request_records_metadata_and_audit_after_proof_envelope() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: Some("pre-migration".to_string()),
+        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+    };
+
+    let (status, Json(view)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
+        .await
+        .unwrap();
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(view.client_id, "client-a");
+    assert_eq!(view.paths, vec!["/etc/hostname"]);
+    assert!(view.include_config);
+    assert_eq!(view.status, "requested_metadata_only");
+    assert_eq!(view.proof_scope, "client:client-a");
+    assert!(view.proof_command_id.is_some());
+    assert!(view.proof_expires_unix.is_some());
+    assert!(view.artifact_id.is_none());
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].id, view.id);
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "backup.requested_metadata_only");
+    assert_eq!(
+        audits[0].command_hash.as_deref(),
+        Some(view.payload_hash.as_str())
+    );
+}
+
+#[tokio::test]
+async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = test_state(repo.clone());
+    let recipient_public_key_hex = "b".repeat(64);
+    let request = CreateBackupPolicyRequest {
+        name: "nightly-edge".to_string(),
+        clients: vec!["client-a".to_string()],
+        pools: Vec::new(),
+        tags: vec!["edge".to_string()],
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: Some(recipient_public_key_hex.clone()),
+        retention_days: Some(45),
+        keep_last: Some(12),
+        rotation_generation: Some("keyring/v2".to_string()),
+        interval_secs: 3600,
+        start_at_unix: Some(unix_now()),
+        enabled: true,
+        catch_up_policy: "run_once".to_string(),
+        catch_up_limit: 1,
+        retry_delay_secs: 120,
+        max_failures: 5,
+        confirmed: true,
+    };
+
+    let (status, Json(view)) = create_backup_policy(State(state), HeaderMap::new(), Json(request))
+        .await
+        .unwrap();
+    let Json(policies) = list_backup_policies(State(test_state(repo.clone())), HeaderMap::new())
+        .await
+        .unwrap();
+    let schedules = repo.list_schedules().await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+    let audit_json = serde_json::to_string(&audits).unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(view.name, "nightly-edge");
+    assert_eq!(view.clients, vec!["client-a"]);
+    assert_eq!(view.tags, vec!["edge"]);
+    assert_eq!(view.paths, vec!["/etc/hostname"]);
+    assert!(view.include_config);
+    assert_eq!(
+        view.recipient_public_key_hex.as_deref(),
+        Some(recipient_public_key_hex.as_str())
+    );
+    assert_eq!(view.retention_days, 45);
+    assert_eq!(view.keep_last, 12);
+    assert_eq!(view.rotation_generation.as_deref(), Some("keyring/v2"));
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].schedule_id, view.schedule_id);
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].command_type, "backup");
+    assert!(matches!(
+        &schedules[0].operation,
+        JobCommand::Backup {
+            recipient_public_key_hex: Some(value),
+            ..
+        } if value == &recipient_public_key_hex
+    ));
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "backup_policy.upserted"));
+    assert!(!audit_json.contains(&recipient_public_key_hex));
+}
+
+#[tokio::test]
+async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
+    let repo = Repository::Memory(MemoryState::default());
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-api-backup-policy-prune-{}", Uuid::new_v4()));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let (_, Json(policy)) = create_backup_policy(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(CreateBackupPolicyRequest {
+            name: "nightly-prune".to_string(),
+            clients: vec!["client-a".to_string()],
+            pools: Vec::new(),
+            tags: Vec::new(),
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            recipient_public_key_hex: None,
+            retention_days: Some(1),
+            keep_last: Some(1),
+            rotation_generation: None,
+            interval_secs: 3600,
+            start_at_unix: Some(unix_now()),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 120,
+            max_failures: 3,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let old_a = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "old-a",
+        3,
+    )
+    .await;
+    let old_b = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "old-b",
+        2,
+    )
+    .await;
+    let retained = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "retained",
+        0,
+    )
+    .await;
+
+    let Json(dry_run) = prune_backup_policies(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(BackupPolicyPruneRequest {
+            schedule_id: Some(policy.schedule_id),
+            dry_run: true,
+            metadata_only: Some(false),
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dry_run.policies.len(), 1);
+    assert_eq!(dry_run.policies[0].matched_rows, 2);
+    assert_eq!(dry_run.policies[0].pruned_rows, 0);
+    assert_eq!(repo.list_backup_artifacts(10).await.unwrap().len(), 3);
+
+    let Json(pruned) = prune_backup_policies(
+        State(state.clone()),
+        HeaderMap::new(),
+        Json(BackupPolicyPruneRequest {
+            schedule_id: Some(policy.schedule_id),
+            dry_run: false,
+            metadata_only: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pruned.policies[0].matched_rows, 2);
+    assert_eq!(pruned.policies[0].pruned_rows, 2);
+    assert!(pruned.policies[0].object_delete_attempted);
+    assert_eq!(repo.list_backup_artifacts(10).await.unwrap().len(), 1);
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    assert_eq!(
+        backups
+            .iter()
+            .filter(|backup| backup.artifact_id.is_some())
+            .count(),
+        1
+    );
+    assert!(!tokio::fs::try_exists(object_root.join(&old_a))
+        .await
+        .unwrap());
+    assert!(!tokio::fs::try_exists(object_root.join(&old_b))
+        .await
+        .unwrap());
+    assert!(tokio::fs::try_exists(object_root.join(&retained))
+        .await
+        .unwrap());
+    assert!(repo
+        .list_audit_logs(20)
+        .await
+        .unwrap()
+        .iter()
+        .any(|audit| audit.action == "backup_policy.retention_pruned"));
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_metadata_links_request_and_audits() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: Some("pre-migration".to_string()),
+        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+    };
+    let (_, Json(backup)) =
+        create_backup_request(State(state.clone()), HeaderMap::new(), Json(request))
+            .await
+            .unwrap();
+
+    let artifact_request = RecordBackupArtifactMetadataRequest {
+        object_key: format!("backups/{}/{}.cbor.zst.age", backup.client_id, backup.id),
+        sha256_hex: "b".repeat(64),
+        encrypted: true,
+        size_bytes: 4096,
+        confirmed: true,
+    };
+    let (status, Json(artifact)) = record_backup_artifact_metadata(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(artifact_request),
+    )
+    .await
+    .unwrap();
+
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(artifact.client_id, "client-a");
+    assert_eq!(artifact.sha256_hex, "b".repeat(64));
+    assert!(artifact.encrypted);
+    assert_eq!(artifact.size_bytes, 4096);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, artifact.id);
+    assert_eq!(backups[0].id, backup.id);
+    assert_eq!(backups[0].artifact_id, Some(artifact.id));
+    assert_eq!(backups[0].status, "artifact_metadata_recorded");
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
+
+    let duplicate = RecordBackupArtifactMetadataRequest {
+        object_key: format!(
+            "backups/{}/{}-duplicate.cbor.zst.age",
+            backup.client_id, backup.id
+        ),
+        sha256_hex: "c".repeat(64),
+        encrypted: true,
+        size_bytes: 4096,
+        confirmed: true,
+    };
+    let error = record_backup_artifact_metadata(
+        State(state),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(duplicate),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "backup_artifact_already_recorded");
+}
+
+#[tokio::test]
+async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-api-backup-upload-{}", Uuid::new_v4()));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let object_key = format!("backups/{}/{}.json", backup.client_id, backup.id);
+
+    let (status, Json(artifact)) = upload_backup_artifact(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(UploadBackupArtifactRequest {
+            object_key: object_key.clone(),
+            artifact_base64: BASE64.encode(&artifact_bytes),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let stored_path = object_root.join(&object_key);
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(artifact.client_id, "client-a");
+    assert_eq!(artifact.object_key, object_key);
+    assert_eq!(artifact.sha256_hex, payload_hash(&artifact_bytes));
+    assert_eq!(artifact.size_bytes, artifact_bytes.len() as i64);
+    assert!(artifact.encrypted);
+    assert_eq!(tokio::fs::read(stored_path).await.unwrap(), artifact_bytes);
+    let download =
+        download_backup_artifact(State(state.clone()), HeaderMap::new(), Path(backup.id))
+            .await
+            .unwrap();
+    assert_eq!(
+        download
+            .headers()
+            .get("x-vpsman-backup-artifact-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        payload_hash(&artifact_bytes)
+    );
+    let downloaded = to_bytes(download.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(downloaded.as_ref(), artifact_bytes);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].id, artifact.id);
+    assert_eq!(backups[0].artifact_id, Some(artifact.id));
+    assert_eq!(backups[0].status, "artifact_metadata_recorded");
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
+
+    let duplicate = upload_backup_artifact(
+        State(state),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(UploadBackupArtifactRequest {
+            object_key: format!("backups/{}/{}-duplicate.json", backup.client_id, backup.id),
+            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-a")),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(duplicate.code, "backup_artifact_already_recorded");
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-upload-session-{}",
+        Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let artifact_sha = payload_hash(&artifact_bytes);
+    let object_key = format!("backups/{}/{}-chunked.json", backup.client_id, backup.id);
+
+    let (status, Json(session)) = create_backup_artifact_upload_session(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactUploadSessionCreateRequest {
+            object_key: object_key.clone(),
+            expected_sha256_hex: artifact_sha.clone(),
+            expected_size_bytes: artifact_bytes.len() as i64,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(session.next_offset_bytes, 0);
+    assert_eq!(session.status, "receiving");
+    assert!(session.max_chunk_bytes >= 1024);
+
+    let first_len = artifact_bytes.len() / 2;
+    let first = upload_backup_artifact_session_chunk(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadChunkRequest {
+            offset_bytes: 0,
+            data_base64: BASE64.encode(&artifact_bytes[..first_len]),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(first.next_offset_bytes, first_len as i64);
+    assert_eq!(first.chunk_count, 1);
+
+    let retry = upload_backup_artifact_session_chunk(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadChunkRequest {
+            offset_bytes: 0,
+            data_base64: BASE64.encode(&artifact_bytes[..first_len]),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(retry.next_offset_bytes, first_len as i64);
+    assert_eq!(retry.chunk_count, 1);
+
+    let second = upload_backup_artifact_session_chunk(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadChunkRequest {
+            offset_bytes: first_len as i64,
+            data_base64: BASE64.encode(&artifact_bytes[first_len..]),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(second.next_offset_bytes, artifact_bytes.len() as i64);
+    assert_eq!(second.status, "uploaded");
+
+    let (status, Json(artifact)) = commit_backup_artifact_upload_session(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadCommitRequest { confirmed: true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(artifact.object_key, object_key);
+    assert_eq!(artifact.sha256_hex, artifact_sha);
+    assert_eq!(artifact.size_bytes, artifact_bytes.len() as i64);
+    assert_eq!(
+        tokio::fs::read(object_root.join(&object_key))
+            .await
+            .unwrap(),
+        artifact_bytes
+    );
+
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+    assert_eq!(backups[0].artifact_id, Some(artifact.id));
+    assert_eq!(backups[0].status, "artifact_metadata_recorded");
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-upload-session-abort-{}",
+        Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+
+    let (_, Json(session)) = create_backup_artifact_upload_session(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactUploadSessionCreateRequest {
+            object_key: format!("backups/{}/{}-abort.json", backup.client_id, backup.id),
+            expected_sha256_hex: payload_hash(&artifact_bytes),
+            expected_size_bytes: artifact_bytes.len() as i64,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let offset_error = upload_backup_artifact_session_chunk(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadChunkRequest {
+            offset_bytes: 4,
+            data_base64: BASE64.encode(&artifact_bytes[..4]),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(offset_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(offset_error.code, "backup_artifact_upload_offset_mismatch");
+
+    let abort = abort_backup_artifact_upload_session(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadCommitRequest { confirmed: true }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(abort.status, "aborted");
+
+    let missing = upload_backup_artifact_session_chunk(
+        State(state),
+        HeaderMap::new(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadChunkRequest {
+            offset_bytes: 0,
+            data_base64: BASE64.encode(&artifact_bytes[..4]),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(missing.code, "backup_artifact_upload_session_not_found");
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-upload-reject-{}",
+        Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+
+    let unconfirmed = upload_backup_artifact(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(UploadBackupArtifactRequest {
+            object_key: format!("backups/{}/unconfirmed.json", backup.client_id),
+            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-a")),
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unconfirmed.code,
+        "backup_artifact_upload_confirmation_required"
+    );
+
+    let wrong_client = upload_backup_artifact(
+        State(state),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(UploadBackupArtifactRequest {
+            object_key: format!("backups/{}/wrong-client.json", backup.client_id),
+            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-b")),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(wrong_client.code, "backup_artifact_client_mismatch");
+    assert!(
+        !tokio::fs::try_exists(object_root.join("backups/client-a/wrong-client.json"))
+            .await
+            .unwrap()
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_handoff_promotes_retained_backup_output() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-api-backup-handoff-{}", Uuid::new_v4()));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let source_job_id = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        memory.jobs.write().await.push(JobHistoryView {
+            id: source_job_id,
+            actor_id: None,
+            command_type: "backup".to_string(),
+            privileged: true,
+            status: "completed".to_string(),
+            target_count: 1,
+            payload_hash: backup.payload_hash.clone(),
+            created_at: unix_now().to_string(),
+            completed_at: Some(unix_now().to_string()),
+        });
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id: source_job_id,
+            client_id: "client-a".to_string(),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            started_at: Some(unix_now().to_string()),
+            completed_at: Some(unix_now().to_string()),
+        });
+        memory.job_outputs.write().await.push(JobOutputView {
+            job_id: source_job_id,
+            client_id: "client-a".to_string(),
+            seq: 0,
+            stream: "stdout".to_string(),
+            data_base64: BASE64.encode(&artifact_bytes),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            artifact_sha256_hex: Some(payload_hash(&artifact_bytes)),
+            artifact_size_bytes: Some(artifact_bytes.len() as i64),
+            exit_code: Some(0),
+            done: true,
+            created_at: unix_now().to_string(),
+        });
+    }
+
+    let (status, Json(handoff)) = create_backup_artifact_handoff(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactHandoffRequest {
+            confirmed: true,
+            job_id: Some(source_job_id),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(handoff.source_job_id, source_job_id);
+    assert_eq!(handoff.source_chunk_count, 1);
+    assert_eq!(handoff.source, "retained_job_outputs_streamed");
+    assert_eq!(handoff.artifact.client_id, "client-a");
+    assert_eq!(handoff.artifact.sha256_hex, payload_hash(&artifact_bytes));
+    assert_eq!(
+        tokio::fs::read(object_root.join(&handoff.artifact.object_key))
+            .await
+            .unwrap(),
+        artifact_bytes
+    );
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    assert_eq!(backups[0].artifact_id, Some(handoff.artifact.id));
+    assert!(repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_handoff_streams_object_store_backed_output() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-handoff-object-backed-{}",
+        Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let source_object_key = "job-outputs/source-backup-artifact.bin";
+    store
+        .put_new(source_object_key, &artifact_bytes)
+        .await
+        .unwrap();
+    let source_job_id = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        memory.jobs.write().await.push(JobHistoryView {
+            id: source_job_id,
+            actor_id: None,
+            command_type: "backup".to_string(),
+            privileged: true,
+            status: "completed".to_string(),
+            target_count: 1,
+            payload_hash: backup.payload_hash.clone(),
+            created_at: unix_now().to_string(),
+            completed_at: Some(unix_now().to_string()),
+        });
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id: source_job_id,
+            client_id: "client-a".to_string(),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            started_at: Some(unix_now().to_string()),
+            completed_at: Some(unix_now().to_string()),
+        });
+        memory.job_outputs.write().await.push(JobOutputView {
+            job_id: source_job_id,
+            client_id: "client-a".to_string(),
+            seq: 0,
+            stream: "stdout".to_string(),
+            data_base64: String::new(),
+            storage: "object_store".to_string(),
+            artifact_object_key: Some(source_object_key.to_string()),
+            artifact_sha256_hex: Some(payload_hash(&artifact_bytes)),
+            artifact_size_bytes: Some(artifact_bytes.len() as i64),
+            exit_code: Some(0),
+            done: true,
+            created_at: unix_now().to_string(),
+        });
+    }
+
+    let (status, Json(handoff)) = create_backup_artifact_handoff(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactHandoffRequest {
+            confirmed: true,
+            job_id: Some(source_job_id),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(handoff.source, "retained_job_outputs_streamed");
+    assert_eq!(handoff.source_chunk_count, 1);
+    assert_eq!(handoff.artifact.sha256_hex, payload_hash(&artifact_bytes));
+    assert_eq!(
+        tokio::fs::read(object_root.join(&handoff.artifact.object_key))
+            .await
+            .unwrap(),
+        artifact_bytes
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_handoff_requires_confirmation_and_source() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-handoff-reject-{}",
+        Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let backup = create_test_backup_request(&repo, state.clone()).await;
+
+    let unconfirmed = create_backup_artifact_handoff(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactHandoffRequest {
+            confirmed: false,
+            job_id: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unconfirmed.code,
+        "backup_artifact_handoff_confirmation_required"
+    );
+
+    let missing_source = create_backup_artifact_handoff(
+        State(state),
+        HeaderMap::new(),
+        Path(backup.id),
+        Json(BackupArtifactHandoffRequest {
+            confirmed: true,
+            job_id: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        missing_source.code,
+        "backup_artifact_handoff_source_missing"
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_request_rejects_missing_or_mismatched_proof_envelope() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    let missing = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: None,
+        envelope: None,
+    };
+    let missing_error = create_backup_request(
+        State(test_state(repo.clone())),
+        HeaderMap::new(),
+        Json(missing),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing_error.status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(missing_error.code, "backup_proof_required");
+
+    let mut mismatched_envelope = backup_envelope("client-a", &["/etc/issue"], false);
+    mismatched_envelope.scope = "client:client-a".to_string();
+    let mismatched = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: None,
+        envelope: Some(mismatched_envelope),
+    };
+    let mismatched_error = create_backup_request(
+        State(test_state(repo.clone())),
+        HeaderMap::new(),
+        Json(mismatched),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mismatched_error.status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(mismatched_error.code, "invalid_backup_proof_envelope");
+    let rejected_audits = repo.list_audit_logs(10).await.unwrap();
+    assert_eq!(rejected_audits.len(), 2);
+    assert!(rejected_audits
+        .iter()
+        .all(|audit| audit.action == "backup.rejected_authorization_required"));
+
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    let mut expired_envelope = backup_envelope("client-a", &["/etc/hostname"], false);
+    expired_envelope.proof.as_mut().unwrap().expires_unix = unix_now().saturating_sub(1);
+    let expired = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: None,
+        envelope: Some(expired_envelope),
+    };
+    let expired_error =
+        create_backup_request(State(test_state(repo)), HeaderMap::new(), Json(expired))
+            .await
+            .unwrap_err();
+    assert_eq!(expired_error.status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(expired_error.code, "invalid_backup_proof_envelope");
+}
+
+fn test_state(repo: Repository) -> AppState {
+    let (events, _) = broadcast::channel(1);
+    AppState {
+        repo,
+        events,
+        internal_token: None,
+        gateway: GatewayDispatchClient::default(),
+        server_signing_key: None,
+        enrollment: EnrollmentSettings::default(),
+        backup_object_store: None,
+        update_object_store: None,
+        update_artifact_public_base_url: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: 32768,
+        require_registered_agent_updates: false,
+    }
+}
+
+fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState {
+    AppState {
+        backup_object_store: Some(store),
+        update_object_store: None,
+        update_artifact_public_base_url: None,
+        ..test_state(repo)
+    }
+}
+
+async fn seed_backup_agent(repo: &Repository) {
+    if let Repository::Memory(memory) = repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+}
+
+async fn create_test_backup_request(
+    repo: &Repository,
+    state: AppState,
+) -> crate::model::BackupRequestView {
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: Some("pre-migration".to_string()),
+        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+    };
+    let (_, Json(backup)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
+        .await
+        .unwrap();
+    assert_eq!(repo.list_backup_requests(10).await.unwrap().len(), 1);
+    backup
+}
+
+async fn seed_policy_backup_artifact(
+    repo: &Repository,
+    store: &BackupObjectStore,
+    schedule_id: Uuid,
+    label: &str,
+    age_days: u64,
+) -> String {
+    let operator = backup_test_operator();
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        recipient_public_key_hex: None,
+        confirmed: true,
+        note: Some(format!("policy artifact {label}")),
+        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+    };
+    let envelope = request.envelope.clone().unwrap();
+    let backup = repo
+        .record_backup_request_with_source(
+            &request,
+            &envelope.payload_hash_hex,
+            &envelope,
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            BackupRequestSourceLink {
+                job_id: Some(Uuid::new_v4()),
+                schedule_id: Some(schedule_id),
+            },
+        )
+        .await
+        .unwrap();
+    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let object_key = format!("backups/client-a/{label}.json");
+    store.put_new(&object_key, &artifact_bytes).await.unwrap();
+    let artifact = repo
+        .record_backup_artifact_metadata(
+            &backup,
+            &RecordBackupArtifactMetadataRequest {
+                object_key: object_key.clone(),
+                sha256_hex: payload_hash(&artifact_bytes),
+                encrypted: true,
+                size_bytes: artifact_bytes.len() as i64,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = repo {
+        let created_at = unix_now()
+            .saturating_sub(age_days.saturating_mul(86_400))
+            .to_string();
+        if let Some(stored) = memory
+            .backup_artifacts
+            .write()
+            .await
+            .iter_mut()
+            .find(|stored| stored.id == artifact.id)
+        {
+            stored.created_at = created_at.clone();
+        }
+        if let Some(stored) = memory
+            .backup_requests
+            .write()
+            .await
+            .iter_mut()
+            .find(|stored| stored.id == backup.id)
+        {
+            stored.created_at = created_at;
+        }
+    }
+    object_key
+}
+
+fn backup_test_operator() -> AuthContext {
+    AuthContext {
+        operator: OperatorView {
+            id: Uuid::new_v4(),
+            username: "operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            totp_enabled: false,
+        },
+        session_id: Uuid::new_v4(),
+    }
+}
+
+fn encrypted_artifact_bytes(client_id: &str) -> Vec<u8> {
+    let ciphertext = format!("encrypted bytes for {client_id}").into_bytes();
+    encrypted_artifact_bytes_with_ciphertext(client_id, &ciphertext)
+}
+
+fn encrypted_artifact_bytes_with_ciphertext(client_id: &str, ciphertext: &[u8]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "format": "vpsman.backup_artifact.v1",
+        "version": 1,
+        "cipher": "x25519-chacha20poly1305",
+        "compression": "lz4-size-prepended",
+        "client_id": client_id,
+        "created_unix": unix_now(),
+        "recipient_public_key_sha256_hex": "a".repeat(64),
+        "ephemeral_public_key_hex": "b".repeat(64),
+        "nonce_hex": "c".repeat(24),
+        "ciphertext_sha256_hex": payload_hash(ciphertext),
+        "ciphertext_base64": BASE64.encode(ciphertext),
+    }))
+    .unwrap()
+}
+
+fn backup_envelope(client_id: &str, paths: &[&str], include_config: bool) -> CommandEnvelope {
+    let command = JobCommand::Backup {
+        paths: paths.iter().map(|path| (*path).to_string()).collect(),
+        include_config,
+        recipient_public_key_hex: None,
+    };
+    command_envelope_for_job(Uuid::new_v4(), client_id, &command)
+}
+
+fn command_envelope_for_job(
+    command_id: Uuid,
+    client_id: &str,
+    command: &JobCommand,
+) -> CommandEnvelope {
+    let payload_hash_hex = payload_hash(&encode_json(&command).unwrap());
+    let scope = format!("client:{client_id}");
+    let super_key = derive_super_key("correct horse", b"backup-test");
+    let proof = sign_privilege_proof(
+        &super_key,
+        command_id,
+        &scope,
+        &payload_hash_hex,
+        &random_nonce(),
+        unix_now() + 60,
+    );
+    CommandEnvelope {
+        command_id,
+        scope,
+        payload_hash_hex,
+        proof: Some(proof),
+        server_signature: Vec::new(),
+    }
+}
+
+async fn spawn_backup_gateway_once(
+    artifact_bytes: Vec<u8>,
+) -> (String, tokio::task::JoinHandle<GatewayCommandDispatch>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let dispatch = loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "gateway client closed before request body");
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(dispatch) = parse_gateway_dispatch(&buffer) {
+                break dispatch;
+            }
+        };
+        let body = serde_json::to_vec(&GatewayCommandDispatchResult {
+            client_id: dispatch.client_id.clone(),
+            job_id: dispatch.request.job_id,
+            accepted: true,
+            message: "ok".to_string(),
+            outputs: vec![
+                CommandOutput {
+                    job_id: dispatch.request.job_id,
+                    stream: OutputStream::Stdout,
+                    data: artifact_bytes,
+                    exit_code: None,
+                    done: false,
+                },
+                CommandOutput {
+                    job_id: dispatch.request.job_id,
+                    stream: OutputStream::Status,
+                    data: Vec::new(),
+                    exit_code: Some(0),
+                    done: true,
+                },
+            ],
+        })
+        .unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+        dispatch
+    });
+    (format!("http://{addr}"), task)
+}
+
+fn parse_gateway_dispatch(buffer: &[u8]) -> Option<GatewayCommandDispatch> {
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = std::str::from_utf8(&buffer[..header_end]).ok()?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    let body_start = header_end + 4;
+    if buffer.len() < body_start + content_length {
+        return None;
+    }
+    serde_json::from_slice(&buffer[body_start..body_start + content_length]).ok()
+}

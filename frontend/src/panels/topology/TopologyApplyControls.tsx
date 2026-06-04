@@ -1,0 +1,440 @@
+import { useMemo, useState, type FormEvent } from "react";
+import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
+import {
+  buildNetworkApplyOperation,
+  buildNetworkProbeOperation,
+  buildNetworkRollbackOperation,
+  buildNetworkSpeedTestOperation,
+  buildNetworkStatusOperation,
+  renderTunnelEndpointConfig,
+} from "../../topologyApply";
+import type {
+  AgentView,
+  CreateJobRequest,
+  CreateJobResponse,
+  TunnelConfigBackend,
+  TunnelEndpointSide,
+  TunnelPlanRecord,
+} from "../../types";
+import { runPanelAction, shortId } from "../../utils";
+import { clampInteger } from "../jobDispatchModel";
+import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
+
+export function TopologyApplyControls({
+  agents,
+  onCreateJob,
+  tunnelPlans,
+}: {
+  agents: AgentView[];
+  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  tunnelPlans: TunnelPlanRecord[];
+}) {
+  const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
+  const [side, setSide] = useState<TunnelEndpointSide>("left");
+  const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
+  const [timeoutSecs, setTimeoutSecs] = useState(60);
+  const [proofTtlSecs, setProofTtlSecs] = useState(300);
+  const [probeCount, setProbeCount] = useState(3);
+  const [probeIntervalMs, setProbeIntervalMs] = useState(500);
+  const [speedDurationSecs, setSpeedDurationSecs] = useState(3);
+  const [speedMaxBytesMiB, setSpeedMaxBytesMiB] = useState(16);
+  const [speedRateLimitKbps, setSpeedRateLimitKbps] = useState(100_000);
+  const [speedPort, setSpeedPort] = useState(5201);
+  const [speedConnectTimeoutMs, setSpeedConnectTimeoutMs] = useState(5000);
+  const [confirmed, setConfirmed] = useState(false);
+  const [forceUnprivileged, setForceUnprivileged] = useState(false);
+  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(null);
+  const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
+  const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
+  const [lastAction, setLastAction] = useState<NetworkAction>("apply");
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
+  const endpoint = useMemo(
+    () => (selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null),
+    [selectedPlan, side],
+  );
+  const mutationTargets = resolveAgentsById(agents, endpoint ? [endpoint.localClientId] : []);
+  const status =
+    actionError ??
+    (lastJob
+      ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} accepted`
+      : proofMaterial
+        ? "Proof unlocked"
+        : "Proof locked");
+
+  async function submitApply(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitNetworkChange("apply");
+  }
+
+  async function submitRollback() {
+    await submitNetworkChange("rollback");
+  }
+
+  async function submitStatus() {
+    await submitNetworkChange("status");
+  }
+
+  async function submitProbe() {
+    await submitNetworkChange("probe");
+  }
+
+  async function submitSpeedTest() {
+    await submitNetworkChange("speed_test");
+  }
+
+  async function submitNetworkChange(mode: NetworkAction) {
+    await runPanelAction(setPending, setActionError, async () => {
+      if (!selectedPlan || !endpoint) {
+        throw new Error("Select a tunnel plan");
+      }
+      if (!proofMaterial) {
+        throw new Error("Proof is locked");
+      }
+      if (isMutation(mode) && !confirmed) {
+        throw new Error("Network change requires confirmation");
+      }
+      const boundedProbeCount = clampInteger(probeCount, 1, 20);
+      const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
+      const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
+      const boundedSpeedMaxBytes = clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
+      const boundedSpeedRateLimitKbps = clampInteger(speedRateLimitKbps, 64, 1_000_000);
+      const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
+      const boundedSpeedConnectTimeoutMs = clampInteger(speedConnectTimeoutMs, 100, 30_000);
+      const builtOperation =
+        mode === "apply"
+          ? await buildNetworkApplyOperation(selectedPlan.plan, side, backend)
+          : mode === "rollback"
+            ? buildNetworkRollbackOperation(selectedPlan.plan, side)
+            : mode === "status"
+              ? buildNetworkStatusOperation(selectedPlan.plan, side)
+              : mode === "probe"
+                ? buildNetworkProbeOperation(selectedPlan.plan, side, boundedProbeCount, boundedProbeIntervalMs)
+                : buildNetworkSpeedTestOperation(
+                    selectedPlan.plan,
+                    side,
+                    boundedSpeedDurationSecs,
+                    boundedSpeedMaxBytes,
+                    boundedSpeedRateLimitKbps,
+                    boundedSpeedPort,
+                    boundedSpeedConnectTimeoutMs,
+                  );
+      const targetClientIds =
+        mode === "speed_test"
+          ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
+          : [builtOperation.endpoint.localClientId];
+      const builtProof = await buildEnvelopesForOperation({
+        clientIds: targetClientIds,
+        operation: builtOperation.operation,
+        proofTtlSecs,
+        superPassword: proofMaterial.superPassword,
+        superSaltHex: proofMaterial.superSaltHex,
+      });
+      const job = await onCreateJob({
+        argv: [],
+        clients: targetClientIds,
+        command: commandName(mode),
+        confirmed: isMutation(mode),
+        destructive: isMutation(mode),
+        envelope: null,
+        envelopes: builtProof.envelopes,
+        operation: builtOperation.operation,
+        pools: [],
+        force_unprivileged: isMutation(mode) ? forceUnprivileged : false,
+        privileged: true,
+        tags: [],
+        timeout_secs: clampInteger(timeoutSecs, 1, 3600),
+      });
+      setLastPayloadHash(builtProof.payloadHashHex);
+      setLastJob(job);
+      setLastAction(mode);
+    });
+  }
+
+  return (
+    <section className="fleetPanel commandComposer">
+      <div className="sectionHeader">
+        <div>
+          <h2>Network apply</h2>
+          <span>{status}</span>
+        </div>
+        <ShieldCheck size={20} />
+      </div>
+      <form className="dispatchForm" onSubmit={submitApply}>
+        <div className="dispatchControls">
+          <label>
+            <span>Apply plan</span>
+            <select
+              aria-label="Network apply plan"
+              onChange={(event) => setSelectedPlanId(event.target.value)}
+              value={selectedPlan?.id ?? ""}
+            >
+              {tunnelPlans.map((plan) => (
+                <option key={plan.id} value={plan.id}>
+                  {plan.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Endpoint side</span>
+            <select
+              aria-label="Network apply endpoint side"
+              onChange={(event) => setSide(event.target.value as TunnelEndpointSide)}
+              value={side}
+            >
+              <option value="left">Left endpoint</option>
+              <option value="right">Right endpoint</option>
+            </select>
+          </label>
+          <label>
+            <span>Network backend</span>
+            <select
+              aria-label="Network apply backend"
+              onChange={(event) => setBackend(event.target.value as TunnelConfigBackend)}
+              value={backend}
+            >
+              <option value="ifupdown">ifupdown</option>
+              <option value="netplan">netplan</option>
+              <option value="systemd_networkd">systemd-networkd</option>
+            </select>
+          </label>
+        </div>
+        <div className="dispatchControls">
+          <label>
+            <span>Timeout seconds</span>
+            <input
+              aria-label="Network apply timeout seconds"
+              max={3600}
+              min={1}
+              onChange={(event) => setTimeoutSecs(Number(event.target.value))}
+              type="number"
+              value={timeoutSecs}
+            />
+          </label>
+          <label>
+            <span>Proof TTL seconds</span>
+            <input
+              aria-label="Network apply proof TTL seconds"
+              max={3600}
+              min={15}
+              onChange={(event) => setProofTtlSecs(Number(event.target.value))}
+              type="number"
+              value={proofTtlSecs}
+            />
+          </label>
+        </div>
+        <div className="dispatchControls">
+          <label>
+            <span>Probe count</span>
+            <input
+              aria-label="Network probe count"
+              max={20}
+              min={1}
+              onChange={(event) => setProbeCount(Number(event.target.value))}
+              type="number"
+              value={probeCount}
+            />
+          </label>
+          <label>
+            <span>Probe interval ms</span>
+            <input
+              aria-label="Network probe interval milliseconds"
+              max={10_000}
+              min={200}
+              onChange={(event) => setProbeIntervalMs(Number(event.target.value))}
+              type="number"
+              value={probeIntervalMs}
+            />
+          </label>
+        </div>
+        <div className="dispatchControls">
+          <label>
+            <span>Speed duration seconds</span>
+            <input
+              aria-label="Network speed test duration seconds"
+              max={30}
+              min={1}
+              onChange={(event) => setSpeedDurationSecs(Number(event.target.value))}
+              type="number"
+              value={speedDurationSecs}
+            />
+          </label>
+          <label>
+            <span>Speed cap MiB</span>
+            <input
+              aria-label="Network speed test max mebibytes"
+              max={256}
+              min={1}
+              onChange={(event) => setSpeedMaxBytesMiB(Number(event.target.value))}
+              type="number"
+              value={speedMaxBytesMiB}
+            />
+          </label>
+        </div>
+        <div className="dispatchControls">
+          <label>
+            <span>Rate limit Kbps</span>
+            <input
+              aria-label="Network speed test rate limit Kbps"
+              max={1_000_000}
+              min={64}
+              onChange={(event) => setSpeedRateLimitKbps(Number(event.target.value))}
+              type="number"
+              value={speedRateLimitKbps}
+            />
+          </label>
+          <label>
+            <span>TCP port</span>
+            <input
+              aria-label="Network speed test TCP port"
+              max={65_535}
+              min={1024}
+              onChange={(event) => setSpeedPort(Number(event.target.value))}
+              type="number"
+              value={speedPort}
+            />
+          </label>
+        </div>
+        <div className="dispatchControls">
+          <label>
+            <span>Connect timeout ms</span>
+            <input
+              aria-label="Network speed test connect timeout milliseconds"
+              max={30_000}
+              min={100}
+              onChange={(event) => setSpeedConnectTimeoutMs(Number(event.target.value))}
+              type="number"
+              value={speedConnectTimeoutMs}
+            />
+          </label>
+        </div>
+        {endpoint && (
+          <div className="operationNote">
+            <strong>{endpoint.localClientId}</strong>
+            <span>
+              {backendLabel(backend)} / {selectedPlan?.plan.bird2_file}
+            </span>
+          </div>
+        )}
+        <TargetImpactPreview
+          forceUnprivileged={forceUnprivileged}
+          mode="root_network_mutation"
+          targets={mutationTargets}
+          title="Network mutation impact"
+        />
+        <label className="checkLine">
+          <input
+            aria-label="Confirm network apply"
+            checked={confirmed}
+            onChange={(event) => setConfirmed(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Confirm network apply</span>
+        </label>
+        <label className="checkLine">
+          <input
+            aria-label="Force unprivileged network best effort"
+            checked={forceUnprivileged}
+            onChange={(event) => setForceUnprivileged(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Force unprivileged best effort</span>
+        </label>
+        <div className="dispatchActions">
+          <button
+            className="primaryAction"
+            disabled={pending || !selectedPlan || !endpoint || !proofMaterial || !confirmed}
+            type="submit"
+          >
+            <Play size={17} />
+            Apply side
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={pending || !selectedPlan || !endpoint || !proofMaterial || !confirmed}
+            onClick={submitRollback}
+            type="button"
+          >
+            <RotateCcw size={17} />
+            Rollback side
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            onClick={submitStatus}
+            type="button"
+          >
+            <Search size={17} />
+            Inspect side
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            onClick={submitProbe}
+            type="button"
+          >
+            <Activity size={17} />
+            Probe latency
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            onClick={submitSpeedTest}
+            type="button"
+          >
+            <Activity size={17} />
+            Test speed
+          </button>
+        </div>
+      </form>
+      <ProofVaultBox lastPayloadHash={lastPayloadHash} onProofMaterialChange={setProofMaterial} proofMaterial={proofMaterial} />
+    </section>
+  );
+}
+
+type NetworkAction = "apply" | "rollback" | "status" | "probe" | "speed_test";
+
+function commandName(mode: NetworkAction) {
+  if (mode === "apply") {
+    return "network_apply";
+  }
+  if (mode === "rollback") {
+    return "network_rollback";
+  }
+  if (mode === "probe") {
+    return "network_probe";
+  }
+  if (mode === "speed_test") {
+    return "network_speed_test";
+  }
+  return "network_status";
+}
+
+function actionLabel(mode: NetworkAction) {
+  if (mode === "apply") {
+    return "Apply";
+  }
+  if (mode === "rollback") {
+    return "Rollback";
+  }
+  if (mode === "probe") {
+    return "Probe";
+  }
+  if (mode === "speed_test") {
+    return "Speed test";
+  }
+  return "Status";
+}
+
+function isMutation(mode: NetworkAction) {
+  return mode === "apply" || mode === "rollback";
+}
+
+function backendLabel(backend: TunnelConfigBackend) {
+  return networkBackendPresetLabel(backend);
+}

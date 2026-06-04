@@ -1,0 +1,452 @@
+use uuid::Uuid;
+use vpsman_common::{
+    plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, BandwidthTier, OspfCostPolicy,
+    ProcessResourceLimits, ProcessRunPolicy, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+};
+
+use super::*;
+
+#[test]
+fn gateway_timeout_output_maps_to_timed_out_target_status() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "command_timeout",
+                "timeout_secs": 1,
+            }))
+            .unwrap(),
+            exit_code: Some(124),
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "timed_out");
+    assert_eq!(outcome.exit_code, Some(124));
+    assert!(outcome.accepted);
+    assert_eq!(aggregate_job_status(&[outcome.status], 1), "timed_out");
+}
+
+#[test]
+fn gateway_canceled_output_maps_to_canceled_target_status() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "command_canceled",
+                "reason": "operator request",
+            }))
+            .unwrap(),
+            exit_code: Some(130),
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "canceled");
+    assert_eq!(outcome.exit_code, Some(130));
+    assert!(outcome.accepted);
+    assert_eq!(aggregate_job_status(&[outcome.status], 1), "canceled");
+}
+
+#[test]
+fn aggregate_job_status_uses_terminal_target_states() {
+    assert_eq!(
+        aggregate_job_status(&["completed".to_string(), "completed".to_string()], 2),
+        "completed"
+    );
+    assert_eq!(
+        aggregate_job_status(&["completed".to_string(), "failed".to_string()], 2),
+        "partially_completed"
+    );
+    assert_eq!(
+        aggregate_job_status(&["failed".to_string(), "failed".to_string()], 2),
+        "failed"
+    );
+    assert_eq!(
+        aggregate_job_status(&["dispatch_failed".to_string()], 1),
+        "dispatch_failed"
+    );
+    assert_eq!(
+        aggregate_job_status(&["degraded_unprivileged".to_string()], 1),
+        "degraded_unprivileged"
+    );
+    assert_eq!(
+        aggregate_job_status(
+            &["completed".to_string(), "degraded_unprivileged".to_string()],
+            2,
+        ),
+        "partially_completed"
+    );
+}
+
+#[test]
+fn capability_split_skips_only_explicit_unprivileged_root_network_targets() {
+    let command = network_rollback_command();
+    let targets = vec![
+        "root-a".to_string(),
+        "user-b".to_string(),
+        "legacy-c".to_string(),
+    ];
+    let agents = vec![
+        test_agent(
+            "root-a",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Root,
+                can_manage_runtime_tunnels: true,
+                ..Default::default()
+            },
+        ),
+        test_agent(
+            "user-b",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Unprivileged,
+                effective_uid: Some(1000),
+                can_attempt_privileged_ops: true,
+                ..Default::default()
+            },
+        ),
+        test_agent("legacy-c", AgentCapabilitySnapshot::default()),
+    ];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, vec!["root-a".to_string(), "legacy-c".to_string()]);
+    assert_eq!(skipped_client_ids(&skipped), vec!["user-b"]);
+    assert_eq!(
+        skipped[0].failure.reason,
+        "target_agent_lacks_root_runtime_network_capability"
+    );
+}
+
+#[test]
+fn capability_split_allows_forced_unprivileged_best_effort() {
+    let command = network_rollback_command();
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, true);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
+fn capability_split_does_not_gate_non_network_commands() {
+    let command = JobCommand::Shell {
+        argv: vec!["uptime".to_string()],
+        pty: false,
+    };
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
+fn capability_split_skips_process_starts_with_limits_when_target_cannot_apply_them() {
+    let command = process_start_with_limits();
+    let targets = vec![
+        "root-a".to_string(),
+        "user-b".to_string(),
+        "legacy-c".to_string(),
+    ];
+    let agents = vec![
+        test_agent(
+            "root-a",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Root,
+                can_apply_process_limits: true,
+                ..Default::default()
+            },
+        ),
+        test_agent(
+            "user-b",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Unprivileged,
+                effective_uid: Some(1000),
+                can_attempt_privileged_ops: true,
+                can_apply_process_limits: false,
+                ..Default::default()
+            },
+        ),
+        test_agent("legacy-c", AgentCapabilitySnapshot::default()),
+    ];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, vec!["root-a".to_string(), "legacy-c".to_string()]);
+    assert_eq!(skipped_client_ids(&skipped), vec!["user-b"]);
+    assert_eq!(
+        skipped[0].failure.reason,
+        "target_agent_lacks_process_limit_capability"
+    );
+}
+
+#[test]
+fn capability_split_allows_unlimited_process_starts_for_unprivileged_targets() {
+    let command = JobCommand::ProcessStart {
+        name: "worker".to_string(),
+        argv: vec!["/bin/sleep".to_string(), "60".to_string()],
+        cwd: None,
+        env: Default::default(),
+        policy: ProcessRunPolicy::default(),
+        limits: ProcessResourceLimits::default(),
+    };
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_apply_process_limits: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
+fn capability_split_force_sends_process_limit_best_effort() {
+    let command = process_start_with_limits();
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_apply_process_limits: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, true);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
+fn capability_split_skips_agent_update_for_unprivileged_targets() {
+    let command = JobCommand::AgentUpdateActivate {
+        staged_sha256_hex: "ab".repeat(32),
+        restart_agent: false,
+    };
+    let targets = vec![
+        "root-a".to_string(),
+        "user-b".to_string(),
+        "legacy-c".to_string(),
+    ];
+    let agents = vec![
+        test_agent(
+            "root-a",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Root,
+                can_attempt_privileged_ops: true,
+                ..Default::default()
+            },
+        ),
+        test_agent(
+            "user-b",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Unprivileged,
+                effective_uid: Some(1000),
+                can_attempt_privileged_ops: false,
+                ..Default::default()
+            },
+        ),
+        test_agent("legacy-c", AgentCapabilitySnapshot::default()),
+    ];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, vec!["root-a".to_string(), "legacy-c".to_string()]);
+    assert_eq!(skipped_client_ids(&skipped), vec!["user-b"]);
+    assert_eq!(
+        skipped[0].failure.reason,
+        "target_agent_lacks_agent_update_capability"
+    );
+}
+
+#[test]
+fn capability_split_skips_restore_for_unprivileged_targets() {
+    let command = restore_rollback_command();
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_attempt_privileged_ops: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert!(dispatch.is_empty());
+    assert_eq!(skipped_client_ids(&skipped), vec!["user-b"]);
+    assert_eq!(
+        skipped[0].failure.reason,
+        "target_agent_lacks_restore_capability"
+    );
+}
+
+#[test]
+fn capability_split_force_sends_update_and_restore_best_effort() {
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            ..Default::default()
+        },
+    )];
+
+    for command in [
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: None,
+        },
+        restore_rollback_command(),
+    ] {
+        let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, true);
+        assert_eq!(dispatch, targets);
+        assert!(skipped.is_empty());
+    }
+}
+
+#[test]
+fn capability_degraded_outcome_records_operator_hint() {
+    let (_dispatch, skipped) = split_targets_by_capability(
+        &network_rollback_command(),
+        &["user-b".to_string()],
+        &[test_agent(
+            "user-b",
+            AgentCapabilitySnapshot {
+                privilege_mode: AgentPrivilegeMode::Unprivileged,
+                effective_uid: Some(1000),
+                ..Default::default()
+            },
+        )],
+        false,
+    );
+    let outcome =
+        capability_degraded_outcome(Uuid::new_v4(), &skipped[0], &network_rollback_command())
+            .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
+
+    assert_eq!(outcome.status, "degraded_unprivileged");
+    assert!(!outcome.accepted);
+    assert_eq!(
+        status["reason"],
+        "target_agent_lacks_root_runtime_network_capability"
+    );
+    assert!(status["hint"]
+        .as_str()
+        .unwrap()
+        .contains("force_unprivileged"));
+}
+
+fn skipped_client_ids(skipped: &[CapabilitySkip]) -> Vec<&str> {
+    skipped.iter().map(|skip| skip.client_id.as_str()).collect()
+}
+
+fn test_agent(id: &str, capabilities: AgentCapabilitySnapshot) -> AgentView {
+    AgentView {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        status: "connected".to_string(),
+        tags: Vec::new(),
+        capabilities,
+    }
+}
+
+fn network_rollback_command() -> JobCommand {
+    JobCommand::NetworkRollback {
+        plan: Box::new(
+            plan_tunnel(&TunnelPlanInput {
+                name: "edge-a-edge-b".to_string(),
+                interface_name: "tunab".to_string(),
+                kind: TunnelKind::Gre,
+                runtime_control: Default::default(),
+                runtime_topology: Default::default(),
+                left_client_id: "root-a".to_string(),
+                right_client_id: "user-b".to_string(),
+                left_underlay: "198.51.100.10".to_string(),
+                right_underlay: "203.0.113.20".to_string(),
+                address_pool_cidr: "10.255.0.0/30".to_string(),
+                reserved_addresses: Vec::new(),
+                bandwidth: BandwidthTier::M100,
+                latency_ms: 18.0,
+                packet_loss_ratio: 0.0,
+                preference: 1.0,
+                ospf_policy: OspfCostPolicy::default(),
+            })
+            .unwrap(),
+        ),
+        side: TunnelEndpointSide::Left,
+    }
+}
+
+fn process_start_with_limits() -> JobCommand {
+    JobCommand::ProcessStart {
+        name: "worker".to_string(),
+        argv: vec!["/bin/sleep".to_string(), "60".to_string()],
+        cwd: None,
+        env: Default::default(),
+        policy: ProcessRunPolicy::default(),
+        limits: ProcessResourceLimits {
+            memory_max_bytes: Some(128 * 1024 * 1024),
+            pids_max: Some(32),
+            open_files_max: Some(256),
+            cpu_shares: Some(1024),
+            no_new_privileges: true,
+        },
+    }
+}
+
+fn restore_rollback_command() -> JobCommand {
+    JobCommand::RestoreRollback {
+        source_restore_job_id: Uuid::new_v4(),
+        restored_files: vec![vpsman_common::RestoreRollbackFile {
+            archive_path: "/etc/hostname".to_string(),
+            destination_path: "/restore/etc/hostname".to_string(),
+            rollback_path: Some("/restore/etc/.vpsman-restore-hostname.bak".to_string()),
+            restored_size_bytes: 8,
+            restored_sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+        }],
+    }
+}

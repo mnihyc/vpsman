@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: vpsman
+      POSTGRES_USER: vpsman
+      POSTGRES_PASSWORD: vpsman
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    image: rust:1.96
+    working_dir: /workspace
+    command: cargo run -p vpsman-api -- --bind 0.0.0.0:8080
+    env_file: .env.example
+    ports:
+      - "8080:8080"
+    volumes:
+      - ..:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/workspace/target
+    depends_on:
+      - postgres
+
+  gateway:
+    image: rust:1.96
+    working_dir: /workspace
+    command: cargo run -p vpsman-gateway -- --bind 0.0.0.0:9443
+    env_file: .env.example
+    ports:
+      - "9443:9443"
+    volumes:
+      - ..:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/workspace/target
+
+  worker:
+    image: rust:1.96
+    working_dir: /workspace
+    command: cargo run -p vpsman-worker
+    env_file: .env.example
+    volumes:
+      - ..:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/workspace/target
+    depends_on:
+      - postgres
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /workspace/frontend
+    command: sh -lc "npm install && npm run dev -- --port 5173"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ..:/workspace
+      - node-cache:/root/.npm
+
+volumes:
+  postgres-data:
+  cargo-cache:
+  target-cache:
+  node-cache:

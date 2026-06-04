@@ -1,0 +1,321 @@
+use std::{path::Path, process::Stdio, time::Duration};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    time,
+};
+use vpsman_common::{
+    AgentConfig, AgentProcessInventorySource, CommandOutput, OutputStream, RuntimeTunnelCommand,
+};
+
+const MAX_PROCESS_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
+
+pub(crate) async fn execute_process_list(
+    config: &AgentConfig,
+    job_id: uuid::Uuid,
+    limit: u16,
+    timeout_secs: u64,
+) -> Result<Vec<CommandOutput>> {
+    let limit = limit.clamp(1, 512);
+    let snapshot = collect_process_snapshot_for_config(config, limit, timeout_secs).await?;
+    let stdout = serde_json::to_vec(&snapshot)?;
+    let mut outputs = chunked_output(job_id, OutputStream::Stdout, &stdout);
+    outputs.push(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&serde_json::json!({
+            "type": "process_list",
+            "count": snapshot.processes.len(),
+            "truncated": snapshot.truncated,
+            "source": snapshot.source,
+        }))?,
+        exit_code: Some(0),
+        done: true,
+    });
+    Ok(outputs)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProcessSnapshot {
+    #[serde(default = "default_process_list_type")]
+    r#type: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    processes: Vec<ProcessView>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProcessView {
+    pid: u32,
+    ppid: u32,
+    uid: u32,
+    state: String,
+    name: String,
+    command: String,
+    rss_kib: u64,
+}
+
+async fn collect_process_snapshot_for_config(
+    config: &AgentConfig,
+    limit: u16,
+    timeout_secs: u64,
+) -> Result<ProcessSnapshot> {
+    match config.execution.process_inventory_source {
+        AgentProcessInventorySource::LinuxProcfs => {
+            let proc_root = config.execution.process_proc_root.clone();
+            time::timeout(
+                Duration::from_secs(timeout_secs.max(1)),
+                tokio::task::spawn_blocking(move || {
+                    collect_linux_procfs_snapshot(&proc_root, limit)
+                }),
+            )
+            .await
+            .context("process list timed out")??
+            .context("failed to collect process list")
+        }
+        AgentProcessInventorySource::CustomCommand => {
+            let command = config
+                .execution
+                .process_inventory_command
+                .as_ref()
+                .context("custom process inventory command is not configured")?;
+            collect_custom_process_snapshot(config, command, limit, timeout_secs).await
+        }
+    }
+}
+
+fn collect_linux_procfs_snapshot(proc_root: &str, limit: u16) -> Result<ProcessSnapshot> {
+    let proc_root = Path::new(proc_root);
+    let mut processes = Vec::new();
+    for entry in std::fs::read_dir(proc_root)
+        .with_context(|| format!("failed to read {}", proc_root.display()))?
+    {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Some(process) = read_process_view(proc_root, pid) {
+            processes.push(process);
+        }
+    }
+
+    processes.sort_by(|left, right| {
+        right
+            .rss_kib
+            .cmp(&left.rss_kib)
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+    let limit = limit as usize;
+    let truncated = processes.len() > limit;
+    processes.truncate(limit);
+    Ok(ProcessSnapshot {
+        r#type: default_process_list_type(),
+        source: "linux_procfs".to_string(),
+        truncated,
+        processes,
+    })
+}
+
+async fn collect_custom_process_snapshot(
+    config: &AgentConfig,
+    command: &RuntimeTunnelCommand,
+    limit: u16,
+    timeout_secs: u64,
+) -> Result<ProcessSnapshot> {
+    let argv = render_process_inventory_argv(config, command, limit)?;
+    let output = run_json_command(
+        &argv,
+        command.timeout_secs.min(timeout_secs.max(1)).clamp(1, 120),
+        command.max_output_bytes.clamp(1024, 64 * 1024) as usize,
+    )
+    .await?;
+    let mut snapshot: ProcessSnapshot = serde_json::from_slice(&output)
+        .context("custom process inventory returned invalid JSON")?;
+    snapshot.r#type = default_process_list_type();
+    snapshot.source = "custom_command".to_string();
+    snapshot.processes.sort_by(|left, right| {
+        right
+            .rss_kib
+            .cmp(&left.rss_kib)
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+    let limit = limit as usize;
+    snapshot.truncated |= snapshot.processes.len() > limit;
+    snapshot.processes.truncate(limit);
+    Ok(snapshot)
+}
+
+fn read_process_view(proc_root: &Path, pid: u32) -> Option<ProcessView> {
+    let status = std::fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
+    let mut ppid = 0_u32;
+    let mut uid = 0_u32;
+    let mut rss_kib = 0_u64;
+    let mut name = String::new();
+    let mut state = String::new();
+
+    for line in status.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "Name" => name = value.to_string(),
+            "State" => state = value.to_string(),
+            "PPid" => ppid = value.parse().unwrap_or_default(),
+            "Uid" => {
+                uid = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|part| part.parse().ok())
+                    .unwrap_or_default();
+            }
+            "VmRSS" => {
+                rss_kib = value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|part| part.parse().ok())
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+    if name.is_empty() {
+        name = format!("pid-{pid}");
+    }
+    Some(ProcessView {
+        pid,
+        ppid,
+        uid,
+        state,
+        command: process_command(proc_root, pid).unwrap_or_else(|| name.clone()),
+        name,
+        rss_kib,
+    })
+}
+
+fn process_command(proc_root: &Path, pid: u32) -> Option<String> {
+    let bytes = std::fs::read(proc_root.join(pid.to_string()).join("cmdline")).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut command = bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if command.len() > 256 {
+        command.truncate(256);
+        command.push_str("...");
+    }
+    Some(command)
+}
+
+fn render_process_inventory_argv(
+    config: &AgentConfig,
+    command: &RuntimeTunnelCommand,
+    limit: u16,
+) -> Result<Vec<String>> {
+    if command.argv.is_empty() {
+        anyhow::bail!("process inventory argv is empty");
+    }
+    if !command.argv[0].starts_with('/') {
+        anyhow::bail!("process inventory executable must be absolute");
+    }
+    Ok(command
+        .argv
+        .iter()
+        .map(|part| {
+            part.replace("{client_id}", &config.client_id)
+                .replace("{display_name}", &config.display_name)
+                .replace("{tags_csv}", &config.tags.join(","))
+                .replace("{limit}", &limit.to_string())
+        })
+        .collect())
+}
+
+async fn run_json_command(
+    argv: &[String],
+    timeout_secs: u64,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.kill_on_drop(true);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .context("failed to spawn process inventory source")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("process inventory stdout pipe missing")?;
+    let output = time::timeout(
+        Duration::from_secs(timeout_secs),
+        read_limited_stdout(stdout, max_output_bytes),
+    )
+    .await
+    .context("process inventory source timed out")??;
+    let status = child
+        .wait()
+        .await
+        .context("process inventory wait failed")?;
+    if !status.success() {
+        anyhow::bail!("process inventory source exited with {status}");
+    }
+    Ok(output)
+}
+
+async fn read_limited_stdout<R>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while output.len() < limit {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(output);
+        }
+        let take = read.min(limit.saturating_sub(output.len()));
+        output.extend_from_slice(&buffer[..take]);
+        if take < read {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "process inventory output exceeded limit",
+            ));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "process inventory output exceeded limit",
+    ))
+}
+
+fn default_process_list_type() -> String {
+    "process_list".to_string()
+}
+
+fn chunked_output(job_id: uuid::Uuid, stream: OutputStream, data: &[u8]) -> Vec<CommandOutput> {
+    data.chunks(MAX_PROCESS_OUTPUT_CHUNK_BYTES)
+        .map(|chunk| CommandOutput {
+            job_id,
+            stream,
+            data: chunk.to_vec(),
+            exit_code: None,
+            done: false,
+        })
+        .collect()
+}

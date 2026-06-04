@@ -1,0 +1,249 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use vpsman_common::JobCommand;
+
+use crate::{
+    http::http_post_json,
+    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+};
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct VtyProofContext {
+    pub(crate) enabled: bool,
+    pub(crate) password: String,
+    pub(crate) salt_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VtyBulkResolveResponse {
+    targets: Vec<VtyTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VtyTarget {
+    id: String,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct VtyJobSelection {
+    pub(crate) clients: Vec<String>,
+    pub(crate) pools: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) destructive: bool,
+    pub(crate) confirmed: bool,
+}
+
+impl VtyProofContext {
+    pub(crate) fn from_env() -> Result<Self> {
+        let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+        let salt_hex = load_super_salt_hex(None)?;
+        Ok(Self {
+            enabled: true,
+            password,
+            salt_hex,
+        })
+    }
+}
+
+impl VtyJobSelection {
+    pub(crate) fn parse(tokens: &[&str]) -> Result<Self> {
+        let mut selection = Self::default();
+        for token in tokens {
+            match *token {
+                "--destructive" => selection.destructive = true,
+                "--confirmed" => selection.confirmed = true,
+                "" => {}
+                value => {
+                    let (kind, target) = value.split_once(':').unwrap_or(("tag", value));
+                    anyhow::ensure!(!target.is_empty(), "empty target in {value}");
+                    match kind {
+                        "client" => selection.clients.push(target.to_string()),
+                        "pool" => selection.pools.push(target.to_string()),
+                        "tag" => selection.tags.push(target.to_string()),
+                        _ => anyhow::bail!(
+                            "unknown target selector {kind}; use client:<id>, pool:<uuid>, or tag:<name>"
+                        ),
+                    }
+                }
+            }
+        }
+        selection.clients.sort();
+        selection.clients.dedup();
+        selection.pools.sort();
+        selection.pools.dedup();
+        selection.tags.sort();
+        selection.tags.dedup();
+        anyhow::ensure!(
+            !selection.clients.is_empty()
+                || !selection.pools.is_empty()
+                || !selection.tags.is_empty(),
+            "job target selection requires at least one client, pool, or tag target"
+        );
+        Ok(selection)
+    }
+}
+
+pub(crate) fn vty_create_job(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    command: &str,
+    pty: bool,
+    selection: VtyJobSelection,
+) -> Result<String> {
+    let operation = JobCommand::Shell {
+        argv: vec![command.to_string()],
+        pty,
+    };
+    vty_submit_operation(
+        api_url,
+        token,
+        proof_context,
+        if pty { "shell_pty" } else { command },
+        &operation,
+        selection,
+        30,
+    )
+}
+
+pub(crate) fn vty_create_shell_script(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    script: &str,
+    selection: VtyJobSelection,
+) -> Result<String> {
+    anyhow::ensure!(!script.trim().is_empty(), "job-shell script is empty");
+    let operation = JobCommand::ShellScript {
+        script: script.to_string(),
+    };
+    vty_submit_operation(
+        api_url,
+        token,
+        proof_context,
+        "shell_script",
+        &operation,
+        selection,
+        30,
+    )
+}
+
+pub(crate) fn vty_submit_operation(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    command_label: &str,
+    operation: &JobCommand,
+    selection: VtyJobSelection,
+    timeout_secs: u64,
+) -> Result<String> {
+    vty_submit_operation_with_force(
+        api_url,
+        token,
+        proof_context,
+        command_label,
+        operation,
+        selection,
+        timeout_secs,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vty_submit_operation_with_force(
+    api_url: &str,
+    token: Option<&str>,
+    proof_context: &VtyProofContext,
+    command_label: &str,
+    operation: &JobCommand,
+    selection: VtyJobSelection,
+    timeout_secs: u64,
+    force_unprivileged: bool,
+) -> Result<String> {
+    let resolved = http_post_json(
+        api_url,
+        "/api/v1/bulk/resolve",
+        token,
+        &serde_json::json!({
+            "clients": &selection.clients,
+            "pools": &selection.pools,
+            "tags": &selection.tags,
+            "destructive": selection.destructive,
+            "confirmed": selection.confirmed,
+        }),
+    )?;
+    let resolved: VtyBulkResolveResponse =
+        serde_json::from_str(&resolved).context("failed to parse bulk target response")?;
+    let client_ids = resolved
+        .targets
+        .into_iter()
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !client_ids.is_empty(),
+        "{command_label} resolved no targets; provide at least one matching target"
+    );
+    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+        &client_ids,
+        operation,
+        &proof_context.password,
+        &proof_context.salt_hex,
+        300,
+    )?;
+
+    http_post_json(
+        api_url,
+        "/api/v1/jobs",
+        token,
+        &serde_json::json!({
+            "command": command_label,
+            "argv": [],
+            "operation": operation,
+            "clients": selection.clients,
+            "pools": selection.pools,
+            "tags": selection.tags,
+            "privileged": true,
+            "destructive": selection.destructive,
+            "confirmed": selection.confirmed,
+            "force_unprivileged": force_unprivileged,
+            "timeout_secs": timeout_secs,
+            "envelope": null,
+            "envelopes": envelopes,
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VtyJobSelection;
+
+    #[test]
+    fn parses_explicit_vty_job_targets_and_flags() {
+        let selection = VtyJobSelection::parse(&[
+            "client:client-a",
+            "pool:8f38c322-7987-4ffe-9206-9a01144ef9d9",
+            "tag:bgp",
+            "edge",
+            "--destructive",
+            "--confirmed",
+            "client:client-a",
+        ])
+        .unwrap();
+
+        assert_eq!(selection.clients, vec!["client-a"]);
+        assert_eq!(
+            selection.pools,
+            vec!["8f38c322-7987-4ffe-9206-9a01144ef9d9"]
+        );
+        assert_eq!(selection.tags, vec!["bgp", "edge"]);
+        assert!(selection.destructive);
+        assert!(selection.confirmed);
+    }
+
+    #[test]
+    fn rejects_unknown_or_empty_vty_job_targets() {
+        assert!(VtyJobSelection::parse(&["role:edge"]).is_err());
+        assert!(VtyJobSelection::parse(&["client:"]).is_err());
+        assert!(VtyJobSelection::parse(&["--destructive"]).is_err());
+    }
+}

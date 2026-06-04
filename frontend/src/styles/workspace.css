@@ -1,0 +1,233 @@
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 24px;
+  padding: 24px;
+}
+
+.workspace.singleColumn {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspaceStack {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.workspace.jobWorkspace {
+  grid-template-columns: minmax(340px, 0.45fr) minmax(0, 1fr);
+  align-items: start;
+}
+
+.authWorkspace {
+  display: grid;
+  justify-items: center;
+  padding: 48px 24px;
+}
+
+.fleetPanel,
+.inspector,
+.authPanel {
+  min-width: 0;
+  background: #fff;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+}
+
+.authPanel {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 520px);
+  padding-bottom: 18px;
+}
+
+.authPanel label {
+  display: grid;
+  gap: 7px;
+  padding: 0 18px;
+}
+
+.authPanel label span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.authPanel input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: #202124;
+  outline: 0;
+  padding: 0 12px;
+}
+
+.compactForm input,
+.compactForm select,
+.compactForm textarea,
+.aliasEditor input,
+.sideForm input,
+.sideForm select,
+.sideForm textarea,
+.dispatchForm input,
+.dispatchForm select,
+.dispatchForm textarea,
+.proofManager input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: #202124;
+  outline: 0;
+  padding: 0 10px;
+}
+
+.compactForm input:focus,
+.compactForm select:focus,
+.compactForm textarea:focus,
+.aliasEditor input:focus,
+.sideForm input:focus,
+.sideForm select:focus,
+.sideForm textarea:focus,
+.dispatchForm input:focus,
+.dispatchForm select:focus,
+.dispatchForm textarea:focus,
+.proofManager input:focus {
+  border-color: #1a73e8;
+}
+
+.compactForm textarea,
+.sideForm textarea,
+.dispatchForm textarea {
+  min-height: 88px;
+  padding: 10px;
+  resize: vertical;
+}
+
+.authPanel input:focus {
+  border-color: #1a73e8;
+}
+
+.aliasEditor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.aliasEditor label {
+  display: grid;
+  gap: 6px;
+}
+
+.aliasEditor label span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.aliasEditor .errorText {
+  grid-column: 1 / -1;
+  color: #b3261e;
+}
+
+.authVaultUnlock {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #dfe3eb;
+  padding-top: 18px;
+}
+
+.authVaultUnlock .wideAction {
+  margin-top: 0;
+}
+
+.secondaryWideAction {
+  background: #fff;
+  border-color: #d2e3fc;
+  color: #174ea6;
+}
+
+.secondaryWideAction:disabled {
+  background: #eef1f6;
+  border-color: #dfe3eb;
+  color: #80868b;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 18px;
+  border-bottom: 1px solid #dfe3eb;
+}
+
+.sectionHeader > div {
+  min-width: 0;
+}
+
+.sectionHeader.compact {
+  display: block;
+}
+
+.segmented {
+  display: flex;
+  flex: 0 0 auto;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.segmented button {
+  height: 34px;
+  min-width: 74px;
+  border: 0;
+  background: #fff;
+  cursor: pointer;
+}
+
+.segmented .selected {
+  background: #e8f0fe;
+  color: #174ea6;
+  font-weight: 600;
+}
+
+.targetModeControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  width: fit-content;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+}
+
+.targetModeControls span {
+  padding: 0 10px;
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.targetModeControls button {
+  min-width: 54px;
+  height: 32px;
+  border: 0;
+  border-left: 1px solid #dfe3eb;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+}
+
+.targetModeControls button.selected {
+  background: #e8f0fe;
+  color: #174ea6;
+  font-weight: 700;
+}

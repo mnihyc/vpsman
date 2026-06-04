@@ -1,0 +1,925 @@
+import { useState, type FormEvent } from "react";
+import { Ban, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
+import { clearProofVault, hasProofVault } from "../vault";
+import { CrudPager } from "../components/CrudPager";
+import type {
+  AuthProofRotationHistoryRecord,
+  GatewaySessionRecord,
+  OperatorSessionRecord,
+  OperatorView,
+  ResourcePoolView,
+  TotpSetupResponse,
+} from "../types";
+import type {
+  ClientKeyRevocationView,
+  CreateEnrollmentTokenRequest,
+  CreateEnrollmentTokenResponse,
+  EnrollmentTokenPurpose,
+  EnrollmentTokenView,
+  KeyLifecycleReportView,
+} from "../typesAccess";
+import { formatTime, shortHash, shortId, statusClass } from "../utils";
+
+type AccessPanelProps = {
+  apiToken: string;
+  error: string | null;
+  gatewaySessions: GatewaySessionRecord[];
+  lastLiveEvent: string;
+  loading: boolean;
+  onClearSession: () => void;
+  onCreateEnrollmentToken: (request: CreateEnrollmentTokenRequest) => Promise<CreateEnrollmentTokenResponse>;
+  onCreateOperator: (username: string, role: string, password: string, scopes: string[]) => Promise<void>;
+  onConfirmTotp: (password: string, code: string) => Promise<void>;
+  onDisableTotp: (password: string, code: string) => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onRevokeClientKey: (clientId: string, reason: string | null, confirmed: boolean) => Promise<void>;
+  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
+  onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
+  operator: OperatorView | null;
+  clientKeyRevocations: ClientKeyRevocationView[];
+  enrollmentTokens: EnrollmentTokenView[];
+  keyLifecycleReport: KeyLifecycleReportView | null;
+  operatorSessions: OperatorSessionRecord[];
+  operators: OperatorView[];
+  pools: ResourcePoolView[];
+  proofRotations: AuthProofRotationHistoryRecord[];
+  sessionVaultAvailable: boolean;
+  wsState: string;
+};
+
+export function AccessPanel({
+  apiToken,
+  error,
+  gatewaySessions,
+  lastLiveEvent,
+  loading,
+  onClearSession,
+  onConfirmTotp,
+  onCreateEnrollmentToken,
+  onCreateOperator,
+  onDisableTotp,
+  onRefresh,
+  onRevokeClientKey,
+  onRevokeOperatorSession,
+  onSetupTotp,
+  operator,
+  clientKeyRevocations,
+  enrollmentTokens,
+  keyLifecycleReport,
+  operatorSessions,
+  operators,
+  pools,
+  proofRotations,
+  sessionVaultAvailable,
+  wsState,
+}: AccessPanelProps) {
+  const [vaultAvailable, setVaultAvailable] = useState(() => hasProofVault());
+  const [newOperatorUsername, setNewOperatorUsername] = useState("");
+  const [newOperatorPassword, setNewOperatorPassword] = useState("");
+  const [newOperatorRole, setNewOperatorRole] = useState("operator");
+  const [newOperatorScopes, setNewOperatorScopes] = useState("");
+  const [operatorActionError, setOperatorActionError] = useState<string | null>(null);
+  const [operatorActionPending, setOperatorActionPending] = useState(false);
+  const [totpPassword, setTotpPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [totpSetup, setTotpSetup] = useState<TotpSetupResponse | null>(null);
+  const [totpPending, setTotpPending] = useState(false);
+  const [totpError, setTotpError] = useState<string | null>(null);
+  const [tokenPurpose, setTokenPurpose] = useState<EnrollmentTokenPurpose>("provision");
+  const [tokenClientId, setTokenClientId] = useState("");
+  const [tokenTtlSecs, setTokenTtlSecs] = useState("1800");
+  const [tokenTags, setTokenTags] = useState("");
+  const [tokenPoolName, setTokenPoolName] = useState("");
+  const [tokenDisplayName, setTokenDisplayName] = useState("");
+  const [tokenConfirmed, setTokenConfirmed] = useState(false);
+  const [tokenPending, setTokenPending] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [createdToken, setCreatedToken] = useState<CreateEnrollmentTokenResponse | null>(null);
+  const [revokeClientId, setRevokeClientId] = useState("");
+  const [revokeReason, setRevokeReason] = useState("");
+  const [revokeConfirmed, setRevokeConfirmed] = useState(false);
+  const [revokePending, setRevokePending] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
+  const sessionState = apiToken ? "Bearer session active" : "No bearer session";
+  const vaultState = vaultAvailable ? "Encrypted proof vault present" : "No proof vault";
+  const tokenStorageState = apiToken ? (sessionVaultAvailable ? "encrypted vault" : "memory only") : "none";
+  const canManageOperators = operator?.role === "admin";
+  const canCreateOperator =
+    canManageOperators && newOperatorUsername.trim().length > 0 && newOperatorPassword.length >= 12 && !operatorActionPending;
+  const canCreateEnrollmentToken =
+    canManageOperators &&
+    !tokenPending &&
+    Number.parseInt(tokenTtlSecs, 10) >= 60 &&
+    (tokenPurpose === "provision" || (tokenClientId.trim().length > 0 && tokenConfirmed));
+  const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && revokeConfirmed && !revokePending;
+  const lifecycleClients = keyLifecycleReport?.clients ?? [];
+
+  function clearVault() {
+    clearProofVault();
+    setVaultAvailable(false);
+  }
+
+  async function createOperator(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canCreateOperator) {
+      return;
+    }
+    setOperatorActionPending(true);
+    setOperatorActionError(null);
+    try {
+      await onCreateOperator(
+        newOperatorUsername.trim(),
+        newOperatorRole,
+        newOperatorPassword,
+        parseScopeInput(newOperatorScopes),
+      );
+      setNewOperatorUsername("");
+      setNewOperatorPassword("");
+      setNewOperatorRole("operator");
+      setNewOperatorScopes("");
+    } catch (error) {
+      setOperatorActionError(error instanceof Error ? error.message : "Operator creation failed");
+    } finally {
+      setOperatorActionPending(false);
+    }
+  }
+
+  async function setupTotp() {
+    if (!totpPassword) {
+      return;
+    }
+    setTotpPending(true);
+    setTotpError(null);
+    try {
+      setTotpSetup(await onSetupTotp(totpPassword));
+    } catch (error) {
+      setTotpError(error instanceof Error ? error.message : "TOTP setup failed");
+    } finally {
+      setTotpPending(false);
+    }
+  }
+
+  async function confirmTotp() {
+    if (!totpPassword || !totpCode) {
+      return;
+    }
+    setTotpPending(true);
+    setTotpError(null);
+    try {
+      await onConfirmTotp(totpPassword, totpCode);
+      setTotpPassword("");
+      setTotpCode("");
+      setTotpSetup(null);
+    } catch (error) {
+      setTotpError(error instanceof Error ? error.message : "TOTP confirmation failed");
+    } finally {
+      setTotpPending(false);
+    }
+  }
+
+  async function disableTotp() {
+    if (!totpPassword || !totpCode) {
+      return;
+    }
+    setTotpPending(true);
+    setTotpError(null);
+    try {
+      await onDisableTotp(totpPassword, totpCode);
+      setTotpPassword("");
+      setTotpCode("");
+      setTotpSetup(null);
+    } catch (error) {
+      setTotpError(error instanceof Error ? error.message : "TOTP disable failed");
+    } finally {
+      setTotpPending(false);
+    }
+  }
+
+  async function createEnrollmentToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canCreateEnrollmentToken) {
+      return;
+    }
+    setTokenPending(true);
+    setTokenError(null);
+    setCreatedToken(null);
+    try {
+      const response = await onCreateEnrollmentToken({
+        ttl_secs: Number.parseInt(tokenTtlSecs, 10),
+        purpose: tokenPurpose,
+        allowed_client_id: tokenClientId.trim() || null,
+        confirmed_reenrollment: tokenPurpose === "rebuild_reenrollment" ? tokenConfirmed : false,
+        preserve_existing_assignments: true,
+        default_tags: parseScopeInput(tokenTags),
+        default_pool_name: tokenPoolName.trim() || null,
+        default_display_name: tokenDisplayName.trim() || null,
+      });
+      setCreatedToken(response);
+      setTokenTags("");
+      setTokenPoolName("");
+      setTokenDisplayName("");
+      setTokenConfirmed(false);
+      if (tokenPurpose === "provision") {
+        setTokenClientId("");
+      }
+    } catch (error) {
+      setTokenError(error instanceof Error ? error.message : "Enrollment token creation failed");
+    } finally {
+      setTokenPending(false);
+    }
+  }
+
+  async function revokeClientKey(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canRevokeClientKey) {
+      return;
+    }
+    setRevokePending(true);
+    setRevokeError(null);
+    try {
+      await onRevokeClientKey(revokeClientId.trim(), revokeReason.trim() || null, revokeConfirmed);
+      setRevokeClientId("");
+      setRevokeReason("");
+      setRevokeConfirmed(false);
+    } catch (error) {
+      setRevokeError(error instanceof Error ? error.message : "Client key revoke failed");
+    } finally {
+      setRevokePending(false);
+    }
+  }
+
+  return (
+    <section className="workspace accessWorkspace">
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Operator session</h2>
+            <span>{error ?? (loading ? "Loading current operator" : sessionState)}</span>
+          </div>
+          <button className="secondaryAction" onClick={() => void onRefresh()} type="button">
+            <RefreshCw size={17} />
+            Refresh
+          </button>
+        </div>
+        <div className="accessGrid">
+          <div className="accessTile">
+            <ShieldCheck size={20} />
+            <span>Operator</span>
+            <strong>{operator?.username ?? "memory-dev or unauthenticated"}</strong>
+            <small>
+              {operator ? `${operator.role} / ${operator.totp_enabled ? "TOTP on" : "TOTP off"} / ${shortId(operator.id)}` : "No operator record loaded"}
+            </small>
+          </div>
+          <div className="accessTile">
+            <KeyRound size={20} />
+            <span>API session</span>
+            <strong>{sessionState}</strong>
+            <small>token {tokenStorageState}</small>
+          </div>
+          <div className="accessTile">
+            <LockKeyhole size={20} />
+            <span>Proof vault</span>
+            <strong>{vaultState}</strong>
+            <small>super password never leaves browser memory or encrypted local storage</small>
+          </div>
+          <div className="accessTile">
+            <Wifi size={20} />
+            <span>Live stream</span>
+            <strong>{wsState}</strong>
+            <small>last event {lastLiveEvent}</small>
+          </div>
+          <div className="accessTile">
+            <Fingerprint size={20} />
+            <span>Client keys</span>
+            <strong>{keyLifecycleReport ? `${keyLifecycleReport.enrolled_client_count} enrolled` : "not loaded"}</strong>
+            <small>
+              {keyLifecycleReport
+                ? `${keyLifecycleReport.current_key_revoked_count} current revoked / ${keyLifecycleReport.revocation_count} records`
+                : "admin report unavailable"}
+            </small>
+          </div>
+          <div className="accessTile">
+            <RotateCcw size={20} />
+            <span>Rebuild tokens</span>
+            <strong>{keyLifecycleReport ? `${keyLifecycleReport.active_rebuild_reenrollment_token_count} active` : "not loaded"}</strong>
+            <small>
+              {keyLifecycleReport
+                ? `${keyLifecycleReport.rebuild_reenrollment_token_count} total / ${keyLifecycleReport.discovery_trusted_server_key_count} trusted discovery keys`
+                : "re-enrollment state unavailable"}
+            </small>
+          </div>
+          <div className="accessTile">
+            <KeyRound size={20} />
+            <span>Proof rotations</span>
+            <strong>{canManageOperators ? `${proofRotations.length} recent` : "admin only"}</strong>
+            <small>{proofRotations[0]?.rotation_generation ?? "latest generation not recorded"}</small>
+          </div>
+        </div>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Operators</h2>
+            <span>{operator?.role === "admin" ? `${operators.length} role records` : "Admin role required"}</span>
+          </div>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Username", value: (record) => record.username },
+            { label: "Role", value: (record) => record.role },
+            { label: "Scopes", value: (record) => record.scopes.join(", ") },
+            { label: "TOTP", value: (record) => record.totp_enabled },
+            { label: "ID", value: (record) => record.id },
+          ]}
+          itemLabel="operators"
+          items={operators}
+          pageSize={8}
+          title="Operator records"
+          empty={
+            <div className="emptyState">
+              <ShieldCheck size={22} />
+              <strong>No operator list available</strong>
+              <span>Admin sessions can review role records here.</span>
+            </div>
+          }
+        >
+          {(operatorRows) => (
+            <div className="table historyTable">
+              <div className="historyRow operatorGrid heading">
+                <span>Username</span>
+                <span>Role</span>
+                <span>Scopes</span>
+                <span>ID</span>
+              </div>
+              {operatorRows.map((record) => (
+                <div className="historyRow operatorGrid" key={record.id}>
+                  <span className="historyPrimary">
+                    <strong>{record.username}</strong>
+                    <small>{record.id === operator?.id ? "current session" : record.totp_enabled ? "TOTP enabled" : "operator account"}</small>
+                  </span>
+                  <span className={`status ${record.role === "admin" ? "ok" : "warn"}`}>{record.role}</span>
+                  <span className="monoValue">{record.scopes.join(", ") || "default"}</span>
+                  <span className="monoValue">{shortId(record.id)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Proof rotation history</h2>
+            <span>{canManageOperators ? `${proofRotations.length} sanitized rotation records` : "Admin role required"}</span>
+          </div>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Generation", value: (record) => record.rotation_generation ?? "default" },
+            { label: "Status", value: (record) => `${record.status} ${record.completed_count}/${record.target_count}` },
+            { label: "Targets", value: (record) => `${record.completed_count} ${record.failed_count} ${record.pending_count}` },
+            { label: "Payload", value: (record) => record.payload_hash },
+            { label: "Created", value: (record) => record.created_at },
+          ]}
+          itemLabel="rotations"
+          items={proofRotations}
+          pageSize={8}
+          title="Proof rotation records"
+          empty={
+            <div className="emptyState">
+              <KeyRound size={22} />
+              <strong>No proof rotations</strong>
+              <span>Confirmed proof-key rotations appear here without storing new proof material.</span>
+            </div>
+          }
+        >
+          {(rotationRows) => (
+            <div className="table historyTable">
+              <div className="historyRow proofRotationGrid heading">
+                <span>Generation</span>
+                <span>Status</span>
+                <span>Targets</span>
+                <span>Payload</span>
+                <span>Created</span>
+              </div>
+              {rotationRows.map((record) => (
+                <div className="historyRow proofRotationGrid" key={record.job_id}>
+                  <span className="historyPrimary">
+                    <strong>{record.rotation_generation ?? "default generation"}</strong>
+                    <small>{shortId(record.job_id)}</small>
+                  </span>
+                  <span className={`status ${statusClass(record.status)}`}>{record.status}</span>
+                  <span className="historyPrimary">
+                    <strong>{record.completed_count}/{record.target_count} completed</strong>
+                    <small>{record.failed_count} failed / {record.pending_count} pending</small>
+                  </span>
+                  <span className="monoValue">{shortHash(record.payload_hash)}</span>
+                  <span>{formatTime(record.created_at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Operator sessions</h2>
+            <span>{operator?.role === "admin" ? `${operatorSessions.length} retained sessions` : "Admin role required"}</span>
+          </div>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Operator", value: (session) => `${session.operator_username} ${session.operator_role}` },
+            { label: "Status", value: (session) => (session.current ? "current" : session.revoked ? "revoked" : "active") },
+            { label: "Created", value: (session) => session.created_at },
+            { label: "ID", value: (session) => session.id },
+          ]}
+          itemLabel="sessions"
+          items={operatorSessions}
+          pageSize={8}
+          title="Operator session records"
+          empty={
+            <div className="emptyState">
+              <KeyRound size={22} />
+              <strong>No operator sessions</strong>
+              <span>Admin sessions can revoke retained bearer/refresh sessions here.</span>
+            </div>
+          }
+        >
+          {(sessionRows) => (
+            <div className="table historyTable">
+              <div className="historyRow operatorSessionGrid heading">
+                <span>Operator</span>
+                <span>Status</span>
+                <span>Created</span>
+                <span>Action</span>
+              </div>
+              {sessionRows.map((session) => (
+                <div className="historyRow operatorSessionGrid" key={session.id}>
+                  <span className="historyPrimary">
+                    <strong>{session.operator_username}</strong>
+                    <small>{session.operator_role} / {shortId(session.id)}</small>
+                  </span>
+                  <span className={`status ${session.revoked ? "warn" : "ok"}`}>
+                    {session.current ? "current" : session.revoked ? "revoked" : "active"}
+                  </span>
+                  <span>{formatTime(session.created_at)}</span>
+                  <button
+                    className="secondaryAction compactAction dangerAction"
+                    disabled={session.current || session.revoked || !canManageOperators}
+                    onClick={() => void onRevokeOperatorSession(session.id)}
+                    type="button"
+                  >
+                    <UserX size={15} />
+                    Revoke
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Enrollment tokens</h2>
+            <span>{canManageOperators ? `${enrollmentTokens.length} retained token policies` : "Admin role required"}</span>
+          </div>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Token", value: (record) => record.token_prefix },
+            { label: "Policy", value: (record) => `${record.purpose} ${record.allowed_client_id ?? ""}` },
+            { label: "Status", value: (record) => (record.used_at ? `used ${record.used_by_client_id ?? ""}` : "available") },
+            { label: "Defaults", value: enrollmentTokenDefaultsLabel },
+            { label: "Expires", value: (record) => record.expires_at },
+          ]}
+          itemLabel="tokens"
+          items={enrollmentTokens}
+          pageSize={8}
+          title="Enrollment token records"
+          empty={
+            <div className="emptyState">
+              <KeyRound size={22} />
+              <strong>No enrollment tokens</strong>
+              <span>Admin sessions can create provisioning and rebuild tokens.</span>
+            </div>
+          }
+        >
+          {(tokenRows) => (
+            <div className="table historyTable">
+              <div className="historyRow enrollmentTokenGrid heading">
+                <span>Token</span>
+                <span>Policy</span>
+                <span>Status</span>
+                <span>Defaults</span>
+              </div>
+              {tokenRows.map((record) => (
+                <div className="historyRow enrollmentTokenGrid" key={record.id}>
+                  <span className="historyPrimary">
+                    <strong>{record.token_prefix}</strong>
+                    <small>expires {formatTime(record.expires_at)}</small>
+                  </span>
+                  <span className="historyPrimary">
+                    <strong>{enrollmentPurposeLabel(record.purpose)}</strong>
+                    <small>{record.allowed_client_id ?? "any new client"}</small>
+                  </span>
+                  <span className={`status ${record.used_at ? "warn" : "ok"}`}>
+                    {record.used_at ? `used by ${record.used_by_client_id ?? "unknown"}` : "available"}
+                  </span>
+                  <span className="monoValue">{enrollmentTokenDefaultsLabel(record) || "none"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Key lifecycle</h2>
+            <span>
+              {keyLifecycleReport
+                ? `${keyLifecycleReport.current_key_revoked_count} current revocations / ${clientKeyRevocations.length} recent records`
+                : "Admin role required"}
+            </span>
+          </div>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Client", value: (client) => `${client.client_id} ${client.display_name}` },
+            { label: "Key", value: (client) => client.current_public_key_sha256_hex },
+            { label: "Status", value: (client) => `${client.status} ${client.current_key_revoked ? "revoked" : ""}` },
+            { label: "Revoked", value: (client) => `${client.latest_revoked_at ?? ""} ${client.latest_revocation_reason ?? ""}` },
+          ]}
+          itemLabel="clients"
+          items={lifecycleClients}
+          pageSize={10}
+          title="Key lifecycle records"
+          empty={
+            <div className="emptyState">
+              <Fingerprint size={22} />
+              <strong>No lifecycle report</strong>
+              <span>Admin sessions can review enrolled keys and revocation records here.</span>
+            </div>
+          }
+        >
+          {(clientRows) => (
+            <div className="table historyTable">
+              <div className="historyRow keyLifecycleGrid heading">
+                <span>Client</span>
+                <span>Current key</span>
+                <span>Status</span>
+                <span>Latest revoke</span>
+              </div>
+              {clientRows.map((client) => (
+                <div className="historyRow keyLifecycleGrid" key={client.client_id}>
+                  <span className="historyPrimary">
+                    <strong>{client.client_id}</strong>
+                    <small>{client.display_name}</small>
+                  </span>
+                  <span className="monoValue">{client.current_public_key_sha256_hex ? shortHash(client.current_public_key_sha256_hex) : "no key"}</span>
+                  <span className={`status ${client.current_key_revoked ? "warn" : statusClass(client.status)}`}>
+                    {client.current_key_revoked ? "revoked" : client.status}
+                  </span>
+                  <span className="historyPrimary">
+                    <strong>{client.latest_revoked_at ? formatTime(client.latest_revoked_at) : "none"}</strong>
+                    <small>{client.latest_revocation_reason ?? "no current-key revocation"}</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Gateway sessions</h2>
+            <span>{gatewaySessions.length} retained TCP lifecycle records</span>
+          </div>
+          <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+            <RefreshCw size={17} />
+            Refresh
+          </button>
+        </div>
+        <CrudPager
+          fields={[
+            { label: "Client", value: (session) => session.client_id },
+            { label: "Status", value: (session) => `${session.status} ${session.end_reason ?? ""}` },
+            { label: "Gateway", value: (session) => session.gateway_id },
+            { label: "Last seen", value: (session) => session.last_seen_at },
+          ]}
+          itemLabel="sessions"
+          items={gatewaySessions}
+          pageSize={10}
+          title="Gateway session records"
+          empty={
+            <div className="emptyState">
+              <Wifi size={22} />
+              <strong>No gateway sessions</strong>
+              <span>Noise-over-TCP agent session starts and ends will appear here.</span>
+            </div>
+          }
+        >
+          {(gatewayRows) => (
+            <div className="table historyTable">
+              <div className="historyRow heading gatewaySessionGrid">
+                <span>Client</span>
+                <span>Status</span>
+                <span>Gateway</span>
+                <span>Last seen</span>
+              </div>
+              {gatewayRows.map((session) => (
+                <div className="historyRow gatewaySessionGrid" key={session.id}>
+                  <span className="historyPrimary">
+                    <strong>{session.client_id}</strong>
+                    <small>{shortId(session.id)}</small>
+                  </span>
+                  <span className={`status ${statusClass(session.status)}`}>{session.status}</span>
+                  <span className="historyPrimary">
+                    <strong>{session.gateway_id}</strong>
+                    <small>{session.end_reason ?? "active route"}</small>
+                  </span>
+                  <span>{formatTime(session.last_seen_at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CrudPager>
+      </div>
+
+      <aside className="inspector accessInspector">
+        <div className="sectionHeader compact">
+          <h2>Create operator</h2>
+          <span>{operatorActionError ?? (canManageOperators ? "Admin role" : "Admin role required")}</span>
+        </div>
+        <form className="sideForm" onSubmit={(event) => void createOperator(event)}>
+          <input
+            aria-label="Operator username"
+            disabled={!canManageOperators || operatorActionPending}
+            onChange={(event) => setNewOperatorUsername(event.target.value)}
+            placeholder="operator username"
+            value={newOperatorUsername}
+          />
+          <select
+            aria-label="Operator role"
+            disabled={!canManageOperators || operatorActionPending}
+            onChange={(event) => setNewOperatorRole(event.target.value)}
+            value={newOperatorRole}
+          >
+            <option value="operator">operator</option>
+            <option value="viewer">viewer</option>
+            <option value="admin">admin</option>
+          </select>
+          <input
+            aria-label="Operator password"
+            autoComplete="new-password"
+            disabled={!canManageOperators || operatorActionPending}
+            onChange={(event) => setNewOperatorPassword(event.target.value)}
+            placeholder="temporary password, min 12 chars"
+            type="password"
+            value={newOperatorPassword}
+          />
+          <input
+            aria-label="Operator scopes"
+            disabled={!canManageOperators || operatorActionPending}
+            onChange={(event) => setNewOperatorScopes(event.target.value)}
+            placeholder="scopes, blank for role defaults"
+            value={newOperatorScopes}
+          />
+          <button className="secondaryAction" disabled={!canCreateOperator} type="submit">
+            <UserPlus size={17} />
+            Create operator
+          </button>
+        </form>
+
+        <div className="sectionHeader compact">
+          <h2>TOTP</h2>
+          <span>{totpError ?? (operator?.totp_enabled ? "Enabled" : "Optional")}</span>
+        </div>
+
+        <div className="sectionHeader compact">
+          <h2>Create token</h2>
+          <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
+        </div>
+        <form className="sideForm" onSubmit={(event) => void createEnrollmentToken(event)}>
+          <select
+            aria-label="Enrollment token purpose"
+            disabled={!canManageOperators || tokenPending}
+            onChange={(event) => {
+              setTokenPurpose(event.target.value as EnrollmentTokenPurpose);
+              setTokenConfirmed(false);
+            }}
+            value={tokenPurpose}
+          >
+            <option value="provision">Provision token</option>
+            <option value="rebuild_reenrollment">Rebuild token</option>
+          </select>
+          <input
+            aria-label="Enrollment token client id"
+            disabled={!canManageOperators || tokenPending}
+            onChange={(event) => setTokenClientId(event.target.value)}
+            placeholder={tokenPurpose === "rebuild_reenrollment" ? "existing client id" : "optional client id"}
+            value={tokenClientId}
+          />
+          <input
+            aria-label="Enrollment token ttl"
+            disabled={!canManageOperators || tokenPending}
+            inputMode="numeric"
+            onChange={(event) => setTokenTtlSecs(event.target.value)}
+            placeholder="ttl seconds"
+            value={tokenTtlSecs}
+          />
+          <input
+            aria-label="Enrollment default tags"
+            disabled={!canManageOperators || tokenPending}
+            onChange={(event) => setTokenTags(event.target.value)}
+            placeholder="default tags"
+            value={tokenTags}
+          />
+          <input
+            aria-label="Enrollment default alias"
+            disabled={!canManageOperators || tokenPending}
+            onChange={(event) => setTokenDisplayName(event.target.value)}
+            placeholder="initial alias"
+            value={tokenDisplayName}
+          />
+          <select
+            aria-label="Enrollment default pool"
+            disabled={!canManageOperators || tokenPending}
+            onChange={(event) => setTokenPoolName(event.target.value)}
+            value={tokenPoolName}
+          >
+            <option value="">No default pool</option>
+            {pools.map((pool) => (
+              <option key={pool.name} value={pool.name}>
+                {pool.name}
+              </option>
+            ))}
+          </select>
+          {tokenPurpose === "rebuild_reenrollment" && (
+            <label className="inlineCheck">
+              <input
+                checked={tokenConfirmed}
+                disabled={!canManageOperators || tokenPending}
+                onChange={(event) => setTokenConfirmed(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Confirm rebuild</span>
+            </label>
+          )}
+          <button className="secondaryAction" disabled={!canCreateEnrollmentToken} type="submit">
+            {tokenPurpose === "rebuild_reenrollment" ? <RotateCcw size={17} /> : <UserPlus size={17} />}
+            {tokenPurpose === "rebuild_reenrollment" ? "Rebuild token" : "Create token"}
+          </button>
+          {createdToken && (
+            <div className="inlineSecret enrollmentSecret">
+              <strong>{createdToken.token}</strong>
+              <small>{enrollmentPurposeLabel(createdToken.purpose)} / {createdToken.token_prefix}</small>
+            </div>
+          )}
+        </form>
+
+        <div className="sectionHeader compact">
+          <h2>Revoke key</h2>
+          <span>{revokeError ?? (canManageOperators ? "Current client key" : "Admin role required")}</span>
+        </div>
+        <form className="sideForm" onSubmit={(event) => void revokeClientKey(event)}>
+          <input
+            aria-label="Client key revoke client id"
+            disabled={!canManageOperators || revokePending}
+            onChange={(event) => setRevokeClientId(event.target.value)}
+            placeholder="client id"
+            value={revokeClientId}
+          />
+          <input
+            aria-label="Client key revoke reason"
+            disabled={!canManageOperators || revokePending}
+            onChange={(event) => setRevokeReason(event.target.value)}
+            placeholder="reason"
+            value={revokeReason}
+          />
+          <label className="inlineCheck">
+            <input
+              checked={revokeConfirmed}
+              disabled={!canManageOperators || revokePending}
+              onChange={(event) => setRevokeConfirmed(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Confirm key revoke</span>
+          </label>
+          <button className="secondaryAction dangerAction" disabled={!canRevokeClientKey} type="submit">
+            <Ban size={17} />
+            Revoke current key
+          </button>
+        </form>
+        <div className="sideForm">
+          <input
+            aria-label="TOTP password"
+            autoComplete="current-password"
+            onChange={(event) => setTotpPassword(event.target.value)}
+            placeholder="current password"
+            type="password"
+            value={totpPassword}
+          />
+          <input
+            aria-label="TOTP code"
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            maxLength={6}
+            onChange={(event) => setTotpCode(event.target.value)}
+            placeholder="6-digit code"
+            value={totpCode}
+          />
+          {totpSetup && (
+            <div className="inlineSecret">
+              <strong>{totpSetup.secret_base32}</strong>
+              <small>{totpSetup.otpauth_uri}</small>
+            </div>
+          )}
+          <button
+            className="secondaryAction"
+            disabled={totpPending || !totpPassword || operator?.totp_enabled}
+            onClick={() => void setupTotp()}
+            type="button"
+          >
+            <ShieldCheck size={17} />
+            Setup TOTP
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={totpPending || !totpPassword || !totpCode || operator?.totp_enabled}
+            onClick={() => void confirmTotp()}
+            type="button"
+          >
+            <LockKeyhole size={17} />
+            Confirm TOTP
+          </button>
+          <button
+            className="secondaryAction dangerAction"
+            disabled={totpPending || !totpPassword || !totpCode || !operator?.totp_enabled}
+            onClick={() => void disableTotp()}
+            type="button"
+          >
+            <Trash2 size={17} />
+            Disable TOTP
+          </button>
+        </div>
+
+        <div className="sectionHeader compact">
+          <h2>Session controls</h2>
+          <span>Local browser state only</span>
+        </div>
+        <div className="sideForm">
+          <button className="secondaryAction" onClick={onClearSession} type="button">
+            <KeyRound size={17} />
+            Clear bearer session
+          </button>
+          <button className="secondaryAction dangerAction" disabled={!vaultAvailable} onClick={clearVault} type="button">
+            <Trash2 size={17} />
+            Clear proof vault
+          </button>
+        </div>
+        <div className="timeline">
+          <ShieldCheck size={18} />
+          <div>
+            <strong>Deny by default</strong>
+            <span>Non-telemetry actions still require local proof envelopes.</span>
+          </div>
+        </div>
+        <div className="timeline">
+          <LockKeyhole size={18} />
+          <div>
+            <strong>Secret handling</strong>
+            <span>Plaintext super password is not sent to the control-plane API.</span>
+          </div>
+        </div>
+      </aside>
+    </section>
+  );
+}
+
+function parseScopeInput(input: string): string[] {
+  return input
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function enrollmentPurposeLabel(purpose: EnrollmentTokenPurpose): string {
+  return purpose === "rebuild_reenrollment" ? "rebuild re-enrollment" : "provision";
+}
+
+function enrollmentTokenDefaultsLabel(record: EnrollmentTokenView): string {
+  return [record.default_display_name, record.default_pool_name, ...record.default_tags]
+    .filter((value): value is string => Boolean(value))
+    .join(", ");
+}

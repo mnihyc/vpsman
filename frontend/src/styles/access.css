@@ -1,0 +1,91 @@
+.accessWorkspace {
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+}
+
+.accessWorkspace > .fleetPanel {
+  grid-column: 1;
+}
+
+.accessWorkspace > .accessInspector {
+  grid-column: 2;
+  grid-row: 1 / span 8;
+}
+
+.accessGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+
+.accessTile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+  min-height: 108px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 14px;
+}
+
+.accessTile svg {
+  color: #1a73e8;
+}
+
+.accessTile span,
+.accessTile small {
+  color: #5f6368;
+}
+
+.accessTile strong,
+.accessTile small {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.accessTile strong {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.accessTile small {
+  line-height: 1.35;
+}
+
+.accessInspector {
+  overflow: hidden;
+}
+
+.enrollmentTokenGrid {
+  grid-template-columns: 1.2fr 1.2fr minmax(120px, 0.8fr) minmax(120px, 1fr);
+}
+
+.keyLifecycleGrid {
+  grid-template-columns: 1.15fr 1.15fr minmax(110px, 0.65fr) minmax(150px, 1fr);
+}
+
+.proofRotationGrid {
+  grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.6fr) minmax(150px, 0.8fr) minmax(120px, 0.6fr) minmax(150px, 0.8fr);
+}
+
+.inlineSecret {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 10px;
+}
+
+.inlineSecret strong,
+.inlineSecret small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.enrollmentSecret strong {
+  font-size: 0.82rem;
+}

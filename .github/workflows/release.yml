@@ -1,0 +1,148 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag name, such as v0.1.0
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  linux-binaries:
+    name: Linux binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install musl targets
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-cargo-${{ runner.os }}-
+
+      - name: Build server binaries
+        run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker -p vpsctl
+
+      - name: Build static agent and CLI
+        run: |
+          cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
+          cargo build --release -p vpsman-agent --target aarch64-unknown-linux-musl
+          cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
+          cargo build --release -p vpsctl --target aarch64-unknown-linux-musl
+
+      - name: Stage binaries
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          cp target/release/vpsman-api release-artifacts/vpsman-api-linux-x86_64
+          cp target/release/vpsman-gateway release-artifacts/vpsman-gateway-linux-x86_64
+          cp target/release/vpsman-worker release-artifacts/vpsman-worker-linux-x86_64
+          cp target/release/vpsctl release-artifacts/vpsctl-linux-x86_64-gnu
+          cp target/x86_64-unknown-linux-musl/release/vpsman-agent release-artifacts/vpsman-agent-linux-x86_64-musl
+          cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/vpsman-agent-linux-aarch64-musl
+          cp target/x86_64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-x86_64-musl
+          cp target/aarch64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-aarch64-musl
+          (cd release-artifacts && sha256sum * > SHA256SUMS)
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: vpsman-linux-binaries
+          path: release-artifacts/*
+
+  frontend:
+    name: Frontend artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Package frontend
+        run: tar -C frontend -czf vpsman-frontend-dist.tar.gz dist
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: vpsman-frontend-dist
+          path: vpsman-frontend-dist.tar.gz
+
+  github-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - linux-binaries
+      - frontend
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-downloads
+
+      - name: Flatten release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find release-downloads -maxdepth 3 -type f -exec cp {} release-assets/ \;
+
+      - name: Resolve release tag
+        id: release-tag
+        run: |
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --title "vpsman $RELEASE_TAG" \
+            --generate-notes \
+            --verify-tag \
+            --target "$GITHUB_SHA"

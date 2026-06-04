@@ -1,0 +1,26 @@
+/target/
+/AGENTS.md
+/frontend/node_modules/
+/frontend/dist/
+/frontend/test-results/
+/frontend/playwright-report/
+/.tmp/
+/pid
+/.env
+/.env.*
+!/deploy/.env.example
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.crt
+*.p12
+*.bak
+
+# Local agent/private release planning artifacts.
+/PROGRESS.md
+/TODO_LIST.md
+/DESIGN_GOAL.md
+/example_legacy_bird2_config.zip

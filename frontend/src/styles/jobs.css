@@ -1,0 +1,713 @@
+.commandComposer {
+  overflow: hidden;
+}
+
+.jobConsoleStack {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.jobConsoleStack > *,
+.jobConsoleStack .fleetPanel {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.jobConsoleStack .fleetPanel {
+  overflow: hidden;
+}
+
+.jobWorkspace > .commandComposer {
+  position: sticky;
+  top: 88px;
+}
+
+.commandComposer .segmented {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+}
+
+.commandComposer .segmented button {
+  min-width: 0;
+}
+
+.dispatchForm,
+.proofManager {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.templateToolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.8fr) minmax(120px, 0.55fr) minmax(150px, 0.7fr) auto;
+  align-items: end;
+  gap: 12px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafd;
+}
+
+.templateToolbar input,
+.templateToolbar select {
+  width: 100%;
+  min-width: 0;
+}
+
+.releaseRecordForm {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 18px;
+}
+
+.releaseRecordForm label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.releaseRecordForm .operationNote,
+.releaseRecordForm .wideField,
+.releaseRecordForm .inlineError {
+  grid-column: 1 / -1;
+}
+
+.dispatchForm label,
+.proofFields,
+.proofForms,
+.inlineProof {
+  display: grid;
+  gap: 8px;
+}
+
+.dispatchForm label span,
+.releaseRecordForm label span,
+.proofManager label span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.targetSelector {
+  display: grid;
+  gap: 10px;
+}
+
+.targetImpactPreview {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.targetImpactHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.targetImpactHeader span,
+.targetImpactHint,
+.targetImpactGroup small {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.targetImpactHint {
+  margin: 0;
+}
+
+.targetImpactGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.targetImpactGroup {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 9px;
+  background: #f8fafd;
+}
+
+.targetImpactGroup.ready {
+  border-color: #c4eed0;
+  background: #f3fbf5;
+}
+
+.targetImpactGroup.degraded,
+.targetImpactGroup.forced {
+  border-color: #f9d99a;
+  background: #fff8e7;
+}
+
+.targetImpactGroup.observation_only {
+  border-color: #d0d7de;
+  background: #f6f8fa;
+}
+
+.targetImpactGroup.unsupported {
+  border-color: #f2b8b5;
+  background: #fceeee;
+}
+
+.targetImpactGroupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.targetImpactGroupHeader span {
+  min-width: 0;
+  overflow: hidden;
+  color: #3c4043;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.targetImpactGroup svg {
+  flex: 0 0 auto;
+}
+
+.targetImpactGroup.ready svg {
+  color: #188038;
+}
+
+.targetImpactGroup.degraded svg,
+.targetImpactGroup.forced svg {
+  color: #b06000;
+}
+
+.targetImpactGroup.observation_only svg {
+  color: #5f6368;
+}
+
+.targetImpactGroup.unsupported svg {
+  color: #b3261e;
+}
+
+.operationNote {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 12px;
+}
+
+.operationNote span {
+  color: #5f6368;
+  font-size: 13px;
+}
+
+.compactOperation {
+  display: grid;
+  align-items: center;
+  grid-template-columns: auto minmax(0, 1fr) minmax(92px, 120px);
+}
+
+.compactOperation label {
+  min-width: 0;
+}
+
+.compactOperation .checkRow {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 38px;
+}
+
+.shellOperation {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.supervisorOperation {
+  grid-template-columns: 1fr;
+}
+
+.supervisorOperation .wideField {
+  grid-column: auto;
+}
+
+.supervisorOperation > svg {
+  display: none;
+}
+
+.supervisorOperation > div {
+  display: grid;
+  gap: 4px;
+}
+
+.dispatchControls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.inlineCheck {
+  align-content: end;
+  min-height: 64px;
+}
+
+.topologyPreview {
+  grid-column: 1 / -1;
+}
+
+.topologyEvidence {
+  grid-column: 1 / -1;
+}
+
+.topologyEvidenceGrid {
+  grid-template-columns: minmax(180px, 1fr) minmax(110px, 0.55fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(150px, 0.8fr);
+}
+
+.topologyMetric {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.topologyMetric strong,
+.topologyMetric small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topologyMetric small {
+  color: #5f6368;
+}
+
+.fileTransferGrid {
+  grid-template-columns: 48px minmax(150px, 0.9fr) minmax(120px, 0.7fr) minmax(170px, 0.9fr) minmax(190px, 1.4fr) minmax(130px, 0.75fr) minmax(140px, 0.8fr) minmax(44px, auto);
+}
+
+.rowSelectCell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.rowSelectCell input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #1a73e8;
+}
+
+.handoffBulkBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 18px;
+  border-top: 1px solid #eef1f6;
+  border-bottom: 1px solid #eef1f6;
+  background: #f8fafd;
+}
+
+.handoffBulkActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.handoffModeControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.handoffModeControl select {
+  min-width: 150px;
+}
+
+.sourceArtifactPanel {
+  display: grid;
+  gap: 12px;
+  padding: 0 18px 18px;
+}
+
+.sectionSubheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sectionSubheader h3 {
+  margin: 0;
+  color: #202124;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.sectionSubheader span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.sourceArtifactControls {
+  display: grid;
+  align-items: end;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.8fr) auto;
+  gap: 10px;
+}
+
+.sourceArtifactControls label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sourceArtifactControls label span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.rolloutPolicyPanel {
+  display: grid;
+  gap: 12px;
+  padding: 0 18px 18px;
+}
+
+.rolloutPolicyForm {
+  display: grid;
+  align-items: end;
+  grid-template-columns:
+    minmax(150px, 1fr)
+    minmax(110px, 0.55fr)
+    minmax(140px, 0.75fr)
+    minmax(112px, 0.55fr)
+    minmax(86px, 0.4fr)
+    minmax(150px, 0.8fr)
+    minmax(86px, 0.4fr)
+    minmax(96px, 0.45fr)
+    auto;
+  gap: 10px;
+}
+
+.rolloutPolicyForm label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rolloutPolicyForm label span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.rolloutPolicyList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.policyChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  gap: 5px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 7px 9px;
+}
+
+.policyChip strong {
+  color: #202124;
+}
+
+.sourceArtifactList {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.sourceArtifactRow,
+.sourceArtifactEmpty {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(160px, 1fr) minmax(130px, 0.55fr) auto;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 12px;
+}
+
+.sourceArtifactRow + .sourceArtifactRow {
+  border-top: 1px solid #eef1f6;
+}
+
+.sourceArtifactEmpty {
+  grid-template-columns: auto 1fr;
+  color: #5f6368;
+}
+
+.transferProgressCell {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.transferProgressCell > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transferProgressTrack {
+  display: block;
+  overflow: hidden;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #e8eaed;
+}
+
+.transferProgressTrack span {
+  display: block;
+  min-width: 2px;
+  max-width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: #1a73e8;
+}
+
+.terminalSessionGrid {
+  grid-template-columns:
+    minmax(132px, 0.75fr)
+    minmax(100px, 0.55fr)
+    minmax(190px, 1.2fr)
+    minmax(110px, 0.6fr)
+    minmax(120px, 0.65fr)
+    minmax(340px, 1.2fr)
+    minmax(132px, 0.7fr);
+}
+
+.compactRowActions {
+  gap: 6px;
+}
+
+.compactRowActions .compactAction {
+  flex: 1 1 82px;
+  justify-content: center;
+}
+
+.compactRowActions .activeAction {
+  border-color: #1a73e8;
+  color: #1a73e8;
+}
+
+.terminalWarning {
+  color: #b06000;
+}
+
+.terminalReplayPreview {
+  display: grid;
+  gap: 10px;
+  padding: 14px 18px;
+  border-top: 1px solid #eef1f6;
+  background: #f8fafd;
+}
+
+.terminalReplayPreview div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.terminalReplayPreview span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.terminalReplayPreview pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Roboto Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #202124;
+}
+
+.latencyCurve {
+  display: flex;
+  align-items: end;
+  min-height: 58px;
+  gap: 8px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #eef1f6;
+  background: #f8fafd;
+}
+
+.latencyCurve span {
+  display: block;
+  width: 18px;
+  border-radius: 4px 4px 0 0;
+}
+
+.latencyCurve span.ok {
+  background: #1a73e8;
+}
+
+.latencyCurve span.warn {
+  background: #f9ab00;
+}
+
+.latencyCurveGroups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 0 18px 16px;
+}
+
+.latencyCurveCard {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+}
+
+.latencyCurveTitle {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.latencyCurveTitle strong,
+.latencyCurveTitle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.latencyCurveTitle strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.latencyCurveTitle small {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.latencyCurve.compact {
+  min-height: 42px;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.latencyCurve.compact span {
+  width: 9px;
+}
+
+.topologyPreview pre {
+  background: #f8fafd;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: #202124;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 18px 18px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.dispatchChecks,
+.dispatchActions,
+.proofStatus {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dispatchActions {
+  justify-content: flex-end;
+}
+
+.transferProgress {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 10px 12px;
+}
+
+.transferProgress span {
+  color: #5f6368;
+  font-size: 13px;
+}
+
+.proofManager {
+  border-top: 1px solid #dfe3eb;
+}
+
+.proofStatus {
+  align-items: flex-start;
+}
+
+.proofStatus div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.proofStatus span {
+  color: #5f6368;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proofFields,
+.inlineProof {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}

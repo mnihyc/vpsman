@@ -1,0 +1,211 @@
+.topologyGraphPanel {
+  grid-column: 1 / -1;
+}
+
+.compactHeader {
+  padding: 0;
+  border-bottom: 0;
+}
+
+.compactHeader h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.topologyGraphCanvas {
+  display: block;
+  width: calc(100% - 36px);
+  min-height: 260px;
+  margin: 0 18px 18px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+}
+
+.topologyGraphControls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px 16px;
+}
+
+.compactSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(360px, 100%);
+  height: 38px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 0 11px;
+  color: #5f6368;
+}
+
+.compactSearch input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: #202124;
+}
+
+.segmentedControl {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+}
+
+.segmentedControl button {
+  min-width: 82px;
+  height: 38px;
+  border: 0;
+  border-right: 1px solid #dfe3eb;
+  background: #fff;
+  color: #3c4043;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.segmentedControl button:last-child {
+  border-right: 0;
+}
+
+.segmentedControl button.active {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.topologyGraphEdge line {
+  stroke: #5f6368;
+  stroke-width: 2;
+}
+
+.topologyGraphEdge.healthy line,
+.topologyGraphEdge.applied line {
+  stroke: #1a73e8;
+}
+
+.topologyGraphEdge.degraded line {
+  stroke: #b06000;
+  stroke-dasharray: 6 5;
+}
+
+.topologyGraphEdge.rolled_back line {
+  stroke: #80868b;
+  stroke-dasharray: 3 5;
+}
+
+.topologyGraphEdge text,
+.topologyGraphNode text {
+  fill: #202124;
+  font-size: 12px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.topologyGraphEdge .topologyGraphMetric,
+.topologyGraphNode .topologyGraphMetric {
+  fill: #5f6368;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.topologyGraphNode circle {
+  fill: #fff;
+  stroke: #1a73e8;
+  stroke-width: 3;
+}
+
+.topologyGraphNode {
+  cursor: pointer;
+  outline: 0;
+}
+
+.topologyGraphNode:focus-visible circle,
+.topologyGraphNode.selected circle {
+  filter: drop-shadow(0 0 0.35rem rgba(26, 115, 232, 0.35));
+  stroke-width: 4;
+}
+
+.topologyGraphNode.stale circle,
+.topologyGraphNode.unknown circle {
+  stroke: #80868b;
+}
+
+.topologyGraphNode.degraded circle {
+  stroke: #b06000;
+}
+
+.topologyGraphSummary {
+  display: grid;
+  max-height: 360px;
+  overflow: auto;
+  border-top: 1px solid #eef1f6;
+}
+
+.topologyNodeInspector {
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) minmax(180px, 1fr) repeat(2, minmax(120px, 0.55fr));
+  align-items: center;
+  gap: 16px;
+  min-height: 58px;
+  padding: 0 18px 16px;
+}
+
+.topologyTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.topologyTagList span {
+  max-width: 180px;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topologyGraphEdgeRow {
+  display: grid;
+  grid-template-columns:
+    minmax(190px, 1fr)
+    minmax(110px, 0.42fr)
+    minmax(140px, 0.62fr)
+    minmax(145px, 0.62fr)
+    minmax(130px, 0.55fr)
+    minmax(110px, 0.45fr)
+    minmax(150px, 0.6fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 0 18px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.topologyGraphEdgeRow:last-child {
+  border-bottom: 0;
+}
+
+.latencyMiniCurve {
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  min-width: 96px;
+  height: 32px;
+}
+
+.latencyMiniCurve span {
+  width: 5px;
+  min-height: 6px;
+  border-radius: 3px 3px 0 0;
+  background: #1a73e8;
+}
