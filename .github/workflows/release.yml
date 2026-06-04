@@ -151,7 +151,7 @@ jobs:
 
           root = Path("release-assets")
           assets = sorted(path.name for path in root.iterdir() if path.is_file())
-          metadata_path = Path("version.json")
+          metadata_path = Path("version-template.json")
           metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
           metadata.update(
               {
