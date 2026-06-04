@@ -64,7 +64,6 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/vpsman-agent-linux-aarch64-musl
           cp target/x86_64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-x86_64-musl
           cp target/aarch64-unknown-linux-musl/release/vpsctl release-artifacts/vpsctl-linux-aarch64-musl
-          (cd release-artifacts && sha256sum * > SHA256SUMS)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v6
@@ -121,12 +120,6 @@ jobs:
         with:
           path: release-downloads
 
-      - name: Flatten release assets
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          find release-downloads -maxdepth 3 -type f -exec cp {} release-assets/ \;
-
       - name: Resolve release tag
         id: release-tag
         run: |
@@ -136,13 +129,53 @@ jobs:
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Flatten release assets
+        env:
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir -p release-assets
+          cp release-downloads/vpsman-linux-binaries/* release-assets/
+          cp release-downloads/vpsman-frontend-dist/vpsman-frontend-dist.tar.gz release-assets/
+          python3 -c '
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("release-assets")
+          assets = sorted(path.name for path in root.iterdir() if path.is_file())
+          (root / "version.json").write_text(
+              json.dumps(
+                  {
+                      "schema_version": 1,
+                      "project": "vpsman",
+                      "tag": os.environ["RELEASE_TAG"],
+                      "commit": os.environ["GITHUB_SHA"],
+                      "assets": assets,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n"
+          )
+          '
+          (cd release-assets && sha256sum * > SHA256SUMS)
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
-          gh release create "$RELEASE_TAG" release-assets/* \
-            --title "vpsman $RELEASE_TAG" \
-            --generate-notes \
-            --verify-tag \
-            --target "$GITHUB_SHA"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" \
+              --title "vpsman $RELEASE_TAG" \
+              --target "$GITHUB_SHA"
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --title "vpsman $RELEASE_TAG" \
+              --generate-notes \
+              --verify-tag \
+              --target "$GITHUB_SHA"
+          fi

@@ -5,6 +5,7 @@
 /frontend/test-results/
 /frontend/playwright-report/
 /.tmp/
+/deploy/runtime/
 /pid
 /.env
 /.env.*

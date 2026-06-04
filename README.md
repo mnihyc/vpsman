@@ -19,6 +19,31 @@ The repository is intentionally structured as a split control plane:
 See `DESIGN.md` for architecture and protocol decisions. See
 `tutorials/README.md` for operator-facing setup and usage guides.
 
+Release builds keep runtime roles separate and publish `version.json` metadata
+for upgrade automation:
+
+- `vpsman-api-linux-x86_64`, `vpsman-gateway-linux-x86_64`, and
+  `vpsman-worker-linux-x86_64`: server/control-plane binaries.
+- `vpsman-frontend-dist.tar.gz`: Vite static panel build for Nginx, Apache2,
+  or another static web server.
+- `vpsman-agent-*-musl`: static client agent binaries.
+- `vpsctl-*`: operator CLI binaries.
+- `version.json`: release tag, commit, and asset list.
+
+For Docker Compose deployment, place released assets into the checkout-local
+runtime layout, then start the persistent compose stack:
+
+- server binaries: `deploy/runtime/server/current/bin/`
+- migration SQL files: `deploy/runtime/server/current/migrations/`
+- extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+
+The compose stack does not rebuild Rust or frontend assets. It mounts
+`deploy/runtime/server/current` and `deploy/runtime/frontend/current`, keeps
+PostgreSQL data under `deploy/runtime/postgres/data`, keeps local object
+storage under `deploy/runtime/data`, and serves the Vite static build through
+Nginx. It uses checkout-local bind mounts rather than Docker-managed named
+volumes so the deployment directory stays portable.
+
 ## Smoke Verification
 
 Run the aggregate release gate when handing off a broad change:

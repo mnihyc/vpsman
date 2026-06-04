@@ -5,27 +5,39 @@ development or smoke testing.
 
 ## Start With Docker Compose
 
-Use the provided compose template when you want Postgres and all control-plane
-processes running together:
+Use the provided compose template when you want persistent PostgreSQL, local
+object storage, Nginx-served Vite static assets, and all backend processes
+running together from released assets.
+
+First place release assets into the checkout-local runtime layout:
+
+- server binaries: `deploy/runtime/server/current/bin/`
+- migration SQL files: `deploy/runtime/server/current/migrations/`
+- extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+
+Then start the stack:
 
 ```sh
-cd deploy
-docker compose --env-file .env.example up
+docker compose -f deploy/compose.yml --env-file deploy/.env.example up -d
 ```
 
 The default compose shape uses:
 
 - API: `http://127.0.0.1:8080`
-- Gateway TCP: `127.0.0.1:9443`
-- Gateway control API: `http://127.0.0.1:9444`
 - Frontend: `http://127.0.0.1:5173`
-- PostgreSQL: `127.0.0.1:5432`
-- Local object storage under `.tmp/vpsman-objects`
+- Gateway TCP: `127.0.0.1:9443`
+- Gateway control API: private between API and gateway containers
+- PostgreSQL: `deploy/runtime/postgres/data`
+- Local object storage: `deploy/runtime/data`
 
 For production, replace placeholder secrets in `deploy/.env.example` and serve
-the API/panel through HTTPS. Leave S3/MinIO variables unset unless you are
+the panel/API through HTTPS. Leave S3/MinIO variables unset unless you are
 deliberately testing that adapter; local disk object storage is the current
-default deployment shape.
+default deployment shape. To upgrade, replace the files under
+`deploy/runtime/server/current` and
+`deploy/runtime/frontend/current`, then restart the compose stack; no Rust or
+frontend rebuild is required. Runtime state stays in checkout-local paths, not
+Docker-managed named volumes.
 
 ## Start Processes Manually
 
