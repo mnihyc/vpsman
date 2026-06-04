@@ -3,6 +3,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
+use vpsman_common::AgentUpdateConfig;
 
 use crate::{
     model::{
@@ -38,10 +39,21 @@ pub(crate) struct EnrollmentClaimContext {
 }
 
 impl Repository {
+    #[cfg(test)]
     pub(crate) async fn create_enrollment_token(
         &self,
         request: &CreateEnrollmentTokenRequest,
         operator: &AuthContext,
+    ) -> Result<CreateEnrollmentTokenResponse> {
+        self.create_enrollment_token_with_update(request, operator, &AgentUpdateConfig::default())
+            .await
+    }
+
+    pub(crate) async fn create_enrollment_token_with_update(
+        &self,
+        request: &CreateEnrollmentTokenRequest,
+        operator: &AuthContext,
+        default_update: &AgentUpdateConfig,
     ) -> Result<CreateEnrollmentTokenResponse> {
         let token = generate_token();
         let token_hash = token_hash(&token);
@@ -63,6 +75,7 @@ impl Repository {
         let default_pool_name = default_pool.as_ref().map(|pool| pool.name.clone());
         let default_display_name =
             normalize_optional_display_name(request.default_display_name.as_deref());
+        let update = enrollment_update_config(request, default_update);
         let requires_existing_client = purpose == ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT;
         let preserve_existing_assignments = request.preserve_existing_assignments.unwrap_or(true);
         let expected_old_public_key_sha256_hex = if requires_existing_client {
@@ -101,6 +114,12 @@ impl Repository {
                         default_tags: default_tags.clone(),
                         default_pool_id,
                         default_display_name: default_display_name.clone(),
+                        unmanaged_update_enabled: update.unmanaged_enabled,
+                        unmanaged_update_version_url: update.unmanaged_version_url.clone(),
+                        unmanaged_update_interval_secs: update.unmanaged_interval_secs as i64,
+                        unmanaged_update_jitter_secs: update.unmanaged_jitter_secs as i64,
+                        unmanaged_update_activate: update.unmanaged_activate,
+                        unmanaged_update_restart_agent: update.unmanaged_restart_agent,
                     });
                 memory
                     .audits
@@ -123,6 +142,12 @@ impl Repository {
                             "default_tags": default_tags.clone(),
                             "default_pool_name": default_pool_name.clone(),
                             "default_display_name": default_display_name.clone(),
+                            "unmanaged_update_enabled": update.unmanaged_enabled,
+                            "unmanaged_update_version_url": update.unmanaged_version_url.clone(),
+                            "unmanaged_update_interval_secs": update.unmanaged_interval_secs,
+                            "unmanaged_update_jitter_secs": update.unmanaged_jitter_secs,
+                            "unmanaged_update_activate": update.unmanaged_activate,
+                            "unmanaged_update_restart_agent": update.unmanaged_restart_agent,
                             "expires_unix": expires_unix,
                         }),
                         created_at: now.to_string(),
@@ -145,11 +170,17 @@ impl Repository {
                         preserve_existing_assignments,
                         expected_old_public_key_sha256_hex,
                         default_pool_id,
-                        default_display_name
+                        default_display_name,
+                        unmanaged_update_enabled,
+                        unmanaged_update_version_url,
+                        unmanaged_update_interval_secs,
+                        unmanaged_update_jitter_secs,
+                        unmanaged_update_activate,
+                        unmanaged_update_restart_agent
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, to_timestamp($6::double precision),
-                        $7, $8, $9, $10, $11, $12, $13
+                        $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
                     )
                     "#,
                 )
@@ -166,6 +197,12 @@ impl Repository {
                 .bind(&expected_old_public_key_sha256_hex)
                 .bind(default_pool_id)
                 .bind(&default_display_name)
+                .bind(update.unmanaged_enabled)
+                .bind(&update.unmanaged_version_url)
+                .bind(update.unmanaged_interval_secs as i64)
+                .bind(update.unmanaged_jitter_secs as i64)
+                .bind(update.unmanaged_activate)
+                .bind(update.unmanaged_restart_agent)
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
@@ -190,6 +227,12 @@ impl Repository {
                     "default_tags": default_tags.clone(),
                     "default_pool_name": default_pool_name.clone(),
                     "default_display_name": default_display_name.clone(),
+                    "unmanaged_update_enabled": update.unmanaged_enabled,
+                    "unmanaged_update_version_url": update.unmanaged_version_url.clone(),
+                    "unmanaged_update_interval_secs": update.unmanaged_interval_secs,
+                    "unmanaged_update_jitter_secs": update.unmanaged_jitter_secs,
+                    "unmanaged_update_activate": update.unmanaged_activate,
+                    "unmanaged_update_restart_agent": update.unmanaged_restart_agent,
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -210,6 +253,12 @@ impl Repository {
             default_tags,
             default_pool_name,
             default_display_name,
+            unmanaged_update_enabled: update.unmanaged_enabled,
+            unmanaged_update_version_url: update.unmanaged_version_url,
+            unmanaged_update_interval_secs: update.unmanaged_interval_secs as i64,
+            unmanaged_update_jitter_secs: update.unmanaged_jitter_secs as i64,
+            unmanaged_update_activate: update.unmanaged_activate,
+            unmanaged_update_restart_agent: update.unmanaged_restart_agent,
         })
     }
 
@@ -244,7 +293,13 @@ impl Repository {
                         enrollment_tokens.default_tags,
                         enrollment_tokens.default_pool_id,
                         resource_pools.name AS default_pool_name,
-                        enrollment_tokens.default_display_name
+                        enrollment_tokens.default_display_name,
+                        enrollment_tokens.unmanaged_update_enabled,
+                        enrollment_tokens.unmanaged_update_version_url,
+                        enrollment_tokens.unmanaged_update_interval_secs,
+                        enrollment_tokens.unmanaged_update_jitter_secs,
+                        enrollment_tokens.unmanaged_update_activate,
+                        enrollment_tokens.unmanaged_update_restart_agent
                     FROM enrollment_tokens
                     LEFT JOIN resource_pools ON resource_pools.id = enrollment_tokens.default_pool_id
                     ORDER BY enrollment_tokens.created_at DESC
@@ -276,6 +331,16 @@ impl Repository {
                             default_tags: default_tags.0,
                             default_pool_name: row.try_get("default_pool_name")?,
                             default_display_name: row.try_get("default_display_name")?,
+                            unmanaged_update_enabled: row.try_get("unmanaged_update_enabled")?,
+                            unmanaged_update_version_url: row
+                                .try_get("unmanaged_update_version_url")?,
+                            unmanaged_update_interval_secs: row
+                                .try_get("unmanaged_update_interval_secs")?,
+                            unmanaged_update_jitter_secs: row
+                                .try_get("unmanaged_update_jitter_secs")?,
+                            unmanaged_update_activate: row.try_get("unmanaged_update_activate")?,
+                            unmanaged_update_restart_agent: row
+                                .try_get("unmanaged_update_restart_agent")?,
                         })
                     })
                     .collect()
@@ -382,6 +447,12 @@ impl Repository {
                             "tags": tags,
                             "default_pool_id": policy.default_pool_id,
                             "display_name": display_name,
+                            "unmanaged_update_enabled": policy.unmanaged_update_enabled,
+                            "unmanaged_update_version_url": policy.unmanaged_update_version_url,
+                            "unmanaged_update_interval_secs": policy.unmanaged_update_interval_secs,
+                            "unmanaged_update_jitter_secs": policy.unmanaged_update_jitter_secs,
+                            "unmanaged_update_activate": policy.unmanaged_update_activate,
+                            "unmanaged_update_restart_agent": policy.unmanaged_update_restart_agent,
                         }),
                         created_at: now.to_string(),
                     });
@@ -390,6 +461,7 @@ impl Repository {
                     request,
                     display_name,
                     tags,
+                    policy.update_config(&settings.update),
                 ))))
             }
             Self::Postgres(pool) => {
@@ -406,6 +478,12 @@ impl Repository {
                         expected_old_public_key_sha256_hex,
                         default_pool_id,
                         default_display_name,
+                        unmanaged_update_enabled,
+                        unmanaged_update_version_url,
+                        unmanaged_update_interval_secs,
+                        unmanaged_update_jitter_secs,
+                        unmanaged_update_activate,
+                        unmanaged_update_restart_agent,
                         EXTRACT(EPOCH FROM expires_at)::bigint AS expires_unix,
                         used_at IS NOT NULL AS used
                     FROM enrollment_tokens
@@ -439,6 +517,14 @@ impl Repository {
                         .try_get("expected_old_public_key_sha256_hex")?,
                     default_pool_id: row.try_get("default_pool_id")?,
                     default_display_name: row.try_get("default_display_name")?,
+                    unmanaged_update_enabled: row.try_get("unmanaged_update_enabled")?,
+                    unmanaged_update_version_url: row.try_get("unmanaged_update_version_url")?,
+                    unmanaged_update_interval_secs: row
+                        .try_get("unmanaged_update_interval_secs")?,
+                    unmanaged_update_jitter_secs: row.try_get("unmanaged_update_jitter_secs")?,
+                    unmanaged_update_activate: row.try_get("unmanaged_update_activate")?,
+                    unmanaged_update_restart_agent: row
+                        .try_get("unmanaged_update_restart_agent")?,
                 };
                 let existing =
                     current_postgres_client_identity(&mut tx, &request.client_id).await?;
@@ -546,6 +632,12 @@ impl Repository {
                     "tags": tags,
                     "default_pool_id": policy.default_pool_id,
                     "display_name": display_name,
+                    "unmanaged_update_enabled": policy.unmanaged_update_enabled,
+                    "unmanaged_update_version_url": policy.unmanaged_update_version_url,
+                    "unmanaged_update_interval_secs": policy.unmanaged_update_interval_secs,
+                    "unmanaged_update_jitter_secs": policy.unmanaged_update_jitter_secs,
+                    "unmanaged_update_activate": policy.unmanaged_update_activate,
+                    "unmanaged_update_restart_agent": policy.unmanaged_update_restart_agent,
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -555,6 +647,7 @@ impl Repository {
                     request,
                     display_name,
                     tags,
+                    policy.update_config(&settings.update),
                 ))))
             }
         }
@@ -622,6 +715,12 @@ fn enrollment_token_record_view(
             .and_then(|pool_id| pools.iter().find(|pool| pool.id == pool_id))
             .map(|pool| pool.name.clone()),
         default_display_name: record.default_display_name.clone(),
+        unmanaged_update_enabled: record.unmanaged_update_enabled,
+        unmanaged_update_version_url: record.unmanaged_update_version_url.clone(),
+        unmanaged_update_interval_secs: record.unmanaged_update_interval_secs,
+        unmanaged_update_jitter_secs: record.unmanaged_update_jitter_secs,
+        unmanaged_update_activate: record.unmanaged_update_activate,
+        unmanaged_update_restart_agent: record.unmanaged_update_restart_agent,
     }
 }
 
@@ -634,6 +733,12 @@ struct EnrollmentTokenPolicy {
     expected_old_public_key_sha256_hex: Option<String>,
     default_pool_id: Option<Uuid>,
     default_display_name: Option<String>,
+    unmanaged_update_enabled: bool,
+    unmanaged_update_version_url: String,
+    unmanaged_update_interval_secs: i64,
+    unmanaged_update_jitter_secs: i64,
+    unmanaged_update_activate: bool,
+    unmanaged_update_restart_agent: bool,
 }
 
 impl EnrollmentTokenPolicy {
@@ -646,6 +751,26 @@ impl EnrollmentTokenPolicy {
             expected_old_public_key_sha256_hex: record.expected_old_public_key_sha256_hex.clone(),
             default_pool_id: record.default_pool_id,
             default_display_name: record.default_display_name.clone(),
+            unmanaged_update_enabled: record.unmanaged_update_enabled,
+            unmanaged_update_version_url: record.unmanaged_update_version_url.clone(),
+            unmanaged_update_interval_secs: record.unmanaged_update_interval_secs,
+            unmanaged_update_jitter_secs: record.unmanaged_update_jitter_secs,
+            unmanaged_update_activate: record.unmanaged_update_activate,
+            unmanaged_update_restart_agent: record.unmanaged_update_restart_agent,
+        }
+    }
+
+    fn update_config(&self, default_update: &AgentUpdateConfig) -> AgentUpdateConfig {
+        AgentUpdateConfig {
+            trusted_artifact_signing_key_hex: default_update
+                .trusted_artifact_signing_key_hex
+                .clone(),
+            unmanaged_enabled: self.unmanaged_update_enabled,
+            unmanaged_version_url: self.unmanaged_update_version_url.clone(),
+            unmanaged_interval_secs: self.unmanaged_update_interval_secs.max(300) as u64,
+            unmanaged_jitter_secs: self.unmanaged_update_jitter_secs.max(0) as u64,
+            unmanaged_activate: self.unmanaged_update_activate,
+            unmanaged_restart_agent: self.unmanaged_update_restart_agent,
         }
     }
 }
@@ -791,6 +916,7 @@ fn claim_response(
     request: &ClaimEnrollmentRequest,
     display_name: String,
     tags: Vec<String>,
+    update: AgentUpdateConfig,
 ) -> ClaimEnrollmentResponse {
     ClaimEnrollmentResponse {
         client_id: request.client_id.clone(),
@@ -806,6 +932,7 @@ fn claim_response(
         telemetry_light_secs: settings.telemetry_light_secs,
         telemetry_full_secs: settings.telemetry_full_secs,
         tags,
+        update,
     }
 }
 
@@ -850,6 +977,39 @@ fn normalize_optional_display_name(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn enrollment_update_config(
+    request: &CreateEnrollmentTokenRequest,
+    default_update: &AgentUpdateConfig,
+) -> AgentUpdateConfig {
+    AgentUpdateConfig {
+        trusted_artifact_signing_key_hex: default_update.trusted_artifact_signing_key_hex.clone(),
+        unmanaged_enabled: request
+            .unmanaged_update_enabled
+            .unwrap_or(default_update.unmanaged_enabled),
+        unmanaged_version_url: request
+            .unmanaged_update_version_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_update.unmanaged_version_url.clone()),
+        unmanaged_interval_secs: request
+            .unmanaged_update_interval_secs
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(default_update.unmanaged_interval_secs),
+        unmanaged_jitter_secs: request
+            .unmanaged_update_jitter_secs
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(default_update.unmanaged_jitter_secs),
+        unmanaged_activate: request
+            .unmanaged_update_activate
+            .unwrap_or(default_update.unmanaged_activate),
+        unmanaged_restart_agent: request
+            .unmanaged_update_restart_agent
+            .unwrap_or(default_update.unmanaged_restart_agent),
+    }
 }
 
 fn decode_public_key(value: &str) -> Result<Vec<u8>> {

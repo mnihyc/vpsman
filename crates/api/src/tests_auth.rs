@@ -186,7 +186,7 @@ fn internal_gateway_token_requires_matching_bearer() {
     let state = AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,
-        internal_token: Some("gateway-secret".to_string()),
+        internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
         enrollment: EnrollmentSettings::default(),
@@ -207,7 +207,9 @@ fn internal_gateway_token_requires_matching_bearer() {
     let mut matching = HeaderMap::new();
     matching.insert(
         axum::http::header::AUTHORIZATION,
-        "Bearer gateway-secret".parse().unwrap(),
+        "Bearer gateway-secret-at-least-32-characters"
+            .parse()
+            .unwrap(),
     );
 
     assert_eq!(
@@ -222,7 +224,16 @@ fn internal_gateway_token_requires_matching_bearer() {
 }
 
 #[test]
-fn internal_gateway_token_is_optional_for_memory_dev() {
+fn internal_token_startup_validation_rejects_missing_short_or_placeholder() {
+    assert!(required_internal_token(None).is_err());
+    assert!(required_internal_token(Some("short")).is_err());
+    assert!(required_internal_token(Some("change-me-internal-token")).is_err());
+    assert!(required_internal_token(Some("replace-with-random-token-at-least-32-chars")).is_err());
+    assert!(required_internal_token(Some("real-internal-token-value-32-plus-chars")).is_ok());
+}
+
+#[test]
+fn internal_gateway_token_is_mandatory_even_for_memory_dev() {
     let (events, _) = broadcast::channel(1);
     let state = AppState {
         repo: Repository::Memory(MemoryState::default()),
@@ -240,7 +251,13 @@ fn internal_gateway_token_is_optional_for_memory_dev() {
         require_registered_agent_updates: false,
     };
 
-    assert!(state.require_internal_gateway(&HeaderMap::new()).is_ok());
+    assert_eq!(
+        state
+            .require_internal_gateway(&HeaderMap::new())
+            .unwrap_err()
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
     assert!(constant_time_eq(b"same", b"same"));
     assert!(!constant_time_eq(b"same", b"different"));
 }

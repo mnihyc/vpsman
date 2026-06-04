@@ -118,9 +118,8 @@ where
         .unwrap_or((without_scheme, String::new()));
     let request_path = format!("{prefix}{request_path_suffix}");
     let body = serde_json::to_vec(body_value)?;
-    let auth_header = internal_token
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
+    let token = internal_token.context("gateway internal token is not configured")?;
+    let auth_header = format!("Authorization: Bearer {token}\r\n");
     let mut stream = TcpStream::connect(host_port)
         .await
         .with_context(|| format!("failed to connect gateway control at {host_port}"))?;

@@ -48,6 +48,8 @@ use crate::{
     unix_now,
 };
 
+const TEST_INTERNAL_TOKEN: &str = "test-internal-token-value-32-plus-chars";
+
 #[test]
 fn backup_request_validation_requires_safe_scope_and_confirmation() {
     let missing_scope = CreateBackupRequest {
@@ -297,7 +299,8 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         repo.clone(),
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
-    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.gateway =
+        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[31_u8; 32])));
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
@@ -403,7 +406,8 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let (gateway_url, gateway_task) =
         spawn_backup_gateway_once(encrypted_artifact_bytes("client-a")).await;
     let mut state = test_state(repo.clone());
-    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.gateway =
+        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[33_u8; 32])));
     let job_request = CreateJobRequest {
         targets: Vec::new(),
@@ -500,7 +504,8 @@ async fn scheduled_backup_dispatch_auto_records_request_and_object_artifact() {
         repo.clone(),
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
-    state.gateway = GatewayDispatchClient::new(Some(gateway_url), None);
+    state.gateway =
+        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[32_u8; 32])));
     let request = DispatchScheduledJobRequest {
         confirmed: true,

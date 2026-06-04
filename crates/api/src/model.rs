@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentNoiseMode, BandwidthTier, CommandEnvelope, JobCommand,
-    RuntimeTunnelControl, RuntimeTunnelTopologyIntent, ServerEndpoint, TunnelEndpointSide,
-    TunnelKind, TunnelPlan, TunnelPlanInput,
+    AgentCapabilitySnapshot, AgentNoiseMode, AgentUpdateConfig, BandwidthTier, CommandEnvelope,
+    JobCommand, RuntimeTunnelControl, RuntimeTunnelTopologyIntent, ServerEndpoint,
+    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;
@@ -398,6 +398,12 @@ pub(crate) struct EnrollmentTokenRecord {
     pub(crate) default_tags: Vec<String>,
     pub(crate) default_pool_id: Option<Uuid>,
     pub(crate) default_display_name: Option<String>,
+    pub(crate) unmanaged_update_enabled: bool,
+    pub(crate) unmanaged_update_version_url: String,
+    pub(crate) unmanaged_update_interval_secs: i64,
+    pub(crate) unmanaged_update_jitter_secs: i64,
+    pub(crate) unmanaged_update_activate: bool,
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -417,6 +423,12 @@ pub(crate) struct EnrollmentTokenView {
     pub(crate) default_tags: Vec<String>,
     pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
+    pub(crate) unmanaged_update_enabled: bool,
+    pub(crate) unmanaged_update_version_url: String,
+    pub(crate) unmanaged_update_interval_secs: i64,
+    pub(crate) unmanaged_update_jitter_secs: i64,
+    pub(crate) unmanaged_update_activate: bool,
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -474,6 +486,18 @@ pub(crate) struct CreateEnrollmentTokenRequest {
     pub(crate) default_pool_name: Option<String>,
     #[serde(default)]
     pub(crate) default_display_name: Option<String>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_version_url: Option<String>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_interval_secs: Option<i64>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_jitter_secs: Option<i64>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_activate: Option<bool>,
+    #[serde(default)]
+    pub(crate) unmanaged_update_restart_agent: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -490,6 +514,12 @@ pub(crate) struct CreateEnrollmentTokenResponse {
     pub(crate) default_tags: Vec<String>,
     pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
+    pub(crate) unmanaged_update_enabled: bool,
+    pub(crate) unmanaged_update_version_url: String,
+    pub(crate) unmanaged_update_interval_secs: i64,
+    pub(crate) unmanaged_update_jitter_secs: i64,
+    pub(crate) unmanaged_update_activate: bool,
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,6 +542,7 @@ pub(crate) struct ClaimEnrollmentResponse {
     pub(crate) telemetry_light_secs: u64,
     pub(crate) telemetry_full_secs: u64,
     pub(crate) tags: Vec<String>,
+    pub(crate) update: AgentUpdateConfig,
 }
 
 #[derive(Debug, Deserialize)]

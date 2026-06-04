@@ -71,9 +71,8 @@ async fn post_json<T: serde::Serialize>(
     let mut stream = TcpStream::connect(host_port)
         .await
         .with_context(|| format!("failed to connect to API at {host_port}"))?;
-    let auth_header = internal_token
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
+    let token = internal_token.context("gateway API internal token is not configured")?;
+    let auth_header = format!("Authorization: Bearer {token}\r\n");
     let request = format!(
         "POST {request_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()

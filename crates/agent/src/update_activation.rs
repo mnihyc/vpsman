@@ -204,15 +204,21 @@ fn write_activation_marker(
         sha256_hex: sha256_hex.to_string(),
         marker_unix: unix_now(),
     };
-    fs::write(&temp_path, serde_json::to_vec(&marker)?)
-        .with_context(|| format!("failed to write activation marker {}", temp_path.display()))?;
-    fs::rename(&temp_path, &marker_path).with_context(|| {
+    let marker_bytes = serde_json::to_vec(&marker)?;
+    if let Err(error) = fs::write(&temp_path, marker_bytes) {
         let _ = fs::remove_file(&temp_path);
-        format!(
-            "failed to atomically replace activation marker {}",
-            marker_path.display()
-        )
-    })?;
+        return Err(error)
+            .with_context(|| format!("failed to write activation marker {}", temp_path.display()));
+    }
+    if let Err(error) = fs::rename(&temp_path, &marker_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to atomically replace activation marker {}",
+                marker_path.display()
+            )
+        });
+    }
     Ok(())
 }
 
@@ -233,17 +239,25 @@ fn read_activation_marker(marker_path: &Path) -> Result<Option<ActivationMarker>
 
 fn replace_active_binary(current_exe: &Path, next_bytes: &[u8]) -> Result<()> {
     let temp_path = current_exe.with_extension(format!("activate-tmp-{}", uuid::Uuid::new_v4()));
-    fs::write(&temp_path, next_bytes)
-        .with_context(|| format!("failed to write activation temp {}", temp_path.display()))?;
-    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("failed to set executable mode on {}", temp_path.display()))?;
-    fs::rename(&temp_path, current_exe).with_context(|| {
+    if let Err(error) = fs::write(&temp_path, next_bytes) {
         let _ = fs::remove_file(&temp_path);
-        format!(
-            "failed to atomically replace active agent {}",
-            current_exe.display()
-        )
-    })?;
+        return Err(error)
+            .with_context(|| format!("failed to write activation temp {}", temp_path.display()));
+    }
+    if let Err(error) = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to set executable mode on {}", temp_path.display()));
+    }
+    if let Err(error) = fs::rename(&temp_path, current_exe) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to atomically replace active agent {}",
+                current_exe.display()
+            )
+        });
+    }
     Ok(())
 }
 

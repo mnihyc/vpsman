@@ -18,17 +18,22 @@ type TargetImpactGroup = {
 export function TargetImpactPreview({
   emptyText = "Preview or select targets to classify capability impact",
   forceUnprivileged = false,
+  minCommandProtocolVersion = 1,
   mode,
   targets,
   title = "Target impact",
 }: {
   emptyText?: string;
   forceUnprivileged?: boolean;
+  minCommandProtocolVersion?: number;
   mode: TargetImpactMode;
   targets: AgentView[];
   title?: string;
 }) {
   const groups = buildTargetImpactGroups(targets, mode, forceUnprivileged);
+  const legacyProtocolTargets = targets.filter(
+    (target) => (target.capabilities.command_protocol_version ?? 1) < minCommandProtocolVersion,
+  );
   const attentionCount = groups
     .filter((group) => group.key !== "ready")
     .reduce((count, group) => count + group.agents.length, 0);
@@ -64,12 +69,23 @@ export function TargetImpactPreview({
             : "Degraded, observation-only, and unsupported targets need operator review before dispatch."}
         </p>
       )}
+      {legacyProtocolTargets.length > 0 && (
+        <p className="targetImpactHint">
+          {legacyProtocolTargets.length} target{legacyProtocolTargets.length === 1 ? "" : "s"} need command protocol{" "}
+          {minCommandProtocolVersion}+ before this operation will run.
+        </p>
+      )}
     </section>
   );
 }
 
 export function targetImpactModeForDispatch(mode: string): TargetImpactMode {
-  if (mode === "agent_update" || mode === "agent_update_activate" || mode === "agent_update_rollback") {
+  if (
+    mode === "agent_update" ||
+    mode === "agent_update_check" ||
+    mode === "agent_update_activate" ||
+    mode === "agent_update_rollback"
+  ) {
     return "agent_update";
   }
   if (mode === "auth_rotate" || mode === "hot_config" || mode === "backup") {

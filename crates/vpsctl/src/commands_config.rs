@@ -216,6 +216,79 @@ pub(crate) fn agent_update(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn agent_update_check(
+    api_url: &str,
+    token: Option<&str>,
+    version_url: Option<String>,
+    activate: bool,
+    restart_agent: bool,
+    clients: Vec<String>,
+    pools: Vec<String>,
+    tags: Vec<String>,
+    password_env: String,
+    super_salt_hex: Option<String>,
+    proof_ttl_secs: u64,
+    timeout_secs: u64,
+    canary_count: Option<u16>,
+    confirmed: bool,
+    force_unprivileged: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        confirmed,
+        "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
+    );
+    if let Some(version_url) = version_url.as_deref() {
+        anyhow::ensure!(
+            version_url.starts_with("https://")
+                || version_url.starts_with("http://localhost")
+                || version_url.starts_with("http://127.0.0.1")
+                || version_url.starts_with("file://"),
+            "version URL must use https://, localhost http://, or file://"
+        );
+    }
+    let operation = JobCommand::AgentUpdateCheck {
+        version_url,
+        activate,
+        restart_agent,
+    };
+    let password = load_super_password(&password_env)?;
+    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
+    let target_ids = resolve_target_ids(api_url, token, &clients, &pools, &tags, false, confirmed)?;
+    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+        &target_ids,
+        &operation,
+        &password,
+        &salt_hex,
+        proof_ttl_secs,
+    )?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            "/api/v1/jobs",
+            token,
+            &serde_json::json!({
+                "command": "agent_update_check",
+                "argv": [],
+                "operation": operation,
+                "clients": clients,
+                "pools": pools,
+                "tags": tags,
+                "privileged": true,
+                "destructive": false,
+                "confirmed": confirmed,
+                "force_unprivileged": force_unprivileged,
+                "timeout_secs": timeout_secs,
+                "canary_count": canary_count,
+                "envelope": null,
+                "envelopes": envelopes,
+            }),
+        )?
+    );
+    Ok(())
+}
+
 pub(crate) fn agent_update_signature(
     artifact_file: PathBuf,
     signing_seed_hex: String,

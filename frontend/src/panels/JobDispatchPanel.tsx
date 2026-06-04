@@ -15,6 +15,7 @@ import {
 import {
   buildOperation,
   clampInteger,
+  commandMinProtocolVersion,
   operationCommandLabel,
   parseBackupPaths,
   supervisorReady,
@@ -46,6 +47,8 @@ import {
   TargetImpactPreview,
   targetImpactModeForDispatch,
 } from "./TargetImpactPreview";
+
+const DEFAULT_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
 
 export type TerminalComposerAction = {
   action: TerminalAction;
@@ -166,6 +169,9 @@ export function JobDispatchPanel({
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
   const [updateArtifactSignatureHex, setUpdateArtifactSignatureHex] = useState("");
   const [updateArtifactSigningKeyHex, setUpdateArtifactSigningKeyHex] = useState("");
+  const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
+  const [updateCheckActivate, setUpdateCheckActivate] = useState(true);
+  const [updateCheckRestartAgent, setUpdateCheckRestartAgent] = useState(true);
   const [updateCanaryCount, setUpdateCanaryCount] = useState(1);
   const [updateActivationSha256Hex, setUpdateActivationSha256Hex] = useState("");
   const [updateRestartAgent, setUpdateRestartAgent] = useState(false);
@@ -273,21 +279,24 @@ export function JobDispatchPanel({
                           /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim()) &&
                           updateSignatureReady &&
                           confirmed
-                        : mode === "agent_update_activate"
-                          ? /^[0-9a-fA-F]{64}$/.test(updateActivationSha256Hex.trim()) && confirmed
-                          : mode === "agent_update_rollback"
-                            ? (!updateRollbackSha256Hex.trim() ||
-                                /^[0-9a-fA-F]{64}$/.test(updateRollbackSha256Hex.trim())) &&
-                              confirmed
-                            : mode === "process_supervisor"
-                              ? supervisorReady(supervisorAction, supervisorName, supervisorArgv)
-                              : mode === "backup"
-                                ? backupReady && confirmed
-                                : true;
+                        : mode === "agent_update_check"
+                          ? updateCheckVersionUrl.trim().length > 0 && confirmed
+                          : mode === "agent_update_activate"
+                            ? /^[0-9a-fA-F]{64}$/.test(updateActivationSha256Hex.trim()) && confirmed
+                            : mode === "agent_update_rollback"
+                              ? (!updateRollbackSha256Hex.trim() ||
+                                  /^[0-9a-fA-F]{64}$/.test(updateRollbackSha256Hex.trim())) &&
+                                confirmed
+                              : mode === "process_supervisor"
+                                ? supervisorReady(supervisorAction, supervisorName, supervisorArgv)
+                                : mode === "backup"
+                                  ? backupReady && confirmed
+                                  : true;
   const selectedTargetCount = selectedClients.length + selectedPools.length + selectedTags.length;
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
   const impactTargets = preview?.targets ?? resolveAgentsById(agents, selectedClients);
+  const minCommandProtocolVersion = commandMinProtocolVersion(mode);
   const status =
     actionError ??
     (lastJob
@@ -363,6 +372,12 @@ export function JobDispatchPanel({
         setUpdateArtifactSignatureHex(operation.artifact_signature_hex ?? "");
         setUpdateArtifactSigningKeyHex(operation.artifact_signing_key_hex ?? "");
         return;
+      case "agent_update_check":
+        setMode("agent_update_check");
+        setUpdateCheckVersionUrl(operation.version_url ?? DEFAULT_UPDATE_VERSION_URL);
+        setUpdateCheckActivate(operation.activate ?? true);
+        setUpdateCheckRestartAgent(operation.restart_agent ?? true);
+        return;
       case "agent_update_activate":
         setMode("agent_update_activate");
         setUpdateActivationSha256Hex(operation.staged_sha256_hex);
@@ -419,6 +434,9 @@ export function JobDispatchPanel({
         updateSha256Hex,
         updateArtifactSignatureHex,
         updateArtifactSigningKeyHex,
+        updateCheckVersionUrl,
+        updateCheckActivate,
+        updateCheckRestartAgent,
         updateActivationSha256Hex,
         updateRestartAgent,
         updateRollbackSha256Hex,
@@ -563,6 +581,9 @@ export function JobDispatchPanel({
         updateSha256Hex,
         updateArtifactSignatureHex,
         updateArtifactSigningKeyHex,
+        updateCheckVersionUrl,
+        updateCheckActivate,
+        updateCheckRestartAgent,
         updateActivationSha256Hex,
         updateRestartAgent,
         updateRollbackSha256Hex,
@@ -575,6 +596,7 @@ export function JobDispatchPanel({
       if (
         (mode === "hot_config" ||
           mode === "agent_update" ||
+          mode === "agent_update_check" ||
           mode === "agent_update_activate" ||
           mode === "agent_update_rollback" ||
           mode === "auth_rotate" ||
@@ -790,6 +812,9 @@ export function JobDispatchPanel({
           setUpdateArtifactSignatureHex={setUpdateArtifactSignatureHex}
           setUpdateArtifactSigningKeyHex={setUpdateArtifactSigningKeyHex}
           setUpdateArtifactUrl={setUpdateArtifactUrl}
+          setUpdateCheckActivate={setUpdateCheckActivate}
+          setUpdateCheckRestartAgent={setUpdateCheckRestartAgent}
+          setUpdateCheckVersionUrl={setUpdateCheckVersionUrl}
           setUpdateActivationSha256Hex={setUpdateActivationSha256Hex}
           setUpdateRestartAgent={setUpdateRestartAgent}
           setUpdateRollbackSha256Hex={setUpdateRollbackSha256Hex}
@@ -806,6 +831,9 @@ export function JobDispatchPanel({
           updateArtifactSignatureHex={updateArtifactSignatureHex}
           updateArtifactSigningKeyHex={updateArtifactSigningKeyHex}
           updateArtifactUrl={updateArtifactUrl}
+          updateCheckActivate={updateCheckActivate}
+          updateCheckRestartAgent={updateCheckRestartAgent}
+          updateCheckVersionUrl={updateCheckVersionUrl}
           updateActivationSha256Hex={updateActivationSha256Hex}
           updateRestartAgent={updateRestartAgent}
           updateRollbackSha256Hex={updateRollbackSha256Hex}
@@ -830,6 +858,7 @@ export function JobDispatchPanel({
         />
         <TargetImpactPreview
           forceUnprivileged={supportsForceUnprivileged ? forceUnprivileged : false}
+          minCommandProtocolVersion={minCommandProtocolVersion}
           mode={impactMode}
           targets={impactTargets}
         />

@@ -34,7 +34,7 @@ pub struct AgentConfig {
     pub auth: AgentAuthConfig,
     #[serde(default)]
     pub backup: AgentBackupConfig,
-    #[serde(default, skip_serializing_if = "AgentUpdateConfig::is_default")]
+    #[serde(default)]
     pub update: AgentUpdateConfig,
     #[serde(default)]
     pub execution: AgentExecutionConfig,
@@ -69,16 +69,60 @@ pub struct AgentBackupConfig {
     pub max_plaintext_bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Default)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentUpdateConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_artifact_signing_key_hex: Option<String>,
+    #[serde(default = "default_agent_unmanaged_update_enabled")]
+    pub unmanaged_enabled: bool,
+    #[serde(default = "default_agent_unmanaged_update_version_url")]
+    pub unmanaged_version_url: String,
+    #[serde(default = "default_agent_unmanaged_update_interval_secs")]
+    pub unmanaged_interval_secs: u64,
+    #[serde(default = "default_agent_unmanaged_update_jitter_secs")]
+    pub unmanaged_jitter_secs: u64,
+    #[serde(default = "default_agent_unmanaged_update_activate")]
+    pub unmanaged_activate: bool,
+    #[serde(default = "default_agent_unmanaged_update_restart_agent")]
+    pub unmanaged_restart_agent: bool,
 }
 
-impl AgentUpdateConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
+impl Default for AgentUpdateConfig {
+    fn default() -> Self {
+        Self {
+            trusted_artifact_signing_key_hex: None,
+            unmanaged_enabled: default_agent_unmanaged_update_enabled(),
+            unmanaged_version_url: default_agent_unmanaged_update_version_url(),
+            unmanaged_interval_secs: default_agent_unmanaged_update_interval_secs(),
+            unmanaged_jitter_secs: default_agent_unmanaged_update_jitter_secs(),
+            unmanaged_activate: default_agent_unmanaged_update_activate(),
+            unmanaged_restart_agent: default_agent_unmanaged_update_restart_agent(),
+        }
     }
+}
+
+pub fn default_agent_unmanaged_update_enabled() -> bool {
+    true
+}
+
+pub fn default_agent_unmanaged_update_version_url() -> String {
+    "https://github.com/mnihyc/vpsman/releases/latest/download/version.json".to_string()
+}
+
+pub fn default_agent_unmanaged_update_interval_secs() -> u64 {
+    24 * 60 * 60
+}
+
+pub fn default_agent_unmanaged_update_jitter_secs() -> u64 {
+    24 * 60 * 60
+}
+
+pub fn default_agent_unmanaged_update_activate() -> bool {
+    true
+}
+
+pub fn default_agent_unmanaged_update_restart_agent() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

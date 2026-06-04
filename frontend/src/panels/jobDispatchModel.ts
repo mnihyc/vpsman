@@ -13,6 +13,7 @@ export type DispatchMode =
   | "hot_config"
   | "auth_rotate"
   | "agent_update"
+  | "agent_update_check"
   | "agent_update_activate"
   | "agent_update_rollback"
   | "backup"
@@ -63,6 +64,9 @@ export function buildOperation(
   updateSha256Hex: string,
   updateArtifactSignatureHex: string,
   updateArtifactSigningKeyHex: string,
+  updateCheckVersionUrl: string,
+  updateCheckActivate: boolean,
+  updateCheckRestartAgent: boolean,
   updateActivationSha256Hex: string,
   updateRestartAgent: boolean,
   updateRollbackSha256Hex: string,
@@ -190,6 +194,24 @@ export function buildOperation(
     }
     return { type: "agent_update", artifact_url: updateArtifactUrl.trim(), sha256_hex: sha256Hex };
   }
+  if (mode === "agent_update_check") {
+    const versionUrl = updateCheckVersionUrl.trim();
+    if (versionUrl && !versionUrl.startsWith("https://") && !versionUrl.startsWith("http://localhost") && !versionUrl.startsWith("http://127.0.0.1") && !versionUrl.startsWith("file://")) {
+      throw new Error("Version manifest URL must use https://, localhost http://, or file://");
+    }
+    return versionUrl
+      ? {
+          type: "agent_update_check",
+          version_url: versionUrl,
+          activate: updateCheckActivate,
+          restart_agent: updateCheckRestartAgent,
+        }
+      : {
+          type: "agent_update_check",
+          activate: updateCheckActivate,
+          restart_agent: updateCheckRestartAgent,
+        };
+  }
   if (mode === "agent_update_activate") {
     const stagedSha256Hex = updateActivationSha256Hex.trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(stagedSha256Hex)) {
@@ -262,6 +284,9 @@ export function operationCommandLabel(mode: DispatchMode, commandText: string): 
   if (mode === "agent_update_rollback") {
     return "agent_update_rollback";
   }
+  if (mode === "agent_update_check") {
+    return "agent_update_check";
+  }
   if (mode === "auth_rotate") {
     return "auth_proof_key_rotate";
   }
@@ -272,6 +297,10 @@ export function operationCommandLabel(mode: DispatchMode, commandText: string): 
     return "file_transfer_download";
   }
   return mode;
+}
+
+export function commandMinProtocolVersion(_mode: DispatchMode): number {
+  return 1;
 }
 
 export function terminalReady(action: TerminalAction, sessionId: string, argv: string, inputText: string): boolean {

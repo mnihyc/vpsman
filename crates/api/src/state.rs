@@ -23,7 +23,7 @@ use crate::{
         bearer_token, constant_time_eq, default_operator_scopes, operator_has_scope, role_allows,
     },
 };
-use vpsman_common::{AgentNoiseMode, ServerEndpoint};
+use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, ServerEndpoint};
 
 #[derive(Clone, Debug)]
 pub(crate) struct EnrollmentSettings {
@@ -36,6 +36,7 @@ pub(crate) struct EnrollmentSettings {
     pub(crate) telemetry_light_secs: u64,
     pub(crate) telemetry_full_secs: u64,
     pub(crate) default_country_tag: Option<String>,
+    pub(crate) update: AgentUpdateConfig,
 }
 
 impl Default for EnrollmentSettings {
@@ -54,6 +55,7 @@ impl Default for EnrollmentSettings {
             telemetry_light_secs: 15,
             telemetry_full_secs: 60,
             default_country_tag: Some("country:US".to_string()),
+            update: AgentUpdateConfig::default(),
         }
     }
 }
@@ -240,7 +242,7 @@ impl AppState {
 
     pub(crate) fn require_internal_gateway(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         let Some(expected_token) = self.internal_token.as_deref() else {
-            return Ok(());
+            return Err(ApiError::unauthorized("missing_internal_token"));
         };
         let provided = bearer_token(headers)
             .ok_or_else(|| ApiError::unauthorized("missing_internal_token"))?;

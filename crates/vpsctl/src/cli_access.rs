@@ -82,6 +82,18 @@ pub(crate) struct EnrollmentTokenCreateCommand {
     pub(crate) default_pool_name: Option<String>,
     #[arg(long)]
     pub(crate) default_display_name: Option<String>,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_enabled: bool,
+    #[arg(long)]
+    pub(crate) unmanaged_update_version_url: Option<String>,
+    #[arg(long, default_value_t = 86_400)]
+    pub(crate) unmanaged_update_interval_secs: u64,
+    #[arg(long, default_value_t = 86_400)]
+    pub(crate) unmanaged_update_jitter_secs: u64,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_activate: bool,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Debug, Args)]
@@ -100,6 +112,18 @@ pub(crate) struct ReenrollmentTokenCreateCommand {
     pub(crate) confirmed: bool,
     #[arg(long, default_value_t = true)]
     pub(crate) preserve_existing_assignments: bool,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_enabled: bool,
+    #[arg(long)]
+    pub(crate) unmanaged_update_version_url: Option<String>,
+    #[arg(long, default_value_t = 86_400)]
+    pub(crate) unmanaged_update_interval_secs: u64,
+    #[arg(long, default_value_t = 86_400)]
+    pub(crate) unmanaged_update_jitter_secs: u64,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_activate: bool,
+    #[arg(long, default_value_t = true)]
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Debug, Args)]

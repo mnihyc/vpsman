@@ -71,7 +71,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     let state = GatewayState::default();
     let agent_args = args.clone();
     let agent_state = state.clone();
@@ -83,6 +84,27 @@ async fn main() -> Result<()> {
         run_control_listener(control_args, control_state),
     )?;
     Ok(())
+}
+
+fn required_internal_token(value: Option<&str>) -> Result<String> {
+    let token = value
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("VPSMAN_INTERNAL_TOKEN is required")?;
+    anyhow::ensure!(
+        token.len() >= 32,
+        "VPSMAN_INTERNAL_TOKEN must be at least 32 characters"
+    );
+    anyhow::ensure!(
+        !matches!(
+            token,
+            "change-me"
+                | "change-me-internal-token"
+                | "replace-with-random-token-at-least-32-chars"
+        ),
+        "VPSMAN_INTERNAL_TOKEN must be changed from the deployment template placeholder"
+    );
+    Ok(token.to_string())
 }
 
 async fn run_agent_listener(args: Args, state: GatewayState) -> Result<()> {
@@ -509,5 +531,16 @@ mod tests {
 
         unregister_session_if_current(&state, "client-a", newer_session_id).await;
         assert!(!state.sessions.read().await.contains_key("client-a"));
+    }
+
+    #[test]
+    fn internal_token_startup_validation_rejects_missing_short_or_placeholder() {
+        assert!(required_internal_token(None).is_err());
+        assert!(required_internal_token(Some("short")).is_err());
+        assert!(required_internal_token(Some("change-me-internal-token")).is_err());
+        assert!(
+            required_internal_token(Some("replace-with-random-token-at-least-32-chars")).is_err()
+        );
+        assert!(required_internal_token(Some("real-internal-token-value-32-plus-chars")).is_ok());
     }
 }

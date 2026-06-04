@@ -86,6 +86,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     default_tags: command.default_tags,
                     default_pool_name: command.default_pool_name,
                     default_display_name: command.default_display_name,
+                    unmanaged_update_enabled: command.unmanaged_update_enabled,
+                    unmanaged_update_version_url: command.unmanaged_update_version_url,
+                    unmanaged_update_interval_secs: command.unmanaged_update_interval_secs,
+                    unmanaged_update_jitter_secs: command.unmanaged_update_jitter_secs,
+                    unmanaged_update_activate: command.unmanaged_update_activate,
+                    unmanaged_update_restart_agent: command.unmanaged_update_restart_agent,
                 },
             )?;
             Ok(None)
@@ -102,6 +108,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     default_display_name: command.default_display_name,
                     confirmed: command.confirmed,
                     preserve_existing_assignments: command.preserve_existing_assignments,
+                    unmanaged_update_enabled: command.unmanaged_update_enabled,
+                    unmanaged_update_version_url: command.unmanaged_update_version_url,
+                    unmanaged_update_interval_secs: command.unmanaged_update_interval_secs,
+                    unmanaged_update_jitter_secs: command.unmanaged_update_jitter_secs,
+                    unmanaged_update_activate: command.unmanaged_update_activate,
+                    unmanaged_update_restart_agent: command.unmanaged_update_restart_agent,
                 },
             )?;
             Ok(None)

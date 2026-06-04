@@ -20,6 +20,8 @@ import type {
 } from "../typesAccess";
 import { formatTime, shortHash, shortId, statusClass } from "../utils";
 
+const DEFAULT_UNMANAGED_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
+
 type AccessPanelProps = {
   apiToken: string;
   error: string | null;
@@ -91,6 +93,12 @@ export function AccessPanel({
   const [tokenTags, setTokenTags] = useState("");
   const [tokenPoolName, setTokenPoolName] = useState("");
   const [tokenDisplayName, setTokenDisplayName] = useState("");
+  const [tokenUnmanagedUpdateEnabled, setTokenUnmanagedUpdateEnabled] = useState(true);
+  const [tokenUnmanagedUpdateVersionUrl, setTokenUnmanagedUpdateVersionUrl] = useState(DEFAULT_UNMANAGED_UPDATE_VERSION_URL);
+  const [tokenUnmanagedUpdateIntervalSecs, setTokenUnmanagedUpdateIntervalSecs] = useState("86400");
+  const [tokenUnmanagedUpdateJitterSecs, setTokenUnmanagedUpdateJitterSecs] = useState("86400");
+  const [tokenUnmanagedUpdateActivate, setTokenUnmanagedUpdateActivate] = useState(true);
+  const [tokenUnmanagedUpdateRestartAgent, setTokenUnmanagedUpdateRestartAgent] = useState(true);
   const [tokenConfirmed, setTokenConfirmed] = useState(false);
   const [tokenPending, setTokenPending] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
@@ -110,6 +118,9 @@ export function AccessPanel({
     canManageOperators &&
     !tokenPending &&
     Number.parseInt(tokenTtlSecs, 10) >= 60 &&
+    Number.parseInt(tokenUnmanagedUpdateIntervalSecs, 10) >= 300 &&
+    Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10) >= 0 &&
+    (!tokenUnmanagedUpdateEnabled || tokenUnmanagedUpdateVersionUrl.trim().length > 0) &&
     (tokenPurpose === "provision" || (tokenClientId.trim().length > 0 && tokenConfirmed));
   const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && revokeConfirmed && !revokePending;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
@@ -213,6 +224,12 @@ export function AccessPanel({
         default_tags: parseScopeInput(tokenTags),
         default_pool_name: tokenPoolName.trim() || null,
         default_display_name: tokenDisplayName.trim() || null,
+        unmanaged_update_enabled: tokenUnmanagedUpdateEnabled,
+        unmanaged_update_version_url: tokenUnmanagedUpdateVersionUrl.trim() || null,
+        unmanaged_update_interval_secs: Number.parseInt(tokenUnmanagedUpdateIntervalSecs, 10),
+        unmanaged_update_jitter_secs: Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10),
+        unmanaged_update_activate: tokenUnmanagedUpdateActivate,
+        unmanaged_update_restart_agent: tokenUnmanagedUpdateRestartAgent,
       });
       setCreatedToken(response);
       setTokenTags("");
@@ -765,6 +782,56 @@ export function AccessPanel({
               </option>
             ))}
           </select>
+          <label className="inlineCheck">
+            <input
+              checked={tokenUnmanagedUpdateEnabled}
+              disabled={!canManageOperators || tokenPending}
+              onChange={(event) => setTokenUnmanagedUpdateEnabled(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Auto-check updates</span>
+          </label>
+          <input
+            aria-label="Enrollment unmanaged update version URL"
+            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+            onChange={(event) => setTokenUnmanagedUpdateVersionUrl(event.target.value)}
+            placeholder="version.json URL"
+            value={tokenUnmanagedUpdateVersionUrl}
+          />
+          <input
+            aria-label="Enrollment unmanaged update interval"
+            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+            inputMode="numeric"
+            onChange={(event) => setTokenUnmanagedUpdateIntervalSecs(event.target.value)}
+            placeholder="interval seconds"
+            value={tokenUnmanagedUpdateIntervalSecs}
+          />
+          <input
+            aria-label="Enrollment unmanaged update jitter"
+            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+            inputMode="numeric"
+            onChange={(event) => setTokenUnmanagedUpdateJitterSecs(event.target.value)}
+            placeholder="jitter seconds"
+            value={tokenUnmanagedUpdateJitterSecs}
+          />
+          <label className="inlineCheck">
+            <input
+              checked={tokenUnmanagedUpdateActivate}
+              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+              onChange={(event) => setTokenUnmanagedUpdateActivate(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Activate update</span>
+          </label>
+          <label className="inlineCheck">
+            <input
+              checked={tokenUnmanagedUpdateRestartAgent}
+              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled || !tokenUnmanagedUpdateActivate}
+              onChange={(event) => setTokenUnmanagedUpdateRestartAgent(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Restart agent</span>
+          </label>
           {tokenPurpose === "rebuild_reenrollment" && (
             <label className="inlineCheck">
               <input
@@ -919,7 +986,10 @@ function enrollmentPurposeLabel(purpose: EnrollmentTokenPurpose): string {
 }
 
 function enrollmentTokenDefaultsLabel(record: EnrollmentTokenView): string {
-  return [record.default_display_name, record.default_pool_name, ...record.default_tags]
+  const updateLabel = record.unmanaged_update_enabled
+    ? `updates ${Math.round(record.unmanaged_update_interval_secs / 3600)}h`
+    : "updates off";
+  return [record.default_display_name, record.default_pool_name, ...record.default_tags, updateLabel]
     .filter((value): value is string => Boolean(value))
     .join(", ");
 }

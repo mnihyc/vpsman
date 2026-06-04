@@ -236,7 +236,7 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 
 fn authorized_internal_request(headers: &[(String, String)], internal_token: Option<&str>) -> bool {
     let Some(expected) = internal_token else {
-        return true;
+        return false;
     };
     headers
         .iter()
@@ -271,7 +271,7 @@ mod tests {
             "Bearer expected-token".to_string(),
         )];
 
-        assert!(authorized_internal_request(&headers, None));
+        assert!(!authorized_internal_request(&headers, None));
         assert!(authorized_internal_request(
             &headers,
             Some("expected-token")

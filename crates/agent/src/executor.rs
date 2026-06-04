@@ -27,7 +27,7 @@ use crate::{
     supervisor::execute_process_supervisor_command,
     telemetry::unix_now,
     terminal::execute_terminal_command,
-    update::{execute_update_agent, AgentUpdateInput},
+    update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
     update_activation::{
         execute_update_activate, execute_update_rollback, AgentUpdateActivateInput,
         AgentUpdateRollbackInput,
@@ -297,6 +297,27 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
             execute_update_rollback(AgentUpdateRollbackInput {
                 job_id,
                 rollback_sha256_hex: rollback_sha256_hex.clone(),
+                timeout_secs,
+            })
+            .await
+        }
+        JobCommand::AgentUpdateCheck {
+            version_url,
+            activate,
+            restart_agent,
+        } => {
+            let version_url = version_url
+                .as_deref()
+                .unwrap_or(config.update.unmanaged_version_url.as_str());
+            execute_update_check(AgentUpdateCheckInput {
+                job_id,
+                version_url,
+                activate: *activate,
+                restart_agent: *restart_agent,
+                trusted_artifact_signing_key_hex: config
+                    .update
+                    .trusted_artifact_signing_key_hex
+                    .as_deref(),
                 timeout_secs,
             })
             .await

@@ -53,15 +53,42 @@ Place release files into this checkout-local layout:
 Then run:
 
 ```sh
-cp deploy/.env.example deploy/.env
-# edit deploy/.env before real deployment
-docker compose -f deploy/compose.yml up -d
+cd deploy
+cp .env.example .env
+# edit .env before real deployment; VPSMAN_INTERNAL_TOKEN is mandatory and
+# must be a random non-placeholder value of at least 32 characters
+docker compose up -d
 ```
 
 Persistent runtime data stays in checkout-local paths:
 
 - PostgreSQL: `deploy/runtime/postgres/data`
 - local object storage: `deploy/runtime/data`
+
+The compose template publishes only Nginx on all host interfaces. API and
+gateway host ports are bound to `127.0.0.1` by default; expose agent TCP through
+your chosen public proxy, firewall, or tunnel when needed.
+
+Update an existing Docker deployment from GitHub Releases:
+
+```sh
+cd deploy
+./update.sh latest
+# or pin a release:
+./update.sh v0.1.0
+```
+
+Rollback swaps back to the previous server/frontend release directories:
+
+```sh
+cd deploy
+./update.sh rollback
+```
+
+The update script downloads release assets, verifies `SHA256SUMS`, updates
+`deploy/runtime/server/current` and `deploy/runtime/frontend/current`, and
+recreates containers. It does not delete PostgreSQL or local object-storage
+data.
 
 ## Local Build
 

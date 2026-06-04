@@ -25,6 +25,12 @@ pub(crate) struct EnrollmentTokenCreateOptions {
     pub(crate) default_tags: Vec<String>,
     pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
+    pub(crate) unmanaged_update_enabled: bool,
+    pub(crate) unmanaged_update_version_url: Option<String>,
+    pub(crate) unmanaged_update_interval_secs: u64,
+    pub(crate) unmanaged_update_jitter_secs: u64,
+    pub(crate) unmanaged_update_activate: bool,
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 pub(crate) fn enrollment_token_create(
@@ -47,6 +53,12 @@ pub(crate) fn enrollment_token_create(
                 "default_tags": options.default_tags,
                 "default_pool_name": options.default_pool_name,
                 "default_display_name": options.default_display_name,
+                "unmanaged_update_enabled": options.unmanaged_update_enabled,
+                "unmanaged_update_version_url": options.unmanaged_update_version_url,
+                "unmanaged_update_interval_secs": options.unmanaged_update_interval_secs,
+                "unmanaged_update_jitter_secs": options.unmanaged_update_jitter_secs,
+                "unmanaged_update_activate": options.unmanaged_update_activate,
+                "unmanaged_update_restart_agent": options.unmanaged_update_restart_agent,
             }),
         )?
     );
@@ -61,6 +73,12 @@ pub(crate) struct ReenrollmentTokenCreateOptions {
     pub(crate) default_display_name: Option<String>,
     pub(crate) confirmed: bool,
     pub(crate) preserve_existing_assignments: bool,
+    pub(crate) unmanaged_update_enabled: bool,
+    pub(crate) unmanaged_update_version_url: Option<String>,
+    pub(crate) unmanaged_update_interval_secs: u64,
+    pub(crate) unmanaged_update_jitter_secs: u64,
+    pub(crate) unmanaged_update_activate: bool,
+    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 pub(crate) fn reenrollment_token_create(
@@ -83,6 +101,12 @@ pub(crate) fn reenrollment_token_create(
                 "default_tags": options.default_tags,
                 "default_pool_name": options.default_pool_name,
                 "default_display_name": options.default_display_name,
+                "unmanaged_update_enabled": options.unmanaged_update_enabled,
+                "unmanaged_update_version_url": options.unmanaged_update_version_url,
+                "unmanaged_update_interval_secs": options.unmanaged_update_interval_secs,
+                "unmanaged_update_jitter_secs": options.unmanaged_update_jitter_secs,
+                "unmanaged_update_activate": options.unmanaged_update_activate,
+                "unmanaged_update_restart_agent": options.unmanaged_update_restart_agent,
             }),
         )?
     );
@@ -250,7 +274,7 @@ fn render_agent_config(
             command_timeout_secs: command_timeout_secs.max(1),
         },
         backup: AgentBackupConfig::default(),
-        update: AgentUpdateConfig::default(),
+        update: response.update.clone(),
         execution: AgentExecutionConfig::default(),
         telemetry: AgentTelemetryConfig::default(),
         network: AgentNetworkConfig::default(),
@@ -289,6 +313,8 @@ struct ClaimEnrollmentResponse {
     telemetry_light_secs: u64,
     telemetry_full_secs: u64,
     tags: Vec<String>,
+    #[serde(default)]
+    update: AgentUpdateConfig,
 }
 
 #[cfg(test)]
@@ -315,6 +341,7 @@ mod tests {
             telemetry_light_secs: 15,
             telemetry_full_secs: 60,
             tags: vec!["edge".to_string()],
+            update: AgentUpdateConfig::default(),
         };
         let config = render_agent_config(&response, "33".repeat(32), "44".repeat(32), 45).unwrap();
         let rendered = toml::to_string(&config).unwrap();
@@ -358,6 +385,7 @@ mod tests {
             telemetry_light_secs: 15,
             telemetry_full_secs: 60,
             tags: Vec::new(),
+            update: AgentUpdateConfig::default(),
         };
 
         assert!(

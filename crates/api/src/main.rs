@@ -143,7 +143,7 @@ use security::{constant_time_eq, role_allows, validate_operator_role};
 use uuid::Uuid;
 #[cfg(test)]
 use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
-use vpsman_common::{AgentNoiseMode, JobCommand, ServerEndpoint};
+use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, JobCommand, ServerEndpoint};
 
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]
@@ -186,6 +186,38 @@ struct Args {
     enrollment_telemetry_full_secs: u64,
     #[arg(long, env = "VPSMAN_ENROLLMENT_DEFAULT_COUNTRY", default_value = "US")]
     enrollment_default_country: String,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_ENABLED",
+        default_value_t = true
+    )]
+    enrollment_unmanaged_update_enabled: bool,
+    #[arg(long, env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_VERSION_URL")]
+    enrollment_unmanaged_update_version_url: Option<String>,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_INTERVAL_SECS",
+        default_value_t = 86_400
+    )]
+    enrollment_unmanaged_update_interval_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_JITTER_SECS",
+        default_value_t = 86_400
+    )]
+    enrollment_unmanaged_update_jitter_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_ACTIVATE",
+        default_value_t = true
+    )]
+    enrollment_unmanaged_update_activate: bool,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_RESTART_AGENT",
+        default_value_t = true
+    )]
+    enrollment_unmanaged_update_restart_agent: bool,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
@@ -298,18 +330,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
     let (events, _) = broadcast::channel(256);
-    let internal_token = args
-        .internal_token
-        .as_deref()
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty());
-    if internal_token.is_none() {
-        warn!(
-            "VPSMAN_INTERNAL_TOKEN is not configured; internal gateway ingestion endpoints are open"
-        );
-    }
-    let gateway =
-        GatewayDispatchClient::new(args.gateway_control_url.clone(), internal_token.clone());
+    let internal_token = required_internal_token(args.internal_token.as_deref())?;
+    let gateway = GatewayDispatchClient::new(
+        args.gateway_control_url.clone(),
+        Some(internal_token.clone()),
+    );
     let server_signing_key = args
         .server_signing_key_hex
         .as_deref()
@@ -341,6 +366,19 @@ async fn main() -> Result<()> {
         telemetry_light_secs: args.enrollment_telemetry_light_secs.max(5),
         telemetry_full_secs: args.enrollment_telemetry_full_secs.max(5),
         default_country_tag: default_country_tag(args.enrollment_default_country.as_str())?,
+        update: AgentUpdateConfig {
+            trusted_artifact_signing_key_hex: None,
+            unmanaged_enabled: args.enrollment_unmanaged_update_enabled,
+            unmanaged_version_url: args
+                .enrollment_unmanaged_update_version_url
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(vpsman_common::default_agent_unmanaged_update_version_url),
+            unmanaged_interval_secs: args.enrollment_unmanaged_update_interval_secs,
+            unmanaged_jitter_secs: args.enrollment_unmanaged_update_jitter_secs,
+            unmanaged_activate: args.enrollment_unmanaged_update_activate,
+            unmanaged_restart_agent: args.enrollment_unmanaged_update_restart_agent,
+        },
     };
     let backup_object_store = build_backup_object_store(&args)?;
     if let Some(store) = &backup_object_store {
@@ -379,7 +417,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         repo,
         events,
-        internal_token,
+        internal_token: Some(internal_token),
         gateway,
         server_signing_key,
         enrollment,
@@ -403,6 +441,27 @@ async fn main() -> Result<()> {
     info!(bind = %args.bind, "api listening");
     axum::serve(listener, build_router(state)).await?;
     Ok(())
+}
+
+fn required_internal_token(value: Option<&str>) -> Result<String> {
+    let token = value
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("VPSMAN_INTERNAL_TOKEN is required")?;
+    anyhow::ensure!(
+        token.len() >= 32,
+        "VPSMAN_INTERNAL_TOKEN must be at least 32 characters"
+    );
+    anyhow::ensure!(
+        !matches!(
+            token,
+            "change-me"
+                | "change-me-internal-token"
+                | "replace-with-random-token-at-least-32-chars"
+        ),
+        "VPSMAN_INTERNAL_TOKEN must be changed from the deployment template placeholder"
+    );
+    Ok(token.to_string())
 }
 
 fn spawn_agent_update_rollout_reconciler(

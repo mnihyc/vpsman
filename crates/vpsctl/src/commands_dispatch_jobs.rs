@@ -587,6 +587,40 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
+        Command::AgentUpdateCheck {
+            version_url,
+            activate,
+            restart_agent,
+            clients,
+            pools,
+            tags,
+            password_env,
+            super_salt_hex,
+            proof_ttl_secs,
+            timeout_secs,
+            canary_count,
+            confirmed,
+            force_unprivileged,
+        } => {
+            commands_config::agent_update_check(
+                api_url,
+                token,
+                version_url,
+                activate,
+                restart_agent,
+                clients,
+                pools,
+                tags,
+                password_env,
+                super_salt_hex,
+                proof_ttl_secs,
+                timeout_secs,
+                canary_count,
+                confirmed,
+                force_unprivileged,
+            )?;
+            Ok(None)
+        }
         Command::AgentUpdateActivate {
             staged_sha256_hex,
             clients,

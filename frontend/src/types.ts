@@ -166,6 +166,7 @@ export type AgentCapabilitySnapshot = {
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
+  command_protocol_version?: number;
   unprivileged_hint?: string | null;
 };
 
@@ -996,6 +997,7 @@ export type JobOperation =
     }
   | { type: "agent_update_activate"; staged_sha256_hex: string; restart_agent?: boolean }
   | { type: "agent_update_rollback"; rollback_sha256_hex?: string }
+  | { type: "agent_update_check"; version_url?: string; activate?: boolean; restart_agent?: boolean }
   | { type: "auth_proof_key_rotate"; new_proof_key_hex: string; rotation_generation?: string }
   | { type: "file_push"; path: string; mode: number; size_bytes: number; sha256_hex: string; data_base64: string }
   | {
@@ -1143,6 +1145,7 @@ export type CreateJobRequest = {
   argv: string[];
   operation?: JobOperation;
   timeout_secs: number;
+  command_version?: number;
   canary_count?: number | null;
   force_unprivileged?: boolean;
   privileged: boolean;

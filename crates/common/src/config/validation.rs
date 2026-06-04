@@ -215,7 +215,37 @@ fn validate_update_config(config: &AgentUpdateConfig) -> Result<(), String> {
         config.trusted_artifact_signing_key_hex.as_deref(),
         "update_trusted_artifact_signing_key_hex",
     )?;
+    validate_update_version_url(&config.unmanaged_version_url)?;
+    if !(300..=604_800).contains(&config.unmanaged_interval_secs) {
+        return Err("update_unmanaged_interval_secs_out_of_range".to_string());
+    }
+    if config.unmanaged_jitter_secs > 604_800 {
+        return Err("update_unmanaged_jitter_secs_out_of_range".to_string());
+    }
     Ok(())
+}
+
+fn validate_update_version_url(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.len() > 2048 || value.as_bytes().contains(&0) {
+        return Err("update_unmanaged_version_url_invalid".to_string());
+    }
+    if value.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = value.strip_prefix("http://") {
+        if is_local_http_discovery_authority(rest) {
+            return Ok(());
+        }
+        return Err("update_unmanaged_version_url_http_must_be_localhost".to_string());
+    }
+    if let Some(path) = value.strip_prefix("file://") {
+        if path.starts_with('/') {
+            return Ok(());
+        }
+        return Err("update_unmanaged_version_url_file_must_be_absolute".to_string());
+    }
+    Err("update_unmanaged_version_url_must_be_https".to_string())
 }
 
 fn validate_execution_config(config: &AgentExecutionConfig) -> Result<(), String> {

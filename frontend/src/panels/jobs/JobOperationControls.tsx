@@ -34,6 +34,7 @@ export function OperationModeTabs({
     { label: "Hot config", mode: "hot_config" },
     { label: "Proof rotate", mode: "auth_rotate" },
     { label: "Update", mode: "agent_update" },
+    { label: "Check update", mode: "agent_update_check" },
     { label: "Activate", mode: "agent_update_activate" },
     { label: "Rollback", mode: "agent_update_rollback" },
     { label: "Backup", mode: "backup" },
@@ -151,6 +152,9 @@ export function JobOperationEditor({
   setUpdateArtifactSignatureHex,
   setUpdateArtifactSigningKeyHex,
   setUpdateArtifactUrl,
+  setUpdateCheckActivate,
+  setUpdateCheckRestartAgent,
+  setUpdateCheckVersionUrl,
   setUpdateActivationSha256Hex,
   setUpdateRestartAgent,
   setUpdateRollbackSha256Hex,
@@ -166,6 +170,9 @@ export function JobOperationEditor({
   updateArtifactSignatureHex,
   updateArtifactSigningKeyHex,
   updateArtifactUrl,
+  updateCheckActivate,
+  updateCheckRestartAgent,
+  updateCheckVersionUrl,
   updateActivationSha256Hex,
   updateRestartAgent,
   updateRollbackSha256Hex,
@@ -251,6 +258,9 @@ export function JobOperationEditor({
   setUpdateArtifactSignatureHex: (value: string) => void;
   setUpdateArtifactSigningKeyHex: (value: string) => void;
   setUpdateArtifactUrl: (value: string) => void;
+  setUpdateCheckActivate: (value: boolean) => void;
+  setUpdateCheckRestartAgent: (value: boolean) => void;
+  setUpdateCheckVersionUrl: (value: string) => void;
   setUpdateActivationSha256Hex: (value: string) => void;
   setUpdateRestartAgent: (value: boolean) => void;
   setUpdateRollbackSha256Hex: (value: string) => void;
@@ -266,6 +276,9 @@ export function JobOperationEditor({
   updateArtifactSignatureHex: string;
   updateArtifactSigningKeyHex: string;
   updateArtifactUrl: string;
+  updateCheckActivate: boolean;
+  updateCheckRestartAgent: boolean;
+  updateCheckVersionUrl: string;
   updateActivationSha256Hex: string;
   updateRestartAgent: boolean;
   updateRollbackSha256Hex: string;
@@ -762,6 +775,55 @@ export function JobOperationEditor({
           <span>Canary</span>
           <input
             aria-label="Agent update canary count"
+            max={10000}
+            min={0}
+            onChange={(event) => setUpdateCanaryCount(Number(event.target.value))}
+            type="number"
+            value={updateCanaryCount}
+          />
+        </label>
+      </div>
+    );
+  }
+
+  if (mode === "agent_update_check") {
+    return (
+      <div className="operationNote compactOperation">
+        <PackageCheck size={18} />
+        <div>
+          <strong>Version manifest</strong>
+          <span>Fetches version.json, verifies SHA256SUMS, stages the matching agent artifact, then optionally activates</span>
+        </div>
+        <label className="wideField">
+          <span>Manifest URL</span>
+          <input
+            aria-label="Agent update version manifest URL"
+            onChange={(event) => setUpdateCheckVersionUrl(event.target.value)}
+            placeholder="https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+            value={updateCheckVersionUrl}
+          />
+        </label>
+        <label className="checkRow">
+          <input
+            checked={updateCheckActivate}
+            onChange={(event) => setUpdateCheckActivate(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Activate if newer</span>
+        </label>
+        <label className="checkRow">
+          <input
+            checked={updateCheckRestartAgent}
+            disabled={!updateCheckActivate}
+            onChange={(event) => setUpdateCheckRestartAgent(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Restart agent</span>
+        </label>
+        <label>
+          <span>Canary</span>
+          <input
+            aria-label="Agent update check canary count"
             max={10000}
             min={0}
             onChange={(event) => setUpdateCanaryCount(Number(event.target.value))}

@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
 use vpsman_common::{
@@ -12,7 +13,8 @@ use vpsman_common::{
     AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode,
     CommandOutput, Frame, JobAck, JobCancelRequest, JobCommand, JobRequest, MessageKind,
     NoiseFrameStream, OutputStream, PrivilegeReplayCache, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput,
+    TelemetryEnvelope, TerminalStreamOutput, CURRENT_COMMAND_PROTOCOL_VERSION,
+    MIN_COMMAND_PROTOCOL_VERSION,
 };
 
 use crate::{
@@ -34,7 +36,7 @@ use crate::{
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     telemetry::{collect_metrics_for_config, read_optional, TelemetryRuntimeState},
     terminal::execute_terminal_command_with_stream_sink,
-    update::{execute_update_agent, AgentUpdateInput},
+    update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
     update_activation::read_activation_heartbeat,
 };
 
@@ -133,6 +135,9 @@ async fn connect_and_stream(
     let mut ticker = time::interval(Duration::from_secs(
         server_hello.telemetry_light_secs.max(5),
     ));
+    let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
+    let mut unmanaged_update_sleep =
+        Box::pin(time::sleep_until(unmanaged_update_schedule.next_due()));
     loop {
         tokio::select! {
             _ = ticker.tick() => {
@@ -164,6 +169,8 @@ async fn connect_and_stream(
                         )
                         .await? {
                             ticker = time::interval(Duration::from_secs(config.telemetry_light_secs.max(5)));
+                            unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
+                            unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                         }
                     }
                     MessageKind::CommandCancel => {
@@ -221,8 +228,116 @@ async fn connect_and_stream(
                     seq += 1;
                 }
             }
+            _ = &mut unmanaged_update_sleep, if active_command.is_none() && unmanaged_update_schedule.enabled(config) => {
+                if unmanaged_update_schedule.due(config) {
+                    unmanaged_update_schedule.mark_attempt(config);
+                    unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
+                    run_unmanaged_update_check(config).await;
+                }
+            }
         }
     }
+}
+
+async fn run_unmanaged_update_check(config: &AgentConfig) {
+    let version_url = config.update.unmanaged_version_url.trim();
+    if !config.update.unmanaged_enabled || version_url.is_empty() {
+        return;
+    }
+    let job_id = uuid::Uuid::new_v4();
+    info!(%job_id, %version_url, "running unmanaged agent update check");
+    match execute_update_check(AgentUpdateCheckInput {
+        job_id,
+        version_url,
+        activate: config.update.unmanaged_activate,
+        restart_agent: config.update.unmanaged_restart_agent,
+        trusted_artifact_signing_key_hex: config.update.trusted_artifact_signing_key_hex.as_deref(),
+        timeout_secs: config.auth.command_timeout_secs.max(300),
+    })
+    .await
+    {
+        Ok(outputs) => {
+            for output in outputs {
+                debug!(
+                    %job_id,
+                    done = output.done,
+                    exit_code = output.exit_code,
+                    bytes = output.data.len(),
+                    "unmanaged agent update check output"
+                );
+            }
+        }
+        Err(error) => warn!(%job_id, %error, "unmanaged agent update check failed"),
+    }
+}
+
+struct UnmanagedUpdateSchedule {
+    next_due: time::Instant,
+}
+
+impl UnmanagedUpdateSchedule {
+    fn new(config: &AgentConfig) -> Self {
+        Self {
+            next_due: next_unmanaged_update_due(config, SystemTime::now(), time::Instant::now()),
+        }
+    }
+
+    fn next_due(&self) -> time::Instant {
+        self.next_due
+    }
+
+    fn enabled(&self, config: &AgentConfig) -> bool {
+        config.update.unmanaged_enabled
+    }
+
+    fn due(&self, config: &AgentConfig) -> bool {
+        config.update.unmanaged_enabled && time::Instant::now() >= self.next_due
+    }
+
+    fn mark_attempt(&mut self, config: &AgentConfig) {
+        self.next_due = next_unmanaged_update_due(config, SystemTime::now(), time::Instant::now());
+    }
+}
+
+fn next_unmanaged_update_due(
+    config: &AgentConfig,
+    base_system: SystemTime,
+    base_instant: time::Instant,
+) -> time::Instant {
+    let jitter = unmanaged_update_jitter(config);
+    let interval = config.update.unmanaged_interval_secs.max(300);
+    let base_unix = base_system
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let interval_start = (base_unix / interval) * interval;
+    let slot_unix = interval_start.saturating_add(jitter.as_secs().min(interval - 1));
+    let target_unix = if slot_unix <= base_unix {
+        slot_unix.saturating_add(interval)
+    } else {
+        slot_unix
+    };
+    base_instant + Duration::from_secs(target_unix.saturating_sub(base_unix))
+}
+
+fn unmanaged_update_jitter(config: &AgentConfig) -> Duration {
+    let jitter_secs = config.update.unmanaged_jitter_secs;
+    if jitter_secs == 0 {
+        return Duration::ZERO;
+    }
+    let unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let day = unix_secs / 86_400;
+    let mut hasher = Sha256::new();
+    hasher.update(config.client_id.as_bytes());
+    hasher.update(config.update.unmanaged_version_url.as_bytes());
+    hasher.update(day.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut first = [0_u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    Duration::from_secs(u64::from_le_bytes(first) % jitter_secs)
 }
 
 fn agent_capabilities() -> AgentCapabilitySnapshot {
@@ -238,6 +353,7 @@ fn agent_capabilities() -> AgentCapabilitySnapshot {
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
+        command_protocol_version: CURRENT_COMMAND_PROTOCOL_VERSION,
         unprivileged_hint: (!root).then(|| {
             "agent is not running as root; root-only network, update, restore, and limit operations may report ineffective or require forced best-effort mode".to_string()
         }),
@@ -376,6 +492,25 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     } = ctx;
     let request: JobRequest = decode_json(&frame.decoded_payload()?)?;
     let request_payload_hash = command_payload_hash(&request.command)?;
+    if !command_supports_requested_protocol(&request.command, request.command_version) {
+        warn!(
+            job_id = %request.job_id,
+            command_version = request.command_version,
+            current_command_protocol_version = CURRENT_COMMAND_PROTOCOL_VERSION,
+            min_command_protocol_version = MIN_COMMAND_PROTOCOL_VERSION,
+            "rejected command with unsupported protocol version"
+        );
+        recent_commands.remember(request.job_id, request_payload_hash);
+        send_unsupported_command_version(
+            stream,
+            frame.stream_id,
+            seq,
+            request.job_id,
+            request.command_version,
+        )
+        .await?;
+        return Ok(false);
+    }
     if let Some(active) = active_command.as_ref() {
         let message = if active.job_id == request.job_id {
             if active.payload_hash == request_payload_hash {
@@ -541,6 +676,54 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         task,
     });
     Ok(false)
+}
+
+fn command_supports_requested_protocol(command: &JobCommand, command_version: u16) -> bool {
+    if matches!(
+        command,
+        JobCommand::UpdateAgent { .. }
+            | JobCommand::AgentUpdateCheck { .. }
+            | JobCommand::AgentUpdateActivate { .. }
+            | JobCommand::AgentUpdateRollback { .. }
+    ) {
+        return command_version >= MIN_COMMAND_PROTOCOL_VERSION;
+    }
+    (MIN_COMMAND_PROTOCOL_VERSION..=CURRENT_COMMAND_PROTOCOL_VERSION).contains(&command_version)
+}
+
+async fn send_unsupported_command_version(
+    stream: &mut NoiseFrameStream<TcpStream>,
+    stream_id: u32,
+    seq: &mut u64,
+    job_id: uuid::Uuid,
+    command_version: u16,
+) -> Result<()> {
+    let ack = JobAck {
+        job_id,
+        accepted: true,
+        message: "unsupported_command_version".to_string(),
+    };
+    send_json_frame(stream, MessageKind::CommandAck, stream_id, *seq, &ack).await?;
+    *seq += 1;
+    let status = serde_json::json!({
+        "type": "unsupported_command_version",
+        "status": "rejected",
+        "job_id": job_id,
+        "command_version": command_version,
+        "current_command_protocol_version": CURRENT_COMMAND_PROTOCOL_VERSION,
+        "min_command_protocol_version": MIN_COMMAND_PROTOCOL_VERSION,
+        "reason": "agent_binary_does_not_support_requested_command_protocol",
+    });
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code: Some(78),
+        done: true,
+    };
+    send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, &output).await?;
+    *seq += 1;
+    Ok(())
 }
 
 async fn execute_authorized_command(
@@ -734,6 +917,27 @@ async fn execute_authorized_command(
             })
             .await
         }
+        JobCommand::AgentUpdateCheck {
+            version_url,
+            activate,
+            restart_agent,
+        } => {
+            let version_url = version_url
+                .as_deref()
+                .unwrap_or(config.update.unmanaged_version_url.as_str());
+            execute_update_check(AgentUpdateCheckInput {
+                job_id: request.job_id,
+                version_url,
+                activate: *activate,
+                restart_agent: *restart_agent,
+                trusted_artifact_signing_key_hex: config
+                    .update
+                    .trusted_artifact_signing_key_hex
+                    .as_deref(),
+                timeout_secs,
+            })
+            .await
+        }
         JobCommand::TerminalOpen { .. }
         | JobCommand::TerminalInput { .. }
         | JobCommand::TerminalPoll { .. }
@@ -910,5 +1114,55 @@ mod tests {
             command_payload_hash(&left).unwrap(),
             command_payload_hash(&right).unwrap()
         );
+    }
+
+    #[test]
+    fn command_protocol_rejects_future_non_update_commands() {
+        let command = JobCommand::Shell {
+            argv: vec!["/bin/true".to_string()],
+            pty: false,
+        };
+
+        assert!(command_supports_requested_protocol(
+            &command,
+            CURRENT_COMMAND_PROTOCOL_VERSION
+        ));
+        assert!(!command_supports_requested_protocol(
+            &command,
+            CURRENT_COMMAND_PROTOCOL_VERSION + 1
+        ));
+        assert!(!command_supports_requested_protocol(&command, 0));
+    }
+
+    #[test]
+    fn command_protocol_keeps_update_path_reachable_for_future_versions() {
+        let command = JobCommand::AgentUpdateCheck {
+            version_url: None,
+            activate: true,
+            restart_agent: true,
+        };
+
+        assert!(command_supports_requested_protocol(
+            &command,
+            CURRENT_COMMAND_PROTOCOL_VERSION + 10
+        ));
+        assert!(!command_supports_requested_protocol(&command, 0));
+    }
+
+    #[test]
+    fn unmanaged_update_schedule_uses_next_interval_slot() {
+        let config = AgentConfig {
+            update: vpsman_common::AgentUpdateConfig {
+                unmanaged_interval_secs: 300,
+                unmanaged_jitter_secs: 0,
+                ..vpsman_common::AgentUpdateConfig::default()
+            },
+            ..AgentConfig::default()
+        };
+        let base_instant = time::Instant::now();
+        let due =
+            next_unmanaged_update_due(&config, UNIX_EPOCH + Duration::from_secs(100), base_instant);
+
+        assert_eq!(due.duration_since(base_instant), Duration::from_secs(200));
     }
 }

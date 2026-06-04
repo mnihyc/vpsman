@@ -16,6 +16,12 @@ export type EnrollmentTokenView = {
   default_tags: string[];
   default_pool_name: string | null;
   default_display_name: string | null;
+  unmanaged_update_enabled: boolean;
+  unmanaged_update_version_url: string;
+  unmanaged_update_interval_secs: number;
+  unmanaged_update_jitter_secs: number;
+  unmanaged_update_activate: boolean;
+  unmanaged_update_restart_agent: boolean;
 };
 
 export type CreateEnrollmentTokenRequest = {
@@ -27,6 +33,12 @@ export type CreateEnrollmentTokenRequest = {
   default_tags: string[];
   default_pool_name?: string | null;
   default_display_name?: string | null;
+  unmanaged_update_enabled?: boolean;
+  unmanaged_update_version_url?: string | null;
+  unmanaged_update_interval_secs?: number;
+  unmanaged_update_jitter_secs?: number;
+  unmanaged_update_activate?: boolean;
+  unmanaged_update_restart_agent?: boolean;
 };
 
 export type CreateEnrollmentTokenResponse = {
@@ -42,6 +54,12 @@ export type CreateEnrollmentTokenResponse = {
   default_tags: string[];
   default_pool_name: string | null;
   default_display_name: string | null;
+  unmanaged_update_enabled: boolean;
+  unmanaged_update_version_url: string;
+  unmanaged_update_interval_secs: number;
+  unmanaged_update_jitter_secs: number;
+  unmanaged_update_activate: boolean;
+  unmanaged_update_restart_agent: boolean;
 };
 
 export type ClientKeyRevocationView = {

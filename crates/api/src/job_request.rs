@@ -8,7 +8,8 @@ use vpsman_common::{
     validate_data_source_config_patch_section, validate_runtime_topology_intent,
     validate_runtime_tunnel_control, verify_update_artifact_signature, AgentConfig,
     CommandEnvelope, JobCommand, ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile,
-    TunnelConfigBackend, MAX_AGENT_HOT_CONFIG_BYTES, MAX_SHELL_SCRIPT_BYTES,
+    TunnelConfigBackend, CURRENT_COMMAND_PROTOCOL_VERSION, MAX_AGENT_HOT_CONFIG_BYTES,
+    MAX_SHELL_SCRIPT_BYTES, MIN_COMMAND_PROTOCOL_VERSION,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -179,6 +180,7 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::UpdateAgent { .. } => "agent_update",
         JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
         JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
+        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
         JobCommand::UserSessions => "user_sessions",
         JobCommand::ProcessList { .. } => "process_list",
         JobCommand::ProcessStart { .. } => "process_start",
@@ -195,6 +197,20 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::NetworkStatus { .. } => "network_status",
         JobCommand::NetworkProbe { .. } => "network_probe",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
+    }
+}
+
+pub(crate) fn job_command_protocol_version(_command: &JobCommand) -> u16 {
+    CURRENT_COMMAND_PROTOCOL_VERSION
+}
+
+pub(crate) fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
+    match command {
+        JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        _ => MIN_COMMAND_PROTOCOL_VERSION,
     }
 }
 
@@ -314,6 +330,12 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         } => {
             if let Some(rollback_sha256_hex) = rollback_sha256_hex {
                 validate_sha256_hex(rollback_sha256_hex, "agent_update_rollback_sha256_invalid")?;
+            }
+            Ok(())
+        }
+        JobCommand::AgentUpdateCheck { version_url, .. } => {
+            if let Some(version_url) = version_url {
+                validate_update_manifest_url(version_url)?;
             }
             Ok(())
         }
@@ -978,6 +1000,52 @@ fn validate_update_agent(
         }
     }
     Ok(())
+}
+
+fn validate_update_manifest_url(version_url: &str) -> Result<(), ApiError> {
+    if version_url.is_empty() || version_url.len() > 2048 || version_url.as_bytes().contains(&0) {
+        return Err(ApiError::bad_request("invalid_update_manifest_url"));
+    }
+    if version_url.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = version_url.strip_prefix("http://") {
+        if is_localhost_http_authority(rest) {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "update_manifest_url_http_must_be_localhost",
+        ));
+    }
+    if let Some(path) = version_url.strip_prefix("file://") {
+        if path.starts_with('/') {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "update_manifest_url_file_must_be_absolute",
+        ));
+    }
+    Err(ApiError::bad_request("update_manifest_url_must_be_https"))
+}
+
+fn is_localhost_http_authority(rest: &str) -> bool {
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, _suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        host
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, _port)) if !host.contains(':') => host,
+            _ => authority,
+        }
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn is_hex_len(value: &str, expected_len: usize) -> bool {

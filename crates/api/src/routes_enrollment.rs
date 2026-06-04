@@ -49,7 +49,7 @@ pub(crate) async fn create_enrollment_token(
         Json(
             state
                 .repo
-                .create_enrollment_token(&request, &operator)
+                .create_enrollment_token_with_update(&request, &operator, &state.enrollment.update)
                 .await?,
         ),
     ))
@@ -244,6 +244,25 @@ fn validate_create_enrollment_token(
     if let Some(default_pool_name) = request.default_pool_name.as_deref() {
         validate_pool_name(default_pool_name)?;
     }
+    if let Some(version_url) = request.unmanaged_update_version_url.as_deref() {
+        validate_update_version_url(version_url)?;
+    }
+    if request
+        .unmanaged_update_interval_secs
+        .is_some_and(|value| !(300..=604_800).contains(&value))
+    {
+        return Err(ApiError::bad_request(
+            "unmanaged_update_interval_secs_out_of_range",
+        ));
+    }
+    if request
+        .unmanaged_update_jitter_secs
+        .is_some_and(|value| !(0..=604_800).contains(&value))
+    {
+        return Err(ApiError::bad_request(
+            "unmanaged_update_jitter_secs_out_of_range",
+        ));
+    }
     Ok(())
 }
 
@@ -312,6 +331,57 @@ fn validate_pool_name(value: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("default_pool_name_invalid"));
     }
     Ok(())
+}
+
+fn validate_update_version_url(value: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 2048 || value.as_bytes().contains(&0) {
+        return Err(ApiError::bad_request(
+            "unmanaged_update_version_url_invalid",
+        ));
+    }
+    if value.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = value.strip_prefix("http://") {
+        if is_local_http_authority(rest) {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "unmanaged_update_version_url_http_must_be_localhost",
+        ));
+    }
+    if let Some(path) = value.strip_prefix("file://") {
+        if path.starts_with('/') {
+            return Ok(());
+        }
+        return Err(ApiError::bad_request(
+            "unmanaged_update_version_url_file_must_be_absolute",
+        ));
+    }
+    Err(ApiError::bad_request(
+        "unmanaged_update_version_url_must_be_https",
+    ))
+}
+
+fn is_local_http_authority(rest: &str) -> bool {
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, _suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        host
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, _port)) if !host.contains(':') => host,
+            _ => authority,
+        }
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn validate_client_key_revocation(

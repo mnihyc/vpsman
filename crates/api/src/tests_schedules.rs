@@ -20,6 +20,8 @@ use vpsman_common::{
 
 use crate::routes_jobs::{cancel_job, dispatch_scheduled_job, CancelJobRequest};
 
+const TEST_INTERNAL_TOKEN: &str = "test-internal-token-value-32-plus-chars";
+
 #[tokio::test]
 async fn schedule_create_lists_durable_selector_without_plaintext_proof_material() {
     let repo = Repository::Memory(MemoryState::default());
@@ -197,7 +199,10 @@ async fn scheduled_job_dispatch_requires_fresh_proof_and_uses_frozen_targets() {
         repo: repo.clone(),
         events: broadcast::channel(4).0,
         internal_token: None,
-        gateway: GatewayDispatchClient::new(Some(gateway_url), None),
+        gateway: GatewayDispatchClient::new(
+            Some(gateway_url),
+            Some(TEST_INTERNAL_TOKEN.to_string()),
+        ),
         server_signing_key: Some(Arc::new(signing_key)),
         enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
@@ -266,6 +271,7 @@ async fn scheduled_network_dispatch_degrades_unprivileged_target_without_gateway
             can_attempt_privileged_ops: true,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
+            command_protocol_version: 1,
             unprivileged_hint: Some("running without root".to_string()),
         },
     });

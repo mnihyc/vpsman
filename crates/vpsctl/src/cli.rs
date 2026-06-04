@@ -478,6 +478,34 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
     },
+    AgentUpdateCheck {
+        #[arg(long)]
+        version_url: Option<String>,
+        #[arg(long, default_value_t = true)]
+        activate: bool,
+        #[arg(long, default_value_t = true)]
+        restart_agent: bool,
+        #[arg(long, value_delimiter = ',')]
+        clients: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        pools: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
+        password_env: String,
+        #[arg(long)]
+        super_salt_hex: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        proof_ttl_secs: u64,
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        #[arg(long)]
+        canary_count: Option<u16>,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
+        #[arg(long, default_value_t = false)]
+        force_unprivileged: bool,
+    },
     AgentUpdateActivate {
         #[arg(long)]
         staged_sha256_hex: String,

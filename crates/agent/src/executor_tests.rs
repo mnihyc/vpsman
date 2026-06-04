@@ -58,6 +58,7 @@ mod tests {
         envelope.server_signature = sign_command_envelope(signing_key, &envelope);
         JobRequest {
             job_id: uuid::Uuid::new_v4(),
+            command_version: 1,
             command,
             envelope,
             timeout_secs: 5,

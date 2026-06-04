@@ -12,11 +12,15 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::{CertificateDer, ServerName};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{task, time};
 use vpsman_common::{verify_update_artifact_signature, CommandOutput, OutputStream};
 
-use crate::agent_binary_path::{current_agent_binary_path, rollback_path, staged_path};
+use crate::{
+    agent_binary_path::{current_agent_binary_path, rollback_path, staged_path},
+    update_activation::{execute_update_activate, AgentUpdateActivateInput},
+};
 
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
@@ -29,6 +33,16 @@ pub(crate) struct AgentUpdateInput<'a> {
     pub(crate) sha256_hex: &'a str,
     pub(crate) artifact_signature_hex: Option<&'a str>,
     pub(crate) artifact_signing_key_hex: Option<&'a str>,
+    pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
+    pub(crate) timeout_secs: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AgentUpdateCheckInput<'a> {
+    pub(crate) job_id: uuid::Uuid,
+    pub(crate) version_url: &'a str,
+    pub(crate) activate: bool,
+    pub(crate) restart_agent: bool,
     pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
     pub(crate) timeout_secs: u64,
 }
@@ -73,6 +87,54 @@ pub(crate) async fn execute_update_agent(
     Ok(vec![output])
 }
 
+pub(crate) async fn execute_update_check(
+    input: AgentUpdateCheckInput<'_>,
+) -> Result<Vec<CommandOutput>> {
+    let current_exe = current_agent_binary_path()?;
+    let timeout = Duration::from_secs(input.timeout_secs.max(1));
+    let job_id = input.job_id;
+    let version_url = input.version_url.trim().to_string();
+    let trusted_artifact_signing_key_hex = normalize_optional_hex(
+        input.trusted_artifact_signing_key_hex,
+        32,
+        "trusted_artifact_signing_key_hex",
+    )?;
+    let check = time::timeout(
+        timeout,
+        task::spawn_blocking(move || {
+            check_and_stage_update(CheckStageInput {
+                job_id,
+                version_url: &version_url,
+                trusted_artifact_signing_key_hex: trusted_artifact_signing_key_hex.as_deref(),
+                current_exe: &current_exe,
+            })
+        }),
+    )
+    .await
+    .context("agent update check timed out")?
+    .context("agent update check task failed")??;
+
+    let mut outputs = check.outputs;
+    if let Some(staged_sha256_hex) = check.staged_sha256_hex {
+        if input.activate {
+            if let Some(last) = outputs.last_mut() {
+                last.done = false;
+                last.exit_code = None;
+            }
+            outputs.extend(
+                execute_update_activate(AgentUpdateActivateInput {
+                    job_id: input.job_id,
+                    staged_sha256_hex,
+                    restart_agent: input.restart_agent,
+                    timeout_secs: input.timeout_secs,
+                })
+                .await?,
+            );
+        }
+    }
+    Ok(outputs)
+}
+
 struct UpdateStageInput<'a> {
     job_id: uuid::Uuid,
     artifact_url: &'a str,
@@ -81,6 +143,29 @@ struct UpdateStageInput<'a> {
     artifact_signing_key_hex: Option<&'a str>,
     trusted_artifact_signing_key_hex: Option<&'a str>,
     current_exe: &'a Path,
+}
+
+struct CheckStageInput<'a> {
+    job_id: uuid::Uuid,
+    version_url: &'a str,
+    trusted_artifact_signing_key_hex: Option<&'a str>,
+    current_exe: &'a Path,
+}
+
+struct CheckStageResult {
+    outputs: Vec<CommandOutput>,
+    staged_sha256_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionManifest {
+    schema_version: u16,
+    project: String,
+    version: String,
+    tag: String,
+    #[serde(default)]
+    commit: Option<String>,
+    assets: Vec<String>,
 }
 
 fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
@@ -117,6 +202,106 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
         data: serde_json::to_vec(&status)?,
         exit_code: Some(0),
         done: true,
+    })
+}
+
+fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult> {
+    let manifest_bytes = fetch_update_artifact(input.version_url)
+        .with_context(|| format!("failed to fetch update manifest {}", input.version_url))?;
+    let manifest: VersionManifest =
+        serde_json::from_slice(&manifest_bytes).context("failed to parse update manifest")?;
+    if manifest.schema_version != 1 {
+        anyhow::bail!(
+            "unsupported update manifest schema {}",
+            manifest.schema_version
+        );
+    }
+    if manifest.project != "vpsman" {
+        anyhow::bail!("unexpected update manifest project {}", manifest.project);
+    }
+    let current_version = env!("CARGO_PKG_VERSION");
+    let Some(asset_name) = agent_asset_name() else {
+        let status = serde_json::json!({
+            "type": "agent_update_check",
+            "status": "unsupported_arch",
+            "arch": std::env::consts::ARCH,
+            "version_url": input.version_url,
+            "candidate_version": manifest.version,
+            "tag": manifest.tag,
+            "commit": manifest.commit,
+        });
+        return Ok(CheckStageResult {
+            outputs: vec![status_output(input.job_id, status, Some(2), true)?],
+            staged_sha256_hex: None,
+        });
+    };
+    if manifest.version == current_version {
+        let status = serde_json::json!({
+            "type": "agent_update_check",
+            "status": "current",
+            "current_version": current_version,
+            "candidate_version": manifest.version,
+            "tag": manifest.tag,
+            "commit": manifest.commit,
+            "asset": asset_name,
+            "version_url": input.version_url,
+        });
+        return Ok(CheckStageResult {
+            outputs: vec![status_output(input.job_id, status, Some(0), true)?],
+            staged_sha256_hex: None,
+        });
+    }
+    if !manifest.assets.iter().any(|asset| asset == asset_name) {
+        let status = serde_json::json!({
+            "type": "agent_update_check",
+            "status": "asset_missing",
+            "arch": std::env::consts::ARCH,
+            "asset": asset_name,
+            "candidate_version": manifest.version,
+            "tag": manifest.tag,
+            "commit": manifest.commit,
+            "version_url": input.version_url,
+        });
+        return Ok(CheckStageResult {
+            outputs: vec![status_output(input.job_id, status, Some(2), true)?],
+            staged_sha256_hex: None,
+        });
+    }
+
+    let artifact_url = sibling_update_url(input.version_url, asset_name)?;
+    let sums_url = sibling_update_url(input.version_url, "SHA256SUMS")?;
+    let sums = String::from_utf8(
+        fetch_update_artifact(&sums_url)
+            .with_context(|| format!("failed to fetch update checksum manifest {sums_url}"))?,
+    )
+    .context("update checksum manifest is not UTF-8")?;
+    let expected_sha256_hex = checksum_for_asset(&sums, asset_name)?;
+    let check_status = serde_json::json!({
+        "type": "agent_update_check",
+        "status": "staging",
+        "current_version": current_version,
+        "candidate_version": manifest.version,
+        "tag": manifest.tag,
+        "commit": manifest.commit,
+        "asset": asset_name,
+        "artifact_url": artifact_url,
+        "sha256_hex": expected_sha256_hex,
+        "version_url": input.version_url,
+    });
+    let mut outputs = vec![status_output(input.job_id, check_status, None, false)?];
+    let staged = stage_update_artifact(UpdateStageInput {
+        job_id: input.job_id,
+        artifact_url: &artifact_url,
+        expected_sha256_hex: &expected_sha256_hex,
+        artifact_signature_hex: None,
+        artifact_signing_key_hex: None,
+        trusted_artifact_signing_key_hex: input.trusted_artifact_signing_key_hex,
+        current_exe: input.current_exe,
+    })?;
+    outputs.push(staged);
+    Ok(CheckStageResult {
+        outputs,
+        staged_sha256_hex: Some(expected_sha256_hex),
     })
 }
 
@@ -179,19 +364,110 @@ fn persist_staged_artifact(
         })?;
     }
     let temp_path = staged_path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    fs::write(&temp_path, artifact)
-        .with_context(|| format!("failed to write staged update {}", temp_path.display()))?;
-    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("failed to set executable mode on {}", temp_path.display()))?;
-    fs::rename(&temp_path, staged_path).with_context(|| {
+    if let Err(error) = fs::write(&temp_path, artifact) {
         let _ = fs::remove_file(&temp_path);
-        format!(
-            "failed to atomically move staged update {} to {}",
-            temp_path.display(),
-            staged_path.display()
-        )
-    })?;
+        return Err(error)
+            .with_context(|| format!("failed to write staged update {}", temp_path.display()));
+    }
+    if let Err(error) = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to set executable mode on {}", temp_path.display()));
+    }
+    if let Err(error) = fs::rename(&temp_path, staged_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to atomically move staged update {} to {}",
+                temp_path.display(),
+                staged_path.display()
+            )
+        });
+    }
     Ok(())
+}
+
+fn status_output(
+    job_id: uuid::Uuid,
+    status: serde_json::Value,
+    exit_code: Option<i32>,
+    done: bool,
+) -> Result<CommandOutput> {
+    Ok(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code,
+        done,
+    })
+}
+
+fn agent_asset_name() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("vpsman-agent-linux-x86_64-musl"),
+        "aarch64" => Some("vpsman-agent-linux-aarch64-musl"),
+        _ => None,
+    }
+}
+
+fn sibling_update_url(base_url: &str, sibling_name: &str) -> Result<String> {
+    if sibling_name.contains('/') || sibling_name.contains('\\') || sibling_name.is_empty() {
+        anyhow::bail!("update manifest sibling name is invalid");
+    }
+    let base_url = base_url.trim();
+    if let Some(path) = base_url.strip_prefix("file://") {
+        if !path.starts_with('/') {
+            anyhow::bail!("file update manifest URL requires an absolute path");
+        }
+        let parent = Path::new(path)
+            .parent()
+            .context("file update manifest URL has no parent directory")?;
+        return Ok(format!("file://{}", parent.join(sibling_name).display()));
+    }
+
+    let scheme_end = base_url
+        .find("://")
+        .context("update manifest URL is missing scheme")?;
+    let scheme = &base_url[..scheme_end];
+    if !matches!(scheme, "https" | "http") {
+        anyhow::bail!("update manifest URL scheme is unsupported");
+    }
+    let rest = &base_url[scheme_end + 3..];
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        anyhow::bail!("update manifest URL authority is invalid");
+    }
+    let suffix = &rest[authority_end..];
+    let path = suffix.split('?').next().unwrap_or("/");
+    let path = if path.is_empty() || path.starts_with('?') {
+        "/"
+    } else {
+        path
+    };
+    let parent = match path.rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => format!("{parent}/"),
+    };
+    Ok(format!("{scheme}://{authority}{parent}{sibling_name}"))
+}
+
+fn checksum_for_asset(checksums: &str, asset_name: &str) -> Result<String> {
+    for line in checksums.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(hash) = parts.next() else {
+            continue;
+        };
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let name = name.trim_start_matches('*');
+        let basename = name.rsplit('/').next().unwrap_or(name);
+        if name == asset_name || basename == asset_name {
+            return normalize_sha256(hash);
+        }
+    }
+    anyhow::bail!("update checksum manifest does not contain {asset_name}");
 }
 
 fn fetch_update_artifact(artifact_url: &str) -> Result<Vec<u8>> {

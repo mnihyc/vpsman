@@ -29,6 +29,8 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -134,7 +136,7 @@ pub enum AgentPrivilegeMode {
     Unprivileged,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentCapabilitySnapshot {
     #[serde(default)]
     pub privilege_mode: AgentPrivilegeMode,
@@ -146,8 +148,24 @@ pub struct AgentCapabilitySnapshot {
     pub can_manage_runtime_tunnels: bool,
     #[serde(default)]
     pub can_apply_process_limits: bool,
+    #[serde(default = "default_command_protocol_version")]
+    pub command_protocol_version: u16,
     #[serde(default)]
     pub unprivileged_hint: Option<String>,
+}
+
+impl Default for AgentCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            privilege_mode: AgentPrivilegeMode::Unknown,
+            effective_uid: None,
+            can_attempt_privileged_ops: false,
+            can_manage_runtime_tunnels: false,
+            can_apply_process_limits: false,
+            command_protocol_version: CURRENT_COMMAND_PROTOCOL_VERSION,
+            unprivileged_hint: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,9 +266,15 @@ pub struct GatewayCommandCancelResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobRequest {
     pub job_id: Uuid,
+    #[serde(default = "default_command_protocol_version")]
+    pub command_version: u16,
     pub command: JobCommand,
     pub envelope: CommandEnvelope,
     pub timeout_secs: u64,
+}
+
+pub fn default_command_protocol_version() -> u16 {
+    CURRENT_COMMAND_PROTOCOL_VERSION
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -331,6 +355,14 @@ pub enum JobCommand {
     AgentUpdateRollback {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rollback_sha256_hex: Option<String>,
+    },
+    AgentUpdateCheck {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version_url: Option<String>,
+        #[serde(default = "default_agent_update_check_activate")]
+        activate: bool,
+        #[serde(default = "default_agent_update_check_restart_agent")]
+        restart_agent: bool,
     },
     FilePull {
         path: String,
@@ -479,6 +511,14 @@ pub enum JobCommand {
         port: u16,
         connect_timeout_ms: u16,
     },
+}
+
+fn default_agent_update_check_activate() -> bool {
+    true
+}
+
+fn default_agent_update_check_restart_agent() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

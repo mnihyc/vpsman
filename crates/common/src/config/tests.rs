@@ -80,6 +80,7 @@ fn validates_update_artifact_signing_key() {
     let config = AgentConfig {
         update: AgentUpdateConfig {
             trusted_artifact_signing_key_hex: Some("66".repeat(32)),
+            ..AgentUpdateConfig::default()
         },
         ..AgentConfig::default()
     };
@@ -88,6 +89,7 @@ fn validates_update_artifact_signing_key() {
     let invalid = AgentConfig {
         update: AgentUpdateConfig {
             trusted_artifact_signing_key_hex: Some("not-hex".to_string()),
+            ..AgentUpdateConfig::default()
         },
         ..AgentConfig::default()
     };

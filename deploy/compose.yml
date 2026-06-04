@@ -15,7 +15,7 @@ services:
     command: ./bin/vpsman-api
     env_file: .env
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
@@ -29,7 +29,7 @@ services:
     command: ./bin/vpsman-gateway
     env_file: .env
     ports:
-      - "9443:9443"
+      - "127.0.0.1:9443:9443"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
     depends_on:
@@ -52,7 +52,7 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "5173:80"
+      - "0.0.0.0:5173:80"
     volumes:
       - ./runtime/frontend/current/dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

@@ -152,7 +152,8 @@ pub(crate) async fn create_job_with_operator(
             }
             JobCommand::HotConfig { .. }
             | JobCommand::DataSourceConfigPatch { .. }
-            | JobCommand::AuthProofKeyRotate { .. } => {
+            | JobCommand::AuthProofKeyRotate { .. }
+            | JobCommand::AgentUpdateCheck { .. } => {
                 return Err(ApiError::conflict("config_update_confirmation_required"));
             }
             _ => {}
@@ -599,9 +600,15 @@ async fn dispatch_to_gateway(
 ) -> Result<(usize, String), ApiError> {
     record_backup_requests_for_dispatch(state, &batch).await?;
     let mut requests = Vec::new();
+    let command_version = crate::job_request::job_command_protocol_version(batch.job_command);
+    debug_assert!(
+        command_version
+            >= crate::job_request::job_command_min_supported_protocol_version(batch.job_command)
+    );
     for client_id in batch.targets {
         let request = JobRequest {
             job_id: batch.job_id,
+            command_version,
             command: batch.job_command.clone(),
             envelope: batch
                 .signed_envelopes
@@ -937,6 +944,7 @@ fn target_lacks_agent_update_capability(command: &JobCommand, agent: &AgentView)
         JobCommand::UpdateAgent { .. }
             | JobCommand::AgentUpdateActivate { .. }
             | JobCommand::AgentUpdateRollback { .. }
+            | JobCommand::AgentUpdateCheck { .. }
             | JobCommand::AuthProofKeyRotate { .. }
     );
     if !agent_update_operation {
