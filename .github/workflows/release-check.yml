@@ -71,4 +71,6 @@ jobs:
           fi
 
       - name: Docker Compose config
-        run: docker compose -f deploy/compose.yml config
+        run: |
+          cp deploy/.env.example deploy/.env
+          docker compose -f deploy/compose.yml config

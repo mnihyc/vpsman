@@ -10,10 +10,12 @@
 /frontend/playwright-report/
 /.tmp/
 /deploy/runtime/
+/deploy/.env
+/deploy/.env.*
+!/deploy/.env.example
 /pid
 /.env
 /.env.*
-!/deploy/.env.example
 *.log
 *.db
 *.sqlite

@@ -1,11 +1,10 @@
+name: vpsman
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: vpsman
-      POSTGRES_USER: vpsman
-      POSTGRES_PASSWORD: vpsman
+    env_file: .env
     volumes:
       - ./runtime/postgres/data:/var/lib/postgresql/data
 
@@ -14,7 +13,7 @@ services:
     restart: unless-stopped
     working_dir: /opt/vpsman
     command: ./bin/vpsman-api
-    env_file: .env.example
+    env_file: .env
     ports:
       - "8080:8080"
     volumes:
@@ -28,7 +27,7 @@ services:
     restart: unless-stopped
     working_dir: /opt/vpsman
     command: ./bin/vpsman-gateway
-    env_file: .env.example
+    env_file: .env
     ports:
       - "9443:9443"
     volumes:
@@ -41,7 +40,7 @@ services:
     restart: unless-stopped
     working_dir: /opt/vpsman
     command: ./bin/vpsman-worker
-    env_file: .env.example
+    env_file: .env
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman

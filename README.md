@@ -53,7 +53,9 @@ Place release files into this checkout-local layout:
 Then run:
 
 ```sh
-docker compose -f deploy/compose.yml --env-file deploy/.env.example up -d
+cp deploy/.env.example deploy/.env
+# edit deploy/.env before real deployment
+docker compose -f deploy/compose.yml up -d
 ```
 
 Persistent runtime data stays in checkout-local paths:
