@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -25,6 +28,7 @@ pub(crate) enum Repository {
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
+    pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
     pub(crate) tags: Arc<RwLock<Vec<String>>>,
     pub(crate) fleet_alert_policies:

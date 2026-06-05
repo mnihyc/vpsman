@@ -33,6 +33,7 @@ import type {
   CreateAgentUpdateReleaseRequest,
   DispatchScheduledJobRequest,
   JobHistoryRecord,
+  JobOutputCompareMode,
   JobOutputComparisonRecord,
   JobOutputRecord,
   JobTargetRecord,
@@ -122,6 +123,10 @@ function selectRolloutActivationDelegationClients(
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
 }
 
 export function JobHistoryPanel({
@@ -217,7 +222,8 @@ export function JobHistoryPanel({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadOutputComparison: (
     jobId: string,
-  ) => Promise<JobOutputComparisonRecord[]>;
+    mode: JobOutputCompareMode,
+  ) => Promise<JobOutputComparisonRecord>;
   onLoadTerminalReplay: (
     clientId: string,
     sessionId: string,
@@ -251,13 +257,18 @@ export function JobHistoryPanel({
   terminalSessions: TerminalSessionRecord[];
   tags: TagView[];
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [targets, setTargets] = useState<JobTargetRecord[]>([]);
   const [outputs, setOutputs] = useState<JobOutputRecord[]>([]);
-  const [outputComparison, setOutputComparison] = useState<
-    JobOutputComparisonRecord[]
-  >([]);
+  const [outputComparison, setOutputComparison] =
+    useState<JobOutputComparisonRecord | null>(null);
+  const [comparisonMode, setComparisonMode] = useState<JobOutputCompareMode>(
+    preferences.bulk_output_compare_mode,
+  );
+  const [selectedComparisonGroupId, setSelectedComparisonGroupId] = useState<
+    string | null
+  >(null);
   const [targetError, setTargetError] = useState<string | null>(null);
   const [outputError, setOutputError] = useState<string | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
@@ -314,40 +325,61 @@ export function JobHistoryPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
+  const displayedComparisonRows = useMemo(() => {
+    if (!outputComparison) {
+      return [];
+    }
+    if (!selectedComparisonGroupId) {
+      return outputComparison.rows;
+    }
+    return outputComparison.rows.filter(
+      (row) => row.group_id === selectedComparisonGroupId,
+    );
+  }, [outputComparison, selectedComparisonGroupId]);
+
+  useEffect(() => {
+    setComparisonMode(preferences.bulk_output_compare_mode);
+  }, [preferences.bulk_output_compare_mode]);
+
   const openTargets = useCallback(
     async (jobId: string) => {
       setSelectedJobId(jobId);
       setTargetsLoading(true);
       setOutputsLoading(true);
+      setComparisonLoading(true);
       setTargetError(null);
       setOutputError(null);
-      try {
-        const [nextTargets, nextOutputs] = await Promise.all([
+      setComparisonError(null);
+      setSelectedComparisonGroupId(null);
+      const [targetResult, outputResult, comparisonResult] =
+        await Promise.allSettled([
           onLoadTargets(jobId),
           onLoadOutputs(jobId),
+          onLoadOutputComparison(jobId, comparisonMode),
         ]);
-        setTargets(nextTargets);
-        setOutputs(nextOutputs);
-      } catch (loadError) {
+      if (targetResult.status === "fulfilled") {
+        setTargets(targetResult.value);
+      } else {
         setTargets([]);
-        setOutputs([]);
-        setOutputComparison([]);
-        setTargetError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Job target history unavailable",
-        );
-        setOutputError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Job output unavailable",
-        );
-      } finally {
-        setTargetsLoading(false);
-        setOutputsLoading(false);
+        setTargetError(errorMessage(targetResult.reason, "Job target history unavailable"));
       }
+      if (outputResult.status === "fulfilled") {
+        setOutputs(outputResult.value);
+      } else {
+        setOutputs([]);
+        setOutputError(errorMessage(outputResult.reason, "Job output unavailable"));
+      }
+      if (comparisonResult.status === "fulfilled") {
+        setOutputComparison(comparisonResult.value);
+      } else {
+        setOutputComparison(null);
+        setComparisonError(errorMessage(comparisonResult.reason, "Execution summary unavailable"));
+      }
+      setTargetsLoading(false);
+      setOutputsLoading(false);
+      setComparisonLoading(false);
     },
-    [onLoadOutputs, onLoadTargets],
+    [comparisonMode, onLoadOutputComparison, onLoadOutputs, onLoadTargets],
   );
 
   const jobColumns = useMemo<ConsoleDataGridColumn<JobHistoryRecord>[]>(
@@ -489,13 +521,16 @@ export function JobHistoryPanel({
     ],
   );
 
-  async function compareSelectedJobOutputs(jobId: string) {
+  async function compareSelectedJobOutputs(
+    jobId: string,
+    mode: JobOutputCompareMode = comparisonMode,
+  ) {
     setComparisonLoading(true);
     setComparisonError(null);
     try {
-      setOutputComparison(await onLoadOutputComparison(jobId));
+      setOutputComparison(await onLoadOutputComparison(jobId, mode));
     } catch (loadError) {
-      setOutputComparison([]);
+      setOutputComparison(null);
       setComparisonError(
         loadError instanceof Error
           ? loadError.message
@@ -503,6 +538,14 @@ export function JobHistoryPanel({
       );
     } finally {
       setComparisonLoading(false);
+    }
+  }
+
+  function changeComparisonMode(mode: JobOutputCompareMode) {
+    setComparisonMode(mode);
+    setSelectedComparisonGroupId(null);
+    if (selectedJobId) {
+      void compareSelectedJobOutputs(selectedJobId, mode);
     }
   }
 
@@ -820,13 +863,7 @@ export function JobHistoryPanel({
   }
 
   return (
-    <section
-      className={
-        jobSubpage === "dispatch"
-          ? "workspace singleColumn jobWorkspace"
-          : "workspace singleColumn"
-      }
-    >
+    <section className="workspace singleColumn">
       {jobSubpage === "dispatch" && (
         <JobDispatchPanel
           agents={agents}
@@ -1100,79 +1137,210 @@ export function JobHistoryPanel({
                         : `${outputs.length} chunks`)}
                   </span>
                 </div>
-                <div className="approvalControls compact">
-                  <button
-                    className="secondaryAction"
-                    disabled={comparisonLoading}
-                    onClick={() =>
-                      void compareSelectedJobOutputs(selectedJobId)
-                    }
-                    type="button"
-                  >
-                    Compare outputs
-                  </button>
-                  <span>
-                    {comparisonError ??
-                      (comparisonLoading
-                        ? "Comparing outputs"
-                        : `${outputComparison.length} comparison rows`)}
-                  </span>
-                </div>
-                {outputComparison.length > 0 && (
-                  <CrudPager
-                    fields={[
-                      {
-                        label: "Client",
-                        value: (row) => clientLabel(row.client_id),
-                      },
-                      { label: "Hash", value: (row) => row.output_sha256_hex },
-                      {
-                        label: "Majority",
-                        value: (row) =>
-                          row.matches_majority ? "match" : "diff",
-                      },
-                      { label: "Exit", value: (row) => row.exit_code },
-                    ]}
-                    itemLabel="comparisons"
-                    items={outputComparison}
-                    pageSize={8}
-                    title="Output comparison"
-                  >
-                    {(comparisonRows) => (
-                      <div className="table historyTable">
-                        <div className="historyRow heading targetHistoryGrid">
-                          <span>Client</span>
-                          <span>Majority</span>
-                          <span>Bytes</span>
-                          <span>Hash</span>
-                        </div>
-                        {comparisonRows.map((row) => (
-                          <div
-                            className="historyRow targetHistoryGrid"
-                            key={row.client_id}
-                          >
-                            <span className="historyPrimary">
-                              <strong>{clientLabel(row.client_id)}</strong>
-                              <small>
-                                {row.stream_count} chunks, exit{" "}
-                                {row.exit_code ?? "-"}
-                              </small>
-                            </span>
-                            <span
-                              className={`status ${row.matches_majority ? "ok" : "warn"}`}
-                            >
-                              {row.matches_majority ? "match" : "diff"}
-                            </span>
-                            <span>{formatBytes(row.byte_count)}</span>
-                            <span className="monoValue" title={row.preview}>
-                              {shortHash(row.output_sha256_hex)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
+                <div className="executionSummary">
+                  <div className="sectionHeader compact">
+                    <h2>Execution summary</h2>
+                    <span>
+                      {comparisonError ??
+                        (comparisonLoading
+                          ? "Comparing target results"
+                          : outputComparison
+                            ? `${outputComparison.group_count} groups across ${outputComparison.compared_targets} targets`
+                            : "No summary loaded")}
+                    </span>
+                  </div>
+                  <div className="comparisonToolbar">
+                    <div
+                      className="targetModeControls"
+                      role="group"
+                      aria-label="Output comparison mode"
+                    >
+                      <span>Compare</span>
+                      <button
+                        className={comparisonMode === "binary" ? "selected" : ""}
+                        onClick={() => changeComparisonMode("binary")}
+                        type="button"
+                      >
+                        Binary
+                      </button>
+                      <button
+                        className={comparisonMode === "text" ? "selected" : ""}
+                        onClick={() => changeComparisonMode("text")}
+                        type="button"
+                      >
+                        Text
+                      </button>
+                    </div>
+                    <button
+                      className="secondaryAction compactAction"
+                      disabled={comparisonLoading}
+                      onClick={() => void compareSelectedJobOutputs(selectedJobId)}
+                      type="button"
+                    >
+                      Refresh summary
+                    </button>
+                    {selectedComparisonGroupId && (
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={() => setSelectedComparisonGroupId(null)}
+                        type="button"
+                      >
+                        Show all targets
+                      </button>
                     )}
-                  </CrudPager>
-                )}
+                  </div>
+                  {outputComparison && (
+                    <div className="executionSummaryStats">
+                      <span>
+                        <strong>{outputComparison.group_count}</strong>
+                        groups
+                      </span>
+                      <span>
+                        <strong>{outputComparison.total_targets}</strong>
+                        targets
+                      </span>
+                      <span>
+                        <strong>{outputComparison.mode}</strong>
+                        compare mode
+                      </span>
+                      <span>
+                        <strong>{formatComparisonTime(outputComparison.compared_at)}</strong>
+                        compared
+                      </span>
+                    </div>
+                  )}
+                  {outputComparison && outputComparison.groups.length > 0 && (
+                    <CrudPager
+                      fields={[
+                        {
+                          label: "Status",
+                          value: (group) => `${group.status} ${group.exit_code ?? "-"}`,
+                        },
+                        {
+                          label: "Targets",
+                          value: (group) => group.client_ids.map(clientLabel).join(" "),
+                        },
+                        {
+                          label: "Digest",
+                          value: (group) => group.output_digest_hex,
+                        },
+                        { label: "Preview", value: (group) => group.preview },
+                      ]}
+                      itemLabel="groups"
+                      items={outputComparison.groups}
+                      pageSize={6}
+                      title="Grouped outcomes"
+                    >
+                      {(groups) => (
+                        <div className="table historyTable">
+                          <div className="historyRow heading comparisonGroupGrid">
+                            <span>Outcome</span>
+                            <span>Targets</span>
+                            <span>Output</span>
+                            <span>Digest</span>
+                          </div>
+                          {groups.map((group) => (
+                            <div
+                              className={`historyRow comparisonGroupGrid clickableRow ${
+                                selectedComparisonGroupId === group.group_id ? "selected" : ""
+                              }`}
+                              key={group.group_id}
+                              onClick={() => setSelectedComparisonGroupId(group.group_id)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  setSelectedComparisonGroupId(group.group_id);
+                                }
+                              }}
+                              role="button"
+                              tabIndex={0}
+                            >
+                              <span className="historyPrimary">
+                                <strong className={`status ${statusClass(group.status)}`}>
+                                  {group.status}
+                                </strong>
+                                <small>exit {group.exit_code ?? "-"}</small>
+                              </span>
+                              <span className="historyPrimary">
+                                <strong>{group.target_count} targets</strong>
+                                <small>{clientLabel(group.representative_client_id)}</small>
+                              </span>
+                              <span className="historyPrimary">
+                                <strong>{outputCompareBasisLabel(group.output_compare_basis)}</strong>
+                                <small>
+                                  {group.stream_count} chunks / {formatBytes(group.byte_count)}
+                                </small>
+                              </span>
+                              <span className="monoValue" title={group.preview}>
+                                {shortHash(group.output_digest_hex)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CrudPager>
+                  )}
+                  {outputComparison && displayedComparisonRows.length > 0 && (
+                    <CrudPager
+                      fields={[
+                        {
+                          label: "Client",
+                          value: (row) => clientLabel(row.client_id),
+                        },
+                        {
+                          label: "Status",
+                          value: (row) => `${row.status} ${row.exit_code ?? "-"}`,
+                        },
+                        {
+                          label: "Group",
+                          value: (row) => row.group_id,
+                        },
+                        { label: "Digest", value: (row) => row.output_digest_hex },
+                      ]}
+                      itemLabel="targets"
+                      items={displayedComparisonRows}
+                      pageSize={8}
+                      title={
+                        selectedComparisonGroupId
+                          ? `Targets in ${selectedComparisonGroupId}`
+                          : "Target result details"
+                      }
+                    >
+                      {(comparisonRows) => (
+                        <div className="table historyTable">
+                          <div className="historyRow heading comparisonTargetGrid">
+                            <span>Client</span>
+                            <span>Status</span>
+                            <span>Group</span>
+                            <span>Digest</span>
+                          </div>
+                          {comparisonRows.map((row) => (
+                            <div
+                              className="historyRow comparisonTargetGrid"
+                              key={row.client_id}
+                            >
+                              <span className="historyPrimary">
+                                <strong>{clientLabel(row.client_id)}</strong>
+                                <small>
+                                  {row.stream_count} chunks / {formatBytes(row.byte_count)}
+                                </small>
+                              </span>
+                              <span className={`status ${statusClass(row.status)}`}>
+                                {row.status} / {row.exit_code ?? "-"}
+                              </span>
+                              <span className={row.matches_largest_group ? "status ok" : "status warn"}>
+                                {row.matches_largest_group ? "largest" : row.group_id}
+                              </span>
+                              <span className="monoValue" title={row.preview}>
+                                {shortHash(row.output_digest_hex)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CrudPager>
+                  )}
+                </div>
                 <div className="outputList">
                   {outputs.map((output) => (
                     <article
@@ -1333,6 +1501,24 @@ async function copyText(value: string) {
 
 function isCancelableJob(job: JobHistoryRecord): boolean {
   return isScheduledApprovalJob(job) || isActiveCancelableJob(job);
+}
+
+function outputCompareBasisLabel(value: string): string {
+  switch (value) {
+    case "text":
+      return "Text normalized";
+    case "binary_metadata":
+      return "Artifact metadata";
+    default:
+      return "Binary exact";
+  }
+}
+
+function formatComparisonTime(value: string): string {
+  if (/^\d+$/.test(value)) {
+    return formatTime(new Date(Number(value) * 1000).toISOString());
+  }
+  return formatTime(value);
 }
 
 function formatBytes(value: number): string {

@@ -13,7 +13,7 @@ use crate::{
         JobTargetView, ListQuery, NetworkObservationTrendView, NetworkObservationView,
         ProcessSupervisorInventoryView,
     },
-    model_command_templates::JobOutputComparisonView,
+    model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     state::AppState,
     util::limit_or_default,
 };
@@ -77,9 +77,23 @@ pub(crate) async fn compare_job_outputs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<Vec<JobOutputComparisonView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(state.repo.compare_job_outputs(job_id).await?))
+    Query(query): Query<JobOutputComparisonQuery>,
+) -> Result<Json<JobOutputComparisonView>, ApiError> {
+    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let mode = query
+        .mode
+        .as_deref()
+        .unwrap_or(&operator.operator.preferences.bulk_output_compare_mode);
+    validate_output_compare_mode(mode)?;
+    Ok(Json(state.repo.compare_job_outputs(job_id, mode).await?))
+}
+
+fn validate_output_compare_mode(mode: &str) -> Result<(), ApiError> {
+    if matches!(mode.trim(), "binary" | "text") {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("invalid_output_compare_mode"))
+    }
 }
 
 pub(crate) async fn download_job_output_artifact(

@@ -40,12 +40,46 @@ pub(crate) struct UpsertCommandTemplateRequest {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct JobOutputComparisonView {
     pub(crate) job_id: Uuid,
-    pub(crate) client_id: String,
-    pub(crate) output_sha256_hex: String,
+    pub(crate) mode: String,
+    pub(crate) compared_at: String,
+    pub(crate) total_targets: i32,
+    pub(crate) compared_targets: i32,
+    pub(crate) group_count: i32,
+    pub(crate) groups: Vec<JobOutputComparisonGroupView>,
+    pub(crate) rows: Vec<JobOutputComparisonRowView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobOutputComparisonGroupView {
+    pub(crate) group_id: String,
+    pub(crate) status: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output_digest_hex: String,
+    pub(crate) output_compare_basis: String,
+    pub(crate) target_count: i32,
     pub(crate) stream_count: i32,
     pub(crate) byte_count: i64,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) matches_majority: bool,
+    pub(crate) representative_client_id: String,
+    pub(crate) client_ids: Vec<String>,
     pub(crate) preview: String,
-    pub(crate) compared_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobOutputComparisonRowView {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) group_id: String,
+    pub(crate) status: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output_digest_hex: String,
+    pub(crate) output_compare_basis: String,
+    pub(crate) stream_count: i32,
+    pub(crate) byte_count: i64,
+    pub(crate) matches_largest_group: bool,
+    pub(crate) preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct JobOutputComparisonQuery {
+    pub(crate) mode: Option<String>,
 }

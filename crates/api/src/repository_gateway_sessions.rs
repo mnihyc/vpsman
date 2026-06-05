@@ -15,12 +15,35 @@ impl Repository {
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
+                if memory
+                    .hidden_clients
+                    .read()
+                    .await
+                    .contains(&event.client_id)
+                {
+                    return Ok(());
+                }
                 upsert_memory_gateway_session(memory, event, "active", None).await;
                 set_memory_agent_status(memory, &event.client_id, "connected").await;
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let visible: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1 FROM clients
+                        WHERE id = $1 AND hidden_at IS NULL
+                    )
+                    "#,
+                )
+                .bind(&event.client_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !visible {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
@@ -44,7 +67,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
-                    "UPDATE clients SET status = 'connected', last_seen_at = now() WHERE id = $1",
+                    "UPDATE clients SET status = 'connected', last_seen_at = now() WHERE id = $1 AND hidden_at IS NULL",
                 )
                 .bind(&event.client_id)
                 .execute(&mut *tx)
@@ -97,6 +120,7 @@ impl Repository {
                     UPDATE clients
                     SET status = 'disconnected', last_seen_at = now()
                     WHERE id = $1
+                      AND hidden_at IS NULL
                       AND NOT EXISTS (
                         SELECT 1
                         FROM gateway_sessions
@@ -123,7 +147,9 @@ impl Repository {
         let limit = limit.clamp(1, 200);
         match self {
             Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
                 let mut sessions = memory.gateway_sessions.read().await.clone();
+                sessions.retain(|session| !hidden.contains(&session.client_id));
                 sessions.sort_by(|left, right| {
                     right
                         .last_seen_at
@@ -137,17 +163,19 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        gateway_id,
-                        client_id,
-                        noise_public_key_hex,
-                        status,
-                        started_at::text AS started_at,
-                        last_seen_at::text AS last_seen_at,
-                        ended_at::text AS ended_at,
-                        end_reason
+                        gateway_sessions.id,
+                        gateway_sessions.gateway_id,
+                        gateway_sessions.client_id,
+                        gateway_sessions.noise_public_key_hex,
+                        gateway_sessions.status,
+                        gateway_sessions.started_at::text AS started_at,
+                        gateway_sessions.last_seen_at::text AS last_seen_at,
+                        gateway_sessions.ended_at::text AS ended_at,
+                        gateway_sessions.end_reason
                     FROM gateway_sessions
-                    ORDER BY last_seen_at DESC, id DESC
+                    JOIN clients c ON c.id = gateway_sessions.client_id
+                    WHERE c.hidden_at IS NULL
+                    ORDER BY gateway_sessions.last_seen_at DESC, gateway_sessions.id DESC
                     LIMIT $1
                     "#,
                 )
@@ -224,6 +252,9 @@ async fn memory_has_active_other_session(
 }
 
 async fn set_memory_agent_status(memory: &MemoryState, client_id: &str, status: &str) {
+    if memory.hidden_clients.read().await.contains(client_id) {
+        return;
+    }
     if let Some(agent) = memory
         .agents
         .write()

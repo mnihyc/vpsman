@@ -411,6 +411,106 @@ nav {
   color: #b3261e;
 }
 
+.confirmationPrompt {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-left: 4px solid #1a73e8;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 12px;
+}
+
+.confirmationPrompt.danger {
+  border-left-color: #b3261e;
+  background: #fff8f6;
+}
+
+.confirmationPromptIcon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: #e8f0fe;
+  color: #1a73e8;
+}
+
+.confirmationPrompt.danger .confirmationPromptIcon {
+  background: #fce8e6;
+  color: #b3261e;
+}
+
+.confirmationPromptBody {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.confirmationPromptBody strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.confirmationPromptBody span,
+.confirmationPromptBody dd {
+  min-width: 0;
+  margin: 0;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.confirmationPromptBody dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 2px 0 0;
+}
+
+.confirmationPromptBody dl div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+}
+
+.confirmationPromptBody dt {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.confirmationPromptActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inspector .confirmationPrompt,
+.actionDrawer .confirmationPrompt {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.inspector .confirmationPromptActions,
+.actionDrawer .confirmationPromptActions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.inspector .confirmationPromptBody dl,
+.actionDrawer .confirmationPromptBody dl {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .linkButton {
   border: 0;
   background: transparent;

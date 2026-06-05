@@ -363,6 +363,7 @@ export function useDashboardData(activeView: ActiveView) {
     fileTransferSources: jobs.fileTransferSources,
     terminalSessions: jobs.terminalSessions,
     gatewaySessions: access.gatewaySessions,
+    deleteAgent: fleet.deleteAgent,
     enrollmentTokens: access.enrollmentTokens,
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertStates: fleet.fleetAlertStates,

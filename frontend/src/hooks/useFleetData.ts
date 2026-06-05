@@ -14,6 +14,8 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  DeleteAgentRequest,
+  DeleteAgentResponse,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
@@ -114,6 +116,20 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setAgents((current) => current.map((stored) => (stored.id === agent.id ? agent : stored)));
       await loadFleet();
       return agent;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const deleteAgent = useCallback(
+    async (clientId: string, request: DeleteAgentRequest) => {
+      const response = await apiPost<DeleteAgentResponse>(
+        `/api/v1/agents/${encodeURIComponent(clientId)}/delete`,
+        apiToken,
+        request,
+      );
+      setAgents((current) => current.filter((agent) => agent.id !== response.client_id));
+      await loadFleet();
+      return response;
     },
     [apiToken, loadFleet],
   );
@@ -226,6 +242,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlertPolicies,
     fleetAlertNotificationChannels,
     fleetAlertNotifications,
+    deleteAgent,
     loadFleet,
     replaceFleetSnapshot,
     updateAgentAlias,

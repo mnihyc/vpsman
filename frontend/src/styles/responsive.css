@@ -52,7 +52,6 @@
 
   .workspace,
   .workspace.dashboardWorkspace,
-  .workspace.jobWorkspace,
   .workspace.backupWorkspace,
   .workspace.accessWorkspace,
   .consoleHeader {
@@ -99,10 +98,6 @@
     flex: 1 1 0;
   }
 
-  .jobWorkspace > .commandComposer {
-    position: static;
-  }
-
   .actionDrawer {
     position: static;
     max-height: none;
@@ -126,6 +121,15 @@
 
   .targetHistoryGrid {
     grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 70px;
+  }
+
+  .comparisonGroupGrid,
+  .comparisonTargetGrid {
+    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(120px, 0.7fr);
+  }
+
+  .executionSummaryStats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .gatewaySessionGrid {
@@ -463,6 +467,15 @@
     grid-template-columns: minmax(0, 1fr) 104px;
   }
 
+  .comparisonGroupGrid,
+  .comparisonTargetGrid {
+    grid-template-columns: minmax(0, 1fr) 104px;
+  }
+
+  .executionSummaryStats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .gatewaySessionGrid {
     grid-template-columns: minmax(0, 1fr) 104px;
   }
@@ -599,7 +612,11 @@
     .rolloutGrid span:nth-child(3),
     .releaseGrid span:nth-child(3),
     .supervisorInventoryGrid span:nth-child(3),
-    .targetHistoryGrid span:nth-child(3) {
+    .targetHistoryGrid span:nth-child(3),
+    .comparisonGroupGrid span:nth-child(3),
+    .comparisonGroupGrid span:nth-child(4),
+    .comparisonTargetGrid span:nth-child(3),
+    .comparisonTargetGrid span:nth-child(4) {
     display: none;
   }
 
@@ -624,5 +641,18 @@
   .rowActions .compactSelect {
     max-width: 124px;
     min-width: 96px;
+  }
+
+  .confirmationPrompt {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .confirmationPromptActions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .confirmationPromptBody dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

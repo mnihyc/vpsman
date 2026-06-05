@@ -10,6 +10,12 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+async function dispatchWithPrompt(composer: Locator) {
+  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
+  await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+}
+
 test("prepares terminal reconnect actions from retained session inventory", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "terminal reconnect actions are covered in the desktop job composer");
 
@@ -43,7 +49,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
   await activate(composer.getByRole("button", { name: "Use proof" }));
   await composer.getByRole("textbox", { name: "Terminal input" }).fill("uptime\n");
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> } })
@@ -75,7 +81,7 @@ test("dispatches terminal poll from retained session inventory", async ({ page }
   await composer.getByLabel("Super password").fill("local-super-password");
   await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
   await activate(composer.getByRole("button", { name: "Use proof" }));
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> } })

@@ -443,6 +443,7 @@ const dashboardOverview = {
 };
 
 const operatorPreferences = {
+  bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
@@ -1588,9 +1589,12 @@ export async function installConsoleApiMock(page: Page) {
     }) => {
       const originalFetch = window.fetch.bind(window);
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
+      const deletedAgentIds = new Set<string>();
+      const visibleAgents = () => agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
+        agentDeletes: [] as unknown[],
         agentUpdateRolloutPolicies: [] as unknown[],
         bulkResolve: [] as unknown[],
         dataSourcePresetAssignments: [] as unknown[],
@@ -1607,8 +1611,10 @@ export async function installConsoleApiMock(page: Page) {
         historyRetentionPolicies: [] as unknown[],
         historyRetentionPrunes: [] as unknown[],
         jobs: [] as unknown[],
+        jobOutputComparisons: [] as unknown[],
         commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
+        operatorPreferences: [] as unknown[],
         restorePlans: [] as unknown[],
         schedules: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
@@ -1663,7 +1669,7 @@ export async function installConsoleApiMock(page: Page) {
         const selected = new Map<string, (typeof agentsFixture)[number]>();
         const selectedClients = new Set(request?.clients ?? []);
         const selectedTags = new Set(request?.tags ?? []);
-        for (const agent of agentsFixture) {
+        for (const agent of visibleAgents()) {
           if (
             selectedClients.has(agent.id) ||
             agent.tags.some((tag) => selectedTags.has(tag))
@@ -1674,7 +1680,135 @@ export async function installConsoleApiMock(page: Page) {
         const targets = [...selected.values()].sort((left, right) =>
           left.id.localeCompare(right.id),
         );
-        return targets.length > 0 ? targets : [agentsFixture[0]];
+        return targets.length > 0 ? targets : visibleAgents().slice(0, 1);
+      };
+      const jobTargetsFor = (jobId: string) => {
+        const job =
+          (jobsFixture as Array<{ id: string; status: string; target_count: number; completed_at: string | null }>).find(
+            (candidate) => candidate.id === jobId,
+          ) ?? {
+            completed_at: "2026-05-31T10:09:00Z",
+            id: jobId,
+            status: "completed",
+            target_count: 1,
+          };
+        const outputs = ((jobOutputsFixture as Record<string, Array<{
+          client_id: string;
+          exit_code?: number | null;
+          stream: string;
+        }>>)[jobId] ?? []);
+        const outputClientIds = Array.from(
+          new Set(outputs.map((output) => output.client_id)),
+        );
+        const fallbackClientIds = visibleAgents()
+          .slice(0, Math.max(1, job.target_count))
+          .map((agent) => agent.id);
+        const clientIds = outputClientIds.length > 0 ? outputClientIds : fallbackClientIds;
+        return clientIds.map((clientId) => {
+          const statusOutput = outputs.find(
+            (output) => output.client_id === clientId && output.stream === "status",
+          );
+          return {
+            client_id: clientId,
+            completed_at: job.completed_at,
+            exit_code: statusOutput?.exit_code ?? (job.status === "completed" ? 0 : null),
+            job_id: jobId,
+            started_at: "2026-05-31T10:08:55Z",
+            status: job.status,
+          };
+        });
+      };
+      const outputComparisonFor = async (jobId: string, mode: string) => {
+        const comparisonMode = mode === "text" ? "text" : "binary";
+        const targets = jobTargetsFor(jobId);
+        const outputs = ((jobOutputsFixture as Record<string, Array<{
+          client_id: string;
+          data_base64?: string;
+          stream: string;
+        }>>)[jobId] ?? []);
+        const rows = [] as Array<{
+          byte_count: number;
+          client_id: string;
+          exit_code: number | null;
+          group_id: string;
+          job_id: string;
+          matches_largest_group: boolean;
+          output_compare_basis: string;
+          output_digest_hex: string;
+          preview: string;
+          status: string;
+          stream_count: number;
+        }>;
+        const grouped = new Map<string, typeof rows>();
+        for (const target of targets) {
+          const chunks = outputs.filter(
+            (output) => output.client_id === target.client_id,
+          );
+          const decoded = chunks
+            .map((chunk) => (chunk.data_base64 ? atob(chunk.data_base64) : ""))
+            .join("");
+          const normalized =
+            comparisonMode === "text"
+              ? decoded.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd()
+              : decoded;
+          const streamKey = chunks
+            .map((chunk) => `${chunk.stream}:${chunk.data_base64 ?? ""}`)
+            .join("|");
+          const signature = comparisonMode === "text" ? normalized : streamKey;
+          const digest = await sha256HexForText(signature);
+          const groupKey = `${target.status}:${target.exit_code ?? "-"}:${digest}`;
+          const row = {
+            byte_count: decoded.length,
+            client_id: target.client_id,
+            exit_code: target.exit_code,
+            group_id: "",
+            job_id: jobId,
+            matches_largest_group: false,
+            output_compare_basis: comparisonMode,
+            output_digest_hex: digest,
+            preview: normalized || "No retained output",
+            status: target.status,
+            stream_count: chunks.length,
+          };
+          const groupRows = grouped.get(groupKey) ?? [];
+          groupRows.push(row);
+          grouped.set(groupKey, groupRows);
+        }
+        const ordered = Array.from(grouped.values()).sort(
+          (left, right) => right.length - left.length || left[0].client_id.localeCompare(right[0].client_id),
+        );
+        const largest = ordered[0]?.length ?? 0;
+        const groups = ordered.map((groupRows, index) => {
+          const groupId = `g${index + 1}`;
+          for (const row of groupRows) {
+            row.group_id = groupId;
+            row.matches_largest_group = largest > 0 && groupRows.length === largest;
+            rows.push(row);
+          }
+          return {
+            byte_count: groupRows.reduce((total, row) => total + row.byte_count, 0),
+            client_ids: groupRows.map((row) => row.client_id),
+            exit_code: groupRows[0].exit_code,
+            group_id: groupId,
+            output_compare_basis: groupRows[0].output_compare_basis,
+            output_digest_hex: groupRows[0].output_digest_hex,
+            preview: groupRows[0].preview,
+            representative_client_id: groupRows[0].client_id,
+            status: groupRows[0].status,
+            stream_count: groupRows.reduce((total, row) => total + row.stream_count, 0),
+            target_count: groupRows.length,
+          };
+        });
+        return {
+          compared_at: "2026-05-31T10:09:30Z",
+          compared_targets: rows.length,
+          group_count: groups.length,
+          groups,
+          job_id: jobId,
+          mode: comparisonMode,
+          rows,
+          total_targets: targets.length,
+        };
       };
 
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1724,7 +1858,12 @@ export async function installConsoleApiMock(page: Page) {
           });
         }
         if (pathname === "/api/v1/fleet/summary") {
-          return jsonResponse(summaryFixture);
+          const currentAgents = visibleAgents();
+          return jsonResponse({
+            ...summaryFixture,
+            connected: currentAgents.filter((agent) => agent.status === "connected").length,
+            total: currentAgents.length,
+          });
         }
         if (pathname === "/api/v1/fleet-alerts" && method === "GET") {
           return jsonResponse(fleetAlertsFixture);
@@ -1818,8 +1957,20 @@ export async function installConsoleApiMock(page: Page) {
             ),
           );
         }
+        const deleteAgentMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/delete$/);
+        if (deleteAgentMatch && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.agentDeletes.push(body);
+          const clientId = decodeURIComponent(deleteAgentMatch[1]);
+          deletedAgentIds.add(clientId);
+          return jsonResponse({
+            client_id: clientId,
+            deleted: true,
+            deleted_at: "2026-06-02T10:07:00Z",
+          });
+        }
         if (pathname === "/api/v1/agents") {
-          return jsonResponse(agentsFixture);
+          return jsonResponse(visibleAgents());
         }
         if (pathname === "/api/v1/gateway-sessions" && method === "GET")
           return emptyArrayResponse();
@@ -1833,7 +1984,9 @@ export async function installConsoleApiMock(page: Page) {
             username: "console-admin",
           });
         if (pathname === "/api/v1/auth/preferences" && method === "PUT") {
-          Object.assign(currentOperatorPreferences, await readJsonBody(input, init));
+          const body = await readJsonBody(input, init);
+          requests.operatorPreferences.push(body);
+          Object.assign(currentOperatorPreferences, body);
           return jsonResponse({
             id: "99999999-aaaa-4bbb-8ccc-000000000001",
             preferences: currentOperatorPreferences,
@@ -2270,6 +2423,29 @@ export async function installConsoleApiMock(page: Page) {
         }
         if (pathname === "/api/v1/network/topology-graph" && method === "GET") {
           return jsonResponse(topologyGraphFixture);
+        }
+        const targetMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/targets$/,
+        );
+        if (targetMatch && method === "GET") {
+          return jsonResponse(jobTargetsFor(targetMatch[1]));
+        }
+        const comparisonMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/output-comparison$/,
+        );
+        if (comparisonMatch && method === "GET") {
+          const params = new URL(url, window.location.href).searchParams;
+          const mode = params.get("mode") ?? currentOperatorPreferences.bulk_output_compare_mode;
+          requests.jobOutputComparisons.push({
+            job_id: comparisonMatch[1],
+            mode,
+          });
+          return jsonResponse(
+            await outputComparisonFor(
+              comparisonMatch[1],
+              mode,
+            ),
+          );
         }
         const outputMatch = pathname.match(
           /^\/api\/v1\/jobs\/([^/]+)\/outputs$/,

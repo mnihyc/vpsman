@@ -212,6 +212,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await.clone();
+                let hidden = memory.hidden_clients.read().await.clone();
                 let public_keys = memory.client_public_keys.read().await.clone();
                 let revocations = memory.client_key_revocations.read().await.clone();
                 let revoked_current_keys = revoked_key_set(&revocations);
@@ -219,6 +220,7 @@ impl Repository {
                 let now = unix_now();
                 let mut clients = agents
                     .into_iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
                     .map(|agent| {
                         let current_public_key_sha256_hex =
                             public_keys.get(&agent.id).and_then(|key| {
@@ -267,8 +269,9 @@ impl Repository {
                     current_key_revoked_count: public_keys
                         .iter()
                         .filter(|(client_id, key)| {
-                            revoked_current_keys
-                                .contains(&(client_id.to_string(), public_key_sha256_hex(key)))
+                            !hidden.contains(client_id.as_str())
+                                && revoked_current_keys
+                                    .contains(&(client_id.to_string(), public_key_sha256_hex(key)))
                         })
                         .count(),
                     revocation_count: revocations.len(),
@@ -282,6 +285,7 @@ impl Repository {
                     r#"
                     SELECT id, display_name, status, public_key
                     FROM clients
+                    WHERE hidden_at IS NULL
                     ORDER BY id
                     LIMIT 1000
                     "#,

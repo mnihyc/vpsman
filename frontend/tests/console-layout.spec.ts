@@ -26,6 +26,12 @@ async function checkControl(locator: Locator) {
   });
 }
 
+async function dispatchWithPrompt(composer: Locator) {
+  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
+  await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+}
+
 async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   await activate(page.getByRole("button", { name: /Fleet health/ }));
   await activate(page.getByRole("button", { name: "Open fleet instances" }));
@@ -102,12 +108,22 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await page.getByRole("button", { name: "Preferences" }).click();
     await expect(page.getByRole("heading", { name: "Preferences", exact: true })).toBeVisible();
     await page.getByLabel("Name display").selectOption("name");
+    await page.getByLabel("Bulk output comparison default").selectOption("text");
     await page.getByRole("button", { name: "Save preferences" }).click();
+    const savedPreferences = await page.evaluate(() => {
+      const requests = (window as unknown as { __vpsmanTestRequests: { operatorPreferences: unknown[] } }).__vpsmanTestRequests;
+      return requests.operatorPreferences.at(-1);
+    });
+    expect(savedPreferences).toMatchObject({
+      bulk_output_compare_mode: "text",
+      vps_name_display_mode: "name",
+    });
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
     await expect(edgeRow).toContainText("edge-sfo-01");
     await expect(edgeRow).not.toContainText("(fo01)");
     await nav.getByRole("button", { name: "Preferences", exact: true }).click();
     await page.getByLabel("Name display").selectOption("name_id_suffix");
+    await page.getByLabel("Bulk output comparison default").selectOption("binary");
     await page.getByRole("button", { name: "Save preferences" }).click();
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
   }
@@ -136,6 +152,38 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
   await activate(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }).first());
   await activate(page.getByRole("tab", { name: "Network" }));
   await expect(page.getByText("Unprivileged best-effort, root operations may be ineffective")).toBeVisible();
+});
+
+test("deletes a VPS through a styled in-panel confirmation", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "delete confirmation layout is covered in desktop detail view");
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  await activate(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }).first());
+  await expect(page.getByRole("heading", { name: "backup-nyc-03 (yc03)" })).toBeVisible();
+
+  await activate(page.locator(".deleteVpsControls").getByRole("button", { name: "Delete VPS" }));
+  const prompt = page.locator(".inspector .confirmationPrompt");
+  await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
+  await expect(prompt).toContainText("deactivates VPS access immediately");
+  await activate(prompt.getByRole("button", { name: "Cancel" }));
+  await expect(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })).toBeVisible();
+
+  await activate(page.locator(".deleteVpsControls").getByRole("button", { name: "Delete VPS" }));
+  await activate(prompt.getByRole("button", { name: "Delete VPS" }));
+  await expect(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })).toHaveCount(0);
+  await expect(page.locator(".consoleHeader").getByText("2 connected / 2 total")).toBeVisible();
+
+  const deleteRequest = await page.evaluate(() => {
+    const requests = (window as unknown as { __vpsmanTestRequests: { agentDeletes: unknown[] } }).__vpsmanTestRequests;
+    return requests.agentDeletes.at(-1);
+  });
+  expect(deleteRequest).toMatchObject({
+    confirmed: true,
+    reason: "Deleted from fleet inventory panel",
+  });
 });
 
 test("clears browser-local console selections without deleting vault records", async ({ page }, testInfo) => {
@@ -503,6 +551,28 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({ pag
   });
 });
 
+test("shows grouped execution summaries for job output details", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "job detail summary density is covered in the desktop layout");
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "History");
+  await activate(page.getByRole("button", { name: "2", exact: true }).first());
+
+  await expect(page.getByRole("heading", { name: "Execution summary" })).toBeVisible();
+  await expect(page.getByText(/2 groups across 2 targets/)).toBeVisible();
+  await expect(page.getByText("Grouped outcomes")).toBeVisible();
+  await expect(page.getByText("Target result details")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Binary", exact: true })).toHaveClass(/selected/);
+
+  await activate(page.getByRole("button", { name: "Text", exact: true }));
+  await expect(page.getByRole("button", { name: "Text", exact: true })).toHaveClass(/selected/);
+  const comparisonRequest = await page.evaluate(() => {
+    const requests = (window as unknown as { __vpsmanTestRequests: { jobOutputComparisons: unknown[] } }).__vpsmanTestRequests;
+    return requests.jobOutputComparisons.at(-1);
+  });
+  expect(comparisonRequest).toMatchObject({ mode: "text" });
+});
+
 test("generates local proof envelopes before dispatching a privileged job", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "privileged dispatch flow is covered in the desktop console layout");
 
@@ -519,7 +589,7 @@ test("generates local proof envelopes before dispatching a privileged job", asyn
   await checkControl(page.getByLabel("edge-sfo-01"));
   await activate(page.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("1 resolved targets")).toBeVisible();
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(page.locator(".commandComposer"));
 
   await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
   const request = await page.evaluate(() => {
@@ -555,7 +625,7 @@ test("dispatches terminal session control operations with local proof", async ({
   await composer.getByLabel("Terminal columns").fill("100");
   await composer.getByLabel("Terminal rows").fill("30");
   await checkControl(composer.getByLabel("edge-sfo-01"));
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
   const request = await page.evaluate(() => {
@@ -604,7 +674,7 @@ test("previews degraded update targets and sends explicit force override", async
 
   await checkControl(page.getByLabel("Force unprivileged job best effort"));
   await expect(impact.getByText("Forced best effort")).toBeVisible();
-  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(page.locator(".commandComposer"));
   await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
   await expect
     .poll(() =>

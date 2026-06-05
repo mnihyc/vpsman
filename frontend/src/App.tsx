@@ -160,6 +160,7 @@ export function App() {
               fleetAlertNotificationChannels={dashboard.fleetAlertNotificationChannels}
               fleetAlertNotifications={dashboard.fleetAlertNotifications}
               lastLiveEvent={dashboard.lastLiveEvent}
+              onDeleteAgent={dashboard.deleteAgent}
               onSelectAgent={setSelectedAgentId}
               onUpdateAgentAlias={dashboard.updateAgentAlias}
               scopeActive={hasFleetScope}

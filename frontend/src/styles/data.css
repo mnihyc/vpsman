@@ -919,6 +919,67 @@
   border-top: 1px solid #dfe3eb;
 }
 
+.executionSummary {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #dfe3eb;
+}
+
+.comparisonToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+}
+
+.executionSummaryStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 0 18px;
+}
+
+.executionSummaryStats span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #5f6368;
+  font-size: 12px;
+  padding: 10px;
+}
+
+.executionSummaryStats strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #202124;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparisonGroupGrid,
+.comparisonTargetGrid {
+  grid-template-columns: minmax(180px, 1.1fr) minmax(130px, 0.8fr) minmax(170px, 1fr) minmax(110px, 0.6fr);
+}
+
+.clickableRow {
+  cursor: pointer;
+}
+
+.clickableRow:hover,
+.clickableRow.selected {
+  background: #eef4ff;
+}
+
+.clickableRow.selected {
+  box-shadow: inset 3px 0 0 #1a73e8;
+}
+
 .outputList {
   display: grid;
 }

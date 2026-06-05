@@ -3,6 +3,7 @@ import {
   Activity,
   LayoutPanelTop,
   Languages,
+  ListChecks,
   RotateCcw,
   Save,
   ServerCog,
@@ -212,6 +213,37 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
               </button>
             </div>
             {localSelectionMessage && <p className="preferencesNotice">{localSelectionMessage}</p>}
+          </PreferenceGroup>
+
+          <PreferenceGroup
+            description="Controls how bulk job result groups are compared before individual target output chunks are shown."
+            icon={<ListChecks size={18} />}
+            title="Bulk execution summaries"
+          >
+            <label>
+              <span>Default comparison</span>
+              <select
+                aria-label="Bulk output comparison default"
+                value={draft.bulk_output_compare_mode}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    bulk_output_compare_mode: event.target.value === "text" ? "text" : "binary",
+                  }))
+                }
+              >
+                <option value="binary">Binary exact</option>
+                <option value="text">Text normalized</option>
+              </select>
+            </label>
+            <div className="preferenceHint">
+              <strong>
+                {draft.bulk_output_compare_mode === "text" ? "Text normalized" : "Binary exact"}
+              </strong>
+              <span>
+                Binary is safest for correctness; text mode normalizes line endings and trailing whitespace for command output review.
+              </span>
+            </div>
           </PreferenceGroup>
 
           <PreferenceGroup

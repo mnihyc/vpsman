@@ -51,11 +51,12 @@ use crate::{
     },
     routes_inventory::{
         assign_agent_tag, assign_data_source_preset, clone_data_source_preset,
-        create_data_source_preset, create_tag, diff_data_source_preset, fleet_summary, list_agents,
-        list_data_source_assignments, list_data_source_presets, list_data_source_status,
-        list_gateway_sessions, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
-        list_telemetry_tunnels, render_data_source_hot_config, resolve_bulk_targets,
-        test_data_source_preset, update_agent_alias, update_data_source_preset,
+        create_data_source_preset, create_tag, delete_agent, diff_data_source_preset,
+        fleet_summary, list_agents, list_data_source_assignments, list_data_source_presets,
+        list_data_source_status, list_gateway_sessions, list_tags, list_telemetry_network_rates,
+        list_telemetry_rollups, list_telemetry_tunnels, render_data_source_hot_config,
+        resolve_bulk_targets, test_data_source_preset, update_agent_alias,
+        update_data_source_preset,
     },
     routes_job_history::{
         compare_job_outputs, download_job_output_artifact, get_job, list_audit_logs,
@@ -163,6 +164,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(process_fleet_alert_notifications),
         )
         .route("/api/v1/agents", get(list_agents))
+        .route("/api/v1/agents/{client_id}/delete", post(delete_agent))
         .route("/api/v1/gateway-sessions", get(list_gateway_sessions))
         .route("/api/v1/telemetry/rollups", get(list_telemetry_rollups))
         .route(

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ProofVaultBox } from "../components/ProofVaultBox";
 import { readFilePushPayload, sha256Hex } from "../fileTransfer";
 import { buildEnvelopesForOperation, deriveSuperKeyHex, parseCommandArgv, type ProofMaterial } from "../proof";
@@ -196,6 +197,7 @@ export function JobDispatchPanel({
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
@@ -311,6 +313,24 @@ export function JobDispatchPanel({
     await runPanelAction(setPending, setActionError, async () => {
       setPreview(await onResolveTargets(targetSelection()));
     });
+  }
+
+  function submitJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setActionError(null);
+    if (!proofMaterial) {
+      setActionError("Proof is locked");
+      return;
+    }
+    if (selectedTargetCount === 0) {
+      setActionError("Select at least one VPS or tag target");
+      return;
+    }
+    if (!operationReady) {
+      setActionError("Complete the selected operation before dispatching");
+      return;
+    }
+    setDispatchPromptOpen(true);
   }
 
   function applyCommandTemplate(templateId: string) {
@@ -458,8 +478,8 @@ export function JobDispatchPanel({
     });
   }
 
-  async function submitJob(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function dispatchJobNow() {
+    setDispatchPromptOpen(false);
     await runPanelAction(setPending, setActionError, async () => {
       if (!proofMaterial) {
         throw new Error("Proof is locked");
@@ -875,14 +895,35 @@ export function JobDispatchPanel({
           timeoutSecs={timeoutSecs}
         />
 
+        <ConfirmationPrompt
+          confirmLabel="Dispatch job"
+          detail="Submitting this job sends signed privileged work to the selected VPS targets. Review the scope before the control plane accepts it."
+          items={[
+            { label: "Operation", value: operationCommandLabel(mode, commandText) },
+            { label: "Targets", value: `${selectedClients.length} VPS / ${selectedTags.length} tags` },
+            { label: "Mode", value: destructive ? "Destructive" : forceUnprivileged ? "Forced best effort" : "Standard" },
+          ]}
+          onCancel={() => setDispatchPromptOpen(false)}
+          onConfirm={() => void dispatchJobNow()}
+          open={dispatchPromptOpen}
+          pending={pending}
+          title="Confirm job dispatch"
+          tone={destructive ? "danger" : "normal"}
+        />
+
         <div className="dispatchActions">
-          <button className="secondaryAction" disabled={pending || selectedTargetCount === 0} onClick={previewTargets} type="button">
+          <button
+            className="secondaryAction"
+            disabled={pending || dispatchPromptOpen || selectedTargetCount === 0}
+            onClick={previewTargets}
+            type="button"
+          >
             <CheckCircle2 size={17} />
             Preview
           </button>
           <button
             className="primaryAction"
-            disabled={pending || !operationReady || selectedTargetCount === 0 || !proofMaterial}
+            disabled={pending || dispatchPromptOpen || !operationReady || selectedTargetCount === 0 || !proofMaterial}
             type="submit"
           >
             <Play size={17} />

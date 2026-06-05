@@ -724,11 +724,6 @@
   grid-column: 1 / -1;
 }
 
-.workspace.jobWorkspace {
-  grid-template-columns: minmax(340px, 0.45fr) minmax(0, 1fr);
-  align-items: start;
-}
-
 .authWorkspace {
   display: grid;
   justify-items: center;
@@ -987,6 +982,37 @@
 .aliasEditor .errorText {
   grid-column: 1 / -1;
   color: #b3261e;
+}
+
+.deleteVpsControls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid #eef1f6;
+  border-bottom: 1px solid #eef1f6;
+  padding: 12px 18px;
+}
+
+.deleteVpsControls div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.deleteVpsControls strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.deleteVpsControls span {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.deleteVpsControls .dangerAction {
+  flex: 0 0 auto;
 }
 
 .authVaultUnlock {

@@ -40,13 +40,14 @@ impl Repository {
                 .read()
                 .await
                 .get(client_id)
-                .is_some_and(|expected| constant_time_eq(expected, &provided))),
+                .is_some_and(|expected| constant_time_eq(expected, &provided))
+                && !memory.hidden_clients.read().await.contains(client_id)),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
                     SELECT public_key
                     FROM clients
-                    WHERE id = $1
+                    WHERE id = $1 AND hidden_at IS NULL
                     "#,
                 )
                 .bind(client_id)
@@ -63,9 +64,19 @@ impl Repository {
 
     pub(crate) async fn upsert_agent_hello(&self, event: &GatewayAgentHelloIngest) -> Result<()> {
         let update_heartbeat = event.hello.update_heartbeat.clone();
+        let mut accepted_hello = true;
         match self {
             Self::Memory(memory) => {
-                upsert_memory_agent(&memory.agents, &event.hello).await;
+                if !memory
+                    .hidden_clients
+                    .read()
+                    .await
+                    .contains(&event.hello.client_id)
+                {
+                    upsert_memory_agent(&memory.agents, &event.hello).await;
+                } else {
+                    accepted_hello = false;
+                }
             }
             Self::Postgres(pool) => {
                 let public_key = match event.noise_public_key_hex.as_deref() {
@@ -75,7 +86,7 @@ impl Repository {
                     None => Vec::new(),
                 };
                 let mut tx = pool.begin().await?;
-                sqlx::query(
+                let result = sqlx::query(
                     r#"
                     INSERT INTO clients (
                         id, display_name, public_key, status, agent_version,
@@ -93,6 +104,7 @@ impl Repository {
                         arch = EXCLUDED.arch,
                         capabilities = EXCLUDED.capabilities,
                         last_seen_at = now()
+                    WHERE clients.hidden_at IS NULL
                     "#,
                 )
                 .bind(&event.hello.client_id)
@@ -104,19 +116,22 @@ impl Repository {
                 .bind(sqlx::types::Json(&event.hello.capabilities))
                 .execute(&mut *tx)
                 .await?;
+                accepted_hello = result.rows_affected() > 0;
 
                 tx.commit().await?;
             }
         }
-        if let Some(heartbeat) = update_heartbeat.as_ref() {
-            debug!(
-                client_id = %event.hello.client_id,
-                activation_job_id = %heartbeat.activation_job_id,
-                sha256_hex = %heartbeat.sha256_hex,
-                "recording agent update heartbeat"
-            );
-            self.record_agent_update_heartbeat(&event.hello.client_id, heartbeat)
-                .await?;
+        if accepted_hello {
+            if let Some(heartbeat) = update_heartbeat.as_ref() {
+                debug!(
+                    client_id = %event.hello.client_id,
+                    activation_job_id = %heartbeat.activation_job_id,
+                    sha256_hex = %heartbeat.sha256_hex,
+                    "recording agent update heartbeat"
+                );
+                self.record_agent_update_heartbeat(&event.hello.client_id, heartbeat)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -124,6 +139,14 @@ impl Repository {
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<()> {
         match self {
             Self::Memory(memory) => {
+                if memory
+                    .hidden_clients
+                    .read()
+                    .await
+                    .contains(&event.telemetry.client_id)
+                {
+                    return Ok(());
+                }
                 let hello = AgentHello {
                     client_id: event.telemetry.client_id.clone(),
                     agent_version: String::new(),
@@ -159,6 +182,21 @@ impl Repository {
             Self::Postgres(pool) => {
                 let metrics = &event.telemetry.metrics;
                 let mut tx = pool.begin().await?;
+                let deleted: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT COALESCE(
+                        (SELECT hidden_at IS NOT NULL FROM clients WHERE id = $1),
+                        false
+                    )
+                    "#,
+                )
+                .bind(&event.telemetry.client_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if deleted {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
                     .await?;
                 upsert_postgres_telemetry_network_rates(
@@ -173,7 +211,7 @@ impl Repository {
                     r#"
                     UPDATE clients
                     SET status = 'connected', last_seen_at = now()
-                    WHERE id = $1
+                    WHERE id = $1 AND hidden_at IS NULL
                     "#,
                 )
                 .bind(&event.telemetry.client_id)

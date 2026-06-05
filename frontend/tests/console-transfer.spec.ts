@@ -20,6 +20,12 @@ async function checkControl(locator: Locator) {
   });
 }
 
+async function dispatchWithPrompt(composer: Locator) {
+  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
+  await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+}
+
 test("orchestrates browser resumable upload with ACK progress", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "browser resumable upload flow is covered in the desktop job composer");
 
@@ -44,7 +50,7 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   await composer.getByLabel("Resumable upload multi-target policy").selectOption("independent-offsets");
   await checkControl(composer.getByLabel("edge-sfo-01"));
   await checkControl(composer.getByLabel("Confirmed"));
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable upload progress")).toContainText("Upload complete");
   await expect(composer.getByLabel("Resumable upload progress")).toContainText("independent-offsets");
@@ -102,7 +108,7 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");
   await checkControl(composer.getByLabel("edge-sfo-01"));
   await checkControl(composer.getByLabel("Confirmed"));
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable upload progress")).toContainText("Upload complete");
 
@@ -152,9 +158,11 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   await checkControl(composer.getByLabel("edge-sfo-01"));
   await checkControl(composer.getByLabel("Confirmed"));
 
+  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    activate(composer.getByRole("button", { name: "Dispatch" })),
+    activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" })),
   ]);
 
   await expect(composer.getByLabel("Resumable download progress")).toContainText("Download complete");
@@ -246,7 +254,7 @@ test("streams browser resumable download through writable file handle", async ({
   await composer.getByLabel("Resumable download save method").selectOption("stream-to-file");
   await checkControl(composer.getByLabel("edge-sfo-01"));
   await checkControl(composer.getByLabel("Confirmed"));
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable download progress")).toContainText("Download complete");
   await expect(composer.getByLabel("Resumable download progress")).toContainText("stream-to-file");

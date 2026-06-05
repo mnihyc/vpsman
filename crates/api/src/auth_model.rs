@@ -68,6 +68,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) dashboard_resource_top_limit: u8,
     #[serde(default = "default_dashboard_top_limit")]
     pub(crate) dashboard_network_top_limit: u8,
+    #[serde(default = "default_bulk_output_compare_mode")]
+    pub(crate) bulk_output_compare_mode: String,
 }
 
 impl Default for OperatorPreferences {
@@ -80,6 +82,7 @@ impl Default for OperatorPreferences {
             dashboard_curve_exclusions: Vec::new(),
             dashboard_resource_top_limit: default_dashboard_top_limit(),
             dashboard_network_top_limit: default_dashboard_top_limit(),
+            bulk_output_compare_mode: default_bulk_output_compare_mode(),
         }
     }
 }
@@ -107,6 +110,11 @@ impl OperatorPreferences {
             ),
             dashboard_network_top_limit: normalize_dashboard_top_limit(
                 self.dashboard_network_top_limit,
+            ),
+            bulk_output_compare_mode: normalize_choice(
+                self.bulk_output_compare_mode,
+                "binary",
+                &["binary", "text"],
             ),
         }
     }
@@ -149,6 +157,10 @@ fn default_sidebar_subpanel_default() -> String {
 
 fn default_dashboard_top_limit() -> u8 {
     8
+}
+
+fn default_bulk_output_compare_mode() -> String {
+    "binary".to_string()
 }
 
 fn normalize_dashboard_top_limit(value: u8) -> u8 {

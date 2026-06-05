@@ -191,6 +191,12 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     if !(3..=16).contains(&preferences.dashboard_network_top_limit) {
         return Err(ApiError::bad_request("invalid_dashboard_network_top_limit"));
     }
+    if !matches!(
+        preferences.bulk_output_compare_mode.trim(),
+        "binary" | "text"
+    ) {
+        return Err(ApiError::bad_request("invalid_bulk_output_compare_mode"));
+    }
     Ok(())
 }
 

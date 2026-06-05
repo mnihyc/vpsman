@@ -1,12 +1,14 @@
 use anyhow::{ensure, Result};
 use base64::Engine as _;
 use sqlx::{types::Json as SqlJson, Row};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
-    model::{AuditLogView, AuthContext},
+    model::{AuditLogView, AuthContext, JobOutputView},
     model_command_templates::{
-        CommandTemplateView, JobOutputComparisonView, UpsertCommandTemplateRequest,
+        CommandTemplateView, JobOutputComparisonGroupView, JobOutputComparisonRowView,
+        JobOutputComparisonView, UpsertCommandTemplateRequest,
     },
     repository::Repository,
     unix_now,
@@ -212,59 +214,306 @@ impl Repository {
     pub(crate) async fn compare_job_outputs(
         &self,
         job_id: Uuid,
-    ) -> Result<Vec<JobOutputComparisonView>> {
+        mode: &str,
+    ) -> Result<JobOutputComparisonView> {
+        let mode = normalize_output_compare_mode(mode);
+        let targets = self.list_job_targets(job_id).await?;
         let outputs = self.list_job_outputs(job_id).await?;
         let compared_at = unix_now().to_string();
-        let mut grouped = std::collections::BTreeMap::<String, Vec<_>>::new();
+        let mut outputs_by_client = BTreeMap::<String, Vec<JobOutputView>>::new();
         for output in outputs {
-            if output.stream == "status" {
-                continue;
-            }
-            grouped
+            outputs_by_client
                 .entry(output.client_id.clone())
                 .or_default()
                 .push(output);
         }
-        let mut rows = Vec::new();
-        let mut hash_counts = std::collections::BTreeMap::<String, usize>::new();
-        for (client_id, mut client_outputs) in grouped {
-            client_outputs.sort_by_key(|output| output.seq);
-            let mut bytes = Vec::new();
-            let mut exit_code = None;
-            for output in &client_outputs {
-                if let Ok(decoded) =
-                    base64::engine::general_purpose::STANDARD.decode(&output.data_base64)
-                {
-                    bytes.extend(decoded);
-                }
-                exit_code = output.exit_code.or(exit_code);
-            }
-            let output_sha256_hex = vpsman_common::payload_hash(&bytes);
-            *hash_counts.entry(output_sha256_hex.clone()).or_default() += 1;
-            rows.push(JobOutputComparisonView {
-                job_id,
-                client_id,
-                output_sha256_hex,
-                stream_count: client_outputs.len() as i32,
-                byte_count: bytes.len() as i64,
-                exit_code,
-                matches_majority: false,
-                preview: sanitized_preview(&bytes),
-                compared_at: compared_at.clone(),
-            });
+
+        let mut group_rows = BTreeMap::<OutputComparisonKey, Vec<OutputComparisonRowBuild>>::new();
+        for target in targets {
+            let signature = output_signature(
+                outputs_by_client
+                    .remove(&target.client_id)
+                    .unwrap_or_default(),
+                &mode,
+            );
+            let key = OutputComparisonKey {
+                status: target.status.clone(),
+                exit_code: target.exit_code,
+                output_digest_hex: signature.output_digest_hex.clone(),
+                output_compare_basis: signature.output_compare_basis.clone(),
+            };
+            group_rows
+                .entry(key)
+                .or_default()
+                .push(OutputComparisonRowBuild {
+                    client_id: target.client_id,
+                    status: target.status,
+                    exit_code: target.exit_code,
+                    output_digest_hex: signature.output_digest_hex,
+                    output_compare_basis: signature.output_compare_basis,
+                    stream_count: signature.stream_count,
+                    byte_count: signature.byte_count,
+                    preview: signature.preview,
+                });
         }
-        let majority_hash = hash_counts
-            .into_iter()
-            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
-            .map(|(hash, _)| hash);
-        if let Some(majority_hash) = majority_hash {
-            for row in &mut rows {
-                row.matches_majority = row.output_sha256_hex == majority_hash;
+        for (client_id, client_outputs) in outputs_by_client {
+            let signature = output_signature(client_outputs, &mode);
+            let key = OutputComparisonKey {
+                status: "unknown".to_string(),
+                exit_code: None,
+                output_digest_hex: signature.output_digest_hex.clone(),
+                output_compare_basis: signature.output_compare_basis.clone(),
+            };
+            group_rows
+                .entry(key)
+                .or_default()
+                .push(OutputComparisonRowBuild {
+                    client_id,
+                    status: "unknown".to_string(),
+                    exit_code: None,
+                    output_digest_hex: signature.output_digest_hex,
+                    output_compare_basis: signature.output_compare_basis,
+                    stream_count: signature.stream_count,
+                    byte_count: signature.byte_count,
+                    preview: signature.preview,
+                });
+        }
+
+        let total_targets = group_rows.values().map(|rows| rows.len()).sum::<usize>() as i32;
+        let mut ordered_groups = group_rows.into_iter().collect::<Vec<_>>();
+        ordered_groups.sort_by(|(left_key, left_rows), (right_key, right_rows)| {
+            right_rows
+                .len()
+                .cmp(&left_rows.len())
+                .then_with(|| left_key.status.cmp(&right_key.status))
+                .then_with(|| left_key.exit_code.cmp(&right_key.exit_code))
+                .then_with(|| left_key.output_digest_hex.cmp(&right_key.output_digest_hex))
+        });
+        let largest_group_size = ordered_groups
+            .first()
+            .map(|(_, rows)| rows.len())
+            .unwrap_or_default();
+        let mut groups = Vec::with_capacity(ordered_groups.len());
+        let mut rows = Vec::with_capacity(total_targets as usize);
+        for (index, (key, mut group_members)) in ordered_groups.into_iter().enumerate() {
+            group_members.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+            let group_id = format!("g{}", index + 1);
+            let group_size = group_members.len();
+            let representative_client_id = group_members
+                .first()
+                .map(|row| row.client_id.clone())
+                .unwrap_or_default();
+            let client_ids = group_members
+                .iter()
+                .map(|row| row.client_id.clone())
+                .collect::<Vec<_>>();
+            let stream_count = group_members
+                .iter()
+                .map(|row| row.stream_count)
+                .sum::<i32>();
+            let byte_count = group_members.iter().map(|row| row.byte_count).sum::<i64>();
+            let preview = group_members
+                .first()
+                .map(|row| row.preview.clone())
+                .unwrap_or_else(|| "No retained output".to_string());
+            groups.push(JobOutputComparisonGroupView {
+                group_id: group_id.clone(),
+                status: key.status,
+                exit_code: key.exit_code,
+                output_digest_hex: key.output_digest_hex,
+                output_compare_basis: key.output_compare_basis,
+                target_count: group_size as i32,
+                stream_count,
+                byte_count,
+                representative_client_id,
+                client_ids,
+                preview,
+            });
+            for row in group_members {
+                rows.push(JobOutputComparisonRowView {
+                    job_id,
+                    client_id: row.client_id,
+                    group_id: group_id.clone(),
+                    status: row.status,
+                    exit_code: row.exit_code,
+                    output_digest_hex: row.output_digest_hex,
+                    output_compare_basis: row.output_compare_basis,
+                    stream_count: row.stream_count,
+                    byte_count: row.byte_count,
+                    matches_largest_group: largest_group_size > 0
+                        && group_size == largest_group_size,
+                    preview: row.preview,
+                });
             }
         }
         rows.sort_by(|left, right| left.client_id.cmp(&right.client_id));
-        Ok(rows)
+        Ok(JobOutputComparisonView {
+            job_id,
+            mode,
+            compared_at,
+            total_targets,
+            compared_targets: rows.len() as i32,
+            group_count: groups.len() as i32,
+            groups,
+            rows,
+        })
     }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OutputComparisonKey {
+    status: String,
+    exit_code: Option<i32>,
+    output_digest_hex: String,
+    output_compare_basis: String,
+}
+
+struct OutputComparisonRowBuild {
+    client_id: String,
+    status: String,
+    exit_code: Option<i32>,
+    output_digest_hex: String,
+    output_compare_basis: String,
+    stream_count: i32,
+    byte_count: i64,
+    preview: String,
+}
+
+struct OutputSignature {
+    output_digest_hex: String,
+    output_compare_basis: String,
+    stream_count: i32,
+    byte_count: i64,
+    preview: String,
+}
+
+fn normalize_output_compare_mode(mode: &str) -> String {
+    match mode.trim() {
+        "text" => "text".to_string(),
+        _ => "binary".to_string(),
+    }
+}
+
+fn output_signature(mut outputs: Vec<JobOutputView>, mode: &str) -> OutputSignature {
+    outputs.sort_by_key(|output| output.seq);
+    if outputs.is_empty() {
+        return OutputSignature {
+            output_digest_hex: vpsman_common::payload_hash(&[]),
+            output_compare_basis: mode.to_string(),
+            stream_count: 0,
+            byte_count: 0,
+            preview: "No retained output".to_string(),
+        };
+    }
+    if mode == "text" {
+        if let Some(signature) = text_output_signature(&outputs) {
+            return signature;
+        }
+    }
+    binary_output_signature(&outputs)
+}
+
+fn text_output_signature(outputs: &[JobOutputView]) -> Option<OutputSignature> {
+    let mut total_bytes = 0_i64;
+    let mut canonical = String::new();
+    let mut preview_text = String::new();
+    for output in outputs {
+        if output.storage != "inline" {
+            return None;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&output.data_base64)
+            .ok()?;
+        let byte_len = decoded.len();
+        let text = String::from_utf8(decoded).ok()?;
+        total_bytes += byte_len as i64;
+        let normalized = normalize_text_for_comparison(&text);
+        canonical.push_str(&output.stream);
+        canonical.push('\0');
+        canonical.push_str(&normalized);
+        canonical.push('\0');
+        if !normalized.is_empty() {
+            if !preview_text.is_empty() {
+                preview_text.push('\n');
+            }
+            preview_text.push_str(&normalized);
+        }
+    }
+    Some(OutputSignature {
+        output_digest_hex: vpsman_common::payload_hash(canonical.as_bytes()),
+        output_compare_basis: "text".to_string(),
+        stream_count: outputs.len() as i32,
+        byte_count: total_bytes,
+        preview: sanitized_preview(preview_text.as_bytes()),
+    })
+}
+
+fn binary_output_signature(outputs: &[JobOutputView]) -> OutputSignature {
+    let mut byte_count = 0_i64;
+    let mut canonical = Vec::new();
+    let mut preview_bytes = Vec::new();
+    let mut has_artifact_backed_output = false;
+    for output in outputs {
+        canonical.extend_from_slice(output.stream.as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(output.storage.as_bytes());
+        canonical.push(0);
+        if output.storage == "inline" {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&output.data_base64)
+                .unwrap_or_default();
+            byte_count += decoded.len() as i64;
+            canonical.extend_from_slice(decoded.len().to_string().as_bytes());
+            canonical.push(0);
+            canonical.extend_from_slice(vpsman_common::payload_hash(&decoded).as_bytes());
+            preview_bytes.extend_from_slice(&decoded);
+        } else {
+            has_artifact_backed_output = true;
+            let size = output.artifact_size_bytes.unwrap_or_default().max(0);
+            byte_count += size;
+            canonical.extend_from_slice(size.to_string().as_bytes());
+            canonical.push(0);
+            canonical.extend_from_slice(
+                output
+                    .artifact_sha256_hex
+                    .as_deref()
+                    .unwrap_or("missing-artifact-hash")
+                    .as_bytes(),
+            );
+        }
+        canonical.push(0);
+    }
+    let preview = if has_artifact_backed_output {
+        format!(
+            "Artifact-backed retained output; {} chunks, {} bytes. Download chunks for full content.",
+            outputs.len(),
+            byte_count
+        )
+    } else {
+        sanitized_preview(&preview_bytes)
+    };
+    OutputSignature {
+        output_digest_hex: vpsman_common::payload_hash(&canonical),
+        output_compare_basis: if has_artifact_backed_output {
+            "binary_metadata".to_string()
+        } else {
+            "binary".to_string()
+        },
+        stream_count: outputs.len() as i32,
+        byte_count,
+        preview,
+    }
+}
+
+fn normalize_text_for_comparison(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 fn command_template_from_row(

@@ -36,8 +36,15 @@ CREATE TABLE clients (
     arch TEXT,
     capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
     last_seen_at TIMESTAMPTZ,
+    hidden_at TIMESTAMPTZ,
+    hidden_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    hidden_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX clients_visible_status_idx
+    ON clients (status, last_seen_at DESC)
+    WHERE hidden_at IS NULL;
 
 CREATE TABLE tags (
     id UUID PRIMARY KEY,

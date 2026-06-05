@@ -20,6 +20,7 @@ import type {
   CreateJobResponse,
   DispatchScheduledJobRequest,
   JobHistoryRecord,
+  JobOutputCompareMode,
   JobOutputComparisonRecord,
   JobOutputRecord,
   JobTargetRecord,
@@ -207,10 +208,10 @@ export function useJobsData(
   );
 
   const loadJobOutputComparison = useCallback(
-    async (jobId: string) => {
+    async (jobId: string, mode: JobOutputCompareMode) => {
       try {
-        return await apiGet<JobOutputComparisonRecord[]>(
-          `/api/v1/jobs/${encodeURIComponent(jobId)}/output-comparison`,
+        return await apiGet<JobOutputComparisonRecord>(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/output-comparison?mode=${encodeURIComponent(mode)}`,
           apiToken,
         );
       } catch (error) {

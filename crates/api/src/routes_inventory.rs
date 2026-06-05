@@ -14,11 +14,11 @@ use crate::{
         DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
         DataSourcePresetDiffRequest, DataSourcePresetDiffView, DataSourcePresetQuery,
         DataSourcePresetTestView, DataSourcePresetView, DataSourceStatusQuery,
-        DataSourceStatusView, FleetSummary, GatewaySessionView, HistoryQuery, TagView,
-        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
-        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
-        TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
-        UpdateDataSourcePresetResponse, WsEvent,
+        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse, FleetSummary,
+        GatewaySessionView, HistoryQuery, TagView, TelemetryNetworkRateQuery,
+        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery,
+        TelemetryTunnelView, TestDataSourcePresetRequest, UpdateAgentAliasRequest,
+        UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse, WsEvent,
     },
     state::AppState,
     util::limit_or_default,
@@ -65,6 +65,28 @@ pub(crate) async fn update_agent_alias(
         gateway_id: "inventory_alias".to_string(),
     });
     Ok(Json(agent))
+}
+
+pub(crate) async fn delete_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<DeleteAgentRequest>,
+) -> Result<Json<DeleteAgentResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_delete_agent_request(&request)?;
+    let response = state
+        .repo
+        .delete_agent(&client_id, &request, &operator)
+        .await
+        .map_err(agent_mutation_error)?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id,
+        gateway_id: "inventory_delete".to_string(),
+    });
+    Ok(Json(response))
 }
 
 pub(crate) async fn list_gateway_sessions(
@@ -612,6 +634,28 @@ fn validate_agent_alias(display_name: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("agent_alias_invalid"));
     }
     Ok(())
+}
+
+fn validate_delete_agent_request(request: &DeleteAgentRequest) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::conflict("agent_delete_confirmation_required"));
+    }
+    if request
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().len() > 240 || reason.chars().any(char::is_control))
+    {
+        return Err(ApiError::bad_request("agent_delete_reason_invalid"));
+    }
+    Ok(())
+}
+
+fn agent_mutation_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("agent_not_found") {
+        ApiError::not_found("agent_not_found")
+    } else {
+        ApiError::from(error)
+    }
 }
 
 fn validate_telemetry_network_rate_query(

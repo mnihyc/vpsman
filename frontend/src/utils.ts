@@ -91,6 +91,7 @@ export const DEFAULT_VPS_NAME_DISPLAY_MODE: VpsNameDisplayMode =
   "name_id_suffix";
 
 export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
+  bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,

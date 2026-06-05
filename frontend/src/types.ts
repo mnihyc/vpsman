@@ -389,6 +389,17 @@ export type AgentView = {
   capabilities: AgentCapabilitySnapshot;
 };
 
+export type DeleteAgentRequest = {
+  confirmed: boolean;
+  reason?: string | null;
+};
+
+export type DeleteAgentResponse = {
+  client_id: string;
+  deleted: boolean;
+  deleted_at: string;
+};
+
 export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
@@ -527,6 +538,7 @@ export type OperatorPreferences = {
   dashboard_curve_exclusions: string[];
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
+  bulk_output_compare_mode: JobOutputCompareMode;
 };
 
 export type OperatorSessionRecord = {
@@ -609,16 +621,45 @@ export type UpsertCommandTemplateRequest = {
   confirmed: boolean;
 };
 
+export type JobOutputCompareMode = "binary" | "text";
+
 export type JobOutputComparisonRecord = {
   job_id: string;
-  client_id: string;
-  output_sha256_hex: string;
+  mode: JobOutputCompareMode;
+  compared_at: string;
+  total_targets: number;
+  compared_targets: number;
+  group_count: number;
+  groups: JobOutputComparisonGroupRecord[];
+  rows: JobOutputComparisonRowRecord[];
+};
+
+export type JobOutputComparisonGroupRecord = {
+  group_id: string;
+  status: string;
+  exit_code: number | null;
+  output_digest_hex: string;
+  output_compare_basis: "binary" | "text" | "binary_metadata" | string;
+  target_count: number;
   stream_count: number;
   byte_count: number;
-  exit_code: number | null;
-  matches_majority: boolean;
+  representative_client_id: string;
+  client_ids: string[];
   preview: string;
-  compared_at: string;
+};
+
+export type JobOutputComparisonRowRecord = {
+  job_id: string;
+  client_id: string;
+  group_id: string;
+  status: string;
+  exit_code: number | null;
+  output_digest_hex: string;
+  output_compare_basis: "binary" | "text" | "binary_metadata" | string;
+  stream_count: number;
+  byte_count: number;
+  matches_largest_group: boolean;
+  preview: string;
 };
 
 export type ScheduleRecord = {

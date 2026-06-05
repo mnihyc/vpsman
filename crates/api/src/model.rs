@@ -62,6 +62,20 @@ pub(crate) struct AgentView {
     pub(crate) capabilities: AgentCapabilitySnapshot,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct DeleteAgentRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DeleteAgentResponse {
+    pub(crate) client_id: String,
+    pub(crate) deleted: bool,
+    pub(crate) deleted_at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct GatewaySessionView {
     pub(crate) id: Uuid,

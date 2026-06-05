@@ -103,6 +103,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     assert_eq!(updated.preferences.vps_name_display_mode, "name");
     assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
     assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
+    assert_eq!(updated.preferences.bulk_output_compare_mode, "binary");
 
     let context = repo
         .authenticate_access_token(&auth.access_token)
@@ -115,6 +116,10 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         Some("UTC")
     );
     assert_eq!(context.operator.preferences.sidebar_subpanel_default, "all");
+    assert_eq!(
+        context.operator.preferences.bulk_output_compare_mode,
+        "binary"
+    );
 }
 
 #[tokio::test]
@@ -148,6 +153,13 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "invalid_timezone",
+        ),
+        (
+            OperatorPreferences {
+                bulk_output_compare_mode: "loose".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_bulk_output_compare_mode",
         ),
     ];
 

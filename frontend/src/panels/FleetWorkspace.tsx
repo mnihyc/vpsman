@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Activity, AlertTriangle, Bell, Boxes, Gauge, Network, Server } from "lucide-react";
+import { Activity, AlertTriangle, Bell, Boxes, Gauge, Network, Server, Trash2 } from "lucide-react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { Metric } from "../components/Metric";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { formatVpsName, type VpsNameDisplayMode } from "../utils";
+import { formatVpsName, runPanelAction, type VpsNameDisplayMode } from "../utils";
 import type {
   AgentView,
   FleetAlertPolicyRecord,
@@ -18,6 +19,8 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  DeleteAgentRequest,
+  DeleteAgentResponse,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
@@ -38,6 +41,7 @@ export function FleetWorkspace({
   fleetAlertNotifications,
   lastLiveEvent,
   onDispatchFleetAlertNotifications,
+  onDeleteAgent,
   onProcessFleetAlertNotifications,
   onSelectAgent,
   onUpdateAgentAlias,
@@ -64,10 +68,11 @@ export function FleetWorkspace({
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onDeleteAgent: (clientId: string, request: DeleteAgentRequest) => Promise<DeleteAgentResponse>;
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
-  onSelectAgent: (agentId: string) => void;
+  onSelectAgent: (agentId: string | null) => void;
   onUpdateAgentAlias: (clientId: string, displayName: string) => Promise<AgentView>;
   onUpdateFleetAlertState: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
   onUpsertFleetAlertNotificationChannel: (
@@ -87,6 +92,9 @@ export function FleetWorkspace({
   const [aliasDraft, setAliasDraft] = useState("");
   const [aliasPending, setAliasPending] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
+  const [deletePromptOpen, setDeletePromptOpen] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const selectedTags = selectedAgent?.tags ?? [];
   const isNetworkManaged = selectedTags.some((tag) => ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()));
   const latestRollups = useMemo(() => latestTelemetryRollupsByClient(telemetryRollups), [telemetryRollups]);
@@ -173,6 +181,8 @@ export function FleetWorkspace({
   useEffect(() => {
     setAliasDraft(selectedAgent?.display_name ?? "");
     setAliasError(null);
+    setDeletePromptOpen(false);
+    setDeleteError(null);
   }, [selectedAgent?.display_name, selectedAgent?.id]);
 
   async function submitAlias(event: FormEvent<HTMLFormElement>) {
@@ -194,6 +204,21 @@ export function FleetWorkspace({
     } finally {
       setAliasPending(false);
     }
+  }
+
+  async function deleteSelectedAgent() {
+    if (!selectedAgent) {
+      return;
+    }
+    const clientId = selectedAgent.id;
+    await runPanelAction(setDeletePending, setDeleteError, async () => {
+      await onDeleteAgent(clientId, {
+        confirmed: true,
+        reason: "Deleted from fleet inventory panel",
+      });
+      setDeletePromptOpen(false);
+      onSelectAgent(null);
+    });
   }
 
   return (
@@ -332,6 +357,41 @@ export function FleetWorkspace({
             {aliasError && <small className="errorText">{aliasError}</small>}
           </form>
         )}
+        {selectedAgent && (
+          <div className="deleteVpsControls">
+            <div>
+              <strong>Delete VPS</strong>
+              <span>Deactivate access immediately and remove this VPS from normal workflows.</span>
+            </div>
+            <button
+              className="secondaryAction dangerAction"
+              disabled={deletePending}
+              onClick={() => setDeletePromptOpen(true)}
+              type="button"
+            >
+              <Trash2 size={16} />
+              Delete VPS
+            </button>
+          </div>
+        )}
+        {selectedAgent && (
+          <ConfirmationPrompt
+            confirmLabel="Delete VPS"
+            detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
+            items={[
+              { label: "VPS", value: formatVpsName(selectedAgent, vpsNameDisplayMode) },
+              { label: "Client ID", value: selectedAgent.id },
+              { label: "Status", value: selectedAgent.status },
+            ]}
+            onCancel={() => setDeletePromptOpen(false)}
+            onConfirm={() => void deleteSelectedAgent()}
+            open={deletePromptOpen}
+            pending={deletePending}
+            title="Delete VPS from panel"
+            tone="danger"
+          />
+        )}
+        {deleteError && <small className="errorText">{deleteError}</small>}
         <div className="detailTabs" role="tablist" aria-label="VPS detail sections">
           {detailTabs.map((tab) => (
             <button
