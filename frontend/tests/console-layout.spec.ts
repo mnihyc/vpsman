@@ -402,7 +402,7 @@ test("previews degraded update targets and sends explicit force override", async
   await page.getByLabel("Super password").fill("local-super-password");
   await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
   await activate(page.getByRole("button", { name: "Use proof" }));
-  await activate(page.getByRole("button", { name: "Update" }));
+  await activate(page.getByRole("button", { name: "Update", exact: true }));
   await page.getByLabel("Agent update artifact URL").fill("https://updates.example/vpsman-agent");
   await page.getByLabel("Agent update SHA-256").fill("a".repeat(64));
   await checkControl(page.locator(".commandComposer").getByLabel("backup-nyc-03"));

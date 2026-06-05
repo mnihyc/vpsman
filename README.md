@@ -92,10 +92,12 @@ data.
 
 ## Remote Agent Enrollment
 
-Remote VPS agents connect to the gateway TCP listener, not to the internal
-gateway control port. Keep `9444` private. For public agents, configure the
-gateway for enrolled Noise IK identity, expose or proxy TCP `9443`, create a
-short-lived enrollment token, and run the deploy installer on the VPS.
+Remote VPS agents connect to the raw TCP gateway listener, not to the internal
+gateway control port and not to an HTTPS gateway URL. Keep `9444` private. For
+public agents, configure the gateway for enrolled Noise IK identity, expose or
+proxy TCP `9443` as a `host:port` endpoint, create a short-lived enrollment
+token through the HTTP(S) control-plane API, and run the deploy installer on the
+VPS.
 
 The deploy installer supports a root privileged systemd service and an
 unprivileged normal-user systemd service. The agent can hot-replace and restart

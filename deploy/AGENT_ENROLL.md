@@ -7,6 +7,14 @@ Remote agents use the gateway TCP listener on `9443`. Do not expose the gateway
 control listener on `9444`; it is only for API-to-gateway traffic inside the
 Compose network.
 
+Protocol surfaces are separate:
+
+- Enrollment API: HTTP(S) URL used by `vpsctl` and `deploy/enroll-agent.sh` to
+  claim enrollment tokens.
+- Agent gateway: raw TCP `host:port` endpoint, usually `your-gateway.example:9443`.
+  Do not add `http://` or `https://` to this endpoint.
+- Gateway control: HTTP listener on `9444`, private/internal only.
+
 ## 1. Prepare The Public Gateway
 
 Public agent ingress must use enrolled Noise IK identity. The default `dev_xx`
@@ -25,12 +33,16 @@ Set the deploy environment:
 VPSMAN_GATEWAY_NOISE_MODE=enrolled_ik
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX=<gateway_private_key_hex>
 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_public_key_hex>
-VPSMAN_PUBLIC_GATEWAY_ENDPOINTS=public=your-domain.example:9443=10
-VPSMAN_DISCOVERY_URL=https://your-domain.example/.well-known/vpsman/endpoints.json
+VPSMAN_PUBLIC_GATEWAY_ENDPOINTS=public=your-gateway.example:9443=10
+VPSMAN_DISCOVERY_URL=https://panel.example.com/.well-known/vpsman/endpoints.json
 ```
 
 Leave `VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX` empty for normal fleets so
 the gateway validates each enrolled agent key through the API.
+
+`VPSMAN_PUBLIC_GATEWAY_ENDPOINTS` is a raw TCP endpoint list in
+`label=host:port=priority` form. `VPSMAN_DISCOVERY_URL` is an optional HTTP(S)
+URL for publishing that raw TCP endpoint list; it is not the gateway transport.
 
 Expose TCP `9443` through one of these paths:
 
@@ -53,22 +65,27 @@ cd deploy
 
 ## 2. Create An Enrollment Token
 
-Create short-lived, client-bound tokens whenever possible:
+Create short-lived tokens. For a new VPS, do not bind the token to a semantic
+client id; the installer generates an opaque random `client-*` id. Use
+`--default-display-name` for the human label stored in the control plane.
 
 ```sh
-export VPSMAN_API_URL=https://your-domain.example
+export VPSMAN_ENROLLMENT_API_URL=https://panel.example.com
 export VPSMAN_API_TOKEN=<operator_access_token>
 
-vpsctl --api-url "$VPSMAN_API_URL" --api-token "$VPSMAN_API_TOKEN" \
+vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" \
   --output pretty-json \
   enrollment-token-create \
-  --allowed-client-id edge-01 \
   --default-display-name edge-01 \
   --default-tags edge,prod \
   --ttl-secs 1800
 ```
 
 Copy the `token` value from the response. Tokens are consumed when claimed.
+
+`--default-display-name` is not written into `agent.toml`. `--allowed-client-id`
+is only for binding a token to a known existing opaque client id, such as a
+rebuild or a tightly pinned provisioning workflow. It is not a display label.
 
 Keep a local super password and a 32-byte salt for privileged operations. The
 agent config stores only the derived proof key, not the plaintext password.
@@ -100,9 +117,8 @@ Run as root on the VPS:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env \
   VPSMAN_INSTALL_MODE=root \
-  VPSMAN_API_URL=https://your-domain.example \
+  VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
   VPSMAN_ENROLLMENT_TOKEN=<token> \
-  VPSMAN_CLIENT_ID=edge-01 \
   VPSMAN_SUPER_PASSWORD=<local_super_password> \
   VPSMAN_SUPER_SALT_HEX=<64_hex_salt> \
   bash
@@ -137,9 +153,8 @@ cd ~/vpsman-agent
 
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env \
   VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_API_URL=https://your-domain.example \
+  VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
   VPSMAN_ENROLLMENT_TOKEN=<token> \
-  VPSMAN_CLIENT_ID=edge-01 \
   VPSMAN_SUPER_PASSWORD=<local_super_password> \
   VPSMAN_SUPER_SALT_HEX=<64_hex_salt> \
   bash
@@ -207,8 +222,8 @@ then starts exactly the unit command again from that stable path.
 From the operator machine:
 
 ```sh
-vpsctl --api-url "$VPSMAN_API_URL" --api-token "$VPSMAN_API_TOKEN" agents
-vpsctl --api-url "$VPSMAN_API_URL" --api-token "$VPSMAN_API_TOKEN" gateway-sessions
+vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" agents
+vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" gateway-sessions
 ```
 
 On a root-mode VPS:
@@ -231,14 +246,15 @@ Use a confirmed re-enrollment token to preserve server-side identity, pools,
 tags, history, and migration context:
 
 ```sh
-vpsctl --api-url "$VPSMAN_API_URL" --api-token "$VPSMAN_API_TOKEN" \
+vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" \
   --output pretty-json \
   reenrollment-token-create \
-  --client-id edge-01 \
+  --client-id <existing_client_id> \
   --ttl-secs 1800 \
   --default-tags rebuilt \
   --confirmed
 ```
 
 Then rerun `deploy/enroll-agent.sh` on the rebuilt VPS with the same
-`VPSMAN_CLIENT_ID` and the new token.
+opaque `VPSMAN_CLIENT_ID` and the new token. For re-enrollment only, the
+`client-id` is the existing server identity, not the human display name.

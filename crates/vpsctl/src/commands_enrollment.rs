@@ -257,7 +257,8 @@ fn render_agent_config(
     }
     Ok(AgentConfig {
         client_id: response.client_id.clone(),
-        display_name: response.display_name.clone(),
+        // Keep panel aliases server-side. The agent only needs its opaque id.
+        display_name: response.client_id.clone(),
         tcp_endpoints: response.tcp_endpoints.clone(),
         discovery_url: response.discovery_url.clone(),
         noise: AgentNoiseConfig {
@@ -302,7 +303,6 @@ fn write_secret_file(path: &PathBuf, data: &[u8]) -> Result<()> {
 #[derive(Clone, Debug, Deserialize)]
 struct ClaimEnrollmentResponse {
     client_id: String,
-    display_name: String,
     tcp_endpoints: Vec<ServerEndpoint>,
     discovery_url: Option<String>,
     noise_mode: AgentNoiseMode,
@@ -323,26 +323,24 @@ mod tests {
 
     #[test]
     fn renders_enrolled_agent_config_without_server_side_private_key() {
-        let response = ClaimEnrollmentResponse {
-            client_id: "client-a".to_string(),
-            display_name: "client-a".to_string(),
-            tcp_endpoints: vec![ServerEndpoint {
-                label: "primary".to_string(),
-                tcp_addr: "198.51.100.10:9443".to_string(),
-                priority: 10,
+        let response: ClaimEnrollmentResponse = serde_json::from_value(serde_json::json!({
+            "client_id": "client-a",
+            "display_name": "Edge A",
+            "tcp_endpoints": [{
+                "label": "primary",
+                "tcp_addr": "198.51.100.10:9443",
+                "priority": 10,
             }],
-            discovery_url: Some(
-                "https://panel.example/.well-known/vpsman/endpoints.json".to_string(),
-            ),
-            noise_mode: AgentNoiseMode::EnrolledIk,
-            gateway_server_public_key_hex: Some("11".repeat(32)),
-            server_ed25519_public_key_hex: Some("22".repeat(32)),
-            discovery_trusted_server_ed25519_public_keys_hex: vec!["55".repeat(32)],
-            telemetry_light_secs: 15,
-            telemetry_full_secs: 60,
-            tags: vec!["edge".to_string()],
-            update: AgentUpdateConfig::default(),
-        };
+            "discovery_url": "https://panel.example/.well-known/vpsman/endpoints.json",
+            "noise_mode": "enrolled_ik",
+            "gateway_server_public_key_hex": "11".repeat(32),
+            "server_ed25519_public_key_hex": "22".repeat(32),
+            "discovery_trusted_server_ed25519_public_keys_hex": ["55".repeat(32)],
+            "telemetry_light_secs": 15,
+            "telemetry_full_secs": 60,
+            "tags": ["edge"],
+        }))
+        .unwrap();
         let config = render_agent_config(&response, "33".repeat(32), "44".repeat(32), 45).unwrap();
         let rendered = toml::to_string(&config).unwrap();
         let client_private_key_hex = "33".repeat(32);
@@ -350,6 +348,7 @@ mod tests {
         let proof_key_hex = "44".repeat(32);
 
         assert_eq!(config.noise.mode, AgentNoiseMode::EnrolledIk);
+        assert_eq!(config.display_name, "client-a");
         assert_eq!(
             config.noise.client_private_key_hex.as_deref(),
             Some(client_private_key_hex.as_str())
@@ -367,6 +366,7 @@ mod tests {
             vec!["55".repeat(32)]
         );
         assert_eq!(config.auth.command_timeout_secs, 45);
+        assert!(!rendered.contains("Edge A"));
         assert!(rendered.contains("client_private_key_hex"));
         assert!(!rendered.contains("enrollment_token"));
     }
@@ -375,7 +375,6 @@ mod tests {
     fn refuses_enrolled_config_without_gateway_public_key() {
         let response = ClaimEnrollmentResponse {
             client_id: "client-a".to_string(),
-            display_name: "client-a".to_string(),
             tcp_endpoints: Vec::new(),
             discovery_url: None,
             noise_mode: AgentNoiseMode::EnrolledIk,
