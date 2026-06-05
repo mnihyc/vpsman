@@ -65,6 +65,9 @@ Persistent runtime data stays in checkout-local paths:
 - PostgreSQL: `deploy/runtime/postgres/data`
 - local object storage: `deploy/runtime/data`
 
+In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
+unchanged; compose maps them to `deploy/runtime/data`.
+
 The compose template publishes only Nginx on all host interfaces. API and
 gateway host ports are bound to `127.0.0.1` by default; expose agent TCP through
 your chosen public proxy, firewall, or tunnel when needed.
