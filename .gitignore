@@ -27,8 +27,5 @@
 *.bak
 
 # Local agent/private release planning artifacts.
-/PROGRESS.md
-/TODO_LIST.md
-/DESIGN_GOAL.md
 /TO_AGENTS.md
-/example_legacy_bird2_config.zip
+/tmp/
