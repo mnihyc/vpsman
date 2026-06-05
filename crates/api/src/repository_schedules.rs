@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
@@ -6,21 +8,142 @@ use crate::job_request::job_command_type_label;
 use crate::model::*;
 use crate::repository::Repository;
 use crate::unix_now;
+use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
+
+fn compare_text_or_number(left: &str, right: &str) -> Ordering {
+    match (left.parse::<i128>(), right.parse::<i128>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_schedule(left: &ScheduleView, right: &ScheduleView, sort: Option<&str>) -> Ordering {
+    match sort.unwrap_or("next_run_at") {
+        "created_at" => compare_text_or_number(&left.created_at, &right.created_at),
+        "enabled" | "state" => left.enabled.cmp(&right.enabled),
+        "interval_secs" | "interval" => left.interval_secs.cmp(&right.interval_secs),
+        "command_type" | "operation" => left.command_type.cmp(&right.command_type),
+        "targets" => {
+            (left.clients.len() + left.tags.len()).cmp(&(right.clients.len() + right.tags.len()))
+        }
+        "failures" | "failure_count" => left.failure_count.cmp(&right.failure_count),
+        "name" => left.name.cmp(&right.name),
+        _ => compare_text_or_number(&left.next_run_at, &right.next_run_at),
+    }
+}
+
+fn schedule_matches_search(schedule: &ScheduleView, needle: &str) -> bool {
+    schedule
+        .id
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(needle)
+        || schedule.name.to_ascii_lowercase().contains(needle)
+        || schedule.command_type.to_ascii_lowercase().contains(needle)
+        || schedule
+            .catch_up_policy
+            .to_ascii_lowercase()
+            .contains(needle)
+        || schedule
+            .last_error
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || schedule
+            .clients
+            .iter()
+            .any(|client| client.to_ascii_lowercase().contains(needle))
+        || schedule
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(needle))
+}
+
+fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort, descending) {
+        (None, _) => "enabled DESC, next_run_at ASC, name ASC",
+        (Some("created_at"), true) => "created_at DESC, id DESC",
+        (Some("created_at"), false) => "created_at ASC, id ASC",
+        (Some("enabled" | "state"), true) => "enabled DESC, next_run_at ASC, id DESC",
+        (Some("enabled" | "state"), false) => "enabled ASC, next_run_at ASC, id ASC",
+        (Some("interval_secs" | "interval"), true) => "interval_secs DESC, id DESC",
+        (Some("interval_secs" | "interval"), false) => "interval_secs ASC, id ASC",
+        (Some("name"), true) => "name DESC, id DESC",
+        (Some("name"), false) => "name ASC, id ASC",
+        (Some("targets"), true) => {
+            "cardinality(target_clients) + cardinality(target_tags) DESC, id DESC"
+        }
+        (Some("targets"), false) => {
+            "cardinality(target_clients) + cardinality(target_tags) ASC, id ASC"
+        }
+        (Some("failures" | "failure_count"), true) => "failure_count DESC, id DESC",
+        (Some("failures" | "failure_count"), false) => "failure_count ASC, id ASC",
+        (_, true) => "next_run_at DESC, id DESC",
+        (_, false) => "next_run_at ASC, id ASC",
+    }
+}
 
 impl Repository {
     pub(crate) async fn list_schedules(&self) -> Result<Vec<ScheduleView>> {
+        self.query_schedules(&ListQuery::default()).await
+    }
+
+    pub(crate) async fn query_schedules(&self, query: &ListQuery) -> Result<Vec<ScheduleView>> {
+        let limit = query.limit.map(|limit| limit_or_default(Some(limit)));
+        let offset = offset_or_default(query.offset);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         match self {
             Self::Memory(memory) => {
-                let mut schedules = memory.schedules.read().await.clone();
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut schedules = memory
+                    .schedules
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|schedule| {
+                        q.as_deref()
+                            .map(|needle| schedule_matches_search(schedule, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
                 schedules.sort_by(|left, right| {
-                    left.next_run_at
-                        .cmp(&right.next_run_at)
-                        .then_with(|| left.name.cmp(&right.name))
+                    if query.sort.is_some() {
+                        let descending = sort_descending(query.dir.as_deref(), false);
+                        let ordering = compare_schedule(left, right, query.sort.as_deref())
+                            .then_with(|| left.name.cmp(&right.name))
+                            .then_with(|| left.id.cmp(&right.id));
+                        if descending {
+                            ordering.reverse()
+                        } else {
+                            ordering
+                        }
+                    } else {
+                        right
+                            .enabled
+                            .cmp(&left.enabled)
+                            .then_with(|| {
+                                compare_text_or_number(&left.next_run_at, &right.next_run_at)
+                            })
+                            .then_with(|| left.name.cmp(&right.name))
+                    }
                 });
-                Ok(schedules)
+                Ok(schedules
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit.unwrap_or(i64::MAX) as usize)
+                    .collect())
             }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
+                let order_by = schedule_order_by(
+                    query.sort.as_deref(),
+                    sort_descending(query.dir.as_deref(), false),
+                );
+                let rows = sqlx::query(&format!(
                     r#"
                     SELECT
                         id,
@@ -40,9 +163,24 @@ impl Repository {
                         last_run_at::text AS last_run_at,
                         created_at::text AS created_at
                     FROM schedules
-                    ORDER BY enabled DESC, next_run_at, name
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR name ILIKE $3 ESCAPE '\'
+                        OR operation::text ILIKE $3 ESCAPE '\'
+                        OR array_to_string(target_clients, ' ') ILIKE $3 ESCAPE '\'
+                        OR array_to_string(target_tags, ' ') ILIKE $3 ESCAPE '\'
+                        OR catch_up_policy ILIKE $3 ESCAPE '\'
+                        OR last_error ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
                     "#,
-                )
+                ))
+                .bind(limit.unwrap_or(1000))
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

@@ -1,4 +1,4 @@
-import type { ActiveView, JsonValue, WsEvent } from "./types";
+import type { ActiveView, JsonValue, OperatorPreferences, WsEvent } from "./types";
 
 export function parseWsEvent(value: unknown): WsEvent | null {
   if (typeof value !== "string") {
@@ -32,11 +32,15 @@ export async function runPanelAction(
 }
 
 export function toggleValue(values: string[], value: string): string[] {
-  return values.includes(value) ? values.filter((existing) => existing !== value) : [...values, value];
+  return values.includes(value)
+    ? values.filter((existing) => existing !== value)
+    : [...values, value];
 }
 
 export function getHeroTitle(view: ActiveView): string {
   switch (view) {
+    case "Dashboard":
+      return "Dashboard";
     case "Fleet":
       return "Fleet overview";
     case "Jobs":
@@ -45,6 +49,8 @@ export function getHeroTitle(view: ActiveView): string {
       return "Schedules";
     case "Audit":
       return "Audit log";
+    case "Preferences":
+      return "Preferences";
     default:
       return `${view} management`;
   }
@@ -52,6 +58,8 @@ export function getHeroTitle(view: ActiveView): string {
 
 export function getHeroCopy(view: ActiveView): string {
   switch (view) {
+    case "Dashboard":
+      return "Operational health, resource posture, network activity, and top label clusters";
     case "Jobs":
       return "Recent command requests and authorization outcomes";
     case "Schedules":
@@ -66,6 +74,8 @@ export function getHeroCopy(view: ActiveView): string {
       return "Backup, restore, and migration workflows";
     case "Access":
       return "Operator sessions, roles, and privileged unlock state";
+    case "Preferences":
+      return "Operator-level display, timezone, language, and navigation defaults";
     default:
       return "";
   }
@@ -77,13 +87,28 @@ export function shortId(value: string | null | undefined): string {
 
 export type VpsNameDisplayMode = "name" | "name_id_suffix";
 
-export const DEFAULT_VPS_NAME_DISPLAY_MODE: VpsNameDisplayMode = "name_id_suffix";
+export const DEFAULT_VPS_NAME_DISPLAY_MODE: VpsNameDisplayMode =
+  "name_id_suffix";
 
-export function displayNameOrUnnamed(displayName: string | null | undefined): string {
+export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
+  dashboard_curve_exclusions: [],
+  dashboard_network_top_limit: 8,
+  dashboard_resource_top_limit: 8,
+  language: "en",
+  sidebar_subpanel_default: "active",
+  timezone: null,
+  vps_name_display_mode: DEFAULT_VPS_NAME_DISPLAY_MODE,
+};
+
+export function displayNameOrUnnamed(
+  displayName: string | null | undefined,
+): string {
   return displayName?.trim() || "Unnamed VPS";
 }
 
-export function clientIdSuffix(clientId: string | null | undefined): string | null {
+export function clientIdSuffix(
+  clientId: string | null | undefined,
+): string | null {
   const trimmed = clientId?.trim();
   if (!trimmed) {
     return null;
@@ -94,11 +119,18 @@ export function clientIdSuffix(clientId: string | null | undefined): string | nu
 }
 
 export function formatVpsName(
-  identity: { id?: string | null; client_id?: string | null; display_name?: string | null },
+  identity: {
+    id?: string | null;
+    client_id?: string | null;
+    display_name?: string | null;
+  },
   mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
 ): string {
   const name = displayNameOrUnnamed(identity.display_name);
-  const suffix = mode === "name_id_suffix" ? clientIdSuffix(identity.id ?? identity.client_id) : null;
+  const suffix =
+    mode === "name_id_suffix"
+      ? clientIdSuffix(identity.id ?? identity.client_id)
+      : null;
   return suffix ? `${name} (${suffix})` : name;
 }
 
@@ -106,17 +138,24 @@ export function clientDisplayNameMap(
   clients: Array<{ id: string; display_name?: string | null }>,
   mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
 ): Map<string, string> {
-  return new Map(clients.map((client) => [client.id, formatVpsName(client, mode)]));
+  return new Map(
+    clients.map((client) => [client.id, formatVpsName(client, mode)]),
+  );
 }
 
 export function clientLifecycleNameMap(
   clients: Array<{ client_id: string; display_name?: string | null }>,
   mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
 ): Map<string, string> {
-  return new Map(clients.map((client) => [client.client_id, formatVpsName(client, mode)]));
+  return new Map(
+    clients.map((client) => [client.client_id, formatVpsName(client, mode)]),
+  );
 }
 
-export function clientDisplayNameFromMap(clientId: string | null | undefined, namesById: Map<string, string>): string {
+export function clientDisplayNameFromMap(
+  clientId: string | null | undefined,
+  namesById: Map<string, string>,
+): string {
   if (!clientId) {
     return "Unknown VPS";
   }
@@ -127,12 +166,61 @@ export function shortHash(value: string): string {
   return value.length > 16 ? `${value.slice(0, 14)}...` : value;
 }
 
-export function formatTime(value: string): string {
+let preferredTimeZone: string | null = null;
+
+export function setPreferredTimeZone(timeZone: string | null): void {
+  const normalized = timeZone?.trim() || null;
+  preferredTimeZone = normalized && isBrowserTimeZoneSupported(normalized) ? normalized : null;
+}
+
+export function formatTime(value: string, timeZone = preferredTimeZone): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  return safeLocaleString(date, timeZone ? { timeZone } : undefined);
+}
+
+export function formatCompactTime(value: string, timeZone = preferredTimeZone): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return safeLocaleString(date, {
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    month: "numeric",
+    ...(timeZone ? { timeZone } : {}),
+  });
+}
+
+function isBrowserTimeZoneSupported(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeLocaleString(date: Date, options?: Intl.DateTimeFormatOptions): string {
+  try {
+    return date.toLocaleString(undefined, options);
+  } catch {
+    if (options?.timeZone) {
+      const { timeZone: _ignored, ...fallbackOptions } = options;
+      try {
+        return date.toLocaleString(
+          undefined,
+          Object.keys(fallbackOptions).length > 0 ? fallbackOptions : undefined,
+        );
+      } catch {
+        return date.toISOString();
+      }
+    }
+    return date.toISOString();
+  }
 }
 
 export function decodeOutputPreview(value: string): string {
@@ -200,6 +288,8 @@ export function metadataPreview(metadata: JsonValue): string {
   return rendered.length > 96 ? `${rendered.slice(0, 93)}...` : rendered;
 }
 
-export function isJsonObject(value: JsonValue): value is { [key: string]: JsonValue } {
+export function isJsonObject(
+  value: JsonValue,
+): value is { [key: string]: JsonValue } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

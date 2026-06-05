@@ -29,9 +29,43 @@ export function buildJsonHeaders(apiToken: string): HeadersInit {
     : { "Content-Type": "application/json" };
 }
 
+export type ListQueryParams = {
+  dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+  q?: string;
+  sort?: string;
+};
+
+export function buildListPath(path: string, query: ListQueryParams): string {
+  const params = new URLSearchParams();
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.offset !== undefined) params.set("offset", String(query.offset));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.dir) params.set("dir", query.dir);
+  if (query.q?.trim()) params.set("q", query.q.trim());
+  const suffix = params.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
 export async function apiPost<T = JsonValue>(path: string, apiToken: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
+    headers: buildJsonHeaders(apiToken),
+    body: JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    throw new ApiUnauthorizedError();
+  }
+  if (!response.ok) {
+    throw await apiErrorFromResponse(response);
+  }
+  return (await response.json()) as T;
+}
+
+export async function apiPut<T = JsonValue>(path: string, apiToken: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "PUT",
     headers: buildJsonHeaders(apiToken),
     body: JSON.stringify(body),
   });

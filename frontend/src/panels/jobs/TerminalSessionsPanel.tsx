@@ -323,7 +323,7 @@ function formatArgv(argv: string[]): string {
 
 function formatWindow(session: TerminalSessionRecord): string {
   if (!session.cols || !session.rows) {
-    return "-";
+    return "Size not reported";
   }
   return `${session.cols} x ${session.rows}`;
 }
@@ -336,7 +336,7 @@ function formatLimits(session: TerminalSessionRecord): string {
 
 function formatOutputRange(session: TerminalSessionRecord): string {
   if (session.output_next_seq === null) {
-    return "-";
+    return "No output retained";
   }
   const first = session.output_first_seq ?? session.output_next_seq;
   return `${first} -> ${session.output_next_seq}`;

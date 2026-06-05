@@ -31,6 +31,7 @@ async fn schedule_create_lists_durable_selector_without_plaintext_proof_material
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),

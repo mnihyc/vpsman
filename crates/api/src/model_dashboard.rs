@@ -1,0 +1,229 @@
+use serde::Serialize;
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardOverviewView {
+    pub(crate) window: String,
+    pub(crate) generated_at: String,
+    pub(crate) group_by: String,
+    pub(crate) scope: DashboardScopeView,
+    pub(crate) time_range: DashboardTimeRangeView,
+    pub(crate) available_filters: DashboardAvailableFiltersView,
+    pub(crate) summary: DashboardSummaryView,
+    pub(crate) operations: DashboardOperationsView,
+    pub(crate) resources: DashboardResourcesView,
+    pub(crate) resource_curve: DashboardResourceCurveView,
+    pub(crate) network: DashboardNetworkView,
+    pub(crate) label_clusters: Vec<DashboardLabelClusterView>,
+    pub(crate) drilldowns: Vec<DashboardDrilldownView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardScopeView {
+    pub(crate) kind: String,
+    pub(crate) value: Option<String>,
+    pub(crate) label: String,
+    pub(crate) query: Option<String>,
+    pub(crate) matched_clients: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardTimeRangeView {
+    pub(crate) mode: String,
+    pub(crate) window: Option<String>,
+    pub(crate) start_unix: u64,
+    pub(crate) end_unix: u64,
+    pub(crate) start_at: String,
+    pub(crate) end_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardAvailableFiltersView {
+    pub(crate) windows: Vec<DashboardWindowOptionView>,
+    pub(crate) group_by_options: Vec<DashboardGroupByOptionView>,
+    pub(crate) providers: Vec<DashboardFilterOptionView>,
+    pub(crate) countries: Vec<DashboardFilterOptionView>,
+    pub(crate) tags: Vec<DashboardFilterOptionView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardGroupByOptionView {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) description: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardWindowOptionView {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardFilterOptionView {
+    pub(crate) kind: String,
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) query: String,
+    pub(crate) count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardSummaryView {
+    pub(crate) total: usize,
+    pub(crate) connected: usize,
+    pub(crate) stale: usize,
+    pub(crate) warnings: usize,
+    pub(crate) running_jobs: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardOperationsView {
+    pub(crate) active_alerts: usize,
+    pub(crate) critical_alerts: usize,
+    pub(crate) warning_alerts: usize,
+    pub(crate) stale_agents: usize,
+    pub(crate) running_jobs: usize,
+    pub(crate) backup_pending: usize,
+    pub(crate) backup_completed: usize,
+    pub(crate) backup_failed: usize,
+    pub(crate) recent_alerts: Vec<DashboardAlertSummaryView>,
+    pub(crate) degraded_agents: Vec<DashboardAgentSummaryView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardResourcesView {
+    pub(crate) sampled_clients: usize,
+    pub(crate) cpu_load_avg: Option<f64>,
+    pub(crate) cpu_load_max: Option<f64>,
+    pub(crate) memory_used_ratio: Option<f64>,
+    pub(crate) disk_free_ratio: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardResourceCurveView {
+    pub(crate) metric: String,
+    pub(crate) sampled_clients: usize,
+    pub(crate) excluded_clients: usize,
+    pub(crate) top_limit: usize,
+    pub(crate) series: Vec<DashboardResourceSeriesView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardResourceSeriesView {
+    pub(crate) client_id: String,
+    pub(crate) label: String,
+    pub(crate) current: Option<f64>,
+    pub(crate) peak: Option<f64>,
+    pub(crate) warning_threshold: Option<f64>,
+    pub(crate) critical_threshold: Option<f64>,
+    pub(crate) threshold_direction: String,
+    pub(crate) points: Vec<DashboardResourcePointView>,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardResourcePointView {
+    pub(crate) bucket_start: String,
+    pub(crate) value: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardNetworkView {
+    pub(crate) rx_bps: f64,
+    pub(crate) tx_bps: f64,
+    pub(crate) points: Vec<DashboardNetworkPointView>,
+    pub(crate) traffic_points: Vec<DashboardTrafficPointView>,
+    pub(crate) top_clients: Vec<DashboardNetworkClientView>,
+    pub(crate) traffic_top_clients: Vec<DashboardTrafficClientView>,
+    pub(crate) traffic_series: Vec<DashboardTrafficSeriesView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardNetworkPointView {
+    pub(crate) bucket_start: String,
+    pub(crate) rx_bps: f64,
+    pub(crate) tx_bps: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardNetworkClientView {
+    pub(crate) client_id: String,
+    pub(crate) label: String,
+    pub(crate) rx_bps: f64,
+    pub(crate) tx_bps: f64,
+    pub(crate) interfaces: Vec<String>,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardTrafficClientView {
+    pub(crate) client_id: String,
+    pub(crate) label: String,
+    pub(crate) rx_bytes: i64,
+    pub(crate) tx_bytes: i64,
+    pub(crate) interfaces: Vec<String>,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardTrafficPointView {
+    pub(crate) bucket_start: String,
+    pub(crate) rx_bytes: i64,
+    pub(crate) tx_bytes: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardTrafficSeriesView {
+    pub(crate) client_id: String,
+    pub(crate) label: String,
+    pub(crate) rx_bytes: i64,
+    pub(crate) tx_bytes: i64,
+    pub(crate) interfaces: Vec<String>,
+    pub(crate) points: Vec<DashboardTrafficPointView>,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardLabelClusterView {
+    pub(crate) label: String,
+    pub(crate) kind: String,
+    pub(crate) query: Option<String>,
+    pub(crate) total: usize,
+    pub(crate) connected: usize,
+    pub(crate) stale: usize,
+    pub(crate) warnings: usize,
+    pub(crate) running_jobs: usize,
+    pub(crate) rx_bps: f64,
+    pub(crate) tx_bps: f64,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardAlertSummaryView {
+    pub(crate) id: String,
+    pub(crate) severity: String,
+    pub(crate) category: String,
+    pub(crate) title: String,
+    pub(crate) client_id: Option<String>,
+    pub(crate) client_label: Option<String>,
+    pub(crate) observed_at: String,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardAgentSummaryView {
+    pub(crate) client_id: String,
+    pub(crate) label: String,
+    pub(crate) status: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) drilldown: DashboardDrilldownView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardDrilldownView {
+    pub(crate) label: String,
+    pub(crate) view: String,
+    pub(crate) subpage: String,
+    pub(crate) query: Option<String>,
+}

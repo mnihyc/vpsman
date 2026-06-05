@@ -5,6 +5,235 @@ export type FleetSummary = {
   running_jobs: number;
 };
 
+export type DashboardWindow = "15m" | "1h" | "6h" | "24h" | "7d" | "14d" | "30d" | "all";
+
+export type DashboardGroupBy = "labels" | "tags" | "countries" | "providers" | "clients" | "status" | "date";
+
+export type DashboardScopeKind = "all" | "tag" | "country" | "provider" | "client";
+
+export type DashboardResourceMetric = "cpu_load" | "memory_used" | "disk_free";
+
+export type DashboardNetworkViewMode = "speed" | "traffic";
+
+export type DashboardTrafficSort = "total" | "rx" | "tx";
+
+export type DashboardPointDensity = "compact" | "balanced" | "dense";
+
+export type DashboardRefreshIntervalSecs = 5 | 30 | 60;
+
+export type DashboardPreferences = {
+  groupBy: DashboardGroupBy;
+  networkView: DashboardNetworkViewMode;
+  pointDensity: DashboardPointDensity;
+  refreshIntervalSecs: DashboardRefreshIntervalSecs;
+  resourceMetric: DashboardResourceMetric;
+  scopeKind: DashboardScopeKind;
+  scopeValue: string;
+  startAt: string;
+  endAt: string;
+  trafficSort: DashboardTrafficSort;
+  window: DashboardWindow;
+};
+
+export type DashboardDrilldownRecord = {
+  label: string;
+  view: string;
+  subpage: string;
+  query: string | null;
+};
+
+export type DashboardOverviewRecord = {
+  window: DashboardWindow;
+  generated_at: string;
+  group_by: DashboardGroupBy;
+  scope: DashboardScopeRecord;
+  time_range: DashboardTimeRangeRecord;
+  available_filters: DashboardAvailableFiltersRecord;
+  summary: DashboardSummaryRecord;
+  operations: DashboardOperationsRecord;
+  resources: DashboardResourcesRecord;
+  resource_curve: DashboardResourceCurveRecord;
+  network: DashboardNetworkRecord;
+  label_clusters: DashboardLabelClusterRecord[];
+  drilldowns: DashboardDrilldownRecord[];
+};
+
+export type DashboardScopeRecord = {
+  kind: DashboardScopeKind;
+  value: string | null;
+  label: string;
+  query: string | null;
+  matched_clients: number;
+};
+
+export type DashboardTimeRangeRecord = {
+  mode: "window" | "custom" | string;
+  window: DashboardWindow | null;
+  start_unix: number;
+  end_unix: number;
+  start_at: string;
+  end_at: string;
+};
+
+export type DashboardAvailableFiltersRecord = {
+  windows: DashboardWindowOptionRecord[];
+  group_by_options: DashboardGroupByOptionRecord[];
+  providers: DashboardFilterOptionRecord[];
+  countries: DashboardFilterOptionRecord[];
+  tags: DashboardFilterOptionRecord[];
+};
+
+export type DashboardWindowOptionRecord = {
+  value: DashboardWindow;
+  label: string;
+  seconds: number;
+};
+
+export type DashboardGroupByOptionRecord = {
+  value: DashboardGroupBy;
+  label: string;
+  description: string;
+};
+
+export type DashboardFilterOptionRecord = {
+  kind: DashboardScopeKind;
+  value: string;
+  label: string;
+  query: string;
+  count: number;
+};
+
+export type DashboardSummaryRecord = {
+  total: number;
+  connected: number;
+  stale: number;
+  warnings: number;
+  running_jobs: number;
+};
+
+export type DashboardOperationsRecord = {
+  active_alerts: number;
+  critical_alerts: number;
+  warning_alerts: number;
+  stale_agents: number;
+  running_jobs: number;
+  backup_pending: number;
+  backup_completed: number;
+  backup_failed: number;
+  recent_alerts: DashboardAlertSummaryRecord[];
+  degraded_agents: DashboardAgentSummaryRecord[];
+};
+
+export type DashboardResourcesRecord = {
+  sampled_clients: number;
+  cpu_load_avg: number | null;
+  cpu_load_max: number | null;
+  memory_used_ratio: number | null;
+  disk_free_ratio: number | null;
+};
+
+export type DashboardResourceCurveRecord = {
+  metric: DashboardResourceMetric;
+  sampled_clients: number;
+  excluded_clients: number;
+  top_limit: number;
+  series: DashboardResourceSeriesRecord[];
+};
+
+export type DashboardResourceSeriesRecord = {
+  client_id: string;
+  label: string;
+  current: number | null;
+  peak: number | null;
+  warning_threshold: number | null;
+  critical_threshold: number | null;
+  threshold_direction: "above" | "below" | string;
+  points: DashboardResourcePointRecord[];
+  drilldown: DashboardDrilldownRecord;
+};
+
+export type DashboardResourcePointRecord = {
+  bucket_start: string;
+  value: number | null;
+};
+
+export type DashboardNetworkRecord = {
+  rx_bps: number;
+  tx_bps: number;
+  points: DashboardNetworkPointRecord[];
+  traffic_points: DashboardTrafficPointRecord[];
+  top_clients: DashboardNetworkClientRecord[];
+  traffic_top_clients: DashboardTrafficClientRecord[];
+  traffic_series: DashboardTrafficSeriesRecord[];
+};
+
+export type DashboardNetworkPointRecord = {
+  bucket_start: string;
+  rx_bps: number;
+  tx_bps: number;
+};
+
+export type DashboardNetworkClientRecord = {
+  client_id: string;
+  label: string;
+  rx_bps: number;
+  tx_bps: number;
+  interfaces: string[];
+  drilldown: DashboardDrilldownRecord;
+};
+
+export type DashboardTrafficClientRecord = {
+  client_id: string;
+  label: string;
+  rx_bytes: number;
+  tx_bytes: number;
+  interfaces: string[];
+  drilldown: DashboardDrilldownRecord;
+};
+
+export type DashboardTrafficPointRecord = {
+  bucket_start: string;
+  rx_bytes: number;
+  tx_bytes: number;
+};
+
+export type DashboardTrafficSeriesRecord = DashboardTrafficClientRecord & {
+  points: DashboardTrafficPointRecord[];
+};
+
+export type DashboardLabelClusterRecord = {
+  label: string;
+  kind: string;
+  query: string | null;
+  total: number;
+  connected: number;
+  stale: number;
+  warnings: number;
+  running_jobs: number;
+  rx_bps: number;
+  tx_bps: number;
+  drilldown: DashboardDrilldownRecord;
+};
+
+export type DashboardAlertSummaryRecord = {
+  id: string;
+  severity: string;
+  category: string;
+  title: string;
+  client_id: string | null;
+  client_label: string | null;
+  observed_at: string;
+  drilldown: DashboardDrilldownRecord;
+};
+
+export type DashboardAgentSummaryRecord = {
+  client_id: string;
+  label: string;
+  status: string;
+  tags: string[];
+  drilldown: DashboardDrilldownRecord;
+};
+
 export type FleetAlertRecord = {
   id: string;
   severity: "critical" | "warning" | "info" | string;
@@ -207,12 +436,12 @@ export type TelemetryNetworkRateRecord = {
   bucket_start: string;
   bucket_secs: number;
   sample_count: number;
+  rx_bytes_avg: number;
+  tx_bytes_avg: number;
   rx_bytes_delta: number;
   tx_bytes_delta: number;
   rx_bps_avg: number;
   tx_bps_avg: number;
-  first_observed_at: string;
-  latest_observed_at: string;
   updated_at: string;
 };
 
@@ -286,7 +515,18 @@ export type OperatorView = {
   username: string;
   role: string;
   scopes: string[];
+  preferences: OperatorPreferences;
   totp_enabled: boolean;
+};
+
+export type OperatorPreferences = {
+  vps_name_display_mode: "name" | "name_id_suffix";
+  timezone: string | null;
+  language: "en";
+  sidebar_subpanel_default: "active" | "all";
+  dashboard_curve_exclusions: string[];
+  dashboard_resource_top_limit: number;
+  dashboard_network_top_limit: number;
 };
 
 export type OperatorSessionRecord = {
@@ -1632,4 +1872,14 @@ export type BulkResolveResponse = {
   confirmation_required: boolean;
 };
 
-export type ActiveView = "Fleet" | "Tags" | "Jobs" | "Schedules" | "Audit" | "Topology" | "Backups" | "Access";
+export type ActiveView =
+  | "Dashboard"
+  | "Fleet"
+  | "Tags"
+  | "Jobs"
+  | "Schedules"
+  | "Audit"
+  | "Topology"
+  | "Backups"
+  | "Access"
+  | "Preferences";

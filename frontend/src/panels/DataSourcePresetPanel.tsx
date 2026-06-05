@@ -57,6 +57,7 @@ const DATA_SOURCE_DOMAINS = [
 const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
 
 export function DataSourcePresetPanel({
+  activeSubpage,
   agents,
   assignments,
   dataSourceStatus,
@@ -71,6 +72,7 @@ export function DataSourcePresetPanel({
   presets,
   tags,
 }: {
+  activeSubpage: "presets" | "status";
   agents: AgentView[];
   assignments: DataSourcePresetAssignmentRecord[];
   dataSourceStatus: DataSourceStatusRecord[];
@@ -129,6 +131,8 @@ export function DataSourcePresetPanel({
   }, [dataSourceStatus]);
   const effectivePresetId = assignPresetId || assignablePresets[0]?.id || "";
   const effectiveLifecyclePresetId = lifecyclePresetId || presets[0]?.id || "";
+  const showPresetManagement = activeSubpage === "presets";
+  const showSourceStatus = activeSubpage === "status";
   const lifecyclePreset = useMemo(
     () => presets.find((preset) => preset.id === effectiveLifecyclePresetId) ?? null,
     [effectiveLifecyclePresetId, presets],
@@ -332,11 +336,12 @@ export function DataSourcePresetPanel({
     <section className="fleetPanel dataSourcePresetPanel">
       <div className="sectionHeader">
         <div>
-          <h2>Data-source presets</h2>
+          <h2>{showSourceStatus ? "Data-source status" : "Data-source presets"}</h2>
           <span>{status}</span>
         </div>
       </div>
 
+      {showPresetManagement && (
       <div className="managementGrid presetManagementGrid">
         <form className="compactForm presetForm" onSubmit={submitCreate}>
           <strong>Preset definition</strong>
@@ -594,7 +599,9 @@ export function DataSourcePresetPanel({
           )}
         </form>
       </div>
+      )}
 
+      {showSourceStatus && (
       <div className="sourceStatusSection">
         <div className="sectionHeader compact">
           <h2>Active source status</h2>
@@ -655,7 +662,9 @@ export function DataSourcePresetPanel({
           )}
         </CrudPager>
       </div>
+      )}
 
+      {showPresetManagement && (
       <CrudPager
         fields={[
           { label: "Preset", value: (preset) => preset.name },
@@ -701,7 +710,9 @@ export function DataSourcePresetPanel({
           </div>
         )}
       </CrudPager>
+      )}
 
+      {showPresetManagement && (
       <div className="timeline presetAssignmentSummary">
         <SlidersHorizontal size={18} />
         <div>
@@ -709,6 +720,7 @@ export function DataSourcePresetPanel({
           <span>{assignmentSummary(assignments, lastAssignment)}</span>
         </div>
       </div>
+      )}
     </section>
   );
 }

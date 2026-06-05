@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -13,7 +14,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   test.skip(testInfo.project.name.includes("mobile"), "terminal reconnect actions are covered in the desktop job composer");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Terminal sessions");
   await expect(page.getByRole("button", { name: "Poll terminal session 71717171" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Input terminal session 71717171" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Close terminal session 71717171" })).toBeDisabled();
@@ -66,7 +67,7 @@ test("dispatches terminal poll from retained session inventory", async ({ page }
   test.skip(testInfo.project.name.includes("mobile"), "terminal reconnect actions are covered in the desktop job composer");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Terminal sessions");
 
   const composer = page.locator(".commandComposer");
   await activate(page.getByRole("button", { name: "Poll terminal session 61616161" }));
@@ -98,7 +99,7 @@ test("loads durable terminal replay from persisted output history", async ({ pag
   test.skip(testInfo.project.name.includes("mobile"), "terminal replay preview is covered in the desktop session table");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Terminal sessions");
 
   await activate(page.getByRole("button", { name: "Durable replay terminal session 61616161" }));
 

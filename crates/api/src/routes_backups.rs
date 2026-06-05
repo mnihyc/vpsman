@@ -24,14 +24,13 @@ use crate::{
         BackupArtifactUploadSessionView, BackupArtifactView, BackupPolicyPruneRequest,
         BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
         BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
-        HistoryQuery, PrepareBackupArtifactRestoreRequest, PreparedBackupArtifactRestoreView,
+        ListQuery, PrepareBackupArtifactRestoreRequest, PreparedBackupArtifactRestoreView,
         RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
     },
     routes_schedules::validate_schedule_request,
     security::operator_has_scope,
     state::AppState,
     unix_now,
-    util::limit_or_default,
 };
 
 const MAX_BACKUP_PATHS: usize = 64;
@@ -44,29 +43,19 @@ pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) async fn list_backup_requests(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<BackupRequestView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_backup_requests(limit_or_default(query.limit))
-            .await?,
-    ))
+    Ok(Json(state.repo.query_backup_requests(&query).await?))
 }
 
 pub(crate) async fn list_backup_artifacts(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<BackupArtifactView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_backup_artifacts(limit_or_default(query.limit))
-            .await?,
-    ))
+    Ok(Json(state.repo.query_backup_artifacts(&query).await?))
 }
 
 pub(crate) async fn list_backup_policies(

@@ -1,18 +1,24 @@
-use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::HeaderMap,
+    http::StatusCode,
+    Json,
+};
 
 use crate::{
     error::ApiError,
     job_request::validate_job_command,
-    model::{CreateScheduleRequest, ScheduleView},
+    model::{CreateScheduleRequest, ListQuery, ScheduleView},
     state::AppState,
 };
 
 pub(crate) async fn list_schedules(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<ScheduleView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(state.repo.list_schedules().await?))
+    Ok(Json(state.repo.query_schedules(&query).await?))
 }
 
 pub(crate) async fn create_schedule(

@@ -11,6 +11,7 @@ use vpsman_common::{
 pub(crate) use crate::auth_model::*;
 pub(crate) use crate::model_agent_updates::*;
 pub(crate) use crate::model_backups::*;
+pub(crate) use crate::model_dashboard::*;
 pub(crate) use crate::model_data_sources::*;
 
 #[derive(Clone, Debug, Serialize)]
@@ -101,12 +102,12 @@ pub(crate) struct TelemetryNetworkRateView {
     pub(crate) bucket_start: String,
     pub(crate) bucket_secs: i32,
     pub(crate) sample_count: i32,
+    pub(crate) rx_bytes_avg: i64,
+    pub(crate) tx_bytes_avg: i64,
     pub(crate) rx_bytes_delta: i64,
     pub(crate) tx_bytes_delta: i64,
     pub(crate) rx_bps_avg: f64,
     pub(crate) tx_bps_avg: f64,
-    pub(crate) first_observed_at: String,
-    pub(crate) latest_observed_at: String,
     pub(crate) updated_at: String,
 }
 
@@ -584,6 +585,15 @@ pub(crate) struct PromoteTunnelPlanToAdapterRequest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     pub(crate) limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct ListQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) offset: Option<i64>,
+    pub(crate) sort: Option<String>,
+    pub(crate) dir: Option<String>,
+    pub(crate) q: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

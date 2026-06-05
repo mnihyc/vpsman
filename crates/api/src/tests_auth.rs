@@ -46,6 +46,7 @@ async fn admin_can_create_sanitized_operator_record() {
             username: "admin".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::new_v4(),
@@ -71,6 +72,151 @@ async fn admin_can_create_sanitized_operator_record() {
     assert!(!serde_json::to_string(&audits[0].metadata)
         .unwrap()
         .contains("viewer-password-123"));
+}
+
+#[tokio::test]
+async fn operator_preferences_update_persists_to_authenticated_views() {
+    let repo = Repository::Memory(MemoryState::default());
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Uuid::new_v4(),
+    };
+
+    let preferences = OperatorPreferences {
+        language: "en".to_string(),
+        sidebar_subpanel_default: "all".to_string(),
+        timezone: Some("UTC".to_string()),
+        vps_name_display_mode: "name".to_string(),
+        ..OperatorPreferences::default()
+    };
+    let updated = repo
+        .update_operator_preferences(&actor, preferences)
+        .await
+        .unwrap();
+    assert_eq!(updated.preferences.vps_name_display_mode, "name");
+    assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
+    assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
+
+    let context = repo
+        .authenticate_access_token(&auth.access_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.operator.preferences.vps_name_display_mode, "name");
+    assert_eq!(
+        context.operator.preferences.timezone.as_deref(),
+        Some("UTC")
+    );
+    assert_eq!(context.operator.preferences.sidebar_subpanel_default, "all");
+}
+
+#[tokio::test]
+async fn operator_preferences_route_rejects_invalid_values() {
+    let state = memory_test_state();
+    let cases = [
+        (
+            OperatorPreferences {
+                vps_name_display_mode: "id_only".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_vps_name_display_mode",
+        ),
+        (
+            OperatorPreferences {
+                language: "fr".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "unsupported_operator_language",
+        ),
+        (
+            OperatorPreferences {
+                sidebar_subpanel_default: "everything".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_sidebar_subpanel_default",
+        ),
+        (
+            OperatorPreferences {
+                timezone: Some("Mars/Base".to_string()),
+                ..OperatorPreferences::default()
+            },
+            "invalid_timezone",
+        ),
+    ];
+
+    for (preferences, expected_code) in cases {
+        let error = routes_auth::update_operator_preferences(
+            axum::extract::State(state.clone()),
+            HeaderMap::new(),
+            axum::Json(preferences),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, expected_code);
+    }
+}
+
+#[tokio::test]
+async fn operator_preferences_route_persists_valid_payload() {
+    let state = memory_test_state();
+    let operator = OperatorRecord {
+        id: Uuid::nil(),
+        username: "memory-dev".to_string(),
+        password_hash: "not-used-in-debug-memory-mode".to_string(),
+        role: "admin".to_string(),
+        scopes: vec!["*".to_string()],
+        preferences: OperatorPreferences::default(),
+        totp_enabled: false,
+        totp_secret_ciphertext_hex: None,
+        totp_secret_nonce_hex: None,
+        totp_secret_salt_hex: None,
+    };
+    if let Repository::Memory(memory) = &state.repo {
+        memory.operators.write().await.push(operator);
+    }
+
+    let response = routes_auth::update_operator_preferences(
+        axum::extract::State(state),
+        HeaderMap::new(),
+        axum::Json(OperatorPreferences {
+            language: "en".to_string(),
+            sidebar_subpanel_default: "all".to_string(),
+            timezone: Some(" America/Los_Angeles ".to_string()),
+            vps_name_display_mode: "name".to_string(),
+            ..OperatorPreferences::default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.0.preferences.vps_name_display_mode, "name");
+    assert_eq!(
+        response.0.preferences.timezone.as_deref(),
+        Some("America/Los_Angeles")
+    );
+    assert_eq!(response.0.preferences.sidebar_subpanel_default, "all");
+}
+
+#[test]
+fn stored_operator_preferences_drop_invalid_timezone() {
+    let preferences = repository_auth::parse_operator_preferences(serde_json::json!({
+        "language": "en",
+        "sidebar_subpanel_default": "all",
+        "timezone": "Mars/Base",
+        "vps_name_display_mode": "name"
+    }));
+
+    assert_eq!(preferences.vps_name_display_mode, "name");
+    assert_eq!(preferences.sidebar_subpanel_default, "all");
+    assert_eq!(preferences.timezone, None);
 }
 
 #[tokio::test]
@@ -260,4 +406,23 @@ fn internal_gateway_token_is_mandatory_even_for_memory_dev() {
     );
     assert!(constant_time_eq(b"same", b"same"));
     assert!(!constant_time_eq(b"same", b"different"));
+}
+
+fn memory_test_state() -> AppState {
+    let (events, _) = broadcast::channel(1);
+    AppState {
+        repo: Repository::Memory(MemoryState::default()),
+        events,
+        internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
+        gateway: GatewayDispatchClient::default(),
+        server_signing_key: None,
+        enrollment: EnrollmentSettings::default(),
+        backup_object_store: None,
+        update_object_store: None,
+        update_artifact_public_base_url: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: 32768,
+        require_registered_agent_updates: false,
+    }
 }

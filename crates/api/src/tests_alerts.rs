@@ -677,6 +677,7 @@ fn test_operator() -> AuthContext {
             username: "test-admin".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::new_v4(),

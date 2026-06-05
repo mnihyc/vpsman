@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
@@ -5,12 +7,93 @@ use uuid::Uuid;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, CreateMigrationLinkRequest, MigrationLinkStatus,
+        AuditLogView, AuthContext, CreateMigrationLinkRequest, ListQuery, MigrationLinkStatus,
         MigrationLinkView, RestorePlanStatus, RestorePlanView,
     },
     repository::Repository,
     unix_now,
+    util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
+
+fn compare_text_or_number(left: &str, right: &str) -> Ordering {
+    match (left.parse::<i128>(), right.parse::<i128>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_migration_link(
+    left: &MigrationLinkView,
+    right: &MigrationLinkView,
+    sort: Option<&str>,
+) -> Ordering {
+    match sort.unwrap_or("created_at") {
+        "destination_root" | "destination" => left.destination_root.cmp(&right.destination_root),
+        "include_config" | "scope" => left.include_config.cmp(&right.include_config),
+        "paths" => left.paths.len().cmp(&right.paths.len()),
+        "restore_plan_id" | "plan" => left.restore_plan_id.cmp(&right.restore_plan_id),
+        "source_client_id" | "source" => left.source_client_id.cmp(&right.source_client_id),
+        "status" => left.status.cmp(&right.status),
+        "target_client_id" | "target" => left.target_client_id.cmp(&right.target_client_id),
+        _ => compare_text_or_number(&left.created_at, &right.created_at),
+    }
+}
+
+fn migration_link_matches_search(link: &MigrationLinkView, needle: &str) -> bool {
+    link.id.to_string().to_ascii_lowercase().contains(needle)
+        || link
+            .actor_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || link
+            .restore_plan_id
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(needle)
+        || link
+            .source_backup_request_id
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(needle)
+        || link.source_client_id.to_ascii_lowercase().contains(needle)
+        || link.target_client_id.to_ascii_lowercase().contains(needle)
+        || link.status.to_ascii_lowercase().contains(needle)
+        || link
+            .destination_root
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || link
+            .note
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || link
+            .paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains(needle))
+}
+
+fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("created_at"), descending) {
+        ("destination_root" | "destination", true) => "destination_root DESC NULLS LAST, id DESC",
+        ("destination_root" | "destination", false) => "destination_root ASC NULLS LAST, id ASC",
+        ("include_config" | "scope", true) => "include_config DESC, id DESC",
+        ("include_config" | "scope", false) => "include_config ASC, id ASC",
+        ("paths", true) => "cardinality(paths) DESC, id DESC",
+        ("paths", false) => "cardinality(paths) ASC, id ASC",
+        ("restore_plan_id" | "plan", true) => "restore_plan_id DESC, id DESC",
+        ("restore_plan_id" | "plan", false) => "restore_plan_id ASC, id ASC",
+        ("source_client_id" | "source", true) => "source_client_id DESC, id DESC",
+        ("source_client_id" | "source", false) => "source_client_id ASC, id ASC",
+        ("status", true) => "status DESC, id DESC",
+        ("status", false) => "status ASC, id ASC",
+        ("target_client_id" | "target", true) => "target_client_id DESC, id DESC",
+        ("target_client_id" | "target", false) => "target_client_id ASC, id ASC",
+        (_, true) => "created_at DESC, id DESC",
+        (_, false) => "created_at ASC, id ASC",
+    }
+}
 
 impl Repository {
     pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
@@ -41,6 +124,92 @@ impl Repository {
                     "#,
                 )
                 .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(migration_link_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn query_migration_links(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<MigrationLinkView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut links = memory
+                    .migration_links
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|link| {
+                        q.as_deref()
+                            .map(|needle| migration_link_matches_search(link, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                links.sort_by(|left, right| {
+                    compare_migration_link(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    links.reverse();
+                }
+                Ok(links
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = migration_link_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        restore_plan_id,
+                        source_backup_request_id,
+                        source_client_id,
+                        target_client_id,
+                        paths,
+                        include_config,
+                        destination_root,
+                        status,
+                        note,
+                        created_at::text AS created_at
+                    FROM migration_links
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR actor_id::text ILIKE $3 ESCAPE '\'
+                        OR restore_plan_id::text ILIKE $3 ESCAPE '\'
+                        OR source_backup_request_id::text ILIKE $3 ESCAPE '\'
+                        OR source_client_id ILIKE $3 ESCAPE '\'
+                        OR target_client_id ILIKE $3 ESCAPE '\'
+                        OR array_to_string(paths, ' ') ILIKE $3 ESCAPE '\'
+                        OR destination_root ILIKE $3 ESCAPE '\'
+                        OR status ILIKE $3 ESCAPE '\'
+                        OR note ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(migration_link_from_row).collect()

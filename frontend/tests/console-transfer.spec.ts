@@ -1,6 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -23,7 +24,7 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   test.skip(testInfo.project.name.includes("mobile"), "browser resumable upload flow is covered in the desktop job composer");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
   await expect(composer.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
@@ -87,7 +88,7 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   test.skip(testInfo.project.name.includes("mobile"), "browser source-artifact upload flow is covered in the desktop job composer");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
   await composer.getByLabel("Super password").fill("local-super-password");
@@ -138,7 +139,7 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   test.skip(testInfo.project.name.includes("mobile"), "browser resumable download flow is covered in the desktop job composer");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
   await composer.getByLabel("Super password").fill("local-super-password");
@@ -232,7 +233,7 @@ test("streams browser resumable download through writable file handle", async ({
   });
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
   await composer.getByLabel("Super password").fill("local-super-password");

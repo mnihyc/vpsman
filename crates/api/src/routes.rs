@@ -1,6 +1,6 @@
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -16,6 +16,7 @@ use crate::{
         bootstrap_operator, confirm_operator_totp, create_operator, current_operator,
         disable_operator_totp, list_operator_sessions, list_operators, login_operator,
         refresh_operator_session, revoke_operator_session, setup_operator_totp,
+        update_operator_preferences,
     },
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
@@ -27,6 +28,7 @@ use crate::{
         MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
+    routes_dashboard::dashboard_overview,
     routes_discovery::discovery_endpoints,
     routes_enrollment::{
         claim_enrollment, create_enrollment_token, key_lifecycle_report,
@@ -100,6 +102,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/login", post(login_operator))
         .route("/api/v1/auth/refresh", post(refresh_operator_session))
         .route("/api/v1/auth/me", get(current_operator))
+        .route("/api/v1/auth/preferences", put(update_operator_preferences))
         .route("/api/v1/auth/totp/setup", post(setup_operator_totp))
         .route("/api/v1/auth/totp/confirm", post(confirm_operator_totp))
         .route("/api/v1/auth/totp/disable", post(disable_operator_totp))
@@ -130,6 +133,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(revoke_current_client_key),
         )
         .route("/api/v1/key-lifecycle/report", get(key_lifecycle_report))
+        .route("/api/v1/dashboard/overview", get(dashboard_overview))
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
         .route("/api/v1/fleet-alerts/export", get(export_fleet_alerts))

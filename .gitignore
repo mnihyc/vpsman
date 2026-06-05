@@ -6,6 +6,7 @@
 /scripts/
 /frontend/node_modules/
 /frontend/dist/
+/frontend/tmp/
 /frontend/test-results/
 /frontend/playwright-report/
 /.tmp/

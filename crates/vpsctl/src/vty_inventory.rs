@@ -2245,8 +2245,8 @@ fn parse_telemetry_rollups_args(parts: &[&str]) -> Result<(u16, Option<String>, 
     }
     if let Some(bucket_secs) = bucket_secs {
         anyhow::ensure!(
-            (60..=86_400).contains(&bucket_secs),
-            "telemetry-rollups --bucket-secs must be between 60 and 86400"
+            bucket_secs == 60,
+            "telemetry-rollups --bucket-secs must be 60"
         );
     }
     Ok((limit, client_id, bucket_secs))
@@ -2341,8 +2341,8 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
     }
     if let Some(bucket_secs) = bucket_secs {
         anyhow::ensure!(
-            (60..=86_400).contains(&bucket_secs),
-            "telemetry-network-rates --bucket-secs must be between 60 and 86400"
+            bucket_secs == 60,
+            "telemetry-network-rates --bucket-secs must be 60"
         );
     }
     Ok(TelemetryNetworkRateArgs {

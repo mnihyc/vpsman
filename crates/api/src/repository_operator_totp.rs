@@ -12,7 +12,7 @@ use crate::{
         TotpSetupResponse, TotpUpdateOutcome,
     },
     repository::Repository,
-    repository_auth::parse_scopes,
+    repository_auth::{parse_operator_preferences, parse_scopes},
     unix_now, verify_operator_password,
 };
 
@@ -148,7 +148,7 @@ impl Repository {
                     if enable { "enabled" } else { "disabled" },
                 )
                 .await;
-                Ok(TotpUpdateOutcome::Updated(view))
+                Ok(TotpUpdateOutcome::Updated(Box::new(view)))
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -209,7 +209,7 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                Ok(TotpUpdateOutcome::Updated(view))
+                Ok(TotpUpdateOutcome::Updated(Box::new(view)))
             }
         }
     }
@@ -257,6 +257,7 @@ async fn select_operator_for_update(
             password_hash,
             role,
             scopes,
+            preferences,
             totp_enabled,
             totp_secret_ciphertext_hex,
             totp_secret_nonce_hex,
@@ -276,6 +277,7 @@ async fn select_operator_for_update(
             password_hash: row.try_get("password_hash")?,
             role: row.try_get("role")?,
             scopes: parse_scopes(row.try_get("scopes")?),
+            preferences: parse_operator_preferences(row.try_get("preferences")?),
             totp_enabled: row.try_get("totp_enabled")?,
             totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
             totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,

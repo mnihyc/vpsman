@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_LIVE_API_SMOKE, "live API smoke is enabled by scripts/smoke-frontend-live-api.sh");
 
@@ -9,7 +10,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await expect(page.getByRole("button", { name: /edge-live-a/ })).toBeVisible();
   await expect(page.locator(".consoleHeader").getByText("2 connected / 2 total")).toBeVisible();
 
-  await page.getByRole("button", { name: "Topology" }).click();
+  await openConsoleSubpage(page, "Topology", "Tunnel plans");
   await expect(page.getByRole("heading", { name: "Tunnel plans" })).toBeVisible();
   const composer = page.locator(".scheduleComposer", { has: page.getByRole("heading", { name: "Create tunnel plan" }) });
   await composer.getByLabel("Name", { exact: true }).fill("live-gre-a-b");

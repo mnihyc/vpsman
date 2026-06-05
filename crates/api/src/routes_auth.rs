@@ -8,9 +8,10 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     model::{
-        AuthResponse, BootstrapOperatorRequest, CreateOperatorRequest, HistoryQuery, LoginRequest,
-        OperatorSessionView, OperatorView, RefreshRequest, TotpConfirmRequest, TotpDisableRequest,
-        TotpSetupOutcome, TotpSetupRequest, TotpSetupResponse, TotpUpdateOutcome,
+        is_valid_operator_timezone, AuthResponse, BootstrapOperatorRequest, CreateOperatorRequest,
+        HistoryQuery, LoginRequest, OperatorPreferences, OperatorSessionView, OperatorView,
+        RefreshRequest, TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
+        TotpSetupResponse, TotpUpdateOutcome,
     },
     security::{normalize_operator_scopes, validate_operator_credentials, validate_operator_role},
     state::AppState,
@@ -87,7 +88,7 @@ pub(crate) async fn confirm_operator_totp(
         .confirm_operator_totp(&operator, &request.password, &request.code)
         .await?
     {
-        TotpUpdateOutcome::Updated(operator) => Ok(Json(operator)),
+        TotpUpdateOutcome::Updated(operator) => Ok(Json(*operator)),
         TotpUpdateOutcome::InvalidCredentials => {
             Err(ApiError::unauthorized("invalid_totp_credentials"))
         }
@@ -108,7 +109,7 @@ pub(crate) async fn disable_operator_totp(
         .disable_operator_totp(&operator, &request.password, &request.code)
         .await?
     {
-        TotpUpdateOutcome::Updated(operator) => Ok(Json(operator)),
+        TotpUpdateOutcome::Updated(operator) => Ok(Json(*operator)),
         TotpUpdateOutcome::InvalidCredentials => {
             Err(ApiError::unauthorized("invalid_totp_credentials"))
         }
@@ -124,6 +125,21 @@ pub(crate) async fn current_operator(
     Ok(Json(state.require_operator(&headers).await?.operator))
 }
 
+pub(crate) async fn update_operator_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorPreferences>,
+) -> Result<Json<OperatorView>, ApiError> {
+    validate_operator_preferences(&request)?;
+    let operator = state.require_operator(&headers).await?;
+    Ok(Json(
+        state
+            .repo
+            .update_operator_preferences(&operator, request.normalized())
+            .await?,
+    ))
+}
+
 fn validate_totp_update_request(password: &str, code: &str) -> Result<(), ApiError> {
     if password.len() < 12 {
         return Err(ApiError::bad_request("password_too_short"));
@@ -131,6 +147,49 @@ fn validate_totp_update_request(password: &str, code: &str) -> Result<(), ApiErr
     let code = code.trim().replace(' ', "");
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ApiError::bad_request("invalid_totp_code"));
+    }
+    Ok(())
+}
+
+fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<(), ApiError> {
+    if !matches!(
+        preferences.vps_name_display_mode.trim(),
+        "name" | "name_id_suffix"
+    ) {
+        return Err(ApiError::bad_request("invalid_vps_name_display_mode"));
+    }
+    if !matches!(preferences.language.trim(), "en") {
+        return Err(ApiError::bad_request("unsupported_operator_language"));
+    }
+    if !matches!(
+        preferences.sidebar_subpanel_default.trim(),
+        "active" | "all"
+    ) {
+        return Err(ApiError::bad_request("invalid_sidebar_subpanel_default"));
+    }
+    if let Some(timezone) = preferences.timezone.as_deref() {
+        let timezone = timezone.trim();
+        if !timezone.is_empty() && !is_valid_operator_timezone(timezone) {
+            return Err(ApiError::bad_request("invalid_timezone"));
+        }
+    }
+    if preferences.dashboard_curve_exclusions.len() > 50 {
+        return Err(ApiError::bad_request("too_many_dashboard_curve_exclusions"));
+    }
+    if preferences
+        .dashboard_curve_exclusions
+        .iter()
+        .any(|value| value.trim().len() > 128)
+    {
+        return Err(ApiError::bad_request("dashboard_curve_exclusion_too_long"));
+    }
+    if !(3..=16).contains(&preferences.dashboard_resource_top_limit) {
+        return Err(ApiError::bad_request(
+            "invalid_dashboard_resource_top_limit",
+        ));
+    }
+    if !(3..=16).contains(&preferences.dashboard_network_top_limit) {
+        return Err(ApiError::bad_request("invalid_dashboard_network_top_limit"));
     }
     Ok(())
 }

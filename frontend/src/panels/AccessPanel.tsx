@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Ban, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
 import { clearProofVault, hasProofVault } from "../vault";
 import { CrudPager } from "../components/CrudPager";
@@ -34,6 +34,7 @@ const accessSubpages = ["Overview", "Server", "VPS clients", "Gateway"] as const
 type AccessSubpage = (typeof accessSubpages)[number];
 
 type AccessPanelProps = {
+  activeSubpage: string;
   apiToken: string;
   error: string | null;
   gatewaySessions: GatewaySessionRecord[];
@@ -59,7 +60,22 @@ type AccessPanelProps = {
   wsState: string;
 };
 
+function accessSubpageFromRoute(subpage: string): AccessSubpage {
+  switch (subpage) {
+    case "operators":
+    case "proof":
+      return "Server";
+    case "clients":
+      return "VPS clients";
+    case "gateway":
+      return "Gateway";
+    default:
+      return "Overview";
+  }
+}
+
 export function AccessPanel({
+  activeSubpage: routeSubpage,
   apiToken,
   error,
   gatewaySessions,
@@ -85,7 +101,7 @@ export function AccessPanel({
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>("Overview");
+  const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(accessSubpageFromRoute(routeSubpage));
   const [vaultAvailable, setVaultAvailable] = useState(() => hasProofVault());
   const [newOperatorUsername, setNewOperatorUsername] = useState("");
   const [newOperatorPassword, setNewOperatorPassword] = useState("");
@@ -139,6 +155,10 @@ export function AccessPanel({
     [lifecycleClients, vpsNameDisplayMode],
   );
   const lifecycleClientLabel = (clientId: string | null | undefined) => clientDisplayNameFromMap(clientId, lifecycleNameById);
+
+  useEffect(() => {
+    setActiveSubpage(accessSubpageFromRoute(routeSubpage));
+  }, [routeSubpage]);
 
   function clearVault() {
     clearProofVault();

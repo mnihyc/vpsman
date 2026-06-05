@@ -7,11 +7,10 @@ use axum::{
 use crate::{
     error::ApiError,
     model::{
-        CreateMigrationLinkRequest, HistoryQuery, MigrationLinkStatus, MigrationLinkView,
+        CreateMigrationLinkRequest, ListQuery, MigrationLinkStatus, MigrationLinkView,
         RestorePlanStatus,
     },
     state::AppState,
-    util::limit_or_default,
 };
 
 const MAX_MIGRATION_NOTE_BYTES: usize = 1024;
@@ -19,15 +18,10 @@ const MAX_MIGRATION_NOTE_BYTES: usize = 1024;
 pub(crate) async fn list_migration_links(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<MigrationLinkView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_migration_links(limit_or_default(query.limit))
-            .await?,
-    ))
+    Ok(Json(state.repo.query_migration_links(&query).await?))
 }
 
 pub(crate) async fn create_migration_link(

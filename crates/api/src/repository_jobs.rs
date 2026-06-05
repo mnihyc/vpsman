@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
@@ -11,6 +13,7 @@ use crate::repository_rollouts::{
     insert_postgres_agent_update_rollout, record_memory_agent_update_rollout,
     rollout_status_for_job_status, rollout_target_summary,
 };
+use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
 use crate::{unix_now, TargetDispatchOutcome};
 
 fn agent_update_activation_failure_status(status: &str) -> bool {
@@ -18,6 +21,102 @@ fn agent_update_activation_failure_status(status: &str) -> bool {
         status,
         "failed" | "dispatch_failed" | "rejected_by_agent" | "timed_out" | "canceled"
     )
+}
+
+fn compare_text_or_number(left: &str, right: &str) -> Ordering {
+    match (left.parse::<i128>(), right.parse::<i128>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_job_history(
+    left: &JobHistoryView,
+    right: &JobHistoryView,
+    sort: Option<&str>,
+) -> Ordering {
+    match sort.unwrap_or("created_at") {
+        "actor_id" => left.actor_id.cmp(&right.actor_id),
+        "command_type" | "command" => left.command_type.cmp(&right.command_type),
+        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
+        "privileged" => left.privileged.cmp(&right.privileged),
+        "status" => left.status.cmp(&right.status),
+        "target_count" | "targets" => left.target_count.cmp(&right.target_count),
+        "completed_at" => left.completed_at.cmp(&right.completed_at),
+        _ => compare_text_or_number(&left.created_at, &right.created_at),
+    }
+}
+
+fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
+    job.id.to_string().to_ascii_lowercase().contains(needle)
+        || job
+            .actor_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || job.command_type.to_ascii_lowercase().contains(needle)
+        || job.status.to_ascii_lowercase().contains(needle)
+        || job.payload_hash.to_ascii_lowercase().contains(needle)
+}
+
+fn job_history_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("created_at"), descending) {
+        ("actor_id", true) => "actor_id DESC NULLS LAST, id DESC",
+        ("actor_id", false) => "actor_id ASC NULLS LAST, id ASC",
+        ("command_type" | "command", true) => "command_type DESC, id DESC",
+        ("command_type" | "command", false) => "command_type ASC, id ASC",
+        ("payload_hash" | "hash", true) => "payload_hash DESC, id DESC",
+        ("payload_hash" | "hash", false) => "payload_hash ASC, id ASC",
+        ("privileged", true) => "privileged DESC, id DESC",
+        ("privileged", false) => "privileged ASC, id ASC",
+        ("status", true) => "status DESC, id DESC",
+        ("status", false) => "status ASC, id ASC",
+        ("target_count" | "targets", true) => "target_count DESC, id DESC",
+        ("target_count" | "targets", false) => "target_count ASC, id ASC",
+        ("completed_at", true) => "completed_at DESC NULLS LAST, id DESC",
+        ("completed_at", false) => "completed_at ASC NULLS LAST, id ASC",
+        (_, true) => "created_at DESC, id DESC",
+        (_, false) => "created_at ASC, id ASC",
+    }
+}
+
+fn compare_audit_log(left: &AuditLogView, right: &AuditLogView, sort: Option<&str>) -> Ordering {
+    match sort.unwrap_or("created_at") {
+        "actor_id" | "operator" => left.actor_id.cmp(&right.actor_id),
+        "action" => left.action.cmp(&right.action),
+        "command_hash" | "hash" => left.command_hash.cmp(&right.command_hash),
+        "target" => left.target.cmp(&right.target),
+        _ => compare_text_or_number(&left.created_at, &right.created_at),
+    }
+}
+
+fn audit_matches_search(audit: &AuditLogView, needle: &str) -> bool {
+    audit.id.to_string().to_ascii_lowercase().contains(needle)
+        || audit
+            .actor_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || audit.action.to_ascii_lowercase().contains(needle)
+        || audit.target.to_ascii_lowercase().contains(needle)
+        || audit
+            .command_hash
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+}
+
+fn audit_log_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("created_at"), descending) {
+        ("actor_id" | "operator", true) => "actor_id DESC NULLS LAST, id DESC",
+        ("actor_id" | "operator", false) => "actor_id ASC NULLS LAST, id ASC",
+        ("action", true) => "action DESC, id DESC",
+        ("action", false) => "action ASC, id ASC",
+        ("command_hash" | "hash", true) => "command_hash DESC NULLS LAST, id DESC",
+        ("command_hash" | "hash", false) => "command_hash ASC NULLS LAST, id ASC",
+        ("target", true) => "target DESC, id DESC",
+        ("target", false) => "target ASC, id ASC",
+        (_, true) => "created_at DESC, id DESC",
+        (_, false) => "created_at ASC, id ASC",
+    }
 }
 
 impl Repository {
@@ -159,6 +258,95 @@ impl Repository {
                     "#,
                 )
                 .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(JobHistoryView {
+                            id: row.try_get("id")?,
+                            actor_id: row.try_get("actor_id")?,
+                            command_type: row.try_get("command_type")?,
+                            privileged: row.try_get("privileged")?,
+                            status: row.try_get("status")?,
+                            target_count: row.try_get("target_count")?,
+                            payload_hash: row.try_get("payload_hash")?,
+                            created_at: row.try_get("created_at")?,
+                            completed_at: row.try_get("completed_at")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn query_jobs(&self, query: &ListQuery) -> Result<Vec<JobHistoryView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut jobs = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|job| {
+                        q.as_deref()
+                            .map(|needle| job_matches_search(job, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                jobs.sort_by(|left, right| {
+                    compare_job_history(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    jobs.reverse();
+                }
+                Ok(jobs
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = job_history_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        command_type,
+                        privileged,
+                        status,
+                        target_count,
+                        payload_hash,
+                        created_at::text AS created_at,
+                        completed_at::text AS completed_at
+                    FROM jobs
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR actor_id::text ILIKE $3 ESCAPE '\'
+                        OR command_type ILIKE $3 ESCAPE '\'
+                        OR status ILIKE $3 ESCAPE '\'
+                        OR payload_hash ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -353,6 +541,93 @@ impl Repository {
                     "#,
                 )
                 .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let metadata: sqlx::types::Json<serde_json::Value> =
+                            row.try_get("metadata")?;
+                        Ok(AuditLogView {
+                            id: row.try_get("id")?,
+                            actor_id: row.try_get("actor_id")?,
+                            action: row.try_get("action")?,
+                            target: row.try_get("target")?,
+                            command_hash: row.try_get("command_hash")?,
+                            metadata: metadata.0,
+                            created_at: row.try_get("created_at")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn query_audit_logs(&self, query: &ListQuery) -> Result<Vec<AuditLogView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut audits = memory
+                    .audits
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|audit| {
+                        q.as_deref()
+                            .map(|needle| audit_matches_search(audit, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                audits.sort_by(|left, right| {
+                    compare_audit_log(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    audits.reverse();
+                }
+                Ok(audits
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = audit_log_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        action,
+                        target,
+                        command_hash,
+                        metadata,
+                        created_at::text AS created_at
+                    FROM audit_logs
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR actor_id::text ILIKE $3 ESCAPE '\'
+                        OR action ILIKE $3 ESCAPE '\'
+                        OR target ILIKE $3 ESCAPE '\'
+                        OR command_hash ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

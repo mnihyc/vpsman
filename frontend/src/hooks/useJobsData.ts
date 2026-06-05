@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiGetBlob, apiPost, apiPostBinary, isApiUnauthorized } from "../api";
+import { apiGet, apiGetBlob, apiPost, apiPostBinary, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentUpdateActivationDelegationRecord,
@@ -69,7 +69,7 @@ export function useJobsData(
         terminalSessionsResult,
         commandTemplatesResult,
       ] = await Promise.allSettled([
-        apiGet<JobHistoryRecord[]>("/api/v1/jobs?limit=1000", apiToken),
+        apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
         apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=200", apiToken),
         apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=200", apiToken),
         apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),

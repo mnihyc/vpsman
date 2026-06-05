@@ -1,9 +1,9 @@
 use super::*;
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, AgentMetrics, BandwidthTier, GatewayTelemetryIngest, OspfCostPolicy,
-    RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
-    TelemetryEnvelope, TunnelKind, TunnelPlanInput,
+    plan_tunnel, AgentMetrics, BandwidthTier, DiskStat, GatewayTelemetryIngest, NetworkStat,
+    OspfCostPolicy, RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager,
+    RuntimeTunnelStat, TelemetryEnvelope, TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -52,6 +52,149 @@ async fn telemetry_tunnel_readback_records_unmatched_import_candidate() {
         Some("interface_counters")
     );
     assert_eq!(tunnels[0].traffic_status.as_deref(), Some("ok"));
+}
+
+#[tokio::test]
+async fn telemetry_ingest_averages_multiple_events_into_one_minute_summary() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_resource_telemetry(
+        &repo,
+        "edge-a",
+        AgentMetrics {
+            observed_unix: 1_800_000_010,
+            hostname: "edge-a".to_string(),
+            cpu: vpsman_common::CpuStat {
+                load: vpsman_common::LoadAverage {
+                    one: 0.5,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            memory: vpsman_common::MemoryStat {
+                total_bytes: 1_000,
+                available_bytes: 800,
+            },
+            disks: vec![DiskStat {
+                mountpoint: "/".to_string(),
+                total_bytes: 100,
+                available_bytes: 70,
+            }],
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: 1_000,
+                tx_bytes: 2_000,
+            }],
+            ..AgentMetrics::default()
+        },
+    )
+    .await;
+    seed_resource_telemetry(
+        &repo,
+        "edge-a",
+        AgentMetrics {
+            observed_unix: 1_800_000_020,
+            hostname: "edge-a".to_string(),
+            cpu: vpsman_common::CpuStat {
+                load: vpsman_common::LoadAverage {
+                    one: 1.5,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            memory: vpsman_common::MemoryStat {
+                total_bytes: 1_200,
+                available_bytes: 600,
+            },
+            disks: vec![DiskStat {
+                mountpoint: "/".to_string(),
+                total_bytes: 100,
+                available_bytes: 50,
+            }],
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: 4_000,
+                tx_bytes: 8_000,
+            }],
+            ..AgentMetrics::default()
+        },
+    )
+    .await;
+
+    let rollups = repo
+        .list_telemetry_rollups(10, Some("edge-a"), Some(60))
+        .await
+        .unwrap();
+    assert_eq!(rollups.len(), 1);
+    assert_eq!(rollups[0].bucket_secs, 60);
+    assert_eq!(rollups[0].sample_count, 2);
+    assert_eq!(rollups[0].cpu_load_1_avg, 1.0);
+    assert_eq!(rollups[0].memory_total_bytes_max, 1_200);
+    assert_eq!(rollups[0].memory_available_bytes_avg, 700);
+    assert_eq!(rollups[0].disk_available_bytes_avg, 60);
+
+    let rates = repo
+        .list_telemetry_network_rates(10, Some("edge-a"), Some("eth0"), Some(60))
+        .await
+        .unwrap();
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0].bucket_secs, 60);
+    assert_eq!(rates[0].sample_count, 2);
+    assert_eq!(rates[0].rx_bytes_avg, 2_500);
+    assert_eq!(rates[0].tx_bytes_avg, 5_000);
+    assert_eq!(rates[0].rx_bytes_delta, 0);
+    assert_eq!(rates[0].tx_bytes_delta, 0);
+    assert_eq!(rates[0].rx_bps_avg, 0.0);
+    assert_eq!(rates[0].tx_bps_avg, 0.0);
+}
+
+#[tokio::test]
+async fn telemetry_network_rates_are_derived_between_minute_summaries() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_resource_telemetry(
+        &repo,
+        "edge-a",
+        AgentMetrics {
+            observed_unix: 1_800_000_010,
+            hostname: "edge-a".to_string(),
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: 1_000,
+                tx_bytes: 2_000,
+            }],
+            ..AgentMetrics::default()
+        },
+    )
+    .await;
+    seed_resource_telemetry(
+        &repo,
+        "edge-a",
+        AgentMetrics {
+            observed_unix: 1_800_000_070,
+            hostname: "edge-a".to_string(),
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: 4_000,
+                tx_bytes: 8_000,
+            }],
+            ..AgentMetrics::default()
+        },
+    )
+    .await;
+
+    let rates = repo
+        .list_telemetry_network_rates(10, Some("edge-a"), Some("eth0"), Some(60))
+        .await
+        .unwrap();
+    let latest = rates
+        .iter()
+        .find(|rate| rate.bucket_start == "1800000060")
+        .unwrap();
+    assert_eq!(latest.rx_bytes_avg, 4_000);
+    assert_eq!(latest.tx_bytes_avg, 8_000);
+    assert_eq!(latest.rx_bytes_delta, 3_000);
+    assert_eq!(latest.tx_bytes_delta, 6_000);
+    assert_eq!(latest.rx_bps_avg, 400.0);
+    assert_eq!(latest.tx_bps_avg, 800.0);
 }
 
 #[tokio::test]
@@ -219,6 +362,7 @@ fn operator_context() -> AuthContext {
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),
@@ -280,6 +424,18 @@ async fn seed_tunnel_telemetry(repo: &Repository, client_id: &str, tunnel: Runti
                 tunnels: vec![tunnel],
                 ..AgentMetrics::default()
             },
+        },
+    })
+    .await
+    .unwrap();
+}
+
+async fn seed_resource_telemetry(repo: &Repository, client_id: &str, metrics: AgentMetrics) {
+    repo.record_telemetry(&GatewayTelemetryIngest {
+        gateway_id: "gateway-a".to_string(),
+        telemetry: TelemetryEnvelope {
+            client_id: client_id.to_string(),
+            metrics,
         },
     })
     .await

@@ -160,7 +160,7 @@ function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpact
 
 function formatAgentNames(agents: AgentView[], mode: VpsNameDisplayMode): string {
   if (agents.length === 0) {
-    return "-";
+    return "No targets";
   }
   const visible = agents.slice(0, 3).map((agent) => formatVpsName(agent, mode));
   const remaining = agents.length - visible.length;

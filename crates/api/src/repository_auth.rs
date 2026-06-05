@@ -33,6 +33,7 @@ impl Repository {
             role: "admin".to_string(),
             scopes: normalize_operator_scopes("admin", &[])
                 .map_err(|error| anyhow::anyhow!(error.code))?,
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
@@ -46,8 +47,8 @@ impl Repository {
             Self::Postgres(pool) => {
                 sqlx::query(
                     r#"
-                    INSERT INTO operators (id, username, password_hash, role, scopes)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO operators (id, username, password_hash, role, scopes, preferences)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     "#,
                 )
                 .bind(operator.id)
@@ -55,6 +56,7 @@ impl Repository {
                 .bind(&operator.password_hash)
                 .bind(&operator.role)
                 .bind(serde_json::json!(operator.scopes))
+                .bind(serde_json::json!(operator.preferences))
                 .execute(pool)
                 .await?;
                 self.issue_session(operator.view()).await
@@ -120,7 +122,7 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
-                    SELECT o.id, o.username, o.role, o.scopes, o.totp_enabled
+                    SELECT o.id, o.username, o.role, o.scopes, o.preferences, o.totp_enabled
                     FROM operator_sessions s
                     JOIN operators o ON o.id = s.operator_id
                     WHERE s.refresh_token_hash = $1
@@ -150,6 +152,7 @@ impl Repository {
                     username: row.try_get("username")?,
                     role: row.try_get("role")?,
                     scopes: parse_scopes(row.try_get("scopes")?),
+                    preferences: parse_operator_preferences(row.try_get("preferences")?),
                     totp_enabled: row.try_get("totp_enabled")?,
                 };
                 self.issue_session(operator).await.map(Some)
@@ -196,6 +199,7 @@ impl Repository {
                         o.username,
                         o.role,
                         o.scopes,
+                        o.preferences,
                         o.totp_enabled
                     FROM operator_sessions s
                     JOIN operators o ON o.id = s.operator_id
@@ -215,6 +219,7 @@ impl Repository {
                             username: row.try_get("username")?,
                             role: row.try_get("role")?,
                             scopes: parse_scopes(row.try_get("scopes")?),
+                            preferences: parse_operator_preferences(row.try_get("preferences")?),
                             totp_enabled: row.try_get("totp_enabled")?,
                         },
                     })
@@ -246,6 +251,7 @@ impl Repository {
                         password_hash,
                         role,
                         scopes,
+                        preferences,
                         totp_enabled,
                         totp_secret_ciphertext_hex,
                         totp_secret_nonce_hex,
@@ -264,6 +270,7 @@ impl Repository {
                         password_hash: row.try_get("password_hash")?,
                         role: row.try_get("role")?,
                         scopes: parse_scopes(row.try_get("scopes")?),
+                        preferences: parse_operator_preferences(row.try_get("preferences")?),
                         totp_enabled: row.try_get("totp_enabled")?,
                         totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
                         totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
@@ -287,7 +294,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    SELECT id, username, role, scopes, totp_enabled
+                    SELECT id, username, role, scopes, preferences, totp_enabled
                     FROM operators
                     ORDER BY created_at ASC, username ASC
                     "#,
@@ -301,6 +308,7 @@ impl Repository {
                             username: row.try_get("username")?,
                             role: row.try_get("role")?,
                             scopes: parse_scopes(row.try_get("scopes")?),
+                            preferences: parse_operator_preferences(row.try_get("preferences")?),
                             totp_enabled: row.try_get("totp_enabled")?,
                         })
                     })
@@ -324,6 +332,7 @@ impl Repository {
             password_hash: hash_operator_password(&request.password)?,
             role,
             scopes,
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
@@ -364,8 +373,8 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 sqlx::query(
                     r#"
-                    INSERT INTO operators (id, username, password_hash, role, scopes)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO operators (id, username, password_hash, role, scopes, preferences)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     "#,
                 )
                 .bind(operator.id)
@@ -373,6 +382,7 @@ impl Repository {
                 .bind(&operator.password_hash)
                 .bind(&operator.role)
                 .bind(serde_json::json!(operator.scopes))
+                .bind(serde_json::json!(operator.preferences))
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
@@ -394,6 +404,86 @@ impl Repository {
             }
         }
         Ok(operator.view())
+    }
+
+    pub(crate) async fn update_operator_preferences(
+        &self,
+        actor: &AuthContext,
+        preferences: OperatorPreferences,
+    ) -> Result<OperatorView> {
+        let preferences = preferences.normalized();
+        let metadata = serde_json::json!({
+            "operator_id": actor.operator.id,
+            "operator_username": actor.operator.username,
+            "session_id": actor.session_id,
+            "preferences": preferences,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let mut operators = memory.operators.write().await;
+                let Some(operator) = operators
+                    .iter_mut()
+                    .find(|operator| operator.id == actor.operator.id)
+                else {
+                    anyhow::bail!("operator not found");
+                };
+                operator.preferences = preferences.clone();
+                let view = operator.view();
+                drop(operators);
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor.operator.id),
+                    action: "operator.preferences.updated".to_string(),
+                    target: format!("operator:{}", actor.operator.id),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+                Ok(view)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET preferences = $2
+                    WHERE id = $1
+                    RETURNING id, username, role, scopes, preferences, totp_enabled
+                    "#,
+                )
+                .bind(actor.operator.id)
+                .bind(serde_json::json!(preferences))
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    anyhow::bail!("operator not found");
+                };
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(actor.operator.id)
+                .bind("operator.preferences.updated")
+                .bind(format!("operator:{}", actor.operator.id))
+                .bind(metadata)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(OperatorView {
+                    id: row.try_get("id")?,
+                    username: row.try_get("username")?,
+                    role: row.try_get("role")?,
+                    scopes: parse_scopes(row.try_get("scopes")?),
+                    preferences: parse_operator_preferences(row.try_get("preferences")?),
+                    totp_enabled: row.try_get("totp_enabled")?,
+                })
+            }
+        }
     }
 
     pub(crate) async fn list_operator_sessions(
@@ -610,6 +700,12 @@ pub(crate) fn parse_scopes(value: serde_json::Value) -> Vec<String> {
         .flatten()
         .filter_map(|scope| scope.as_str().map(ToOwned::to_owned))
         .collect()
+}
+
+pub(crate) fn parse_operator_preferences(value: serde_json::Value) -> OperatorPreferences {
+    serde_json::from_value::<OperatorPreferences>(value)
+        .unwrap_or_default()
+        .normalized()
 }
 
 async fn record_session_revoke_audit(

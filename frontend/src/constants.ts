@@ -4,14 +4,23 @@ import {
   DatabaseBackup,
   GitBranch,
   KeyRound,
+  LayoutDashboard,
   Server,
+  Settings,
   Tag,
   TerminalSquare,
   type LucideIcon,
 } from "lucide-react";
 import type { ActiveView, FleetSummary } from "./types";
 
+export type ConsoleSubpage = {
+  id: string;
+  label: string;
+  description: string;
+};
+
 export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
+  { view: "Dashboard", icon: LayoutDashboard },
   { view: "Fleet", icon: Server },
   { view: "Tags", icon: Tag },
   { view: "Jobs", icon: TerminalSquare },
@@ -20,6 +29,7 @@ export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
   { view: "Backups", icon: DatabaseBackup },
   { view: "Audit", icon: ClipboardList },
   { view: "Access", icon: KeyRound },
+  { view: "Preferences", icon: Settings },
 ];
 
 export const navSections: readonly {
@@ -28,7 +38,7 @@ export const navSections: readonly {
 }[] = [
   {
     label: "Operations",
-    items: navItems.filter((item) => ["Fleet", "Tags", "Jobs", "Schedules"].includes(item.view)),
+    items: navItems.filter((item) => ["Dashboard", "Fleet", "Tags", "Jobs", "Schedules"].includes(item.view)),
   },
   {
     label: "Network",
@@ -38,7 +48,95 @@ export const navSections: readonly {
     label: "Data & access",
     items: navItems.filter((item) => ["Backups", "Audit", "Access"].includes(item.view)),
   },
+  {
+    label: "System",
+    items: navItems.filter((item) => item.view === "Preferences"),
+  },
 ];
+
+export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
+  Dashboard: [
+    {
+      id: "overview",
+      label: "Overview",
+      description: "Operational health, resource usage, network curves, and label clusters",
+    },
+  ],
+  Fleet: [
+    { id: "instances", label: "Instances", description: "VPS inventory, health, and selected-instance details" },
+    { id: "alerts", label: "Alerts", description: "Active fleet alerts and triage state" },
+    { id: "policies", label: "Alert policies", description: "Scoped fleet alert thresholds" },
+    { id: "notifications", label: "Notifications", description: "Alert delivery channels and queue processing" },
+  ],
+  Tags: [
+    { id: "registry", label: "Tag registry", description: "Provider, country, and custom tags" },
+    { id: "targeting", label: "Targeting", description: "Assign tags and preview target sets" },
+    { id: "presets", label: "Data-source presets", description: "Preset definition, assignment, lifecycle, and proofed apply" },
+    { id: "status", label: "Source status", description: "Active data-source selections and health" },
+  ],
+  Jobs: [
+    { id: "history", label: "History", description: "Command requests, targets, output, and cancellation" },
+    { id: "dispatch", label: "Dispatch", description: "Compose proof-gated commands and terminal actions" },
+    { id: "updates", label: "Updates", description: "Agent releases, rollout policies, and rollout state" },
+    { id: "transfers", label: "File transfers", description: "Source artifacts, handoffs, and transfer sessions" },
+    { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
+    { id: "processes", label: "Processes", description: "Process supervisor inventory" },
+    { id: "approvals", label: "Approvals", description: "Scheduled privileged approvals and proof vault" },
+  ],
+  Schedules: [
+    { id: "registry", label: "Schedule registry", description: "Server-side schedules and due-run records" },
+  ],
+  Topology: [
+    { id: "graph", label: "Graph", description: "Observed topology graph and tunnel plan summary" },
+    { id: "plans", label: "Tunnel plans", description: "Saved tunnel plans and plan authoring" },
+    { id: "apply", label: "Apply / rollback", description: "Proof-gated tunnel apply, rollback, status, probes, and speed tests" },
+    { id: "promotion", label: "Promotion", description: "Promote observed tunnels into adapter contracts" },
+    { id: "evidence", label: "Evidence", description: "Network trends, observations, and retained plan output" },
+    { id: "ospf", label: "OSPF", description: "OSPF update recommendations and cost apply" },
+  ],
+  Backups: [
+    { id: "requests", label: "Requests", description: "Backup request history and metadata" },
+    { id: "policies", label: "Policies", description: "Policy create and retention pruning" },
+    { id: "artifacts", label: "Artifacts", description: "Upload retained backup artifacts and create handoffs" },
+    { id: "restore", label: "Restore", description: "Plan restore, run restore, and rollback" },
+    { id: "migration", label: "Migration", description: "Migration assistant for replacement VPS workflows" },
+  ],
+  Audit: [
+    { id: "events", label: "Events", description: "Operator and security audit events" },
+    { id: "retention", label: "Retention", description: "History export and retention pruning" },
+  ],
+  Access: [
+    { id: "overview", label: "Overview", description: "Session, vault, key, and live stream posture" },
+    { id: "operators", label: "Operators", description: "Operator accounts, sessions, and TOTP" },
+    { id: "clients", label: "VPS keys", description: "Enrollment tokens and client key lifecycle" },
+    { id: "gateway", label: "Gateway", description: "Gateway sessions and control-plane stream state" },
+    { id: "proof", label: "Proof vault", description: "Proof vault and rotation records" },
+  ],
+  Preferences: [
+    {
+      id: "operator",
+      label: "Operator",
+      description: "Display, timezone, language, and navigation defaults",
+    },
+  ],
+};
+
+export const defaultSubpages: Record<ActiveView, string> = Object.fromEntries(
+  Object.entries(viewSubpages).map(([view, subpages]) => [view, subpages[0]?.id ?? "main"]),
+) as Record<ActiveView, string>;
+
+export function normalizeSubpage(view: ActiveView, subpage: string | null | undefined): string {
+  const valid = viewSubpages[view].some((entry) => entry.id === subpage);
+  return valid && subpage ? subpage : defaultSubpages[view];
+}
+
+export function subpageLabel(view: ActiveView, subpage: string): string {
+  return viewSubpages[view].find((entry) => entry.id === subpage)?.label ?? subpage;
+}
+
+export function subpageDescription(view: ActiveView, subpage: string): string {
+  return viewSubpages[view].find((entry) => entry.id === subpage)?.description ?? "";
+}
 
 export const emptySummary: FleetSummary = {
   total: 0,

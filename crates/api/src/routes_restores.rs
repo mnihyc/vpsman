@@ -10,11 +10,9 @@ use crate::{
     error::ApiError,
     job_request::{validate_file_path, validate_unsigned_command_envelope},
     model::{
-        BulkResolveRequest, CreateRestorePlanRequest, HistoryQuery, RestorePlanStatus,
-        RestorePlanView,
+        BulkResolveRequest, CreateRestorePlanRequest, ListQuery, RestorePlanStatus, RestorePlanView,
     },
     state::AppState,
-    util::limit_or_default,
 };
 
 const MAX_RESTORE_PATHS: usize = 64;
@@ -23,15 +21,10 @@ const MAX_RESTORE_NOTE_BYTES: usize = 1024;
 pub(crate) async fn list_restore_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<RestorePlanView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_restore_plans(limit_or_default(query.limit))
-            .await?,
-    ))
+    Ok(Json(state.repo.query_restore_plans(&query).await?))
 }
 
 pub(crate) async fn create_restore_plan(

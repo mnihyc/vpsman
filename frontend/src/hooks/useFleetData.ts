@@ -19,6 +19,8 @@ import type {
   TelemetryTunnelRecord,
 } from "../types";
 
+const FLEET_DETAIL_LIMIT = 200;
+
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [summary, setSummary] = useState<FleetSummary>(emptySummary);
   const [agents, setAgents] = useState<AgentView[]>([]);
@@ -41,14 +43,14 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiGet<AgentView[]>("/api/v1/agents", apiToken),
       ]);
       const optionalResults = await Promise.allSettled([
-        apiGet<FleetAlertRecord[]>("/api/v1/fleet-alerts?limit=1000&include_muted=true", apiToken),
-        apiGet<FleetAlertStateRecord[]>("/api/v1/fleet-alert-states?limit=1000", apiToken),
-        apiGet<FleetAlertPolicyRecord[]>("/api/v1/fleet-alert-policies?limit=1000", apiToken),
-        apiGet<FleetAlertNotificationChannelRecord[]>("/api/v1/fleet-alert-notification-channels?limit=1000", apiToken),
-        apiGet<FleetAlertNotificationDeliveryRecord[]>("/api/v1/fleet-alert-notifications?limit=1000", apiToken),
-        apiGet<TelemetryRollupRecord[]>("/api/v1/telemetry/rollups?limit=1000", apiToken),
-        apiGet<TelemetryNetworkRateRecord[]>("/api/v1/telemetry/network-rates?limit=1000", apiToken),
-        apiGet<TelemetryTunnelRecord[]>("/api/v1/telemetry/tunnels?limit=1000", apiToken),
+        apiGet<FleetAlertRecord[]>(`/api/v1/fleet-alerts?limit=${FLEET_DETAIL_LIMIT}&include_muted=true`, apiToken),
+        apiGet<FleetAlertStateRecord[]>(`/api/v1/fleet-alert-states?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<FleetAlertPolicyRecord[]>(`/api/v1/fleet-alert-policies?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<FleetAlertNotificationChannelRecord[]>(`/api/v1/fleet-alert-notification-channels?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<FleetAlertNotificationDeliveryRecord[]>(`/api/v1/fleet-alert-notifications?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<TelemetryRollupRecord[]>(`/api/v1/telemetry/rollups?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<TelemetryNetworkRateRecord[]>(`/api/v1/telemetry/network-rates?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<TelemetryTunnelRecord[]>(`/api/v1/telemetry/tunnels?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
       ]);
 
       const optionalFailure = optionalResults.find((result) => result.status === "rejected");

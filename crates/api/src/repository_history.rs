@@ -348,11 +348,6 @@ impl Repository {
                             object_keys: Vec::new(),
                         })
                     }
-                    HistoryDomain::TelemetrySamples => Ok(HistoryRetentionPruneOutcome {
-                        matched_rows: 0,
-                        pruned_rows: 0,
-                        object_keys: Vec::new(),
-                    }),
                 }
             }
             Self::Postgres(pool) => {
@@ -414,49 +409,6 @@ impl Repository {
             }
         }
         Ok(())
-    }
-
-    pub(crate) async fn export_telemetry_samples(
-        &self,
-        limit: i64,
-        client_id: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>> {
-        match self {
-            Self::Memory(_) => Ok(Vec::new()),
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        client_id,
-                        observed_at::text AS observed_at,
-                        cpu_load_1,
-                        memory_total_bytes,
-                        memory_available_bytes,
-                        payload
-                    FROM telemetry_samples
-                    WHERE $1::TEXT IS NULL OR client_id = $1
-                    ORDER BY observed_at DESC, client_id ASC
-                    LIMIT $2
-                    "#,
-                )
-                .bind(client_id)
-                .bind(limit.clamp(1, 200))
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(json!({
-                            "client_id": row.try_get::<String, _>("client_id")?,
-                            "observed_at": row.try_get::<String, _>("observed_at")?,
-                            "cpu_load_1": row.try_get::<f64, _>("cpu_load_1")?,
-                            "memory_total_bytes": row.try_get::<i64, _>("memory_total_bytes")?,
-                            "memory_available_bytes": row.try_get::<i64, _>("memory_available_bytes")?,
-                            "payload": row.try_get::<serde_json::Value, _>("payload")?,
-                        }))
-                    })
-                    .collect()
-            }
-        }
     }
 
     pub(crate) async fn export_job_outputs(
@@ -635,12 +587,6 @@ async fn prune_postgres_history_domain(
             )
             .await
         }
-        (HistoryDomain::TelemetrySamples, true) => {
-            select_telemetry_samples(pool, cutoff_unix, limit, true).await
-        }
-        (HistoryDomain::TelemetrySamples, false) => {
-            select_telemetry_samples(pool, cutoff_unix, limit, false).await
-        }
         (HistoryDomain::TelemetryRollups, true) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, true).await
         }
@@ -774,48 +720,6 @@ async fn delete_by_id(
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: rows.len() as i64,
-        object_keys: Vec::new(),
-    })
-}
-
-async fn select_telemetry_samples(
-    pool: &sqlx::PgPool,
-    cutoff_unix: u64,
-    limit: i32,
-    dry_run: bool,
-) -> Result<HistoryRetentionPruneOutcome> {
-    let query = if dry_run {
-        r#"
-        SELECT client_id, observed_at
-        FROM telemetry_samples
-        WHERE observed_at < to_timestamp($1)
-        ORDER BY observed_at ASC, client_id ASC
-        LIMIT $2
-        "#
-    } else {
-        r#"
-        WITH doomed AS (
-            SELECT client_id, observed_at
-            FROM telemetry_samples
-            WHERE observed_at < to_timestamp($1)
-            ORDER BY observed_at ASC, client_id ASC
-            LIMIT $2
-        )
-        DELETE FROM telemetry_samples sample
-        USING doomed
-        WHERE sample.client_id = doomed.client_id
-          AND sample.observed_at = doomed.observed_at
-        RETURNING sample.client_id
-        "#
-    };
-    let rows = sqlx::query(query)
-        .bind(cutoff_unix as i64)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-    Ok(HistoryRetentionPruneOutcome {
-        matched_rows: rows.len() as i64,
-        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
         object_keys: Vec::new(),
     })
 }

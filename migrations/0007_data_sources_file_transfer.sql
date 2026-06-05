@@ -22,15 +22,15 @@ CREATE TABLE data_source_presets (
 );
 
 CREATE UNIQUE INDEX data_source_presets_global_name_idx
-    ON data_source_presets(domain, name, scope)
+    ON data_source_presets (domain, name, scope)
     WHERE owner_client_id IS NULL;
 
 CREATE UNIQUE INDEX data_source_presets_client_name_idx
-    ON data_source_presets(domain, owner_client_id, name)
+    ON data_source_presets (domain, owner_client_id, name)
     WHERE owner_client_id IS NOT NULL;
 
 CREATE UNIQUE INDEX data_source_presets_default_idx
-    ON data_source_presets(domain)
+    ON data_source_presets (domain)
     WHERE is_default;
 
 CREATE TABLE client_data_source_preset_assignments (
@@ -42,7 +42,7 @@ CREATE TABLE client_data_source_preset_assignments (
 );
 
 CREATE INDEX client_data_source_preset_assignments_preset_idx
-    ON client_data_source_preset_assignments(preset_id);
+    ON client_data_source_preset_assignments (preset_id);
 
 INSERT INTO data_source_presets (
     id, domain, name, scope, built_in, is_default, description, definition
@@ -265,3 +265,23 @@ FROM clients
 CROSS JOIN data_source_presets presets
 WHERE presets.is_default
 ON CONFLICT (client_id, domain) DO NOTHING;
+
+CREATE TABLE file_transfer_source_artifacts (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    sha256_hex TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    created_by UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT file_transfer_source_artifacts_sha256_hex_check
+        CHECK (sha256_hex ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT file_transfer_source_artifacts_size_check
+        CHECK (size_bytes >= 0)
+);
+
+CREATE INDEX file_transfer_source_artifacts_created_idx
+    ON file_transfer_source_artifacts (created_at DESC, id DESC);
+
+CREATE INDEX file_transfer_source_artifacts_hash_idx
+    ON file_transfer_source_artifacts (sha256_hex, size_bytes);

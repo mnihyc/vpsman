@@ -189,17 +189,6 @@ pub(crate) async fn export_history(
                     json!(state.repo.list_audit_logs(limit).await?),
                 );
             }
-            HistoryDomain::TelemetrySamples => {
-                data.insert(
-                    domain.as_str().to_string(),
-                    Value::Array(
-                        state
-                            .repo
-                            .export_telemetry_samples(limit, query.client_id.as_deref())
-                            .await?,
-                    ),
-                );
-            }
             HistoryDomain::TelemetryRollups => {
                 data.insert(
                     domain.as_str().to_string(),

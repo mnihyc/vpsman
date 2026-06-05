@@ -1,17 +1,455 @@
 import type { Page } from "@playwright/test";
-import { dataSourceAssignments, dataSourcePresets } from "./dataSourcePresetFixtures";
-import { fileTransferSourceArtifacts, fileTransfers, terminalSessions } from "./jobSessionFixtures";
+import {
+  dataSourceAssignments,
+  dataSourcePresets,
+} from "./dataSourcePresetFixtures";
+import {
+  fileTransferSourceArtifacts,
+  fileTransfers,
+  terminalSessions,
+} from "./jobSessionFixtures";
 import { installTransferJobApiMock } from "./transferJobMock";
 
-export { buildEncryptedBackupArtifactFixture, sha256Hex } from "./backupArtifactFixture";
+export {
+  buildEncryptedBackupArtifactFixture,
+  sha256Hex,
+} from "./backupArtifactFixture";
 
-const statusOutput = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64");
+const statusOutput = (value: unknown) =>
+  Buffer.from(JSON.stringify(value)).toString("base64");
 
 const summary = {
   connected: 2,
   running_jobs: 3,
   total: 3,
   warnings: 1,
+};
+
+const dashboardOverview = {
+  available_filters: {
+    countries: [
+      { count: 2, kind: "country", label: "country:US", query: "country:US", value: "US" },
+      { count: 1, kind: "country", label: "country:DE", query: "country:DE", value: "DE" },
+    ],
+    group_by_options: [
+      { description: "Provider, country, and custom tags together", label: "Labels", value: "labels" },
+      { description: "Non-provider and non-country tags", label: "Custom tags", value: "tags" },
+      { description: "country:* tag distribution", label: "Countries", value: "countries" },
+      { description: "provider:* tag distribution", label: "Providers", value: "providers" },
+      { description: "One group per VPS in the selected scope", label: "VPS clients", value: "clients" },
+      { description: "Connected, stale, enrolled, and other client states", label: "Status", value: "status" },
+      { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
+    ],
+    providers: [
+      { count: 1, kind: "provider", label: "provider:alpha", query: "provider:alpha", value: "alpha" },
+    ],
+    tags: [
+      { count: 1, kind: "tag", label: "bgp", query: "tag:bgp", value: "bgp" },
+      { count: 1, kind: "tag", label: "bird2", query: "tag:bird2", value: "bird2" },
+    ],
+    windows: [
+      { label: "15 minutes", seconds: 900, value: "15m" },
+      { label: "1 hour", seconds: 3600, value: "1h" },
+      { label: "6 hours", seconds: 21600, value: "6h" },
+      { label: "24 hours", seconds: 86400, value: "24h" },
+      { label: "7 days", seconds: 604800, value: "7d" },
+      { label: "14 days", seconds: 1209600, value: "14d" },
+      { label: "30 days", seconds: 2592000, value: "30d" },
+      { label: "All", seconds: 0, value: "all" },
+    ],
+  },
+  drilldowns: [
+    {
+      label: "Open fleet instances",
+      query: null,
+      subpage: "instances",
+      view: "Fleet",
+    },
+    {
+      label: "Review active alerts",
+      query: null,
+      subpage: "alerts",
+      view: "Fleet",
+    },
+    {
+      label: "Inspect topology evidence",
+      query: null,
+      subpage: "evidence",
+      view: "Topology",
+    },
+  ],
+  generated_at: "2026-06-05T20:44:58Z",
+  group_by: "labels",
+  label_clusters: [
+    {
+      connected: 1,
+      drilldown: {
+        label: "Open matching VPS",
+        query: "country:US",
+        subpage: "instances",
+        view: "Fleet",
+      },
+      kind: "country",
+      label: "country:US",
+      query: "country:US",
+      running_jobs: 1,
+      rx_bps: 4200,
+      stale: 1,
+      total: 2,
+      tx_bps: 6400,
+      warnings: 2,
+    },
+    {
+      connected: 1,
+      drilldown: {
+        label: "Open matching VPS",
+        query: "country:DE",
+        subpage: "instances",
+        view: "Fleet",
+      },
+      kind: "country",
+      label: "country:DE",
+      query: "country:DE",
+      running_jobs: 2,
+      rx_bps: 8738,
+      stale: 0,
+      total: 1,
+      tx_bps: 17476,
+      warnings: 1,
+    },
+    {
+      connected: 1,
+      drilldown: {
+        label: "Open matching VPS",
+        query: "provider:alpha",
+        subpage: "instances",
+        view: "Fleet",
+      },
+      kind: "provider",
+      label: "provider:alpha",
+      query: "provider:alpha",
+      running_jobs: 1,
+      rx_bps: 4200,
+      stale: 0,
+      total: 1,
+      tx_bps: 6400,
+      warnings: 1,
+    },
+    {
+      connected: 2,
+      drilldown: {
+        label: "Open matching VPS",
+        query: null,
+        subpage: "instances",
+        view: "Fleet",
+      },
+      kind: "all",
+      label: "All VPS",
+      query: null,
+      running_jobs: 3,
+      rx_bps: 12938,
+      stale: 1,
+      total: 3,
+      tx_bps: 23876,
+      warnings: 3,
+    },
+  ],
+  network: {
+    points: [
+      {
+        bucket_start: "2026-06-05T20:15:00Z",
+        rx_bps: 5800,
+        tx_bps: 7800,
+      },
+      {
+        bucket_start: "2026-06-05T20:25:00Z",
+        rx_bps: 9200,
+        tx_bps: 14800,
+      },
+      {
+        bucket_start: "2026-06-05T20:35:00Z",
+        rx_bps: 12938,
+        tx_bps: 23876,
+      },
+    ],
+    rx_bps: 12938,
+    traffic_points: [
+      {
+        bucket_start: "2026-06-05T20:15:00Z",
+        rx_bytes: 160_000_000,
+        tx_bytes: 280_000_000,
+      },
+      {
+        bucket_start: "2026-06-05T20:25:00Z",
+        rx_bytes: 260_000_000,
+        tx_bytes: 410_000_000,
+      },
+      {
+        bucket_start: "2026-06-05T20:35:00Z",
+        rx_bytes: 348_000_000,
+        tx_bytes: 724_000_000,
+      },
+    ],
+    top_clients: [
+      {
+        client_id: "agent-fra-02",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-fra-02",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0", "tun0"],
+        label: "core-fra-02",
+        rx_bps: 8738,
+        tx_bps: 17476,
+      },
+      {
+        client_id: "agent-sfo-01",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-sfo-01",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0"],
+        label: "edge-sfo-01",
+        rx_bps: 4200,
+        tx_bps: 6400,
+      },
+    ],
+    traffic_series: [
+      {
+        client_id: "agent-fra-02",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-fra-02",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0", "tun0"],
+        label: "core-fra-02",
+        points: [
+          { bucket_start: "2026-06-05T20:15:00Z", rx_bytes: 110_000_000, tx_bytes: 190_000_000 },
+          { bucket_start: "2026-06-05T20:25:00Z", rx_bytes: 180_000_000, tx_bytes: 310_000_000 },
+          { bucket_start: "2026-06-05T20:35:00Z", rx_bytes: 258_000_000, tx_bytes: 524_000_000 },
+        ],
+        rx_bytes: 548_000_000,
+        tx_bytes: 1_024_000_000,
+      },
+      {
+        client_id: "agent-sfo-01",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-sfo-01",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0"],
+        label: "edge-sfo-01",
+        points: [
+          { bucket_start: "2026-06-05T20:15:00Z", rx_bytes: 50_000_000, tx_bytes: 90_000_000 },
+          { bucket_start: "2026-06-05T20:25:00Z", rx_bytes: 80_000_000, tx_bytes: 100_000_000 },
+          { bucket_start: "2026-06-05T20:35:00Z", rx_bytes: 90_000_000, tx_bytes: 200_000_000 },
+        ],
+        rx_bytes: 220_000_000,
+        tx_bytes: 390_000_000,
+      },
+    ],
+    traffic_top_clients: [
+      {
+        client_id: "agent-fra-02",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-fra-02",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0", "tun0"],
+        label: "core-fra-02",
+        rx_bytes: 548_000_000,
+        tx_bytes: 1_024_000_000,
+      },
+      {
+        client_id: "agent-sfo-01",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-sfo-01",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        interfaces: ["eth0"],
+        label: "edge-sfo-01",
+        rx_bytes: 220_000_000,
+        tx_bytes: 390_000_000,
+      },
+    ],
+    tx_bps: 23876,
+  },
+  operations: {
+    active_alerts: 3,
+    backup_completed: 1,
+    backup_failed: 0,
+    backup_pending: 1,
+    critical_alerts: 1,
+    degraded_agents: [
+      {
+        client_id: "agent-nyc-03",
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-nyc-03",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        label: "backup-nyc-03",
+        status: "stale",
+        tags: ["country:US"],
+      },
+    ],
+    recent_alerts: [
+      {
+        category: "network",
+        client_id: "agent-fra-02",
+        client_label: "core-fra-02",
+        drilldown: {
+          label: "Open core-fra-02",
+          query: "id:agent-fra-02",
+          subpage: "alerts",
+          view: "Fleet",
+        },
+        id: "fleet-alert-network-agent-fra-02-tun0",
+        observed_at: "2026-06-05T20:35:00Z",
+        severity: "critical",
+        title: "Tunnel adapter status failed",
+      },
+      {
+        category: "agent_status",
+        client_id: "agent-nyc-03",
+        client_label: "backup-nyc-03",
+        drilldown: {
+          label: "Open backup-nyc-03",
+          query: "id:agent-nyc-03",
+          subpage: "alerts",
+          view: "Fleet",
+        },
+        id: "fleet-alert-agent-agent-nyc-03-stale",
+        observed_at: "2026-06-05T20:25:00Z",
+        severity: "warning",
+        title: "Agent is not connected",
+      },
+    ],
+    running_jobs: 3,
+    stale_agents: 1,
+    warning_alerts: 2,
+  },
+  resources: {
+    cpu_load_avg: 0.74,
+    cpu_load_max: 1.91,
+    disk_free_ratio: 0.58,
+    memory_used_ratio: 0.63,
+    sampled_clients: 2,
+  },
+  resource_curve: {
+    excluded_clients: 0,
+    metric: "cpu_load",
+    sampled_clients: 3,
+    series: [
+      {
+        client_id: "agent-fra-02",
+        critical_threshold: 4,
+        current: 1.42,
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-fra-02",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        label: "core-fra-02",
+        peak: 1.91,
+        points: [
+          { bucket_start: "2026-06-05T20:15:00Z", value: 0.92 },
+          { bucket_start: "2026-06-05T20:25:00Z", value: 1.18 },
+          { bucket_start: "2026-06-05T20:35:00Z", value: 1.42 },
+        ],
+        threshold_direction: "above",
+        warning_threshold: 2,
+      },
+      {
+        client_id: "agent-sfo-01",
+        critical_threshold: 4,
+        current: 0.71,
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-sfo-01",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        label: "edge-sfo-01",
+        peak: 1.08,
+        points: [
+          { bucket_start: "2026-06-05T20:15:00Z", value: 0.61 },
+          { bucket_start: "2026-06-05T20:25:00Z", value: 0.88 },
+          { bucket_start: "2026-06-05T20:35:00Z", value: 0.71 },
+        ],
+        threshold_direction: "above",
+        warning_threshold: 2,
+      },
+      {
+        client_id: "agent-nyc-03",
+        critical_threshold: 4,
+        current: 0.34,
+        drilldown: {
+          label: "Open VPS details",
+          query: "id:agent-nyc-03",
+          subpage: "instances",
+          view: "Fleet",
+        },
+        label: "backup-nyc-03",
+        peak: 0.65,
+        points: [
+          { bucket_start: "2026-06-05T20:15:00Z", value: 0.24 },
+          { bucket_start: "2026-06-05T20:25:00Z", value: 0.55 },
+          { bucket_start: "2026-06-05T20:35:00Z", value: 0.34 },
+        ],
+        threshold_direction: "above",
+        warning_threshold: 2,
+      },
+    ],
+    top_limit: 8,
+  },
+  scope: {
+    kind: "all",
+    label: "All VPS",
+    matched_clients: 3,
+    query: null,
+    value: null,
+  },
+  summary: {
+    connected: 2,
+    running_jobs: 3,
+    stale: 1,
+    total: 3,
+    warnings: 3,
+  },
+  time_range: {
+    end_at: "2026-06-05T20:44:58Z",
+    end_unix: 1780692298,
+    mode: "window",
+    start_at: "2026-06-04T20:44:58Z",
+    start_unix: 1780605898,
+    window: "24h",
+  },
+  window: "24h",
+};
+
+const operatorPreferences = {
+  dashboard_curve_exclusions: [],
+  dashboard_network_top_limit: 8,
+  dashboard_resource_top_limit: 8,
+  language: "en",
+  sidebar_subpanel_default: "active",
+  timezone: null,
+  vps_name_display_mode: "name_id_suffix",
 };
 
 const rootCapabilities = {
@@ -87,7 +525,8 @@ const fleetAlerts = [
   {
     category: "source_readiness",
     client_id: "agent-sfo-01",
-    detail: "Backup object store: backup object-store preset is selected, but no server object store is configured",
+    detail:
+      "Backup object store: backup object-store preset is selected, but no server object store is configured",
     evidence: { domain: "backup_object_store" },
     id: "fleet-alert-source-agent-sfo-01-backup",
     observed_at: "2026-06-02T10:00:00Z",
@@ -260,7 +699,8 @@ const dataSourceStatus = [
     preset_scope: "shared",
     source_kind: "vnstat",
     status: "ok",
-    status_reason: "latest traffic samples are available from the selected preset",
+    status_reason:
+      "latest traffic samples are available from the selected preset",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -280,7 +720,8 @@ const dataSourceStatus = [
     preset_scope: "built_in",
     source_kind: "interface_counters",
     status: "ok",
-    status_reason: "latest interface counters are available from the selected preset",
+    status_reason:
+      "latest interface counters are available from the selected preset",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -301,7 +742,8 @@ const dataSourceStatus = [
     preset_scope: "built_in",
     source_kind: "local_filesystem",
     status: "selected_no_store",
-    status_reason: "backup object-store preset is selected, but no server object store is configured",
+    status_reason:
+      "backup object-store preset is selected, but no server object store is configured",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -324,7 +766,8 @@ const dataSourceStatus = [
     preset_scope: "built_in",
     source_kind: "local_filesystem_or_https",
     status: "metadata_only",
-    status_reason: "signed HTTPS update release metadata exists; hosted artifact storage is optional",
+    status_reason:
+      "signed HTTPS update release metadata exists; hosted artifact storage is optional",
   },
 ];
 
@@ -365,8 +808,10 @@ const keyLifecycleReport = {
     current_key_revoked: agent.id === "agent-nyc-03",
     current_public_key_sha256_hex: (index + 1).toString(16).repeat(64),
     display_name: agent.display_name,
-    latest_revocation_reason: agent.id === "agent-nyc-03" ? "fixture rebuild" : null,
-    latest_revoked_at: agent.id === "agent-nyc-03" ? "2026-05-31T10:01:00Z" : null,
+    latest_revocation_reason:
+      agent.id === "agent-nyc-03" ? "fixture rebuild" : null,
+    latest_revoked_at:
+      agent.id === "agent-nyc-03" ? "2026-05-31T10:01:00Z" : null,
     status: agent.status,
   })),
   current_key_revoked_count: 1,
@@ -473,7 +918,10 @@ export const tunnelPlans = [
         "  cost 14;",
         "};",
       ].join("\n"),
-      touched_files: ["/etc/network/interfaces.d/vpsman-tunnels", "/etc/bird/vpsman-ospf.conf"],
+      touched_files: [
+        "/etc/network/interfaces.d/vpsman-tunnels",
+        "/etc/bird/vpsman-ospf.conf",
+      ],
       validation_steps: ["review generated snippets before apply"],
       rollback_notes: ["remove only the vpsman-managed blocks"],
       conflicts: [],
@@ -543,8 +991,12 @@ export const tunnelPlans = [
         "};",
       ].join("\n"),
       touched_files: ["/etc/bird/vpsman-ospf.conf"],
-      validation_steps: ["confirm the external tunnel is present before routing apply"],
-      rollback_notes: ["remove only the matching vpsman-managed Bird2 interface block"],
+      validation_steps: [
+        "confirm the external tunnel is present before routing apply",
+      ],
+      rollback_notes: [
+        "remove only the matching vpsman-managed Bird2 interface block",
+      ],
       conflicts: [],
       mutates_host: false,
     },
@@ -602,6 +1054,43 @@ const networkJobs = [
   },
 ];
 
+const commandTemplates = [
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_type: "shell",
+    created_at: "2026-05-31T10:04:00Z",
+    defaults: { timeout_secs: 30 },
+    id: "46464646-5656-4789-8abc-defdefdefdef",
+    name: "edge-health-check",
+    operation: { argv: ["uptime"], pty: false, type: "shell" },
+    scope_kind: "tag",
+    scope_value: "provider:alpha",
+    updated_at: "2026-05-31T10:04:00Z",
+  },
+];
+
+const schedules = [
+  {
+    catch_up_limit: 1,
+    catch_up_policy: "run_once",
+    clients: ["agent-sfo-01"],
+    command_type: "shell",
+    created_at: "2026-05-31T09:00:00Z",
+    enabled: true,
+    failure_count: 0,
+    id: "51515151-6161-4717-8abc-defdefdefdef",
+    interval_secs: 3600,
+    last_error: null,
+    last_run_at: "2026-05-31T10:00:00Z",
+    max_failures: 3,
+    name: "edge-health-hourly",
+    next_run_at: "2026-05-31T11:00:00Z",
+    operation: { argv: ["uptime"], pty: false, type: "shell" },
+    retry_delay_secs: 300,
+    tags: ["provider:alpha"],
+  },
+];
+
 const agentUpdateRollouts = [
   {
     activation_policy: "manual_staging_only",
@@ -621,7 +1110,8 @@ const agentUpdateRollouts = [
     automation_lease_expires_at: null,
     automation_status: "ready_activate_canary",
     automation_next_action: "operator_activate_batch",
-    automation_blocker: "privileged rollout dispatch requires fresh per-target proof",
+    automation_blocker:
+      "privileged rollout dispatch requires fresh per-target proof",
     automation_targets: ["agent-sfo-01"],
     automation_updated_at: "2026-05-31T10:10:01Z",
     activation_delegations: [
@@ -968,7 +1458,7 @@ const topologyGraph = {
       display_name: "edge-sfo-01",
       latest_observed_at: "2026-05-31T10:09:00Z",
       status: "connected",
-      tags: ["provider:alpha", "pool:west"],
+      tags: ["provider:alpha", "country:US"],
       tunnel_count: 1,
     },
     {
@@ -978,7 +1468,7 @@ const topologyGraph = {
       display_name: "core-fra-02",
       latest_observed_at: "2026-05-31T10:09:00Z",
       status: "connected",
-      tags: ["bgp", "bird2", "pool:europe"],
+      tags: ["bgp", "bird2", "country:DE"],
       tunnel_count: 1,
     },
   ],
@@ -1012,7 +1502,8 @@ export const ospfUpdatePlans = [
   {
     approval_scope: ["client:agent-sfo-01", "client:agent-fra-02"],
     bird2_file: "/etc/bird/vpsman-ospf.conf",
-    change_summary: "Change Bird2 OSPF cost on tunab from 14 to 22 for both tunnel endpoints",
+    change_summary:
+      "Change Bird2 OSPF cost on tunab from 14 to 22 for both tunnel endpoints",
     confidence: "measured",
     cost_delta: 8,
     current_ospf_cost: 14,
@@ -1064,9 +1555,11 @@ export async function installConsoleApiMock(page: Page) {
       agentUpdateReleasesFixture,
       artifactsFixture,
       backupsFixture,
+      dashboardOverviewFixture,
       dataSourceAssignmentsFixture,
       dataSourcePresetsFixture,
       dataSourceStatusFixture,
+      commandTemplatesFixture,
       clientKeyRevocationsFixture,
       enrollmentTokensFixture,
       keyLifecycleReportFixture,
@@ -1084,7 +1577,9 @@ export async function installConsoleApiMock(page: Page) {
       ospfRecommendationsFixture,
       ospfUpdatePlansFixture,
       networkTrendsFixture,
+      operatorPreferencesFixture,
       processSupervisorInventoryFixture,
+      schedulesFixture,
       summaryFixture,
       tagsFixture,
       terminalSessionsFixture,
@@ -1092,6 +1587,7 @@ export async function installConsoleApiMock(page: Page) {
       tunnelPlansFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
+      const currentOperatorPreferences = { ...operatorPreferencesFixture };
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
@@ -1111,8 +1607,10 @@ export async function installConsoleApiMock(page: Page) {
         historyRetentionPolicies: [] as unknown[],
         historyRetentionPrunes: [] as unknown[],
         jobs: [] as unknown[],
+        commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
         restorePlans: [] as unknown[],
+        schedules: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlans: [] as unknown[],
       };
@@ -1129,7 +1627,10 @@ export async function installConsoleApiMock(page: Page) {
         );
       const emptyArrayResponse = () => jsonResponse([]);
 
-      const readJsonBody = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const readJsonBody = async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
         const body = init?.body;
         if (typeof body === "string") {
           return JSON.parse(body) as unknown;
@@ -1142,8 +1643,13 @@ export async function installConsoleApiMock(page: Page) {
       const artifactBodyForTransfer = (clientId: string, sessionId: string) =>
         `server-side transfer handoff ${clientId} ${sessionId}`;
       const sha256HexForText = async (value: string) => {
-        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(value),
+        );
+        return Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("");
       };
       const bytesToBase64 = (bytes: Uint8Array) => {
         let binary = "";
@@ -1158,18 +1664,65 @@ export async function installConsoleApiMock(page: Page) {
         const selectedClients = new Set(request?.clients ?? []);
         const selectedTags = new Set(request?.tags ?? []);
         for (const agent of agentsFixture) {
-          if (selectedClients.has(agent.id) || agent.tags.some((tag) => selectedTags.has(tag))) {
+          if (
+            selectedClients.has(agent.id) ||
+            agent.tags.some((tag) => selectedTags.has(tag))
+          ) {
             selected.set(agent.id, agent);
           }
         }
-        const targets = [...selected.values()].sort((left, right) => left.id.localeCompare(right.id));
+        const targets = [...selected.values()].sort((left, right) =>
+          left.id.localeCompare(right.id),
+        );
         return targets.length > 0 ? targets : [agentsFixture[0]];
       };
 
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
         const pathname = new URL(url, window.location.href).pathname;
-        const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+        const method = (
+          init?.method ?? (input instanceof Request ? input.method : "GET")
+        ).toUpperCase();
+        if (pathname === "/api/v1/dashboard/overview") {
+          const params = new URL(url, window.location.href).searchParams;
+          const requestedWindow = params.get("window") ?? "24h";
+          const requestedGroupBy = params.get("group_by") ?? "labels";
+          const requestedResourceMetric = params.get("resource_metric") ?? dashboardOverviewFixture.resource_curve.metric;
+          const scopeKind = params.get("scope_kind") ?? "all";
+          const scopeValue = params.get("scope_value");
+          const startAt = params.get("start_at");
+          const endAt = params.get("end_at");
+          return jsonResponse({
+            ...dashboardOverviewFixture,
+            group_by: requestedGroupBy,
+            resource_curve: {
+              ...dashboardOverviewFixture.resource_curve,
+              metric: requestedResourceMetric,
+            },
+            scope: {
+              kind: scopeKind,
+              label:
+                scopeKind === "all"
+                  ? "All VPS"
+                  : scopeKind === "provider"
+                    ? `provider:${scopeValue}`
+                    : scopeKind === "country"
+                      ? `country:${scopeValue}`
+                      : scopeValue,
+              matched_clients: scopeKind === "all" ? 3 : 1,
+              query: scopeValue ? `${scopeKind}:${scopeValue}` : null,
+              value: scopeValue,
+            },
+            time_range: {
+              ...dashboardOverviewFixture.time_range,
+              end_at: endAt ?? dashboardOverviewFixture.time_range.end_at,
+              mode: startAt ? "custom" : requestedWindow === "all" ? "all" : "window",
+              start_at: startAt ?? dashboardOverviewFixture.time_range.start_at,
+              window: startAt ? null : requestedWindow,
+            },
+            window: requestedWindow,
+          });
+        }
         if (pathname === "/api/v1/fleet/summary") {
           return jsonResponse(summaryFixture);
         }
@@ -1182,7 +1735,12 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/fleet-alert-states" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.fleetAlertStates.push(body);
-          const request = body as { action?: string; alert_id?: string; muted_for_secs?: number | null; reason?: string | null };
+          const request = body as {
+            action?: string;
+            alert_id?: string;
+            muted_for_secs?: number | null;
+            reason?: string | null;
+          };
           return jsonResponse({
             action: request.action ?? "acknowledge",
             alert_id: request.alert_id ?? fleetAlertsFixture[0].id,
@@ -1208,10 +1766,16 @@ export async function installConsoleApiMock(page: Page) {
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
-        if (pathname === "/api/v1/fleet-alert-notification-channels" && method === "GET") {
+        if (
+          pathname === "/api/v1/fleet-alert-notification-channels" &&
+          method === "GET"
+        ) {
           return jsonResponse(fleetAlertNotificationChannelsFixture);
         }
-        if (pathname === "/api/v1/fleet-alert-notification-channels" && method === "POST") {
+        if (
+          pathname === "/api/v1/fleet-alert-notification-channels" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.fleetAlertNotificationChannels.push(body);
           return jsonResponse({
@@ -1222,42 +1786,111 @@ export async function installConsoleApiMock(page: Page) {
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
-        if (pathname === "/api/v1/fleet-alert-notifications" && method === "GET") {
+        if (
+          pathname === "/api/v1/fleet-alert-notifications" &&
+          method === "GET"
+        ) {
           return jsonResponse(fleetAlertNotificationsFixture);
         }
-        if (pathname === "/api/v1/fleet-alert-notifications/dispatch" && method === "POST") {
+        if (
+          pathname === "/api/v1/fleet-alert-notifications/dispatch" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.fleetAlertNotificationDispatches.push(body);
           return jsonResponse(fleetAlertNotificationsFixture);
         }
-        if (pathname === "/api/v1/fleet-alert-notifications/process" && method === "POST") {
+        if (
+          pathname === "/api/v1/fleet-alert-notifications/process" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.fleetAlertNotificationProcesses.push(body);
           return jsonResponse(
-            fleetAlertNotificationsFixture.map((delivery: Record<string, unknown>) => ({
-              ...delivery,
-              status: (body as { dry_run?: boolean } | null)?.dry_run ? delivery.status : "sent",
-              updated_at: "2026-06-02T10:03:00Z",
-            })),
+            fleetAlertNotificationsFixture.map(
+              (delivery: Record<string, unknown>) => ({
+                ...delivery,
+                status: (body as { dry_run?: boolean } | null)?.dry_run
+                  ? delivery.status
+                  : "sent",
+                updated_at: "2026-06-02T10:03:00Z",
+              }),
+            ),
           );
         }
         if (pathname === "/api/v1/agents") {
           return jsonResponse(agentsFixture);
         }
-        if (pathname === "/api/v1/gateway-sessions" && method === "GET") return emptyArrayResponse();
-        if (pathname === "/api/v1/auth/me" && method === "GET") return jsonResponse({ id: "99999999-aaaa-4bbb-8ccc-000000000001", role: "admin", scopes: ["*"], totp_enabled: false, username: "console-admin" });
+        if (pathname === "/api/v1/gateway-sessions" && method === "GET")
+          return emptyArrayResponse();
+        if (pathname === "/api/v1/auth/me" && method === "GET")
+          return jsonResponse({
+            id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            preferences: currentOperatorPreferences,
+            role: "admin",
+            scopes: ["*"],
+            totp_enabled: false,
+            username: "console-admin",
+          });
+        if (pathname === "/api/v1/auth/preferences" && method === "PUT") {
+          Object.assign(currentOperatorPreferences, await readJsonBody(input, init));
+          return jsonResponse({
+            id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            preferences: currentOperatorPreferences,
+            role: "admin",
+            scopes: ["*"],
+            totp_enabled: false,
+            username: "console-admin",
+          });
+        }
         if (pathname === "/api/v1/operators" && method === "GET") {
           return jsonResponse([
-            { id: "99999999-aaaa-4bbb-8ccc-000000000001", role: "admin", scopes: ["*"], totp_enabled: false, username: "console-admin" },
-            { id: "99999999-aaaa-4bbb-8ccc-000000000002", role: "operator", scopes: ["fleet:read", "jobs:write"], totp_enabled: true, username: "noc-operator" },
+            {
+              id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              preferences: currentOperatorPreferences,
+              role: "admin",
+              scopes: ["*"],
+              totp_enabled: false,
+              username: "console-admin",
+            },
+            {
+              id: "99999999-aaaa-4bbb-8ccc-000000000002",
+              preferences: currentOperatorPreferences,
+              role: "operator",
+              scopes: ["fleet:read", "jobs:write"],
+              totp_enabled: true,
+              username: "noc-operator",
+            },
           ]);
         }
-        if (pathname === "/api/v1/operator-sessions" && method === "GET") return jsonResponse([{ id: "88888888-aaaa-4bbb-8ccc-000000000001", operator_id: "99999999-aaaa-4bbb-8ccc-000000000001", operator_role: "admin", operator_username: "console-admin", current: true, created_at: "2026-01-01T00:00:00Z", expires_at: "2026-01-01T00:15:00Z", refresh_expires_at: "2026-01-15T00:00:00Z", revoked: false, revoked_at: null }]);
-        if (pathname === "/api/v1/enrollment-tokens" && method === "GET") return jsonResponse(enrollmentTokensFixture);
-        if (pathname === "/api/v1/client-key-revocations" && method === "GET") return jsonResponse(clientKeyRevocationsFixture);
-        if (pathname === "/api/v1/key-lifecycle/report" && method === "GET") return jsonResponse(keyLifecycleReportFixture);
-        if (pathname === "/api/v1/auth/proof-rotations" && method === "GET") return emptyArrayResponse();
-        if (pathname.startsWith("/api/v1/clients/") && pathname.endsWith("/key-revocations") && method === "POST") {
+        if (pathname === "/api/v1/operator-sessions" && method === "GET")
+          return jsonResponse([
+            {
+              id: "88888888-aaaa-4bbb-8ccc-000000000001",
+              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              operator_role: "admin",
+              operator_username: "console-admin",
+              current: true,
+              created_at: "2026-01-01T00:00:00Z",
+              expires_at: "2026-01-01T00:15:00Z",
+              refresh_expires_at: "2026-01-15T00:00:00Z",
+              revoked: false,
+              revoked_at: null,
+            },
+          ]);
+        if (pathname === "/api/v1/enrollment-tokens" && method === "GET")
+          return jsonResponse(enrollmentTokensFixture);
+        if (pathname === "/api/v1/client-key-revocations" && method === "GET")
+          return jsonResponse(clientKeyRevocationsFixture);
+        if (pathname === "/api/v1/key-lifecycle/report" && method === "GET")
+          return jsonResponse(keyLifecycleReportFixture);
+        if (pathname === "/api/v1/auth/proof-rotations" && method === "GET")
+          return emptyArrayResponse();
+        if (
+          pathname.startsWith("/api/v1/clients/") &&
+          pathname.endsWith("/key-revocations") &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.clientKeyRevocations.push(body);
           return jsonResponse({
@@ -1275,7 +1908,8 @@ export async function installConsoleApiMock(page: Page) {
           const purpose = (body as { purpose?: string }).purpose ?? "provision";
           const assignedClientId =
             purpose === "rebuild_reenrollment"
-              ? (body as { allowed_client_id?: string | null }).allowed_client_id ?? "agent-sfo-01"
+              ? ((body as { allowed_client_id?: string | null })
+                  .allowed_client_id ?? "agent-sfo-01")
               : "11111111-2222-4333-8444-555555555555";
           return jsonResponse({
             ...(body as Record<string, unknown>),
@@ -1283,19 +1917,59 @@ export async function installConsoleApiMock(page: Page) {
             allowed_client_id: assignedClientId,
             created_at: "2026-05-31T10:05:00Z",
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-            expected_old_public_key_sha256_hex: purpose === "rebuild_reenrollment" ? "f".repeat(64) : null,
+            expected_old_public_key_sha256_hex:
+              purpose === "rebuild_reenrollment" ? "f".repeat(64) : null,
             expires_at: "2026-05-31T10:35:00Z",
             id: "bcbcbcbc-dede-4faf-8bbb-cccccccccccc",
             requires_existing_client: purpose === "rebuild_reenrollment",
-            token: purpose === "rebuild_reenrollment" ? "vpsm_rebuild_token_secret" : "vpsm_provision_token_secret",
-            token_prefix: purpose === "rebuild_reenrollment" ? "vpsm_rebuild" : "vpsm_provision",
+            token:
+              purpose === "rebuild_reenrollment"
+                ? "vpsm_rebuild_token_secret"
+                : "vpsm_provision_token_secret",
+            token_prefix:
+              purpose === "rebuild_reenrollment"
+                ? "vpsm_rebuild"
+                : "vpsm_provision",
             used_at: null,
             used_by_client_id: null,
           });
         }
-        if (pathname === "/api/v1/telemetry/rollups" && method === "GET") return emptyArrayResponse();
-        if (pathname === "/api/v1/telemetry/network-rates" && method === "GET") return jsonResponse([{ client_id: "agent-fra-02", interface: "eth0", bucket_start: "2026-05-31T10:00:00Z", bucket_secs: 300, sample_count: 2, rx_bytes_delta: 65536, tx_bytes_delta: 131072, rx_bps_avg: 8738, tx_bps_avg: 17476, first_observed_at: "2026-05-31T10:01:00Z", latest_observed_at: "2026-05-31T10:02:00Z", updated_at: "2026-05-31T10:02:05Z" }]);
-        if (pathname === "/api/v1/telemetry/tunnels" && method === "GET") return jsonResponse([{ client_id: "agent-fra-02", observed_at: "2026-05-31T10:02:00Z", interface: "tun0", kind: "tun_tap", ownership_mode: "runtime_observed", source: "sysfs_proc_net_dev", operstate: "up", mtu: 1500, link_type: 65534, address: "00:00:00:00:00:00", rx_bytes: 65536, tx_bytes: 131072 }]);
+        if (pathname === "/api/v1/telemetry/rollups" && method === "GET")
+          return emptyArrayResponse();
+        if (pathname === "/api/v1/telemetry/network-rates" && method === "GET")
+          return jsonResponse([
+            {
+              client_id: "agent-fra-02",
+              interface: "eth0",
+              bucket_start: "2026-05-31T10:00:00Z",
+              bucket_secs: 300,
+              sample_count: 2,
+              rx_bytes_delta: 65536,
+              tx_bytes_delta: 131072,
+              rx_bps_avg: 8738,
+              tx_bps_avg: 17476,
+              first_observed_at: "2026-05-31T10:01:00Z",
+              latest_observed_at: "2026-05-31T10:02:00Z",
+              updated_at: "2026-05-31T10:02:05Z",
+            },
+          ]);
+        if (pathname === "/api/v1/telemetry/tunnels" && method === "GET")
+          return jsonResponse([
+            {
+              client_id: "agent-fra-02",
+              observed_at: "2026-05-31T10:02:00Z",
+              interface: "tun0",
+              kind: "tun_tap",
+              ownership_mode: "runtime_observed",
+              source: "sysfs_proc_net_dev",
+              operstate: "up",
+              mtu: 1500,
+              link_type: 65534,
+              address: "00:00:00:00:00:00",
+              rx_bytes: 65536,
+              tx_bytes: 131072,
+            },
+          ]);
         if (pathname === "/api/v1/data-source-presets" && method === "GET") {
           return jsonResponse(dataSourcePresetsFixture);
         }
@@ -1312,19 +1986,26 @@ export async function installConsoleApiMock(page: Page) {
             updated_at: "2026-06-02T10:03:00Z",
           });
         }
-        if (pathname === "/api/v1/data-source-assignments" && method === "GET") {
+        if (
+          pathname === "/api/v1/data-source-assignments" &&
+          method === "GET"
+        ) {
           return jsonResponse(dataSourceAssignmentsFixture);
         }
         if (pathname === "/api/v1/data-source-status" && method === "GET") {
           return jsonResponse(dataSourceStatusFixture);
         }
-        if (pathname === "/api/v1/data-source-assignments" && method === "POST") {
+        if (
+          pathname === "/api/v1/data-source-assignments" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.dataSourcePresetAssignments.push(body);
           const request = body as { preset_id?: string };
           const preset =
-            dataSourcePresetsFixture.find((record: { id: string }) => record.id === request.preset_id) ??
-            dataSourcePresetsFixture[0];
+            dataSourcePresetsFixture.find(
+              (record: { id: string }) => record.id === request.preset_id,
+            ) ?? dataSourcePresetsFixture[0];
           return jsonResponse({
             assignments: dataSourceAssignmentsFixture,
             confirmation_required: false,
@@ -1335,13 +2016,50 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/jobs" && method === "GET") {
           return jsonResponse(jobsFixture);
         }
+        if (pathname === "/api/v1/command-templates" && method === "GET") {
+          return jsonResponse(commandTemplatesFixture);
+        }
+        if (pathname === "/api/v1/command-templates" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.commandTemplates.push(body);
+          const request = body as {
+            command_type?: string;
+            defaults?: Record<string, unknown> | null;
+            name?: string;
+            operation?: Record<string, unknown>;
+            scope_kind?: string;
+            scope_value?: string | null;
+          };
+          return jsonResponse({
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            command_type: request.command_type ?? "shell",
+            created_at: "2026-06-02T10:04:00Z",
+            defaults: request.defaults ?? {},
+            id: "47474747-5656-4789-8abc-defdefdefdef",
+            name: request.name ?? "saved-template",
+            operation: request.operation ?? {
+              argv: ["uptime"],
+              pty: false,
+              type: "shell",
+            },
+            scope_kind: request.scope_kind ?? "global",
+            scope_value: request.scope_value ?? null,
+            updated_at: "2026-06-02T10:04:00Z",
+          });
+        }
         if (pathname === "/api/v1/agent-update-rollouts" && method === "GET") {
           return jsonResponse(agentUpdateRolloutsFixture);
         }
-        if (pathname === "/api/v1/agent-update-rollout-policies" && method === "GET") {
+        if (
+          pathname === "/api/v1/agent-update-rollout-policies" &&
+          method === "GET"
+        ) {
           return jsonResponse(agentUpdateRolloutPoliciesFixture);
         }
-        if (pathname === "/api/v1/agent-update-rollout-policies" && method === "POST") {
+        if (
+          pathname === "/api/v1/agent-update-rollout-policies" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.agentUpdateRolloutPolicies.push(body);
           const request = body as {
@@ -1374,7 +2092,10 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/agent-update-releases" && method === "GET") {
           return jsonResponse(agentUpdateReleasesFixture);
         }
-        if (pathname === "/api/v1/process-supervisor/inventory" && method === "GET") {
+        if (
+          pathname === "/api/v1/process-supervisor/inventory" &&
+          method === "GET"
+        ) {
           return jsonResponse(processSupervisorInventoryFixture);
         }
         if (pathname === "/api/v1/file-transfers" && method === "GET") {
@@ -1386,7 +2107,11 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/file-transfer-sources" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.fileTransferSourceUploads.push(body);
-          const request = body as { name?: string; sha256_hex?: string; size_bytes?: number };
+          const request = body as {
+            name?: string;
+            sha256_hex?: string;
+            size_bytes?: number;
+          };
           return jsonResponse({
             id: "73737373-2222-4333-8444-555555555555",
             name: request.name ?? "source.bin",
@@ -1395,11 +2120,13 @@ export async function installConsoleApiMock(page: Page) {
             size_bytes: request.size_bytes,
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             created_at: "2026-05-31T10:12:00Z",
-            download_path: "/api/v1/file-transfer-sources/73737373-2222-4333-8444-555555555555/artifact",
+            download_path:
+              "/api/v1/file-transfer-sources/73737373-2222-4333-8444-555555555555/artifact",
           });
         }
         if (
-          pathname === "/api/v1/file-transfer-sources/62626262-2222-4333-8444-555555555555/artifact" &&
+          pathname ===
+            "/api/v1/file-transfer-sources/62626262-2222-4333-8444-555555555555/artifact" &&
           method === "GET"
         ) {
           return Promise.resolve(
@@ -1408,7 +2135,9 @@ export async function installConsoleApiMock(page: Page) {
             }),
           );
         }
-        const handoffMatch = pathname.match(/^\/api\/v1\/file-transfers\/([^/]+)\/([^/]+)\/handoff$/);
+        const handoffMatch = pathname.match(
+          /^\/api\/v1\/file-transfers\/([^/]+)\/([^/]+)\/handoff$/,
+        );
         if (handoffMatch && method === "POST") {
           const clientId = decodeURIComponent(handoffMatch[1]);
           const sessionId = decodeURIComponent(handoffMatch[2]);
@@ -1431,8 +2160,9 @@ export async function installConsoleApiMock(page: Page) {
           return jsonResponse({
             client_id: clientId,
             session_id: sessionId,
-            object_key: `file-transfers/${Array.from(new TextEncoder().encode(clientId), (byte) =>
-              byte.toString(16).padStart(2, "0"),
+            object_key: `file-transfers/${Array.from(
+              new TextEncoder().encode(clientId),
+              (byte) => byte.toString(16).padStart(2, "0"),
             ).join("")}/${sessionId}/${artifactSha256Hex}.bin`,
             sha256_hex: artifactSha256Hex,
             size_bytes: sizeBytes,
@@ -1460,9 +2190,12 @@ export async function installConsoleApiMock(page: Page) {
           return Promise.resolve(
             new Response(artifactBody, {
               headers: {
-                "Content-Length": String(new TextEncoder().encode(artifactBody).byteLength),
+                "Content-Length": String(
+                  new TextEncoder().encode(artifactBody).byteLength,
+                ),
                 "Content-Type": "application/octet-stream",
-                "x-vpsman-artifact-sha256": await sha256HexForText(artifactBody),
+                "x-vpsman-artifact-sha256":
+                  await sha256HexForText(artifactBody),
               },
             }),
           );
@@ -1471,13 +2204,17 @@ export async function installConsoleApiMock(page: Page) {
           return jsonResponse(terminalSessionsFixture);
         }
         if (
-          pathname === "/api/v1/terminal-sessions/agent-sfo-01/61616161-2222-4333-8444-555555555555/replay" &&
+          pathname ===
+            "/api/v1/terminal-sessions/agent-sfo-01/61616161-2222-4333-8444-555555555555/replay" &&
           method === "GET"
         ) {
           return jsonResponse({
             session_id: "61616161-2222-4333-8444-555555555555",
             client_id: "agent-sfo-01",
-            from_seq: Number(new URL(url, window.location.href).searchParams.get("from_seq") ?? "1"),
+            from_seq: Number(
+              new URL(url, window.location.href).searchParams.get("from_seq") ??
+                "1",
+            ),
             available_first_seq: 1,
             next_seq: 4,
             chunk_count: 2,
@@ -1513,26 +2250,42 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/network/observations" && method === "GET") {
           return jsonResponse(networkObservationsFixture);
         }
-        if (pathname === "/api/v1/network/observation-trends" && method === "GET") {
+        if (
+          pathname === "/api/v1/network/observation-trends" &&
+          method === "GET"
+        ) {
           return jsonResponse(networkTrendsFixture);
         }
-        if (pathname === "/api/v1/network/ospf-recommendations" && method === "GET") {
+        if (
+          pathname === "/api/v1/network/ospf-recommendations" &&
+          method === "GET"
+        ) {
           return jsonResponse(ospfRecommendationsFixture);
         }
-        if (pathname === "/api/v1/network/ospf-update-plans" && method === "GET") {
+        if (
+          pathname === "/api/v1/network/ospf-update-plans" &&
+          method === "GET"
+        ) {
           return jsonResponse(ospfUpdatePlansFixture);
         }
         if (pathname === "/api/v1/network/topology-graph" && method === "GET") {
           return jsonResponse(topologyGraphFixture);
         }
-        const outputMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs$/);
+        const outputMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/outputs$/,
+        );
         if (outputMatch && method === "GET") {
-          return jsonResponse((jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ?? []);
+          return jsonResponse(
+            (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
+              [],
+          );
         }
         const jobMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
         if (jobMatch && method === "GET") {
           return jsonResponse(
-            (jobsFixture as Array<{ id: string }>).find((job) => job.id === jobMatch[1]) ?? {
+            (jobsFixture as Array<{ id: string }>).find(
+              (job) => job.id === jobMatch[1],
+            ) ?? {
               id: jobMatch[1],
               status: "completed",
             },
@@ -1544,6 +2297,49 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/backups" && method === "GET") {
           return jsonResponse(backupsFixture);
         }
+        if (pathname === "/api/v1/schedules" && method === "GET") {
+          return jsonResponse(schedulesFixture);
+        }
+        if (pathname === "/api/v1/schedules" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.schedules.push(body);
+          const request = body as {
+            catch_up_limit?: number;
+            catch_up_policy?: string;
+            clients?: string[];
+            command_type?: string;
+            enabled?: boolean;
+            interval_secs?: number;
+            max_failures?: number;
+            name?: string;
+            operation?: Record<string, unknown>;
+            retry_delay_secs?: number;
+            tags?: string[];
+          };
+          return jsonResponse({
+            catch_up_limit: request.catch_up_limit ?? 1,
+            catch_up_policy: request.catch_up_policy ?? "run_once",
+            clients: request.clients ?? [],
+            command_type: request.command_type ?? "shell",
+            created_at: "2026-06-02T10:04:00Z",
+            enabled: request.enabled ?? true,
+            failure_count: 0,
+            id: "52525252-6161-4717-8abc-defdefdefdef",
+            interval_secs: request.interval_secs ?? 3600,
+            last_error: null,
+            last_run_at: null,
+            max_failures: request.max_failures ?? 3,
+            name: request.name ?? "scheduled-job",
+            next_run_at: "2026-06-02T11:04:00Z",
+            operation: request.operation ?? {
+              argv: ["uptime"],
+              pty: false,
+              type: "shell",
+            },
+            retry_delay_secs: request.retry_delay_secs ?? 300,
+            tags: request.tags ?? [],
+          });
+        }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
           return jsonResponse([]);
         }
@@ -1554,7 +2350,9 @@ export async function installConsoleApiMock(page: Page) {
           /^\/api\/v1\/backups\/([^/]+)\/artifact-handoff$/,
         );
         if (backupArtifactHandoffMatch && method === "POST") {
-          const body = (await readJsonBody(input, init)) as { job_id?: string | null };
+          const body = (await readJsonBody(input, init)) as {
+            job_id?: string | null;
+          };
           requests.backupArtifactHandoffs.push(body);
           return jsonResponse({
             artifact: {
@@ -1568,7 +2366,8 @@ export async function installConsoleApiMock(page: Page) {
             },
             source: "retained_job_outputs",
             source_chunk_count: 2,
-            source_job_id: body.job_id ?? "99999999-2222-4333-8444-555555555555",
+            source_job_id:
+              body.job_id ?? "99999999-2222-4333-8444-555555555555",
           });
         }
         const backupArtifactPrepareRestoreMatch = pathname.match(
@@ -1621,7 +2420,10 @@ export async function installConsoleApiMock(page: Page) {
           requests.tunnelPlans.push(body);
           return jsonResponse(tunnelPlansFixture[0]);
         }
-        if (pathname === "/api/v1/tunnel-plans/promote-adapter" && method === "POST") {
+        if (
+          pathname === "/api/v1/tunnel-plans/promote-adapter" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.tunnelPlanAdapterPromotions.push(body);
           return jsonResponse(tunnelPlansFixture[1]);
@@ -1668,10 +2470,16 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/audit") {
           return emptyArrayResponse();
         }
-        if (pathname === "/api/v1/history/retention-policies" && method === "GET") {
+        if (
+          pathname === "/api/v1/history/retention-policies" &&
+          method === "GET"
+        ) {
           return jsonResponse(historyRetentionPoliciesFixture);
         }
-        if (pathname === "/api/v1/history/retention-policies" && method === "POST") {
+        if (
+          pathname === "/api/v1/history/retention-policies" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.historyRetentionPolicies.push(body);
           return jsonResponse({
@@ -1682,35 +2490,52 @@ export async function installConsoleApiMock(page: Page) {
             updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
           });
         }
-        if (pathname === "/api/v1/history/retention-prune" && method === "POST") {
+        if (
+          pathname === "/api/v1/history/retention-prune" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.historyRetentionPrunes.push(body);
-          const request = body as { domain?: string | null; dry_run?: boolean; metadata_only?: boolean | null } | null;
+          const request = body as {
+            domain?: string | null;
+            dry_run?: boolean;
+            metadata_only?: boolean | null;
+          } | null;
           const domains = historyRetentionPoliciesFixture.filter(
-            (policy: { domain: string }) => !request?.domain || policy.domain === request.domain,
+            (policy: { domain: string }) =>
+              !request?.domain || policy.domain === request.domain,
           );
           return jsonResponse({
             dry_run: Boolean(request?.dry_run),
             metadata_only_requested: request?.metadata_only ?? null,
-            domains: domains.map((policy: { domain: string; enabled: boolean; retention_days: number; metadata_only: boolean }) => ({
-              cutoff_unix: 1780000000,
-              domain: policy.domain,
-              enabled: policy.enabled,
-              matched_rows: 0,
-              metadata_only: request?.metadata_only ?? policy.metadata_only,
-              object_delete_attempted: false,
-              object_delete_errors: [],
-              object_keys: [],
-              pruned_rows: 0,
-              retention_days: policy.retention_days,
-              status: request?.dry_run ? "dry_run" : "pruned",
-            })),
+            domains: domains.map(
+              (policy: {
+                domain: string;
+                enabled: boolean;
+                retention_days: number;
+                metadata_only: boolean;
+              }) => ({
+                cutoff_unix: 1780000000,
+                domain: policy.domain,
+                enabled: policy.enabled,
+                matched_rows: 0,
+                metadata_only: request?.metadata_only ?? policy.metadata_only,
+                object_delete_attempted: false,
+                object_delete_errors: [],
+                object_keys: [],
+                pruned_rows: 0,
+                retention_days: policy.retention_days,
+                status: request?.dry_run ? "dry_run" : "pruned",
+              }),
+            ),
           });
         }
         if (pathname === "/api/v1/history/export" && method === "GET") {
           const requestedDomains =
             new URL(url, window.location.href).searchParams.get("domains") ??
-            historyRetentionPoliciesFixture.map((policy: { domain: string }) => policy.domain).join(",");
+            historyRetentionPoliciesFixture
+              .map((policy: { domain: string }) => policy.domain)
+              .join(",");
           const domains = requestedDomains
             .split(",")
             .map((entry) => entry.trim())
@@ -1723,7 +2548,10 @@ export async function installConsoleApiMock(page: Page) {
             },
             domains,
             generated_at: "2026-06-02T10:06:00Z",
-            limit: Number(new URL(url, window.location.href).searchParams.get("limit") ?? "25"),
+            limit: Number(
+              new URL(url, window.location.href).searchParams.get("limit") ??
+                "25",
+            ),
           });
         }
         if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
@@ -1786,9 +2614,11 @@ export async function installConsoleApiMock(page: Page) {
       agentUpdateReleasesFixture: agentUpdateReleases,
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,
+      dashboardOverviewFixture: dashboardOverview,
       dataSourceAssignmentsFixture: dataSourceAssignments,
       dataSourcePresetsFixture: dataSourcePresets,
       dataSourceStatusFixture: dataSourceStatus,
+      commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
       enrollmentTokensFixture: enrollmentTokens,
       keyLifecycleReportFixture: keyLifecycleReport,
@@ -1806,7 +2636,9 @@ export async function installConsoleApiMock(page: Page) {
       ospfRecommendationsFixture: ospfRecommendations,
       ospfUpdatePlansFixture: ospfUpdatePlans,
       networkTrendsFixture: networkTrends,
+      operatorPreferencesFixture: operatorPreferences,
       processSupervisorInventoryFixture: processSupervisorInventory,
+      schedulesFixture: schedules,
       summaryFixture: summary,
       tagsFixture: tags,
       terminalSessionsFixture: terminalSessions,

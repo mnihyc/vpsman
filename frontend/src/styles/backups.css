@@ -14,8 +14,9 @@
 
 .backupHistoryGrid {
   grid-template-columns:
-    minmax(140px, 0.8fr) minmax(160px, 0.9fr) minmax(100px, 0.5fr)
-    minmax(170px, 0.8fr) minmax(130px, 0.6fr) minmax(150px, 0.8fr);
+    minmax(120px, 1fr) minmax(130px, 0.85fr) minmax(76px, 0.5fr)
+    minmax(112px, 0.7fr) minmax(92px, 0.55fr) minmax(112px, 0.65fr);
+  gap: 10px;
 }
 
 .backupScopeList {

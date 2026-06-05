@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -13,7 +14,7 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   test.skip(testInfo.project.name.includes("mobile"), "dense process inventory evidence is covered in desktop layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "Processes");
 
   const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
   await expect(inventory.getByText("ospf-worker")).toBeVisible();

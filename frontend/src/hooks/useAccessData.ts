@@ -1,8 +1,9 @@
 import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   AuthProofRotationHistoryRecord,
   GatewaySessionRecord,
+  OperatorPreferences,
   OperatorSessionRecord,
   OperatorView,
   TotpSetupResponse,
@@ -26,6 +27,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [proofRotations, setProofRotations] = useState<AuthProofRotationHistoryRecord[]>([]);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  const [preferencesSaving, setPreferencesSaving] = useState(false);
 
   function resetAccessRecords() {
     setOperator(null);
@@ -36,22 +39,56 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     setKeyLifecycleReport(null);
     setGatewaySessions([]);
     setProofRotations([]);
+    setPreferencesError(null);
   }
+
+  const setAuthenticatedOperator = useCallback((nextOperator: OperatorView | null) => {
+    setOperator(nextOperator);
+    if (!nextOperator) {
+      return;
+    }
+    setOperators((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+      return current.map((existing) => (existing.id === nextOperator.id ? nextOperator : existing));
+    });
+  }, []);
+
+  const loadCurrentOperatorProfile = useCallback(async () => {
+    setAccessLoading(true);
+    setAccessError(null);
+    try {
+      const nextOperator = await apiGet<OperatorView>("/api/v1/auth/me", apiToken);
+      setAuthenticatedOperator(nextOperator);
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        resetAccessRecords();
+        setAccessError("Operator login required");
+        return;
+      }
+      setAccessError(error instanceof Error ? error.message : "Operator profile unavailable");
+    } finally {
+      setAccessLoading(false);
+    }
+  }, [apiToken, onUnauthorized, setAuthenticatedOperator]);
 
   const loadCurrentOperator = useCallback(async () => {
     setAccessLoading(true);
     setAccessError(null);
     try {
       const nextOperator = await apiGet<OperatorView>("/api/v1/auth/me", apiToken);
+      setAuthenticatedOperator(nextOperator);
       const [
-        nextGatewaySessions,
-        nextOperators,
-        nextOperatorSessions,
-        nextEnrollmentTokens,
-        nextClientKeyRevocations,
-        nextKeyLifecycleReport,
-        nextProofRotations,
-      ] = await Promise.all([
+        gatewaySessionsResult,
+        operatorsResult,
+        operatorSessionsResult,
+        enrollmentTokensResult,
+        clientKeyRevocationsResult,
+        keyLifecycleReportResult,
+        proofRotationsResult,
+      ] = await Promise.allSettled([
         apiGet<GatewaySessionRecord[]>("/api/v1/gateway-sessions?limit=200", apiToken),
         nextOperator.role === "admin" ? apiGet<OperatorView[]>("/api/v1/operators", apiToken) : Promise.resolve([]),
         nextOperator.role === "admin"
@@ -66,14 +103,32 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           ? apiGet<AuthProofRotationHistoryRecord[]>("/api/v1/auth/proof-rotations?limit=200", apiToken)
           : Promise.resolve([]),
       ]);
-      setOperator(nextOperator);
-      setOperators(nextOperators);
-      setOperatorSessions(nextOperatorSessions);
-      setEnrollmentTokens(nextEnrollmentTokens);
-      setClientKeyRevocations(nextClientKeyRevocations);
-      setKeyLifecycleReport(nextKeyLifecycleReport);
-      setGatewaySessions(nextGatewaySessions);
-      setProofRotations(nextProofRotations);
+      const failures: string[] = [];
+      const unauthorized = [
+        gatewaySessionsResult,
+        operatorsResult,
+        operatorSessionsResult,
+        enrollmentTokensResult,
+        clientKeyRevocationsResult,
+        keyLifecycleReportResult,
+        proofRotationsResult,
+      ].some((result) => result.status === "rejected" && isApiUnauthorized(result.reason));
+      if (unauthorized) {
+        onUnauthorized();
+        resetAccessRecords();
+        setAccessError("Operator login required");
+        return;
+      }
+      setGatewaySessions(settledValue(gatewaySessionsResult, [], "gateway sessions", failures));
+      setOperators(settledValue(operatorsResult, [], "operators", failures));
+      setOperatorSessions(settledValue(operatorSessionsResult, [], "operator sessions", failures));
+      setEnrollmentTokens(settledValue(enrollmentTokensResult, [], "enrollment tokens", failures));
+      setClientKeyRevocations(settledValue(clientKeyRevocationsResult, [], "client revocations", failures));
+      setKeyLifecycleReport(settledValue(keyLifecycleReportResult, null, "key lifecycle", failures));
+      setProofRotations(settledValue(proofRotationsResult, [], "proof rotations", failures));
+      if (failures.length > 0) {
+        setAccessError(`Some access records unavailable: ${failures.join(", ")}`);
+      }
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
@@ -85,7 +140,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     } finally {
       setAccessLoading(false);
     }
-  }, [apiToken, onUnauthorized]);
+  }, [apiToken, onUnauthorized, setAuthenticatedOperator]);
 
   const createOperator = useCallback(
     async (username: string, role: string, password: string, scopes: string[]) => {
@@ -231,6 +286,31 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, loadCurrentOperator, onUnauthorized],
   );
 
+  const updateOperatorPreferences = useCallback(
+    async (preferences: OperatorPreferences) => {
+      setPreferencesSaving(true);
+      setPreferencesError(null);
+      setAccessError(null);
+      try {
+        const nextOperator = await apiPut<OperatorView>("/api/v1/auth/preferences", apiToken, preferences);
+        setAuthenticatedOperator(nextOperator);
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setPreferencesError("Operator login required");
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : "Preference update failed";
+        setPreferencesError(message);
+        throw error;
+      } finally {
+        setPreferencesSaving(false);
+      }
+    },
+    [apiToken, onUnauthorized, setAuthenticatedOperator],
+  );
+
   const clearOperator = useCallback(() => {
     resetAccessRecords();
   }, []);
@@ -247,13 +327,31 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     enrollmentTokens,
     gatewaySessions,
     keyLifecycleReport,
+    loadCurrentOperatorProfile,
     loadCurrentOperator,
     operator,
     operators,
     operatorSessions,
+    preferencesError,
+    preferencesSaving,
     proofRotations,
     revokeClientKey,
     revokeOperatorSession,
+    setAuthenticatedOperator,
     setupTotp,
+    updateOperatorPreferences,
   };
+}
+
+function settledValue<T>(
+  result: PromiseSettledResult<T>,
+  fallback: T,
+  label: string,
+  failures: string[],
+): T {
+  if (result.status === "fulfilled") {
+    return result.value;
+  }
+  failures.push(label);
+  return fallback;
 }

@@ -12,6 +12,7 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),
@@ -52,7 +53,7 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
     repo.update_agent_alias(&client_id, "edge-after-rebuild")
         .await
         .unwrap();
-    repo.assign_agent_tag(&client_id, "pool:alpha-sfo")
+    repo.assign_agent_tag(&client_id, "region:sfo")
         .await
         .unwrap();
     repo.assign_agent_tag(&client_id, "edge").await.unwrap();
@@ -109,9 +110,9 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
             "edge".to_string(),
             "os:debian".to_string(),
             "panel:custom".to_string(),
-            "pool:alpha-sfo".to_string(),
             "provider:alpha".to_string(),
-            "rebuilt".to_string()
+            "rebuilt".to_string(),
+            "region:sfo".to_string()
         ]
     );
     assert!(repo
@@ -133,6 +134,7 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),
@@ -269,6 +271,7 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),

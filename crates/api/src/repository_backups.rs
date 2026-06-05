@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use base64::Engine as _;
 use serde_json::json;
@@ -8,16 +10,95 @@ use vpsman_common::CommandEnvelope;
 use crate::{
     model::{
         AuditLogView, AuthContext, BackupRequestStatus, BackupRequestView, CreateBackupRequest,
-        JobOutputView,
+        JobOutputView, ListQuery,
     },
     repository::Repository,
     unix_now,
+    util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BackupRequestSourceLink {
     pub(crate) job_id: Option<Uuid>,
     pub(crate) schedule_id: Option<Uuid>,
+}
+
+fn compare_text_or_number(left: &str, right: &str) -> Ordering {
+    match (left.parse::<i128>(), right.parse::<i128>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_backup_request(
+    left: &BackupRequestView,
+    right: &BackupRequestView,
+    sort: Option<&str>,
+) -> Ordering {
+    match sort.unwrap_or("created_at") {
+        "artifact_id" | "artifact" => left.artifact_id.cmp(&right.artifact_id),
+        "client_id" | "client" => left.client_id.cmp(&right.client_id),
+        "include_config" | "scope" => left.include_config.cmp(&right.include_config),
+        "paths" => left.paths.len().cmp(&right.paths.len()),
+        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
+        "proof_scope" => left.proof_scope.cmp(&right.proof_scope),
+        "status" => left.status.cmp(&right.status),
+        _ => compare_text_or_number(&left.created_at, &right.created_at),
+    }
+}
+
+fn backup_request_matches_search(request: &BackupRequestView, needle: &str) -> bool {
+    request.id.to_string().to_ascii_lowercase().contains(needle)
+        || request
+            .actor_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request.client_id.to_ascii_lowercase().contains(needle)
+        || request.status.to_ascii_lowercase().contains(needle)
+        || request.payload_hash.to_ascii_lowercase().contains(needle)
+        || request.proof_scope.to_ascii_lowercase().contains(needle)
+        || request
+            .artifact_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request
+            .source_job_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request
+            .source_schedule_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request
+            .note
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request
+            .paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains(needle))
+}
+
+fn backup_request_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("created_at"), descending) {
+        ("artifact_id" | "artifact", true) => "artifact_id DESC NULLS LAST, id DESC",
+        ("artifact_id" | "artifact", false) => "artifact_id ASC NULLS LAST, id ASC",
+        ("client_id" | "client", true) => "client_id DESC, id DESC",
+        ("client_id" | "client", false) => "client_id ASC, id ASC",
+        ("include_config" | "scope", true) => "include_config DESC, id DESC",
+        ("include_config" | "scope", false) => "include_config ASC, id ASC",
+        ("paths", true) => "cardinality(paths) DESC, id DESC",
+        ("paths", false) => "cardinality(paths) ASC, id ASC",
+        ("payload_hash" | "hash", true) => "payload_hash DESC, id DESC",
+        ("payload_hash" | "hash", false) => "payload_hash ASC, id ASC",
+        ("proof_scope", true) => "proof_scope DESC, id DESC",
+        ("proof_scope", false) => "proof_scope ASC, id ASC",
+        ("status", true) => "status DESC, id DESC",
+        ("status", false) => "status ASC, id ASC",
+        (_, true) => "created_at DESC, id DESC",
+        (_, false) => "created_at ASC, id ASC",
+    }
 }
 
 impl Repository {
@@ -57,6 +138,96 @@ impl Repository {
                     "#,
                 )
                 .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(backup_request_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn query_backup_requests(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<BackupRequestView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut requests = memory
+                    .backup_requests
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|request| {
+                        q.as_deref()
+                            .map(|needle| backup_request_matches_search(request, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                requests.sort_by(|left, right| {
+                    compare_backup_request(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    requests.reverse();
+                }
+                Ok(requests
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = backup_request_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        status,
+                        payload_hash,
+                        proof_scope,
+                        proof_command_id,
+                        proof_expires_unix,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        note,
+                        created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR actor_id::text ILIKE $3 ESCAPE '\'
+                        OR client_id ILIKE $3 ESCAPE '\'
+                        OR array_to_string(paths, ' ') ILIKE $3 ESCAPE '\'
+                        OR status ILIKE $3 ESCAPE '\'
+                        OR payload_hash ILIKE $3 ESCAPE '\'
+                        OR proof_scope ILIKE $3 ESCAPE '\'
+                        OR artifact_id::text ILIKE $3 ESCAPE '\'
+                        OR source_job_id::text ILIKE $3 ESCAPE '\'
+                        OR source_schedule_id::text ILIKE $3 ESCAPE '\'
+                        OR note ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(backup_request_from_row).collect()

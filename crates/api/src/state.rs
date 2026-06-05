@@ -264,6 +264,7 @@ impl AppState {
                     username: "memory-dev".to_string(),
                     role: "admin".to_string(),
                     scopes: default_operator_scopes("admin"),
+                    preferences: crate::model::OperatorPreferences::default(),
                     totp_enabled: false,
                 },
                 session_id: Uuid::nil(),

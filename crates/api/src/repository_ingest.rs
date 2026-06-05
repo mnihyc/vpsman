@@ -1,16 +1,23 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use sqlx::Row;
 use tokio::sync::RwLock;
 use tracing::debug;
 use uuid::Uuid;
-use vpsman_common::{AgentHello, GatewayAgentHelloIngest, GatewayTelemetryIngest};
+use vpsman_common::{
+    AgentHello, AgentMetrics, GatewayAgentHelloIngest, GatewayTelemetryIngest,
+    RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
+};
 
-use crate::model::AgentView;
-use crate::model::{TelemetryTunnelAdapterHealthView, TelemetryTunnelView};
+use crate::model::{
+    AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
+    TelemetryTunnelView,
+};
 use crate::repository::Repository;
 use crate::security::constant_time_eq;
-use sqlx::Row;
+
+const TELEMETRY_BUCKET_SECS: i32 = 60;
 
 impl Repository {
     pub(crate) async fn validate_agent_public_key(
@@ -126,93 +133,42 @@ impl Repository {
                     capabilities: Default::default(),
                 };
                 upsert_memory_agent(&memory.agents, &hello).await;
+                upsert_memory_telemetry_rollup(
+                    &memory.telemetry_rollups,
+                    &event.telemetry.client_id,
+                    &event.telemetry.metrics,
+                )
+                .await;
+                upsert_memory_telemetry_network_rates(
+                    &memory.telemetry_network_rates,
+                    &event.telemetry.client_id,
+                    &event.telemetry.metrics,
+                )
+                .await;
                 let mut tunnels = memory.telemetry_tunnels.write().await;
                 tunnels.retain(|record| record.client_id != event.telemetry.client_id);
-                tunnels.extend(event.telemetry.metrics.tunnels.iter().map(|tunnel| {
-                    TelemetryTunnelView {
-                        client_id: event.telemetry.client_id.clone(),
-                        observed_at: event.telemetry.metrics.observed_unix.to_string(),
-                        interface: tunnel.interface.clone(),
-                        kind: tunnel.kind.clone(),
-                        ownership_mode: tunnel.ownership_mode.clone(),
-                        mutation_policy: tunnel.mutation_policy.clone(),
-                        promotion_required: tunnel.promotion_required,
-                        plan_correlation: if tunnel.plan_id.is_some() || tunnel.plan_name.is_some()
-                        {
-                            "telemetry_reported_plan".to_string()
-                        } else {
-                            "unmatched".to_string()
-                        },
-                        plan_id: tunnel
-                            .plan_id
-                            .as_deref()
-                            .and_then(|value| Uuid::parse_str(value).ok()),
-                        plan_name: tunnel.plan_name.clone(),
-                        plan_runtime_manager: tunnel.plan_runtime_manager.clone(),
-                        endpoint_side: tunnel.endpoint_side.clone(),
-                        peer_client_id: tunnel.peer_client_id.clone(),
-                        source: tunnel.source.clone(),
-                        operstate: tunnel.operstate.clone(),
-                        mtu: tunnel.mtu.map(|value| value as i64),
-                        link_type: tunnel.link_type,
-                        address: tunnel.address.clone(),
-                        rx_bytes: tunnel.rx_bytes as i64,
-                        tx_bytes: tunnel.tx_bytes as i64,
-                        traffic_source: tunnel.traffic_source.clone(),
-                        traffic_status: tunnel.traffic_status.clone(),
-                        traffic_reason: tunnel.traffic_reason.clone(),
-                        traffic_checked_unix: tunnel.traffic_checked_unix.map(|value| value as i64),
-                        adapter_health: tunnel.adapter_health.as_ref().map(|health| {
-                            TelemetryTunnelAdapterHealthView {
-                                status: health.status.clone(),
-                                checked_unix: health.checked_unix as i64,
-                                configured: health.configured,
-                                success: health.success,
-                                exit_code: health.exit_code,
-                                reason: health.reason.clone(),
-                                duration_ms: health.duration_ms as i64,
-                                command_sha256_hex: health.command_sha256_hex.clone(),
-                                timed_out: health.timed_out,
-                                output_truncated: health.output_truncated,
-                                stdout_sha256_hex: health.stdout_sha256_hex.clone(),
-                                stderr_sha256_hex: health.stderr_sha256_hex.clone(),
-                            }
-                        }),
-                    }
+                tunnels.extend(event.telemetry.metrics.tunnels.iter().filter_map(|tunnel| {
+                    telemetry_tunnel_view(
+                        &event.telemetry.client_id,
+                        event.telemetry.metrics.observed_unix,
+                        tunnel,
+                    )
                 }));
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let metrics = &event.telemetry.metrics;
-                sqlx::query(
-                    r#"
-                    INSERT INTO telemetry_samples (
-                        client_id, observed_at, cpu_load_1, memory_total_bytes,
-                        memory_available_bytes, payload
-                    )
-                    VALUES (
-                        $1,
-                        to_timestamp($2::double precision),
-                        $3,
-                        $4,
-                        $5,
-                        $6
-                    )
-                    ON CONFLICT (client_id, observed_at) DO UPDATE SET
-                        cpu_load_1 = EXCLUDED.cpu_load_1,
-                        memory_total_bytes = EXCLUDED.memory_total_bytes,
-                        memory_available_bytes = EXCLUDED.memory_available_bytes,
-                        payload = EXCLUDED.payload
-                    "#,
+                let mut tx = pool.begin().await?;
+                upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
+                    .await?;
+                upsert_postgres_telemetry_network_rates(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    metrics,
                 )
-                .bind(&event.telemetry.client_id)
-                .bind(metrics.observed_unix as f64)
-                .bind(metrics.cpu.load.one)
-                .bind(metrics.memory.total_bytes as i64)
-                .bind(metrics.memory.available_bytes as i64)
-                .bind(sqlx::types::Json(metrics))
-                .execute(pool)
                 .await?;
+                upsert_postgres_telemetry_tunnels(&mut tx, &event.telemetry.client_id, metrics)
+                    .await?;
                 sqlx::query(
                     r#"
                     UPDATE clients
@@ -221,12 +177,507 @@ impl Repository {
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
                 Ok(())
             }
         }
     }
+}
+
+async fn upsert_memory_telemetry_rollup(
+    rollups: &Arc<RwLock<Vec<TelemetryRollupView>>>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) {
+    let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
+    let observed_at = metrics.observed_unix.to_string();
+    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let mut rollups = rollups.write().await;
+    if let Some(rollup) = rollups.iter_mut().find(|rollup| {
+        rollup.client_id == client_id
+            && rollup.bucket_secs == TELEMETRY_BUCKET_SECS
+            && rollup.bucket_start == bucket_start
+    }) {
+        let current_count = rollup.sample_count.max(1);
+        rollup.sample_count = rollup.sample_count.saturating_add(1);
+        rollup.cpu_load_1_avg =
+            weighted_avg_f64(rollup.cpu_load_1_avg, current_count, metrics.cpu.load.one);
+        rollup.cpu_load_1_max = rollup.cpu_load_1_max.max(metrics.cpu.load.one);
+        rollup.memory_total_bytes_max = rollup
+            .memory_total_bytes_max
+            .max(u64_to_i64(metrics.memory.total_bytes));
+        rollup.memory_available_bytes_avg = weighted_avg_i64(
+            rollup.memory_available_bytes_avg,
+            current_count,
+            u64_to_i64(metrics.memory.available_bytes),
+        );
+        rollup.memory_available_bytes_min = rollup
+            .memory_available_bytes_min
+            .min(u64_to_i64(metrics.memory.available_bytes));
+        rollup.disk_total_bytes_max = rollup.disk_total_bytes_max.max(disk_total);
+        rollup.disk_available_bytes_avg = weighted_avg_i64(
+            rollup.disk_available_bytes_avg,
+            current_count,
+            disk_available,
+        );
+        rollup.disk_available_bytes_min = rollup.disk_available_bytes_min.min(disk_available);
+        rollup.network_rx_bytes_max = rollup.network_rx_bytes_max.max(network_rx);
+        rollup.network_tx_bytes_max = rollup.network_tx_bytes_max.max(network_tx);
+        if metrics.observed_unix >= parse_unix(&rollup.latest_observed_at) {
+            rollup.latest_observed_at = observed_at.clone();
+        }
+        rollup.updated_at = observed_at;
+        return;
+    }
+
+    rollups.push(TelemetryRollupView {
+        client_id: client_id.to_string(),
+        bucket_start,
+        bucket_secs: TELEMETRY_BUCKET_SECS,
+        sample_count: 1,
+        cpu_load_1_avg: metrics.cpu.load.one,
+        cpu_load_1_max: metrics.cpu.load.one,
+        memory_total_bytes_max: u64_to_i64(metrics.memory.total_bytes),
+        memory_available_bytes_avg: u64_to_i64(metrics.memory.available_bytes),
+        memory_available_bytes_min: u64_to_i64(metrics.memory.available_bytes),
+        disk_total_bytes_max: disk_total,
+        disk_available_bytes_avg: disk_available,
+        disk_available_bytes_min: disk_available,
+        network_rx_bytes_max: network_rx,
+        network_tx_bytes_max: network_tx,
+        latest_observed_at: observed_at.clone(),
+        updated_at: observed_at,
+    });
+}
+
+async fn upsert_memory_telemetry_network_rates(
+    rates: &Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) {
+    let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
+    let observed_at = metrics.observed_unix.to_string();
+    let mut rates = rates.write().await;
+    for network in metrics
+        .networks
+        .iter()
+        .filter(|network| valid_telemetry_name(&network.interface))
+    {
+        let rx_bytes = u64_to_i64(network.rx_bytes);
+        let tx_bytes = u64_to_i64(network.tx_bytes);
+        if let Some(rate) = rates.iter_mut().find(|rate| {
+            rate.client_id == client_id
+                && rate.interface == network.interface
+                && rate.bucket_secs == TELEMETRY_BUCKET_SECS
+                && rate.bucket_start == bucket_start
+        }) {
+            let current_count = rate.sample_count.max(1);
+            rate.sample_count = rate.sample_count.saturating_add(1);
+            rate.rx_bytes_avg = weighted_avg_i64(rate.rx_bytes_avg, current_count, rx_bytes);
+            rate.tx_bytes_avg = weighted_avg_i64(rate.tx_bytes_avg, current_count, tx_bytes);
+            rate.rx_bytes_delta = 0;
+            rate.tx_bytes_delta = 0;
+            rate.rx_bps_avg = 0.0;
+            rate.tx_bps_avg = 0.0;
+            rate.updated_at = observed_at.clone();
+            continue;
+        }
+
+        rates.push(TelemetryNetworkRateView {
+            client_id: client_id.to_string(),
+            interface: network.interface.clone(),
+            bucket_start: bucket_start.clone(),
+            bucket_secs: TELEMETRY_BUCKET_SECS,
+            sample_count: 1,
+            rx_bytes_avg: rx_bytes,
+            tx_bytes_avg: tx_bytes,
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: observed_at.clone(),
+        });
+    }
+}
+
+async fn upsert_postgres_telemetry_rollup(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id,
+            bucket_start,
+            bucket_secs,
+            sample_count,
+            cpu_load_1_avg,
+            cpu_load_1_max,
+            memory_total_bytes_max,
+            memory_available_bytes_avg,
+            memory_available_bytes_min,
+            disk_total_bytes_max,
+            disk_available_bytes_avg,
+            disk_available_bytes_min,
+            network_rx_bytes_max,
+            network_tx_bytes_max,
+            latest_observed_at,
+            updated_at
+        )
+        VALUES (
+            $1,
+            to_timestamp($2::double precision),
+            $3,
+            1,
+            $4,
+            $4,
+            $5,
+            $6,
+            $6,
+            $7,
+            $8,
+            $8,
+            $9,
+            $10,
+            to_timestamp($11::double precision),
+            now()
+        )
+        ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
+            sample_count = telemetry_rollups.sample_count + EXCLUDED.sample_count,
+            cpu_load_1_avg = (
+                telemetry_rollups.cpu_load_1_avg * telemetry_rollups.sample_count::double precision
+                + EXCLUDED.cpu_load_1_avg * EXCLUDED.sample_count::double precision
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_1_max = GREATEST(telemetry_rollups.cpu_load_1_max, EXCLUDED.cpu_load_1_max),
+            memory_total_bytes_max = GREATEST(
+                telemetry_rollups.memory_total_bytes_max,
+                EXCLUDED.memory_total_bytes_max
+            ),
+            memory_available_bytes_avg = round((
+                telemetry_rollups.memory_available_bytes_avg::numeric * telemetry_rollups.sample_count::numeric
+                + EXCLUDED.memory_available_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+            memory_available_bytes_min = LEAST(
+                telemetry_rollups.memory_available_bytes_min,
+                EXCLUDED.memory_available_bytes_min
+            ),
+            disk_total_bytes_max = GREATEST(
+                telemetry_rollups.disk_total_bytes_max,
+                EXCLUDED.disk_total_bytes_max
+            ),
+            disk_available_bytes_avg = round((
+                telemetry_rollups.disk_available_bytes_avg::numeric * telemetry_rollups.sample_count::numeric
+                + EXCLUDED.disk_available_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+            disk_available_bytes_min = LEAST(
+                telemetry_rollups.disk_available_bytes_min,
+                EXCLUDED.disk_available_bytes_min
+            ),
+            network_rx_bytes_max = GREATEST(
+                telemetry_rollups.network_rx_bytes_max,
+                EXCLUDED.network_rx_bytes_max
+            ),
+            network_tx_bytes_max = GREATEST(
+                telemetry_rollups.network_tx_bytes_max,
+                EXCLUDED.network_tx_bytes_max
+            ),
+            latest_observed_at = GREATEST(
+                telemetry_rollups.latest_observed_at,
+                EXCLUDED.latest_observed_at
+            ),
+            updated_at = now()
+        "#,
+    )
+    .bind(client_id)
+    .bind(bucket_start_unix(metrics.observed_unix) as f64)
+    .bind(TELEMETRY_BUCKET_SECS)
+    .bind(metrics.cpu.load.one)
+    .bind(u64_to_i64(metrics.memory.total_bytes))
+    .bind(u64_to_i64(metrics.memory.available_bytes))
+    .bind(disk_total)
+    .bind(disk_available)
+    .bind(network_rx)
+    .bind(network_tx)
+    .bind(metrics.observed_unix as f64)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_postgres_telemetry_network_rates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    for network in metrics
+        .networks
+        .iter()
+        .filter(|network| valid_telemetry_name(&network.interface))
+    {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_network_rates (
+                client_id,
+                interface,
+                bucket_start,
+                bucket_secs,
+                sample_count,
+                rx_bytes_avg,
+                tx_bytes_avg,
+                updated_at
+            )
+            VALUES (
+                $1,
+                $2,
+                to_timestamp($3::double precision),
+                $4,
+                1,
+                $5,
+                $6,
+                now()
+            )
+            ON CONFLICT (client_id, interface, bucket_secs, bucket_start) DO UPDATE SET
+                sample_count = telemetry_network_rates.sample_count + EXCLUDED.sample_count,
+                rx_bytes_avg = round((
+                    telemetry_network_rates.rx_bytes_avg::numeric * telemetry_network_rates.sample_count::numeric
+                    + EXCLUDED.rx_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+                ) / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+                tx_bytes_avg = round((
+                    telemetry_network_rates.tx_bytes_avg::numeric * telemetry_network_rates.sample_count::numeric
+                    + EXCLUDED.tx_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+                ) / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+                updated_at = now()
+            "#,
+        )
+        .bind(client_id)
+        .bind(&network.interface)
+        .bind(bucket_start_unix(metrics.observed_unix) as f64)
+        .bind(TELEMETRY_BUCKET_SECS)
+        .bind(u64_to_i64(network.rx_bytes))
+        .bind(u64_to_i64(network.tx_bytes))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn upsert_postgres_telemetry_tunnels(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    sqlx::query("DELETE FROM telemetry_tunnels WHERE client_id = $1")
+        .bind(client_id)
+        .execute(&mut **tx)
+        .await?;
+
+    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
+        let adapter_health = tunnel
+            .adapter_health
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_tunnels (
+                client_id,
+                observed_at,
+                interface,
+                kind,
+                ownership_mode,
+                mutation_policy,
+                promotion_required,
+                source,
+                operstate,
+                mtu,
+                link_type,
+                address,
+                rx_bytes,
+                tx_bytes,
+                traffic_source,
+                traffic_status,
+                traffic_reason,
+                traffic_checked_unix,
+                telemetry_plan_id,
+                telemetry_plan_name,
+                telemetry_plan_runtime_manager,
+                telemetry_endpoint_side,
+                telemetry_peer_client_id,
+                adapter_health,
+                updated_at
+            )
+            VALUES (
+                $1,
+                to_timestamp($2::double precision),
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15,
+                $16,
+                $17,
+                $18,
+                $19,
+                $20,
+                $21,
+                $22,
+                $23,
+                $24,
+                now()
+            )
+            "#,
+        )
+        .bind(client_id)
+        .bind(metrics.observed_unix as f64)
+        .bind(&tunnel.interface)
+        .bind(&tunnel.kind)
+        .bind(&tunnel.ownership_mode)
+        .bind(&tunnel.mutation_policy)
+        .bind(tunnel.promotion_required)
+        .bind(&tunnel.source)
+        .bind(&tunnel.operstate)
+        .bind(tunnel.mtu.map(u64_to_i64))
+        .bind(tunnel.link_type)
+        .bind(&tunnel.address)
+        .bind(u64_to_i64(tunnel.rx_bytes))
+        .bind(u64_to_i64(tunnel.tx_bytes))
+        .bind(&tunnel.traffic_source)
+        .bind(&tunnel.traffic_status)
+        .bind(&tunnel.traffic_reason)
+        .bind(tunnel.traffic_checked_unix.map(u64_to_i64))
+        .bind(&tunnel.plan_id)
+        .bind(&tunnel.plan_name)
+        .bind(&tunnel.plan_runtime_manager)
+        .bind(&tunnel.endpoint_side)
+        .bind(&tunnel.peer_client_id)
+        .bind(adapter_health)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+fn telemetry_tunnel_view(
+    client_id: &str,
+    observed_unix: u64,
+    tunnel: &RuntimeTunnelStat,
+) -> Option<TelemetryTunnelView> {
+    if !valid_tunnel(tunnel) {
+        return None;
+    }
+    Some(TelemetryTunnelView {
+        client_id: client_id.to_string(),
+        observed_at: observed_unix.to_string(),
+        interface: tunnel.interface.clone(),
+        kind: tunnel.kind.clone(),
+        ownership_mode: tunnel.ownership_mode.clone(),
+        mutation_policy: tunnel.mutation_policy.clone(),
+        promotion_required: tunnel.promotion_required,
+        plan_correlation: if tunnel.plan_id.is_some() || tunnel.plan_name.is_some() {
+            "telemetry_reported_plan".to_string()
+        } else {
+            "unmatched".to_string()
+        },
+        plan_id: tunnel
+            .plan_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok()),
+        plan_name: tunnel.plan_name.clone(),
+        plan_runtime_manager: tunnel.plan_runtime_manager.clone(),
+        endpoint_side: tunnel.endpoint_side.clone(),
+        peer_client_id: tunnel.peer_client_id.clone(),
+        source: tunnel.source.clone(),
+        operstate: tunnel.operstate.clone(),
+        mtu: tunnel.mtu.map(u64_to_i64),
+        link_type: tunnel.link_type,
+        address: tunnel.address.clone(),
+        rx_bytes: u64_to_i64(tunnel.rx_bytes),
+        tx_bytes: u64_to_i64(tunnel.tx_bytes),
+        traffic_source: tunnel.traffic_source.clone(),
+        traffic_status: tunnel.traffic_status.clone(),
+        traffic_reason: tunnel.traffic_reason.clone(),
+        traffic_checked_unix: tunnel.traffic_checked_unix.map(u64_to_i64),
+        adapter_health: tunnel.adapter_health.as_ref().map(adapter_health_view),
+    })
+}
+
+fn adapter_health_view(
+    health: &RuntimeTunnelAdapterHealthStat,
+) -> TelemetryTunnelAdapterHealthView {
+    TelemetryTunnelAdapterHealthView {
+        status: health.status.clone(),
+        checked_unix: u64_to_i64(health.checked_unix),
+        configured: health.configured,
+        success: health.success,
+        exit_code: health.exit_code,
+        reason: health.reason.clone(),
+        duration_ms: u64_to_i64(health.duration_ms),
+        command_sha256_hex: health.command_sha256_hex.clone(),
+        timed_out: health.timed_out,
+        output_truncated: health.output_truncated,
+        stdout_sha256_hex: health.stdout_sha256_hex.clone(),
+        stderr_sha256_hex: health.stderr_sha256_hex.clone(),
+    }
+}
+
+fn telemetry_totals(metrics: &AgentMetrics) -> (i64, i64, i64, i64) {
+    let disk_total = sum_u64(metrics.disks.iter().map(|disk| disk.total_bytes));
+    let disk_available = sum_u64(metrics.disks.iter().map(|disk| disk.available_bytes));
+    let network_rx = sum_u64(metrics.networks.iter().map(|network| network.rx_bytes));
+    let network_tx = sum_u64(metrics.networks.iter().map(|network| network.tx_bytes));
+    (disk_total, disk_available, network_rx, network_tx)
+}
+
+fn weighted_avg_f64(current_avg: f64, current_count: i32, next_value: f64) -> f64 {
+    let current_count = current_count.max(1) as f64;
+    ((current_avg * current_count) + next_value) / (current_count + 1.0)
+}
+
+fn weighted_avg_i64(current_avg: i64, current_count: i32, next_value: i64) -> i64 {
+    let current_count = i128::from(current_count.max(1));
+    let numerator = i128::from(current_avg) * current_count + i128::from(next_value);
+    let denominator = current_count + 1;
+    ((numerator + denominator / 2) / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+        as i64
+}
+
+fn bucket_start_unix(observed_unix: u64) -> u64 {
+    observed_unix / TELEMETRY_BUCKET_SECS as u64 * TELEMETRY_BUCKET_SECS as u64
+}
+
+fn parse_unix(value: &str) -> u64 {
+    value.parse::<u64>().unwrap_or(0)
+}
+
+fn valid_tunnel(tunnel: &RuntimeTunnelStat) -> bool {
+    valid_telemetry_name(&tunnel.interface) && valid_telemetry_name(&tunnel.kind)
+}
+
+fn valid_telemetry_name(value: &str) -> bool {
+    let len = value.len();
+    (1..=64).contains(&len)
+}
+
+fn sum_u64(values: impl Iterator<Item = u64>) -> i64 {
+    values
+        .fold(0_u128, |total, value| total.saturating_add(value as u128))
+        .min(i64::MAX as u128) as i64
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
 }
 
 pub(crate) async fn upsert_memory_agent(agents: &Arc<RwLock<Vec<AgentView>>>, hello: &AgentHello) {

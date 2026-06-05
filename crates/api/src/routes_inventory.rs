@@ -580,7 +580,7 @@ fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), A
     }
     if query
         .bucket_secs
-        .is_some_and(|bucket_secs| !(60..=86_400).contains(&bucket_secs))
+        .is_some_and(|bucket_secs| bucket_secs != 60)
     {
         return Err(ApiError::bad_request("invalid_bucket_secs"));
     }
@@ -633,7 +633,7 @@ fn validate_telemetry_network_rate_query(
     }
     if query
         .bucket_secs
-        .is_some_and(|bucket_secs| !(60..=86_400).contains(&bucket_secs))
+        .is_some_and(|bucket_secs| bucket_secs != 60)
     {
         return Err(ApiError::bad_request("invalid_bucket_secs"));
     }
@@ -666,7 +666,7 @@ mod tests {
     fn persisted_tags_reject_inner_selector_prefixes() {
         validate_persisted_tag_name("provider:alpha").unwrap();
         validate_persisted_tag_name("country:US").unwrap();
-        validate_persisted_tag_name("pool:legacy-name").unwrap();
+        validate_persisted_tag_name("region:legacy-name").unwrap();
 
         assert!(validate_persisted_tag_name("id:edge-a").is_err());
         assert!(validate_persisted_tag_name("name:edge-a").is_err());

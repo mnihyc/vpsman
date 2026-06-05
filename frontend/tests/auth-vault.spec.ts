@@ -2,6 +2,12 @@ import { expect, test, type Locator } from "@playwright/test";
 
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
+const preferences = {
+  language: "en",
+  sidebar_subpanel_default: "active",
+  timezone: null,
+  vps_name_display_mode: "name_id_suffix",
+};
 
 async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
@@ -18,7 +24,7 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({ pag
   await activate(page.getByRole("button", { name: "Submit login" }));
 
   await page.waitForFunction(() => window.localStorage.getItem("vpsman.authVault") !== null);
-  await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
 
   const storage = await readSessionStorage(page);
   expect(storage.access).toBeNull();
@@ -33,7 +39,7 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({ pag
   await expect(page.getByRole("heading", { name: "Operator access" })).toBeVisible();
   await page.getByLabel("Stored session key").fill("vault-key-123456");
   await activate(page.getByRole("button", { name: "Unlock session" }));
-  await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
 });
 
 async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
@@ -45,6 +51,7 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
         expires_in_secs: 900,
         operator: {
           id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          preferences,
           role: "admin",
           scopes: ["*"],
           totp_enabled: false,
@@ -64,6 +71,59 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
     await route.fulfill({
       contentType: "application/json",
       json: { connected: 1, running_jobs: 0, total: 1, warnings: 0 },
+    });
+  });
+  await page.route("**/api/v1/dashboard/overview**", async (route) => {
+    if (!isAuthorized(route.request())) {
+      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        available_filters: {
+          countries: [],
+          group_by_options: [{ description: "All labels", label: "Labels", value: "labels" }],
+          providers: [],
+          tags: [],
+          windows: [{ label: "24 hours", seconds: 86400, value: "24h" }],
+        },
+        drilldowns: [{ label: "Open fleet instances", query: null, subpage: "instances", view: "Fleet" }],
+        generated_at: "2026-06-05T20:44:58Z",
+        group_by: "labels",
+        label_clusters: [],
+        network: { points: [], rx_bps: 0, top_clients: [], tx_bps: 0 },
+        operations: {
+          active_alerts: 0,
+          backup_completed: 0,
+          backup_failed: 0,
+          backup_pending: 0,
+          critical_alerts: 0,
+          degraded_agents: [],
+          recent_alerts: [],
+          running_jobs: 0,
+          stale_agents: 0,
+          warning_alerts: 0,
+        },
+        resources: {
+          cpu_load_avg: null,
+          cpu_load_max: null,
+          disk_free_ratio: null,
+          memory_used_ratio: null,
+          sampled_clients: 0,
+        },
+        scope: { kind: "all", label: "All VPS", matched_clients: 1, query: null, value: null },
+        summary: { connected: 1, running_jobs: 0, stale: 0, total: 1, warnings: 0 },
+        time_range: {
+          end_at: "2026-06-05T20:44:58Z",
+          end_unix: 1780692298,
+          mode: "window",
+          start_at: "2026-06-04T20:44:58Z",
+          start_unix: 1780605898,
+          window: "24h",
+        },
+        window: "24h",
+      },
     });
   });
   await page.route("**/api/v1/agents", async (route) => {
@@ -146,7 +206,20 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
         await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
         return;
       }
-      await route.fulfill({ contentType: "application/json", json: path === "auth/me" ? { id: "99999999-aaaa-4bbb-8ccc-000000000001", role: "admin", scopes: ["*"], totp_enabled: false, username: "vault-admin" } : [] });
+      await route.fulfill({
+        contentType: "application/json",
+        json:
+          path === "auth/me"
+            ? {
+                id: "99999999-aaaa-4bbb-8ccc-000000000001",
+                preferences,
+                role: "admin",
+                scopes: ["*"],
+                totp_enabled: false,
+                username: "vault-admin",
+              }
+            : [],
+      });
     });
   }
 }

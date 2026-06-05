@@ -1,6 +1,6 @@
 import { ClipboardList, Download, Scissors, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { CrudPager } from "../components/CrudPager";
+import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import type {
   AuditLogRecord,
   HistoryExportRecord,
@@ -12,6 +12,7 @@ import type {
 import { formatTime, metadataOperator, metadataPreview, shortHash, shortId } from "../utils";
 
 export function AuditLogPanel({
+  activeSubpage,
   audits,
   error,
   historyExport,
@@ -23,6 +24,7 @@ export function AuditLogPanel({
   onRefresh,
   onUpsertHistoryRetentionPolicy,
 }: {
+  activeSubpage: string;
   audits: AuditLogRecord[];
   error: string | null;
   historyExport: HistoryExportRecord | null;
@@ -34,6 +36,7 @@ export function AuditLogPanel({
   onRefresh: () => void;
   onUpsertHistoryRetentionPolicy: (request: HistoryRetentionPolicyRequest) => Promise<void>;
 }) {
+  const auditSubpage = activeSubpage === "retention" ? "retention" : "events";
   const [selectedDomain, setSelectedDomain] = useState("audit_logs");
   const selectedPolicy = useMemo(
     () => historyRetentionPolicies.find((policy) => policy.domain === selectedDomain) ?? historyRetentionPolicies[0],
@@ -63,6 +66,63 @@ export function AuditLogPanel({
         .join(","),
     [historyRetentionPolicies],
   );
+  const auditColumns = useMemo<ConsoleDataGridColumn<AuditLogRecord>[]>(
+    () => [
+      {
+        id: "action",
+        header: "Action",
+        size: 190,
+        minSize: 140,
+        sortValue: (audit) => audit.action,
+        searchValue: (audit) => `${audit.action} ${audit.id}`,
+        cell: (audit) => (
+          <span className="historyPrimary">
+            <strong>{audit.action}</strong>
+            <small>{shortId(audit.id)}</small>
+          </span>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 230,
+        minSize: 150,
+        sortValue: (audit) => audit.target,
+        searchValue: (audit) => `${audit.target} ${metadataPreview(audit.metadata)}`,
+        cell: (audit) => (
+          <span className="historyPrimary">
+            <strong>{audit.target}</strong>
+            <small>{metadataPreview(audit.metadata)}</small>
+          </span>
+        ),
+      },
+      {
+        id: "operator",
+        header: "Operator",
+        size: 150,
+        sortValue: (audit) => metadataOperator(audit.metadata) ?? audit.actor_id,
+        searchValue: (audit) => metadataOperator(audit.metadata) ?? audit.actor_id,
+        cell: (audit) => metadataOperator(audit.metadata) ?? shortId(audit.actor_id),
+      },
+      {
+        id: "command",
+        header: "Command",
+        size: 130,
+        sortValue: (audit) => audit.command_hash ?? "",
+        searchValue: (audit) => audit.command_hash ?? "",
+        cell: (audit) => <span className="monoValue">{audit.command_hash ? shortHash(audit.command_hash) : "-"}</span>,
+      },
+      {
+        id: "created",
+        header: "Created",
+        size: 170,
+        sortValue: (audit) => audit.created_at,
+        searchValue: (audit) => audit.created_at,
+        cell: (audit) => formatTime(audit.created_at),
+      },
+    ],
+    [],
+  );
 
   const submitPolicy = () => {
     void onUpsertHistoryRetentionPolicy({
@@ -86,6 +146,54 @@ export function AuditLogPanel({
 
   return (
     <section className="workspace singleColumn">
+      {auditSubpage === "events" && (
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>Audit log</h2>
+            <span>{error ?? (loading ? "Refreshing audit records" : "Operator and control-plane events")}</span>
+          </div>
+          <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
+            Refresh
+          </button>
+        </div>
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Copy audit IDs",
+              onSelect: (rows) => void copyText(rows.map((audit) => audit.id).join("\n")),
+            },
+            {
+              label: "Copy command hashes",
+              onSelect: (rows) => void copyText(rows.map((audit) => audit.command_hash).filter(Boolean).join("\n")),
+            },
+          ]}
+          columns={auditColumns}
+          defaultPageSize={12}
+          empty={
+            <div className="emptyState">
+              <ClipboardList size={22} />
+              <strong>No audit records</strong>
+              <span>{error ?? "No audit records match the current search."}</span>
+            </div>
+          }
+          getRowId={(audit) => audit.id}
+          itemLabel="records"
+          renderExpandedRow={(audit) => (
+            <div className="gridDetailLine">
+              <strong>{audit.action}</strong>
+              <span>{audit.target}</span>
+              <span>{metadataPreview(audit.metadata)}</span>
+              <span>{audit.command_hash ? shortHash(audit.command_hash) : "no command hash"}</span>
+            </div>
+          )}
+          rows={audits}
+          storageKey="vpsman.grid.audit.events"
+          title="Audit records"
+        />
+      </div>
+      )}
+      {auditSubpage === "retention" && (
       <div className="fleetPanel">
         <div className="sectionHeader">
           <div>
@@ -155,64 +263,14 @@ export function AuditLogPanel({
           </div>
         )}
       </div>
-      <div className="fleetPanel">
-        <div className="sectionHeader">
-          <div>
-            <h2>Audit log</h2>
-            <span>{error ?? (loading ? "Refreshing audit records" : "Operator and control-plane events")}</span>
-          </div>
-          <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-            Refresh
-          </button>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "Action", value: (audit) => audit.action },
-            { label: "Target", value: (audit) => audit.target },
-            { label: "Operator", value: (audit) => metadataOperator(audit.metadata) ?? audit.actor_id },
-            { label: "Command", value: (audit) => audit.command_hash },
-            { label: "Created", value: (audit) => audit.created_at },
-          ]}
-          itemLabel="records"
-          items={audits}
-          pageSize={12}
-          title="Audit records"
-          empty={
-            <div className="emptyState">
-              <ClipboardList size={22} />
-              <strong>No audit records</strong>
-              <span>{error ?? "No audit records match the current search."}</span>
-            </div>
-          }
-        >
-          {(auditRows) => (
-            <div className="table historyTable">
-              <div className="historyRow heading auditHistoryGrid">
-                <span>Action</span>
-                <span>Target</span>
-                <span>Operator</span>
-                <span>Command</span>
-                <span>Created</span>
-              </div>
-              {auditRows.map((audit) => (
-                <div className="historyRow auditHistoryGrid" key={audit.id}>
-                  <span className="historyPrimary">
-                    <strong>{audit.action}</strong>
-                    <small>{shortId(audit.id)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{audit.target}</strong>
-                    <small>{metadataPreview(audit.metadata)}</small>
-                  </span>
-                  <span>{metadataOperator(audit.metadata) ?? shortId(audit.actor_id)}</span>
-                  <span className="monoValue">{audit.command_hash ? shortHash(audit.command_hash) : "-"}</span>
-                  <span>{formatTime(audit.created_at)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
+      )}
     </section>
   );
+}
+
+async function copyText(value: string) {
+  if (!value.trim()) {
+    return;
+  }
+  await navigator.clipboard?.writeText(value);
 }

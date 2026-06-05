@@ -1,13 +1,22 @@
 import { createContext, useContext, type ReactNode } from "react";
-import { DEFAULT_VPS_NAME_DISPLAY_MODE, type VpsNameDisplayMode } from "./utils";
+import type { OperatorPreferences } from "./types";
+import { DEFAULT_OPERATOR_PREFERENCES, type VpsNameDisplayMode } from "./utils";
 
 type PanelDisplaySettings = {
+  preferences: OperatorPreferences;
+  preferencesError: string | null;
+  preferencesSaving: boolean;
   vpsNameDisplayMode: VpsNameDisplayMode;
+  updatePreferences: (preferences: OperatorPreferences) => Promise<void>;
   setVpsNameDisplayMode: (mode: VpsNameDisplayMode) => void;
 };
 
 const fallbackSettings: PanelDisplaySettings = {
-  vpsNameDisplayMode: DEFAULT_VPS_NAME_DISPLAY_MODE,
+  preferences: DEFAULT_OPERATOR_PREFERENCES,
+  preferencesError: null,
+  preferencesSaving: false,
+  vpsNameDisplayMode: DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode,
+  updatePreferences: async () => undefined,
   setVpsNameDisplayMode: () => undefined,
 };
 

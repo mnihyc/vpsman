@@ -24,6 +24,7 @@ mod model_alert_policies;
 mod model_alert_states;
 mod model_backups;
 mod model_command_templates;
+mod model_dashboard;
 mod model_data_sources;
 mod model_file_transfer;
 mod model_history;
@@ -75,6 +76,7 @@ mod routes_alerts;
 mod routes_auth;
 mod routes_backups;
 mod routes_command_templates;
+mod routes_dashboard;
 mod routes_discovery;
 mod routes_enrollment;
 mod routes_file_transfers;
@@ -709,6 +711,7 @@ fn delegated_rollout_operator(actor_id: Option<uuid::Uuid>) -> AuthContext {
             username: "rollout-automation".to_string(),
             role: "operator".to_string(),
             scopes: vec!["jobs:write".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: uuid::Uuid::nil(),
@@ -894,6 +897,8 @@ mod tests_auth_rotation;
 mod tests_backups;
 #[cfg(test)]
 mod tests_config;
+#[cfg(test)]
+mod tests_dashboard;
 #[cfg(test)]
 mod tests_data_sources;
 #[cfg(test)]

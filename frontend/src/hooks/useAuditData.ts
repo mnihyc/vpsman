@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import type {
   AuditLogRecord,
   HistoryExportRecord,
@@ -35,7 +35,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     setAuditError(null);
     try {
       const [auditRows, retentionRows] = await Promise.all([
-        apiGet<AuditLogRecord[]>("/api/v1/audit?limit=1000", apiToken),
+        apiGet<AuditLogRecord[]>(buildListPath("/api/v1/audit", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
         apiGet<HistoryRetentionPolicyRecord[]>("/api/v1/history/retention-policies", apiToken),
       ]);
       setAudits(auditRows);

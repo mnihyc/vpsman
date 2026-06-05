@@ -27,6 +27,7 @@ import { CrudPager } from "../components/CrudPager";
 import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
 
 export function TagsPanel({
+  activeSubpage,
   agents,
   error,
   loading,
@@ -47,6 +48,7 @@ export function TagsPanel({
   dataSourceStatus,
   tags,
 }: {
+  activeSubpage: string;
   agents: AgentView[];
   dataSourceAssignments: DataSourcePresetAssignmentRecord[];
   dataSourcePresets: DataSourcePresetRecord[];
@@ -77,6 +79,9 @@ export function TagsPanel({
   const [bulkPreview, setBulkPreview] = useState<BulkResolveResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const tagSubpage = ["registry", "targeting", "presets", "status"].includes(activeSubpage)
+    ? activeSubpage
+    : "registry";
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -105,8 +110,8 @@ export function TagsPanel({
   const status = actionError ?? error ?? (loading ? "Refreshing tag state" : "Live tag targets");
 
   return (
-    <section className="workspace">
-      <div className="workspaceStack">
+    <section className="workspace singleColumn">
+      {tagSubpage === "registry" && (
         <div className="fleetPanel">
           <div className="sectionHeader">
             <div>
@@ -170,8 +175,11 @@ export function TagsPanel({
             )}
           </CrudPager>
         </div>
+      )}
 
+      {(tagSubpage === "presets" || tagSubpage === "status") && (
         <DataSourcePresetPanel
+          activeSubpage={tagSubpage}
           agents={agents}
           assignments={dataSourceAssignments}
           dataSourceStatus={dataSourceStatus}
@@ -186,15 +194,19 @@ export function TagsPanel({
           presets={dataSourcePresets}
           tags={tags}
         />
-      </div>
+      )}
 
-      <aside className="inspector">
-        <div className="sectionHeader compact">
+      {tagSubpage === "targeting" && (
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
           <h2>Targeting</h2>
           <span>Resolve before dispatch</span>
+          </div>
         </div>
 
-        <form className="sideForm" onSubmit={submitAssignments}>
+        <div className="managementGrid">
+        <form className="compactForm" onSubmit={submitAssignments}>
           <strong>Assign VPS</strong>
           <select aria-label="VPS" onChange={(event) => setTargetClient(event.target.value)} value={targetClient}>
             <option value="">VPS</option>
@@ -215,7 +227,7 @@ export function TagsPanel({
           </button>
         </form>
 
-        <div className="sideForm">
+        <div className="compactForm">
           <strong>Bulk preview</strong>
           <div className="chipList">
             {tags.map((tag) => (
@@ -251,6 +263,7 @@ export function TagsPanel({
             Preview targets
           </button>
         </div>
+        </div>
 
         <div className="timeline">
           <ShieldCheck size={18} />
@@ -263,7 +276,8 @@ export function TagsPanel({
             </span>
           </div>
         </div>
-      </aside>
+      </div>
+      )}
     </section>
   );
 }

@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -13,7 +14,7 @@ test("creates server-side handoff for a completed download session", async ({ pa
   test.skip(testInfo.project.name.includes("mobile"), "dense transfer handoff controls are covered in desktop layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "File transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await expect(panel.getByText("core-fra-02")).toBeVisible();
@@ -33,7 +34,7 @@ test("downloads selected handoffs for multiple completed download sessions", asy
   test.skip(testInfo.project.name.includes("mobile"), "dense transfer handoff controls are covered in desktop layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "File transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await expect(panel.getByText("2 completed downloads available, 0 selected")).toBeVisible();
@@ -88,7 +89,7 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
     });
   });
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "File transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await panel.getByLabel("Transfer handoff save method").selectOption("stream-to-file");
@@ -112,7 +113,7 @@ test("uploads a confirmed source artifact for transfer reuse", async ({ page }, 
   test.skip(testInfo.project.name.includes("mobile"), "dense transfer source controls are covered in desktop layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs" }));
+  await openConsoleSubpage(page, "Jobs", "File transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await expect(panel.getByRole("heading", { name: "Source artifacts" })).toBeVisible();

@@ -45,6 +45,7 @@ const runtimeManagers: RuntimeTunnelManager[] = [
 ];
 
 export function TopologyPanel({
+  activeSubpage,
   agents,
   error,
   jobs,
@@ -68,6 +69,7 @@ export function TopologyPanel({
   topologyGraph,
   tunnelPlans,
 }: {
+  activeSubpage: string;
   agents: AgentView[];
   error: string | null;
   jobs: JobHistoryRecord[];
@@ -132,6 +134,9 @@ export function TopologyPanel({
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const runtimeManager = form.runtime_control?.manager ?? "agent_iproute2_managed";
+  const topologySubpage = ["graph", "plans", "apply", "promotion", "evidence", "ospf"].includes(activeSubpage)
+    ? activeSubpage
+    : "graph";
   const ready =
     form.name.trim() &&
     form.interface_name.trim() &&
@@ -182,6 +187,7 @@ export function TopologyPanel({
 
   return (
     <div className="workspaceGrid">
+      {(topologySubpage === "graph" || topologySubpage === "plans") && (
       <section className="fleetPanel">
         <div className="sectionHeader">
           <div>
@@ -242,13 +248,17 @@ export function TopologyPanel({
           </table>
         </div>
       </section>
+      )}
 
+      {topologySubpage === "graph" && (
       <TopologyGraphPanel
         graph={topologyGraph}
         loading={loading}
         onRefresh={onLoadTopologyGraph}
       />
+      )}
 
+      {topologySubpage === "plans" && (
       <section className="fleetPanel scheduleComposer">
         <div className="sectionHeader">
           <div>
@@ -492,7 +502,9 @@ export function TopologyPanel({
           </button>
         </form>
       </section>
+      )}
 
+      {topologySubpage === "promotion" && (
       <TopologyPromotionPanel
         agents={agents}
         onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
@@ -500,15 +512,16 @@ export function TopologyPanel({
         telemetryTunnels={telemetryTunnels}
         tunnelPlans={tunnelPlans}
       />
+      )}
 
-      {tunnelPlans.length > 0 && (
+      {topologySubpage === "apply" && tunnelPlans.length > 0 && (
         <TopologyApplyControls
           agents={agents}
           onCreateJob={onCreateJob}
           tunnelPlans={tunnelPlans}
         />
       )}
-      {tunnelPlans.length > 0 && (
+      {topologySubpage === "ospf" && tunnelPlans.length > 0 && (
         <TopologyOspfUpdateControls
           agents={agents}
           onCreateJob={onCreateJob}
@@ -517,6 +530,7 @@ export function TopologyPanel({
         />
       )}
 
+      {topologySubpage === "evidence" && (
       <TopologyEvidencePanel
         clientLabel={clientLabel}
         jobs={jobs}
@@ -530,8 +544,9 @@ export function TopologyPanel({
         ospfUpdatePlans={ospfUpdatePlans}
         trends={networkTrends}
       />
+      )}
 
-      {tunnelPlans[0] && (
+      {topologySubpage === "plans" && tunnelPlans[0] && (
         <section className="fleetPanel topologyPreview">
           <div className="sectionHeader">
             <div>

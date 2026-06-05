@@ -1,6 +1,8 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   BookmarkPlus,
+  ChevronDown,
+  ChevronRight,
   Cloud,
   Command,
   FolderKanban,
@@ -12,13 +14,16 @@ import {
   X,
 } from "lucide-react";
 import { Metric } from "./Metric";
-import { navSections } from "../constants";
+import { navSections, subpageDescription, subpageLabel, viewSubpages } from "../constants";
 import type { ActiveView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
 import { usePanelDisplaySettings } from "../panelDisplay";
 
+const SIDEBAR_SUBPANEL_STORAGE_KEY = "vpsman.sidebarSubpanels";
+
 type ConsoleShellProps = {
   activeSavedFleetViewId: string | null;
+  activeSubpage: string;
   activeView: ActiveView;
   apiToken: string;
   children: ReactNode;
@@ -35,14 +40,17 @@ type ConsoleShellProps = {
   onFleetQueryChange: (query: string) => void;
   onOpenAccessControls: () => void;
   onSaveFleetView: () => void;
+  onSelectSubpage: (subpage: string) => void;
   onSelectView: (view: ActiveView) => void;
   onSavedFleetViewNameChange: (name: string) => void;
+  operatorPreferencesReady: boolean;
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
 };
 
 export function ConsoleShell({
   activeSavedFleetViewId,
+  activeSubpage,
   activeView,
   apiToken,
   children,
@@ -59,15 +67,56 @@ export function ConsoleShell({
   onFleetQueryChange,
   onOpenAccessControls,
   onSaveFleetView,
+  onSelectSubpage,
   onSelectView,
   onSavedFleetViewNameChange,
+  operatorPreferencesReady,
   savedFleetViews,
   summary,
 }: ConsoleShellProps) {
-  const { vpsNameDisplayMode, setVpsNameDisplayMode } = usePanelDisplaySettings();
+  const { preferences } = usePanelDisplaySettings();
+  const initialSubpanelPreferences = useRef(readSidebarSubpanelPreferences());
+  const storedDefaultRef = useRef<string | null>(initialSubpanelPreferences.current.defaultMode);
+  const [manualSubpanelState, setManualSubpanelState] = useState<Record<string, boolean>>(
+    initialSubpanelPreferences.current.state,
+  );
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
+  const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
+  const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
+  const isSubpanelExpanded = (view: ActiveView, hasSubpages: boolean) => {
+    if (!hasSubpages) {
+      return false;
+    }
+    const manual = manualSubpanelState[view];
+    if (manual !== undefined) {
+      return manual;
+    }
+    return preferences.sidebar_subpanel_default === "all" || activeView === view;
+  };
+  const toggleSubpanel = (view: ActiveView, expanded: boolean) => {
+    setManualSubpanelState((current) => {
+      const next = { ...current, [view]: !expanded };
+      writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!operatorPreferencesReady) {
+      return;
+    }
+    const defaultMode = preferences.sidebar_subpanel_default;
+    if (storedDefaultRef.current && storedDefaultRef.current !== defaultMode) {
+      storedDefaultRef.current = defaultMode;
+      setManualSubpanelState({});
+      writeSidebarSubpanelPreferences(defaultMode, {});
+      return;
+    }
+    storedDefaultRef.current = defaultMode;
+    writeSidebarSubpanelPreferences(defaultMode, manualSubpanelState);
+  }, [manualSubpanelState, operatorPreferencesReady, preferences.sidebar_subpanel_default]);
 
   return (
     <div className="shell">
@@ -82,17 +131,51 @@ export function ConsoleShell({
               <span className="navSectionTitle">{section.label}</span>
               {section.items.map((item) => {
                 const Icon = item.icon;
+                const subpages = viewSubpages[item.view] ?? [];
+                const hasSubpages = subpages.length > 1;
+                const expanded = isSubpanelExpanded(item.view, hasSubpages);
                 return (
-                  <button
-                    aria-current={activeView === item.view ? "page" : undefined}
-                    className={activeView === item.view ? "navItem active" : "navItem"}
-                    key={item.view}
-                    onClick={() => onSelectView(item.view)}
-                    type="button"
-                  >
-                    <Icon size={18} />
-                    <span>{item.view}</span>
-                  </button>
+                  <div className="navGroup" key={item.view}>
+                    <div className={activeView === item.view ? "navItemRow active" : "navItemRow"}>
+                      <button
+                        aria-current={activeView === item.view ? "page" : undefined}
+                        className={activeView === item.view ? "navItem active" : "navItem"}
+                        onClick={() => onSelectView(item.view)}
+                        type="button"
+                      >
+                        <Icon size={18} />
+                        <span>{item.view}</span>
+                      </button>
+                      {hasSubpages && (
+                        <button
+                          aria-expanded={expanded}
+                          aria-label={expanded ? "Collapse subpages" : "Expand subpages"}
+                          className="subnavToggle"
+                          onClick={() => toggleSubpanel(item.view, expanded)}
+                          title={`${expanded ? "Collapse" : "Expand"} ${item.view} sections`}
+                          type="button"
+                        >
+                          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </button>
+                      )}
+                    </div>
+                    {expanded && (
+                      <div className="subnav" aria-label={`${item.view} sections`}>
+                        {subpages.map((subpage) => (
+                          <button
+                            aria-current={activeSubpage === subpage.id ? "page" : undefined}
+                            className={activeSubpage === subpage.id ? "subnavItem active" : "subnavItem"}
+                            key={subpage.id}
+                            onClick={() => onSelectSubpage(subpage.id)}
+                            title={subpage.description}
+                            type="button"
+                          >
+                            {subpage.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>
@@ -105,7 +188,6 @@ export function ConsoleShell({
           <button className="scopeSelector" onClick={onClearFleetView} title="Clear fleet scope" type="button">
             <FolderKanban size={18} />
             <span className="scopeMeta">
-              <span>Resource scope</span>
               <strong>{scopeName}</strong>
               <small>
                 {filteredAgentCount} / {summary.total} resources
@@ -124,17 +206,6 @@ export function ConsoleShell({
             />
           </div>
           <div className="topbarActions">
-            <label className="panelDisplayControl">
-              <span>Panel display</span>
-              <select
-                aria-label="VPS name display"
-                onChange={(event) => setVpsNameDisplayMode(event.target.value === "name" ? "name" : "name_id_suffix")}
-                value={vpsNameDisplayMode}
-              >
-                <option value="name_id_suffix">Name (last4)</option>
-                <option value="name">Name only</option>
-              </select>
-            </label>
             <div className="savedViewControls" aria-label="Saved fleet views">
               <select
                 aria-label="Saved fleet view"
@@ -218,9 +289,11 @@ export function ConsoleShell({
 
         <section className="consoleHeader">
           <div className="titleBlock">
-            <span className="breadcrumb">vpsman / {activeView}</span>
+            <span className="breadcrumb">
+              vpsman / {activeView} / {activeSubpageLabel}
+            </span>
             <h1>{heroTitle}</h1>
-            <p>{heroCopy}</p>
+            <p>{heroCopy || activeSubpageDescription}</p>
           </div>
           <div className="quickStats">
             <Metric label="Connected" value={String(summary.connected)} tone="green" />
@@ -234,4 +307,58 @@ export function ConsoleShell({
       </main>
     </div>
   );
+}
+
+type SidebarSubpanelPreferences = {
+  defaultMode: string | null;
+  state: Record<string, boolean>;
+};
+
+function readSidebarSubpanelPreferences(): SidebarSubpanelPreferences {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_SUBPANEL_STORAGE_KEY);
+    if (!raw) {
+      return { defaultMode: null, state: {} };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { defaultMode: null, state: {} };
+    }
+    if ("state" in parsed) {
+      const record = parsed as { defaultMode?: unknown; state?: unknown };
+      return {
+        defaultMode: typeof record.defaultMode === "string" ? record.defaultMode : null,
+        state: sanitizeSidebarSubpanelState(record.state),
+      };
+    }
+    return {
+      defaultMode: null,
+      state: sanitizeSidebarSubpanelState(parsed),
+    };
+  } catch {
+    return { defaultMode: null, state: {} };
+  }
+}
+
+function sanitizeSidebarSubpanelState(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"),
+  );
+}
+
+function writeSidebarSubpanelPreferences(defaultMode: string, state: Record<string, boolean>) {
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_SUBPANEL_STORAGE_KEY,
+      JSON.stringify({
+        defaultMode,
+        state,
+      }),
+    );
+  } catch {
+    // Local navigation chrome state is non-critical.
+  }
 }

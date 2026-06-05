@@ -12,7 +12,6 @@ use vpsman_common::payload_hash;
 mod alert_notifications;
 mod backup_policy_retention;
 mod rollout_automation;
-mod telemetry_rollups;
 mod worker_leases;
 
 use alert_notifications::{
@@ -23,10 +22,6 @@ use backup_policy_retention::{
     BackupPolicyRetentionPruneRun,
 };
 use rollout_automation::process_rollout_automation;
-use telemetry_rollups::{
-    prune_telemetry_samples, refresh_telemetry_network_rates, refresh_telemetry_rollups,
-    TelemetryRollupConfig,
-};
 use worker_leases::acquire_worker_lease;
 
 #[derive(Debug, Parser)]
@@ -44,24 +39,6 @@ struct Args {
     worker_id: Option<String>,
     #[arg(long, env = "VPSMAN_WORKER_LEASE_SECS", default_value_t = 60)]
     worker_lease_secs: i32,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_TELEMETRY_ROLLUP_SECS",
-        default_value_t = 300
-    )]
-    telemetry_rollup_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_TELEMETRY_ROLLUP_LOOKBACK_HOURS",
-        default_value_t = 24
-    )]
-    telemetry_rollup_lookback_hours: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_TELEMETRY_PRUNE_AFTER_HOURS",
-        default_value_t = 168
-    )]
-    telemetry_prune_after_hours: u64,
     #[arg(
         long,
         env = "VPSMAN_WORKER_ROLLOUT_HEARTBEAT_TIMEOUT_SECS",
@@ -158,11 +135,6 @@ async fn main() -> Result<()> {
         }
     };
     let pool = connect_postgres(postgres_url, &args.migrations_dir).await?;
-    let telemetry_rollup_config = TelemetryRollupConfig::new(
-        args.telemetry_rollup_secs,
-        args.telemetry_rollup_lookback_hours,
-        args.telemetry_prune_after_hours,
-    );
     let worker_id = args
         .worker_id
         .clone()
@@ -212,27 +184,6 @@ async fn main() -> Result<()> {
             args.worker_lease_secs,
         )
         .await?;
-        let telemetry_rollups = refresh_telemetry_rollups_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await?;
-        let telemetry_network_rates = refresh_telemetry_network_rates_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await?;
-        let telemetry_samples_pruned = prune_telemetry_samples_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await?;
         info!(
             schedules_processed,
             alert_notification_processed = alert_notifications.processed,
@@ -244,9 +195,6 @@ async fn main() -> Result<()> {
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
-            telemetry_rollups,
-            telemetry_network_rates,
-            telemetry_samples_pruned,
             "worker once completed"
         );
         return Ok(());
@@ -324,51 +272,6 @@ async fn main() -> Result<()> {
             }
             Err(error) => warn!(%error, "failed to process backup policy retention prune"),
         }
-        match refresh_telemetry_rollups_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await
-        {
-            Ok(processed) => {
-                if processed > 0 {
-                    info!(processed, "refreshed telemetry rollups");
-                }
-            }
-            Err(error) => warn!(%error, "failed to refresh telemetry rollups"),
-        }
-        match refresh_telemetry_network_rates_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await
-        {
-            Ok(processed) => {
-                if processed > 0 {
-                    info!(processed, "refreshed telemetry network rates");
-                }
-            }
-            Err(error) => warn!(%error, "failed to refresh telemetry network rates"),
-        }
-        match prune_telemetry_samples_if_leader(
-            &pool,
-            telemetry_rollup_config,
-            &worker_id,
-            args.worker_lease_secs,
-        )
-        .await
-        {
-            Ok(pruned) => {
-                if pruned > 0 {
-                    info!(pruned, "pruned raw telemetry samples");
-                }
-            }
-            Err(error) => warn!(%error, "failed to prune telemetry samples"),
-        }
     }
 }
 
@@ -407,54 +310,6 @@ async fn process_alert_notifications_if_leader(
         return Ok(AlertNotificationWorkerRun::default());
     }
     process_alert_notifications(pool, config).await
-}
-
-async fn refresh_telemetry_rollups_if_leader(
-    pool: &PgPool,
-    config: TelemetryRollupConfig,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<u64> {
-    if !acquire_worker_lease(pool, "telemetry_rollups", worker_id, lease_secs).await? {
-        debug!(
-            worker_id,
-            "skipped telemetry rollups because another worker holds the lease"
-        );
-        return Ok(0);
-    }
-    refresh_telemetry_rollups(pool, config).await
-}
-
-async fn refresh_telemetry_network_rates_if_leader(
-    pool: &PgPool,
-    config: TelemetryRollupConfig,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<u64> {
-    if !acquire_worker_lease(pool, "telemetry_network_rates", worker_id, lease_secs).await? {
-        debug!(
-            worker_id,
-            "skipped telemetry network rates because another worker holds the lease"
-        );
-        return Ok(0);
-    }
-    refresh_telemetry_network_rates(pool, config).await
-}
-
-async fn prune_telemetry_samples_if_leader(
-    pool: &PgPool,
-    config: TelemetryRollupConfig,
-    worker_id: &str,
-    lease_secs: i32,
-) -> Result<u64> {
-    if !acquire_worker_lease(pool, "telemetry_prune", worker_id, lease_secs).await? {
-        debug!(
-            worker_id,
-            "skipped telemetry pruning because another worker holds the lease"
-        );
-        return Ok(0);
-    }
-    prune_telemetry_samples(pool, config).await
 }
 
 async fn process_backup_policy_retention_prune_if_leader(

@@ -1,11 +1,18 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ACCESS_TOKEN_STORAGE_KEY, REFRESH_TOKEN_STORAGE_KEY } from "../constants";
-import type { ActiveView, AuthResponse, WsJobOutputEvent, WsTerminalOutputEvent } from "../types";
+import type {
+  ActiveView,
+  AuthResponse,
+  DashboardRefreshIntervalSecs,
+  WsJobOutputEvent,
+  WsTerminalOutputEvent,
+} from "../types";
 import { parseWsEvent } from "../utils";
 import { clearAuthVault, hasAuthVault, saveAuthVault } from "../vault";
 import { useAccessData } from "./useAccessData";
 import { useAuditData } from "./useAuditData";
 import { useBackupsData } from "./useBackupsData";
+import { useDashboardOverviewData } from "./useDashboardOverviewData";
 import { useFleetData } from "./useFleetData";
 import { useInventoryData } from "./useInventoryData";
 import { useJobsData } from "./useJobsData";
@@ -20,16 +27,36 @@ export function useDashboardData(activeView: ActiveView) {
   const [lastLiveEvent, setLastLiveEvent] = useState("waiting");
   const [lastJobOutputEvent, setLastJobOutputEvent] = useState<WsJobOutputEvent | null>(null);
   const [lastTerminalOutputEvent, setLastTerminalOutputEvent] = useState<WsTerminalOutputEvent | null>(null);
+  const dashboardOverviewReloadTimer = useRef<number | null>(null);
 
   const requireAuth = useCallback(() => setAuthRequired(true), []);
-  const fleet = useFleetData(apiToken, requireAuth);
   const access = useAccessData(apiToken, requireAuth);
+  const dashboardOverview = useDashboardOverviewData(apiToken, requireAuth);
+  const fleet = useFleetData(apiToken, requireAuth);
   const audit = useAuditData(apiToken, requireAuth);
   const inventory = useInventoryData(apiToken, requireAuth, fleet.loadFleet);
   const jobs = useJobsData(apiToken, requireAuth, fleet.loadFleet, audit.loadAudits);
   const schedules = useSchedulesData(apiToken, requireAuth, audit.loadAudits);
   const topology = useTopologyData(apiToken, requireAuth, audit.loadAudits);
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
+  const scheduleDashboardOverviewReload = useCallback(() => {
+    if (dashboardOverviewReloadTimer.current !== null) {
+      window.clearTimeout(dashboardOverviewReloadTimer.current);
+    }
+    dashboardOverviewReloadTimer.current = window.setTimeout(() => {
+      dashboardOverviewReloadTimer.current = null;
+      void dashboardOverview.loadDashboardOverview();
+    }, 250);
+  }, [dashboardOverview.loadDashboardOverview]);
+
+  useEffect(
+    () => () => {
+      if (dashboardOverviewReloadTimer.current !== null) {
+        window.clearTimeout(dashboardOverviewReloadTimer.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -47,6 +74,39 @@ export function useDashboardData(activeView: ActiveView) {
       window.clearInterval(timer);
     };
   }, [fleet.loadFleet]);
+
+  useEffect(() => {
+    if ((authRequired && !apiToken) || activeView !== "Dashboard") {
+      return;
+    }
+    let cancelled = false;
+    let timer: number | null = null;
+
+    async function loadAndSchedule() {
+      await dashboardOverview.loadDashboardOverview();
+      if (cancelled) {
+        return;
+      }
+      timer = window.setTimeout(
+        loadAndSchedule,
+        dashboardRefreshIntervalMs(dashboardOverview.dashboardPreferences.refreshIntervalSecs),
+      );
+    }
+
+    void loadAndSchedule();
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    activeView,
+    apiToken,
+    authRequired,
+    dashboardOverview.dashboardPreferences.refreshIntervalSecs,
+    dashboardOverview.loadDashboardOverview,
+  ]);
 
   useEffect(() => {
     if (authRequired && !apiToken) {
@@ -78,9 +138,12 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Access") {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
+    } else if (activeView === "Preferences") {
+      void access.loadCurrentOperatorProfile();
     }
   }, [
     access.loadCurrentOperator,
+    access.loadCurrentOperatorProfile,
     activeView,
     apiToken,
     authRequired,
@@ -126,6 +189,12 @@ export function useDashboardData(activeView: ActiveView) {
       if (event.type === "agent_updated" || event.type === "telemetry_updated" || event.type === "job_rejected") {
         void fleet.loadFleet();
       }
+      if (
+        activeView === "Dashboard" &&
+        (event.type === "agent_updated" || event.type === "telemetry_updated" || event.type === "job_rejected")
+      ) {
+        scheduleDashboardOverviewReload();
+      }
       if (event.type === "agent_updated" || event.type === "telemetry_updated") {
         void inventory.loadTagInventory();
       }
@@ -148,10 +217,16 @@ export function useDashboardData(activeView: ActiveView) {
         void jobs.loadJobs();
         void jobs.loadAgentUpdateRollouts();
         void audit.loadAudits();
+        if (activeView === "Dashboard") {
+          scheduleDashboardOverviewReload();
+        }
       }
       if (event.type === "backup_artifact_recorded") {
         void backups.loadBackups();
         void audit.loadAudits();
+        if (activeView === "Dashboard") {
+          scheduleDashboardOverviewReload();
+        }
       }
     });
     return () => socket.close();
@@ -162,10 +237,12 @@ export function useDashboardData(activeView: ActiveView) {
     fleet.loadFleet,
     fleet.replaceFleetSnapshot,
     backups.loadBackups,
+    dashboardOverview.loadDashboardOverview,
     inventory.loadTagInventory,
     jobs.loadAgentUpdateRollouts,
     jobs.loadJobs,
     jobs.loadTerminalSessions,
+    scheduleDashboardOverviewReload,
     activeView,
   ]);
 
@@ -174,24 +251,32 @@ export function useDashboardData(activeView: ActiveView) {
     window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
   }, []);
 
-  const handleAuth = useCallback(async (auth: AuthResponse, sessionVaultKey?: string) => {
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-    if (sessionVaultKey) {
-      await saveAuthVault(auth, sessionVaultKey);
-    } else {
-      clearAuthVault();
-    }
-    setAuthVaultAvailable(hasAuthVault());
-    setApiToken(auth.access_token);
-    setAuthRequired(false);
-  }, []);
+  const handleAuth = useCallback(
+    async (auth: AuthResponse, sessionVaultKey?: string) => {
+      window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+      window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+      if (sessionVaultKey) {
+        await saveAuthVault(auth, sessionVaultKey);
+      } else {
+        clearAuthVault();
+      }
+      access.setAuthenticatedOperator(auth.operator);
+      setAuthVaultAvailable(hasAuthVault());
+      setApiToken(auth.access_token);
+      setAuthRequired(false);
+    },
+    [access.setAuthenticatedOperator],
+  );
 
-  const handleAuthVaultUnlock = useCallback((auth: AuthResponse) => {
-    setAuthVaultAvailable(hasAuthVault());
-    setApiToken(auth.access_token);
-    setAuthRequired(false);
-  }, []);
+  const handleAuthVaultUnlock = useCallback(
+    (auth: AuthResponse) => {
+      access.setAuthenticatedOperator(auth.operator);
+      setAuthVaultAvailable(hasAuthVault());
+      setApiToken(auth.access_token);
+      setAuthRequired(false);
+    },
+    [access.setAuthenticatedOperator],
+  );
 
   const clearSession = useCallback(() => {
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
@@ -202,7 +287,8 @@ export function useDashboardData(activeView: ActiveView) {
     setAuthRequired(true);
     access.clearOperator();
     fleet.clearFleet();
-  }, [access.clearOperator, fleet.clearFleet]);
+    dashboardOverview.clearDashboardOverview();
+  }, [access.clearOperator, dashboardOverview.clearDashboardOverview, fleet.clearFleet]);
 
   return {
     accessError: access.accessError,
@@ -321,9 +407,19 @@ export function useDashboardData(activeView: ActiveView) {
     operator: access.operator,
     operators: access.operators,
     operatorSessions: access.operatorSessions,
+    preferencesError: access.preferencesError,
+    preferencesSaving: access.preferencesSaving,
     dataSourceAssignments: inventory.dataSourceAssignments,
     dataSourcePresets: inventory.dataSourcePresets,
     dataSourceStatus: inventory.dataSourceStatus,
+    dashboardOverview: dashboardOverview.dashboardOverview,
+    dashboardOverviewError: dashboardOverview.dashboardOverviewError,
+    dashboardOverviewLoading: dashboardOverview.dashboardOverviewLoading,
+    dashboardOverviewWindow: dashboardOverview.dashboardOverviewWindow,
+    dashboardPreferences: dashboardOverview.dashboardPreferences,
+    loadDashboardOverview: dashboardOverview.loadDashboardOverview,
+    setDashboardOverviewWindow: dashboardOverview.setDashboardOverviewWindow,
+    updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,
     diffDataSourcePreset: inventory.diffDataSourcePreset,
     renderDataSourceHotConfig: inventory.renderDataSourceHotConfig,
     resolveBulkPreview: inventory.resolveBulkPreview,
@@ -351,6 +447,11 @@ export function useDashboardData(activeView: ActiveView) {
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,
+    updateOperatorPreferences: access.updateOperatorPreferences,
     wsState,
   };
+}
+
+function dashboardRefreshIntervalMs(value: DashboardRefreshIntervalSecs): number {
+  return value * 1000;
 }

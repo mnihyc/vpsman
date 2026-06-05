@@ -17,7 +17,9 @@
 
   .brand span,
   .navSectionTitle,
-  .navItem span {
+  .navItem span,
+  .subnav,
+  .subnavToggle {
     display: none;
   }
 
@@ -49,6 +51,7 @@
   }
 
   .workspace,
+  .workspace.dashboardWorkspace,
   .workspace.jobWorkspace,
   .workspace.backupWorkspace,
   .workspace.accessWorkspace,
@@ -67,8 +70,42 @@
     display: grid;
   }
 
+  .operationalGrid,
+  .dashboardClusterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .resourceGrid,
+  .dashboardNetworkPanel,
+  .dashboardLists,
+  .dashboardControlBar {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboardTrafficRow {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboardTrafficRow b {
+    justify-self: start;
+  }
+
+  .dashboardHeaderTools,
+  .dashboardSectionTools {
+    width: 100%;
+  }
+
+  .dashboardSectionTools button {
+    flex: 1 1 0;
+  }
+
   .jobWorkspace > .commandComposer {
     position: static;
+  }
+
+  .actionDrawer {
+    position: static;
+    max-height: none;
   }
 
   .quickStats {
@@ -133,6 +170,7 @@
 
   .managementGrid,
   .accessGrid,
+  .preferenceGroup,
   .formRow,
   .historyRetentionGrid,
   .handoffBulkBar,
@@ -148,6 +186,17 @@
 
   .supervisorOperation .wideField {
     grid-column: auto;
+  }
+
+  .preferencesActions,
+  .preferenceHint,
+  .preferenceResetRow {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .preferenceResetRow {
+    grid-template-columns: 1fr;
   }
 
   .tagGrid {
@@ -243,10 +292,40 @@
     display: none;
   }
 
+  .content {
+    margin-left: 0;
+  }
+
   .topbar,
   .consoleHeader,
   .workspace {
     padding: 14px;
+  }
+
+  .dashboardToolbar,
+  .dashboardSectionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dashboardToolbarActions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .dashboardControlBar {
+    gap: 8px;
+  }
+
+  .operationalGrid,
+  .resourceGrid,
+  .dashboardClusterGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboardMetricCard,
+  .dashboardClusterCard {
+    min-height: 0;
   }
 
   .primaryAction span {
@@ -256,6 +335,11 @@
   .sessionButton {
     width: 40px;
     padding: 0;
+  }
+
+  .actionDrawer {
+    border-radius: 8px;
+    box-shadow: none;
   }
 
   .sessionButton span {
@@ -287,6 +371,21 @@
   .sectionHeader {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .gridToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .gridSearch {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .gridToolbarActions {
+    justify-content: flex-start;
   }
 
   .row {

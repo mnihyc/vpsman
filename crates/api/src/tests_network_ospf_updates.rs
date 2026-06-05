@@ -19,6 +19,7 @@ async fn builds_reviewed_ospf_update_plan_from_observed_recommendation() {
             username: "memory-dev".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::nil(),

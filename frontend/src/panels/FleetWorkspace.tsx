@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Activity, AlertTriangle, Bell, Boxes, Gauge, Network, Server } from "lucide-react";
+import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
+import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { Metric } from "../components/Metric";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { formatVpsName, type VpsNameDisplayMode } from "../utils";
@@ -26,6 +28,7 @@ type FleetDetailTab = "Overview" | "Telemetry" | "Jobs" | "Network";
 const detailTabs: FleetDetailTab[] = ["Overview", "Telemetry", "Jobs", "Network"];
 
 export function FleetWorkspace({
+  activeSubpage,
   agents,
   apiError,
   fleetAlerts,
@@ -49,6 +52,7 @@ export function FleetWorkspace({
   telemetryTunnels,
   wsState,
 }: {
+  activeSubpage: string;
   agents: AgentView[];
   apiError: string | null;
   fleetAlerts: FleetAlertRecord[];
@@ -94,10 +98,77 @@ export function FleetWorkspace({
   const selectedRollup = selectedAgent ? latestRollups.get(selectedAgent.id) ?? null : null;
   const selectedNetworkRates = selectedAgent ? latestNetworkRates.get(selectedAgent.id) ?? [] : [];
   const selectedTunnels = selectedAgent ? latestTunnels.get(selectedAgent.id) ?? [] : [];
+  const selectedTrafficSummary = formatSignalTraffic(selectedRollup, selectedNetworkRates);
+  const selectedSampleSummary = formatSignalSamples(selectedRollup, selectedNetworkRates);
   const selectedCapabilities = selectedAgent?.capabilities;
   const selectedCountry = selectedAgent ? countryFromTags(selectedAgent.tags) : null;
   const selectedProvider = selectedAgent ? providerFromTags(selectedAgent.tags) : null;
   const selectedDisplayTags = selectedAgent ? displayTags(selectedAgent.tags) : [];
+  const fleetSubpage = ["instances", "alerts", "policies", "notifications"].includes(activeSubpage)
+    ? activeSubpage
+    : "instances";
+  const fleetColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
+    () => [
+      {
+        id: "name",
+        header: "Name",
+        size: 300,
+        minSize: 220,
+        sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
+        searchValue: (agent) => `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id} ${agent.status}`,
+        cell: (agent) => (
+          <span className="instance">
+            <Server size={17} />
+            <span>
+              <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+              <ConsoleStatusBadge tone={agent.status === "connected" ? "ok" : "warning"}>
+                {agent.status}
+              </ConsoleStatusBadge>
+            </span>
+          </span>
+        ),
+      },
+      {
+        id: "country",
+        header: "Country",
+        size: 110,
+        minSize: 90,
+        sortValue: (agent) => countryFromTags(agent.tags) ?? "",
+        searchValue: (agent) => countryFromTags(agent.tags) ?? "",
+        cell: (agent) => <span className="countryBadge">{countryLabel(countryFromTags(agent.tags))}</span>,
+      },
+      {
+        id: "provider",
+        header: "Provider",
+        size: 130,
+        minSize: 100,
+        sortValue: (agent) => providerFromTags(agent.tags) ?? "",
+        searchValue: (agent) => providerFromTags(agent.tags) ?? "",
+        cell: (agent) => (
+          <span className="tags providerTags">
+            <em>{providerFromTags(agent.tags) || "unset"}</em>
+          </span>
+        ),
+      },
+      {
+        id: "tags",
+        header: "Tags",
+        size: 240,
+        minSize: 150,
+        sortValue: (agent) => displayTags(agent.tags).join(" "),
+        searchValue: (agent) => agent.tags.join(" "),
+        cell: (agent) => {
+          const agentTags = displayTags(agent.tags);
+          return (
+            <span className="tags">
+              {agentTags.length === 0 ? <em>untagged</em> : agentTags.map((tag) => <em key={tag}>{tag}</em>)}
+            </span>
+          );
+        },
+      },
+    ],
+    [vpsNameDisplayMode],
+  );
 
   useEffect(() => {
     setAliasDraft(selectedAgent?.display_name ?? "");
@@ -126,7 +197,8 @@ export function FleetWorkspace({
   }
 
   return (
-    <section className="workspace">
+    <section className={fleetSubpage === "instances" ? "workspace" : "workspace singleColumn"}>
+      {fleetSubpage === "instances" && (
       <div className="fleetPanel">
         <div className="sectionHeader">
           <div>
@@ -136,65 +208,105 @@ export function FleetWorkspace({
           <span className="sectionContext">Tags scoped from inventory</span>
         </div>
 
-        <FleetAlertList
-          agents={agents}
-          alerts={fleetAlerts}
-          stateCount={fleetAlertStates.length}
-          onUpdate={onUpdateFleetAlertState}
-        />
-        <FleetAlertPolicyManager policies={fleetAlertPolicies} onUpsert={onUpsertFleetAlertPolicy} />
-        <FleetAlertNotificationManager
-          channels={fleetAlertNotificationChannels}
-          deliveries={fleetAlertNotifications}
-          onDispatch={onDispatchFleetAlertNotifications}
-          onProcess={onProcessFleetAlertNotifications}
-          onUpsert={onUpsertFleetAlertNotificationChannel}
-        />
-
-        <div className="table">
-          <div className="row heading">
-            <span>Name</span>
-            <span>Country</span>
-            <span>Provider</span>
-            <span>Tags</span>
-          </div>
-          {agents.map((agent) => {
-            const agentCountry = countryFromTags(agent.tags);
-            const agentProvider = providerFromTags(agent.tags);
-            const agentTags = displayTags(agent.tags);
-            return (
-              <button
-                className={selectedAgent?.id === agent.id ? "row agentRow selected" : "row agentRow"}
-                key={agent.id}
-                onClick={() => onSelectAgent(agent.id)}
-                type="button"
-              >
-                <span className="instance">
-                  <Server size={17} />
-                  <span>
-                    <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-                  </span>
-                </span>
-                <span className="countryBadge">{countryLabel(agentCountry)}</span>
-                <span className="tags providerTags">
-                  <em>{agentProvider || "unset"}</em>
-                </span>
-                <span className="tags">
-                  {agentTags.length === 0 ? <em>untagged</em> : agentTags.map((tag) => <em key={tag}>{tag}</em>)}
-                </span>
-              </button>
-            );
-          })}
-          {agents.length === 0 && (
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Inspect selected",
+              disabled: (rows) => rows.length !== 1,
+              onSelect: (rows) => onSelectAgent(rows[0].id),
+            },
+            {
+              label: "Copy client IDs",
+              onSelect: (rows) => void copyText(rows.map((agent) => agent.id).join("\n")),
+            },
+            {
+              label: "Copy tag query",
+              onSelect: (rows) =>
+                void copyText(
+                  Array.from(new Set(rows.flatMap((agent) => agent.tags)))
+                    .sort()
+                    .map((tag) => `tag:${tag}`)
+                    .join(" "),
+                ),
+            },
+          ]}
+          columns={fleetColumns}
+          defaultPageSize={10}
+          empty={
             <div className="emptyState">
               <Server size={22} />
               <strong>{scopeActive ? "No VPS match this view" : "No agents connected"}</strong>
               <span>{apiError ?? (scopeActive ? "Adjust or clear the saved fleet view." : "Waiting for enrolled VPS agents to report in.")}</span>
             </div>
+          }
+          getRowId={(agent) => agent.id}
+          itemLabel="instances"
+          onOpenRow={(agent) => onSelectAgent(agent.id)}
+          renderExpandedRow={(agent) => (
+            <div className="gridDetailLine">
+              <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+              <span>{agent.id}</span>
+              <span>{agent.capabilities.privilege_mode}; uid {agent.capabilities.effective_uid ?? "unknown"}</span>
+            </div>
           )}
-        </div>
+          rows={agents}
+          storageKey="vpsman.grid.fleet.instances"
+          title="VPS instance records"
+        />
       </div>
+      )}
 
+      {fleetSubpage === "alerts" && (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Fleet alerts</h2>
+              <span>{apiError ?? `${fleetAlerts.length} active fleet alerts`}</span>
+            </div>
+            <span className="sectionContext">{fleetAlertStates.length} triaged states</span>
+          </div>
+          <FleetAlertList
+            agents={agents}
+            alerts={fleetAlerts}
+            stateCount={fleetAlertStates.length}
+            onUpdate={onUpdateFleetAlertState}
+          />
+        </div>
+      )}
+
+      {fleetSubpage === "policies" && (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Alert policies</h2>
+              <span>{apiError ?? `${fleetAlertPolicies.length} scoped thresholds`}</span>
+            </div>
+            <span className="sectionContext">Thresholds resolve by tag, provider, client, or global scope</span>
+          </div>
+          <FleetAlertPolicyManager policies={fleetAlertPolicies} onUpsert={onUpsertFleetAlertPolicy} />
+        </div>
+      )}
+
+      {fleetSubpage === "notifications" && (
+        <div className="fleetPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Notification channels</h2>
+              <span>{apiError ?? `${fleetAlertNotificationChannels.length} delivery channels`}</span>
+            </div>
+            <span className="sectionContext">{fleetAlertNotifications.length} retained deliveries</span>
+          </div>
+          <FleetAlertNotificationManager
+            channels={fleetAlertNotificationChannels}
+            deliveries={fleetAlertNotifications}
+            onDispatch={onDispatchFleetAlertNotifications}
+            onProcess={onProcessFleetAlertNotifications}
+            onUpsert={onUpsertFleetAlertNotificationChannel}
+          />
+        </div>
+      )}
+
+      {fleetSubpage === "instances" && (
       <aside className="inspector">
         <div className="sectionHeader compact">
           <h2>{selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No VPS selected"}</h2>
@@ -235,8 +347,8 @@ export function FleetWorkspace({
           ))}
         </div>
         <div className="signalGrid">
-          <Metric label="Latency" value="-" tone="blue" />
-          <Metric label="Loss" value="-" tone="green" />
+          <Metric label="Traffic" value={selectedTrafficSummary} tone="blue" />
+          <Metric label="Samples" value={selectedSampleSummary} tone="green" />
         </div>
         <div className="detailPane" role="tabpanel">
           {activeDetailTab === "Overview" && (
@@ -247,14 +359,14 @@ export function FleetWorkspace({
                 value={selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No target"}
               />
               <DetailLine icon={<Server size={18} />} label="Status" value={selectedAgent?.status ?? "No target"} />
-              <DetailLine icon={<Boxes size={18} />} label="Client ID" value={selectedAgent?.id ?? "-"} mono />
+              <DetailLine icon={<Boxes size={18} />} label="Client ID" value={selectedAgent?.id ?? "No VPS selected"} mono />
               <DetailLine icon={<Boxes size={18} />} label="Country" value={countryLabel(selectedCountry)} />
               <DetailLine icon={<Boxes size={18} />} label="Provider" value={selectedProvider || "unset"} />
               <DetailLine icon={<Gauge size={18} />} label="Privilege" value={formatPrivilege(selectedCapabilities)} />
               <DetailLine
                 icon={<Gauge size={18} />}
                 label="Fleet position"
-                value={selectedAgent ? `${summary.connected} connected / ${summary.total} total` : "-"}
+                value={selectedAgent ? `${summary.connected} connected / ${summary.total} total` : "No VPS selected"}
               />
             </>
           )}
@@ -270,15 +382,15 @@ export function FleetWorkspace({
               <DetailLine icon={<Server size={18} />} label="RAM used" value={formatMemoryUsed(selectedRollup)} />
               <DetailLine icon={<Boxes size={18} />} label="Disk free" value={formatDiskFree(selectedRollup)} />
               <DetailLine icon={<Network size={18} />} label="Network bytes" value={formatNetworkBytes(selectedRollup)} />
-              <DetailLine icon={<Network size={18} />} label="Network rate" value={formatNetworkRateSummary(selectedNetworkRates)} />
+              <DetailLine icon={<Network size={18} />} label="Network rate" value={formatNetworkRateSummary(selectedNetworkRates, selectedRollup)} />
               <DetailLine icon={<Activity size={18} />} label="Rollup samples" value={formatRollupSamples(selectedRollup)} />
-              <DetailLine icon={<Server size={18} />} label="Agent status" value={selectedAgent?.status ?? "-"} />
+              <DetailLine icon={<Server size={18} />} label="Agent status" value={selectedAgent?.status ?? "No VPS selected"} />
             </>
           )}
           {activeDetailTab === "Jobs" && (
             <>
               <DetailLine icon={<Gauge size={18} />} label="Running jobs" value={String(summary.running_jobs)} />
-              <DetailLine icon={<Server size={18} />} label="Target" value={selectedAgent?.id ?? "-"} mono />
+              <DetailLine icon={<Server size={18} />} label="Target" value={selectedAgent?.id ?? "No VPS selected"} mono />
               <DetailLine icon={<Activity size={18} />} label="Proof state" value="Local unlock required" />
             </>
           )}
@@ -292,7 +404,7 @@ export function FleetWorkspace({
               />
               <DetailLine icon={<Boxes size={18} />} label="Tags" value={selectedDisplayTags.join(", ") || "untagged"} />
               <TunnelList tunnels={selectedTunnels} />
-              <NetworkRateList rates={selectedNetworkRates} />
+              <NetworkRateList rates={selectedNetworkRates} rollup={selectedRollup} />
               <DetailLine icon={<Activity size={18} />} label="Tunnel apply" value="Observe and plan" />
               {selectedCapabilities?.unprivileged_hint && (
                 <DetailLine icon={<Activity size={18} />} label="Privilege hint" value={selectedCapabilities.unprivileged_hint} />
@@ -301,6 +413,7 @@ export function FleetWorkspace({
           )}
         </div>
       </aside>
+      )}
     </section>
   );
 }
@@ -448,6 +561,13 @@ function displayTags(tags: string[]): string[] {
     .filter((tag) => !/^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag))
     .filter((tag) => !/^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag))
     .sort((left, right) => left.localeCompare(right));
+}
+
+async function copyText(value: string) {
+  if (!value.trim()) {
+    return;
+  }
+  await navigator.clipboard?.writeText(value);
 }
 
 function countryLabel(country: string | null): string {
@@ -752,7 +872,7 @@ function latestTelemetryNetworkRatesByClient(rates: TelemetryNetworkRateRecord[]
   for (const rate of rates) {
     const clientRates = latest.get(rate.client_id) ?? new Map<string, TelemetryNetworkRateRecord>();
     const current = clientRates.get(rate.interface);
-    if (!current || rate.latest_observed_at > current.latest_observed_at) {
+    if (!current || rate.bucket_start > current.bucket_start) {
       clientRates.set(rate.interface, rate);
     }
     latest.set(rate.client_id, clientRates);
@@ -778,12 +898,12 @@ function latestTelemetryTunnelsByClient(tunnels: TelemetryTunnelRecord[]) {
 }
 
 function formatLoad(value: number | undefined) {
-  return typeof value === "number" ? value.toFixed(2) : "-";
+  return typeof value === "number" ? value.toFixed(2) : "No rollup";
 }
 
 function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
-    return "-";
+    return "No rollup";
   }
   const used = rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg;
   return `${Math.round((used / rollup.memory_total_bytes_max) * 100)}%`;
@@ -791,7 +911,7 @@ function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
 
 function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
-    return "-";
+    return "No rollup";
   }
   const percent = Math.round((rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100);
   return `${percent}% free`;
@@ -799,18 +919,39 @@ function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
 
 function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)) {
-    return "-";
+    return "No counters";
   }
   return `RX ${formatBytes(rollup.network_rx_bytes_max)} / TX ${formatBytes(rollup.network_tx_bytes_max)}`;
 }
 
-function formatNetworkRateSummary(rates: TelemetryNetworkRateRecord[]) {
+function formatNetworkRateSummary(rates: TelemetryNetworkRateRecord[], rollup: TelemetryRollupRecord | null | undefined) {
   if (rates.length === 0) {
-    return "-";
+    return rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
+      ? "Rate rollup pending; counters active"
+      : "Awaiting rate rollup";
   }
   const rx = rates.reduce((total, rate) => total + rate.rx_bps_avg, 0);
   const tx = rates.reduce((total, rate) => total + rate.tx_bps_avg, 0);
   return `RX ${formatBitsPerSecond(rx)} / TX ${formatBitsPerSecond(tx)}`;
+}
+
+function formatSignalTraffic(rollup: TelemetryRollupRecord | null | undefined, rates: TelemetryNetworkRateRecord[]) {
+  if (rates.length > 0) {
+    const totalBps = rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0);
+    return formatBitsPerSecond(totalBps);
+  }
+  if (rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)) {
+    return formatBytes(rollup.network_rx_bytes_max + rollup.network_tx_bytes_max);
+  }
+  return "Awaiting rate rollup";
+}
+
+function formatSignalSamples(rollup: TelemetryRollupRecord | null | undefined, rates: TelemetryNetworkRateRecord[]) {
+  if (rollup && rollup.sample_count > 0) {
+    return `${rollup.sample_count} rollup`;
+  }
+  const rateSamples = rates.reduce((total, rate) => total + rate.sample_count, 0);
+  return rateSamples > 0 ? `${rateSamples} rate` : "No rollup";
 }
 
 function formatPrivilege(capabilities: AgentView["capabilities"] | undefined) {
@@ -855,9 +996,25 @@ function formatBytes(value: number) {
   return `${next >= 10 || unit === 0 ? Math.round(next) : next.toFixed(1)} ${units[unit]}`;
 }
 
-function NetworkRateList({ rates }: { rates: TelemetryNetworkRateRecord[] }) {
+function NetworkRateList({
+  rates,
+  rollup,
+}: {
+  rates: TelemetryNetworkRateRecord[];
+  rollup: TelemetryRollupRecord | null | undefined;
+}) {
   if (rates.length === 0) {
-    return <DetailLine icon={<Network size={18} />} label="Interfaces" value="No rate samples" />;
+    return (
+      <DetailLine
+        icon={<Network size={18} />}
+        label="Interfaces"
+        value={
+          rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
+            ? "Counter-only telemetry; rate rollup pending"
+            : "Awaiting rate rollup"
+        }
+      />
+    );
   }
   return (
     <div className="timeline">

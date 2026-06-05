@@ -174,7 +174,7 @@ pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, 
         .collect()
 }
 
-fn effective_policy_for_scope(
+pub(crate) fn effective_policy_for_scope(
     base: &FleetAlertPolicy,
     policies: &[FleetAlertPolicyOverrideView],
     scope: &AgentAlertScope,

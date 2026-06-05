@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiGetBlob, apiPost, isApiUnauthorized } from "../api";
+import { apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import { bytesToBase64, readFileSlice, sha256FileHex } from "../fileTransfer";
 import type {
   BackupArtifactRecord,
@@ -42,11 +42,23 @@ export function useBackupsData(
     setBackupsError(null);
     try {
       const [backupRows, policyRows, artifactRows, restoreRows, migrationRows] = await Promise.all([
-        apiGet<BackupRequestRecord[]>("/api/v1/backups?limit=1000", apiToken),
+        apiGet<BackupRequestRecord[]>(
+          buildListPath("/api/v1/backups", { limit: 1000, sort: "created_at", dir: "desc" }),
+          apiToken,
+        ),
         apiGet<BackupPolicyRecord[]>("/api/v1/backup-policies", apiToken),
-        apiGet<BackupArtifactRecord[]>("/api/v1/backup-artifacts?limit=1000", apiToken),
-        apiGet<RestorePlanRecord[]>("/api/v1/restore-plans?limit=1000", apiToken),
-        apiGet<MigrationLinkRecord[]>("/api/v1/migration-links?limit=1000", apiToken),
+        apiGet<BackupArtifactRecord[]>(
+          buildListPath("/api/v1/backup-artifacts", { limit: 1000, sort: "created_at", dir: "desc" }),
+          apiToken,
+        ),
+        apiGet<RestorePlanRecord[]>(
+          buildListPath("/api/v1/restore-plans", { limit: 1000, sort: "created_at", dir: "desc" }),
+          apiToken,
+        ),
+        apiGet<MigrationLinkRecord[]>(
+          buildListPath("/api/v1/migration-links", { limit: 1000, sort: "created_at", dir: "desc" }),
+          apiToken,
+        ),
       ]);
       setBackups(backupRows);
       setBackupPolicies(policyRows);

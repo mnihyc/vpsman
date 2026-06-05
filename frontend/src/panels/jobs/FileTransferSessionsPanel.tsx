@@ -362,7 +362,7 @@ export function FileTransferSessionsPanel({
                         type="checkbox"
                       />
                     ) : (
-                      <small aria-hidden="true">-</small>
+                      <small title="Handoff is available only after a completed inbound transfer">No handoff</small>
                     )}
                   </span>
                   <span className="historyPrimary">

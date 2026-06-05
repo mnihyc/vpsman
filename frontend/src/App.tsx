@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ConsoleShell } from "./components/ConsoleShell";
 import { AuthPanel } from "./panels/AuthPanel";
+import { DashboardPanel } from "./panels/DashboardPanel";
 import { FleetWorkspace } from "./panels/FleetWorkspace";
 import { JobHistoryPanel } from "./panels/JobHistoryPanel";
 import { TagsPanel } from "./panels/TagsPanel";
@@ -9,25 +10,27 @@ import { AccessPanel } from "./panels/AccessPanel";
 import { AuditLogPanel } from "./panels/AuditLogPanel";
 import { BackupsPanel } from "./panels/BackupsPanel";
 import { TopologyPanel } from "./panels/TopologyPanel";
+import { PreferencesPanel } from "./panels/PreferencesPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
+import { defaultSubpages, normalizeSubpage } from "./constants";
 import {
-  DEFAULT_VPS_NAME_DISPLAY_MODE,
+  DEFAULT_OPERATOR_PREFERENCES,
   getHeroCopy,
   getHeroTitle,
+  setPreferredTimeZone,
   type VpsNameDisplayMode,
 } from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
 
-const VPS_NAME_DISPLAY_MODE_STORAGE_KEY = "vpsman.panelDisplay.vpsNameMode";
-
 export function App() {
-  const [activeView, setActiveView] = useState<ActiveView>("Fleet");
+  const [activeView, setActiveView] = useState<ActiveView>("Dashboard");
+  const [activeSubpages, setActiveSubpages] = useState<Record<ActiveView, string>>({ ...defaultSubpages });
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [vpsNameDisplayMode, setVpsNameDisplayMode] = useState<VpsNameDisplayMode>(() => readVpsNameDisplayMode());
   const dashboard = useDashboardData(activeView);
   const fleetViews = useFleetViews(dashboard.agents);
+  const operatorPreferences = dashboard.operator?.preferences ?? DEFAULT_OPERATOR_PREFERENCES;
   const visibleAgents = fleetViews.filteredAgents;
   const selectedAgent = useMemo(
     () => visibleAgents.find((agent) => agent.id === selectedAgentId) ?? visibleAgents[0] ?? null,
@@ -46,6 +49,7 @@ export function App() {
     }
     return `${Math.round((dashboard.summary.connected / dashboard.summary.total) * 100)}%`;
   }, [dashboard.summary.connected, dashboard.summary.total]);
+  const activeSubpage = normalizeSubpage(activeView, activeSubpages[activeView]);
   const heroTitle = getHeroTitle(activeView);
   const hasFleetScope = fleetViews.fleetQuery.trim().length > 0 || fleetViews.activeSavedViewId !== null;
   const heroCopy =
@@ -55,19 +59,52 @@ export function App() {
         ? `${dashboard.summary.connected} connected / ${dashboard.summary.total} total`
       : getHeroCopy(activeView);
 
+  useEffect(() => {
+    setPreferredTimeZone(operatorPreferences.timezone);
+  }, [operatorPreferences.timezone]);
+
   function updateVpsNameDisplayMode(mode: VpsNameDisplayMode) {
-    setVpsNameDisplayMode(mode);
-    try {
-      window.localStorage.setItem(VPS_NAME_DISPLAY_MODE_STORAGE_KEY, mode);
-    } catch {
-      // The display preference is non-critical and should not block the panel.
+    void dashboard.updateOperatorPreferences({
+      ...operatorPreferences,
+      vps_name_display_mode: mode,
+    });
+  }
+
+  function selectView(view: ActiveView, subpage?: string) {
+    setActiveView(view);
+    if (subpage) {
+      setActiveSubpages((current) => ({ ...current, [view]: normalizeSubpage(view, subpage) }));
     }
   }
 
+  function selectSubpage(subpage: string) {
+    setActiveSubpages((current) => ({ ...current, [activeView]: normalizeSubpage(activeView, subpage) }));
+  }
+
+  function navigateDashboardTarget(target: { query: string | null; subpage: string; view: string }) {
+    if (!isActiveView(target.view)) {
+      return;
+    }
+    if (target.view === "Fleet" && target.query) {
+      fleetViews.setFleetQuery(target.query);
+    }
+    selectView(target.view, target.subpage);
+  }
+
   return (
-    <PanelDisplayProvider value={{ vpsNameDisplayMode, setVpsNameDisplayMode: updateVpsNameDisplayMode }}>
+    <PanelDisplayProvider
+      value={{
+        preferences: operatorPreferences,
+        preferencesError: dashboard.preferencesError,
+        preferencesSaving: dashboard.preferencesSaving,
+        setVpsNameDisplayMode: updateVpsNameDisplayMode,
+        updatePreferences: dashboard.updateOperatorPreferences,
+        vpsNameDisplayMode: operatorPreferences.vps_name_display_mode,
+      }}
+    >
     <ConsoleShell
       activeSavedFleetViewId={fleetViews.activeSavedViewId}
+      activeSubpage={activeSubpage}
       activeView={activeView}
       apiToken={dashboard.apiToken}
       connectedRatio={connectedRatio}
@@ -81,10 +118,12 @@ export function App() {
       onClearSession={dashboard.clearSession}
       onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
       onFleetQueryChange={fleetViews.setFleetQuery}
-      onOpenAccessControls={() => setActiveView("Access")}
+      onOpenAccessControls={() => selectView("Access", "proof")}
       onSaveFleetView={fleetViews.saveFleetView}
-      onSelectView={setActiveView}
+      onSelectSubpage={selectSubpage}
+      onSelectView={selectView}
       onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
+      operatorPreferencesReady={dashboard.operator !== null}
       savedFleetViews={fleetViews.savedViews}
       summary={dashboard.summary}
     >
@@ -97,8 +136,22 @@ export function App() {
         />
       ) : (
         <>
+          {activeView === "Dashboard" && (
+            <DashboardPanel
+              error={dashboard.dashboardOverviewError}
+              loading={dashboard.dashboardOverviewLoading}
+              onNavigate={navigateDashboardTarget}
+              onRefresh={() => void dashboard.loadDashboardOverview()}
+              onPreferencesChange={dashboard.updateDashboardPreferences}
+              onWindowChange={dashboard.setDashboardOverviewWindow}
+              overview={dashboard.dashboardOverview}
+              preferences={dashboard.dashboardPreferences}
+              window={dashboard.dashboardOverviewWindow}
+            />
+          )}
           {activeView === "Fleet" && (
             <FleetWorkspace
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               apiError={dashboard.apiError}
               fleetAlerts={dashboard.fleetAlerts}
@@ -125,6 +178,7 @@ export function App() {
           )}
           {activeView === "Tags" && (
             <TagsPanel
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               dataSourceAssignments={dashboard.dataSourceAssignments}
               dataSourcePresets={dashboard.dataSourcePresets}
@@ -148,6 +202,7 @@ export function App() {
           )}
           {activeView === "Jobs" && (
             <JobHistoryPanel
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               error={dashboard.jobsError}
               agentUpdateReleases={dashboard.agentUpdateReleases}
@@ -189,6 +244,7 @@ export function App() {
           )}
           {activeView === "Schedules" && (
             <SchedulesPanel
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               error={dashboard.schedulesError}
               loading={dashboard.schedulesLoading}
@@ -200,6 +256,7 @@ export function App() {
           )}
           {activeView === "Topology" && (
             <TopologyPanel
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               error={dashboard.topologyError}
               jobs={dashboard.jobs}
@@ -226,6 +283,7 @@ export function App() {
           )}
           {activeView === "Audit" && (
             <AuditLogPanel
+              activeSubpage={activeSubpage}
               audits={dashboard.audits}
               error={dashboard.auditError}
               historyExport={dashboard.historyExport}
@@ -240,6 +298,7 @@ export function App() {
           )}
           {activeView === "Backups" && (
             <BackupsPanel
+              activeSubpage={activeSubpage}
               agents={visibleAgents}
               artifacts={dashboard.backupArtifacts}
               backupPolicies={dashboard.backupPolicies}
@@ -265,6 +324,7 @@ export function App() {
           )}
           {activeView === "Access" && (
             <AccessPanel
+              activeSubpage={activeSubpage}
               apiToken={dashboard.apiToken}
               error={dashboard.accessError}
               gatewaySessions={dashboard.gatewaySessions}
@@ -290,6 +350,7 @@ export function App() {
               wsState={dashboard.wsState}
             />
           )}
+          {activeView === "Preferences" && <PreferencesPanel operator={dashboard.operator} />}
         </>
       )}
     </ConsoleShell>
@@ -297,11 +358,6 @@ export function App() {
   );
 }
 
-function readVpsNameDisplayMode(): VpsNameDisplayMode {
-  try {
-    const stored = window.localStorage.getItem(VPS_NAME_DISPLAY_MODE_STORAGE_KEY);
-    return stored === "name" ? "name" : DEFAULT_VPS_NAME_DISPLAY_MODE;
-  } catch {
-    return DEFAULT_VPS_NAME_DISPLAY_MODE;
-  }
+function isActiveView(value: string): value is ActiveView {
+  return value in defaultSubpages;
 }

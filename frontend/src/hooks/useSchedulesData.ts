@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import type { CreateScheduleRequest, ScheduleRecord } from "../types";
 
 export function useSchedulesData(
@@ -15,7 +15,12 @@ export function useSchedulesData(
     setSchedulesLoading(true);
     setSchedulesError(null);
     try {
-      setSchedules(await apiGet<ScheduleRecord[]>("/api/v1/schedules", apiToken));
+      setSchedules(
+        await apiGet<ScheduleRecord[]>(
+          buildListPath("/api/v1/schedules", { limit: 1000, sort: "next_run_at", dir: "asc" }),
+          apiToken,
+        ),
+      );
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();

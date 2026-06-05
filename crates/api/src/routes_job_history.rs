@@ -10,7 +10,7 @@ use crate::{
     error::ApiError,
     model::{
         AuditLogView, AuthProofRotationHistoryView, HistoryQuery, JobHistoryView, JobOutputView,
-        JobTargetView, NetworkObservationTrendView, NetworkObservationView,
+        JobTargetView, ListQuery, NetworkObservationTrendView, NetworkObservationView,
         ProcessSupervisorInventoryView,
     },
     model_command_templates::JobOutputComparisonView,
@@ -21,12 +21,10 @@ use crate::{
 pub(crate) async fn list_jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<JobHistoryView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state.repo.list_jobs(limit_or_default(query.limit)).await?,
-    ))
+    Ok(Json(state.repo.query_jobs(&query).await?))
 }
 
 pub(crate) async fn list_auth_proof_rotations(
@@ -141,15 +139,10 @@ pub(crate) async fn list_process_supervisor_inventory(
 pub(crate) async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AuditLogView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_audit_logs(limit_or_default(query.limit))
-            .await?,
-    ))
+    Ok(Json(state.repo.query_audit_logs(&query).await?))
 }
 
 pub(crate) async fn list_network_observations(

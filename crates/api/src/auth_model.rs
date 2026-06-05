@@ -8,6 +8,7 @@ pub(crate) struct OperatorRecord {
     pub(crate) password_hash: String,
     pub(crate) role: String,
     pub(crate) scopes: Vec<String>,
+    pub(crate) preferences: OperatorPreferences,
     pub(crate) totp_enabled: bool,
     pub(crate) totp_secret_ciphertext_hex: Option<String>,
     pub(crate) totp_secret_nonce_hex: Option<String>,
@@ -25,6 +26,7 @@ impl OperatorRecord {
             } else {
                 self.scopes.clone()
             },
+            preferences: self.preferences.clone().normalized(),
             totp_enabled: self.totp_enabled,
         }
     }
@@ -50,12 +52,132 @@ pub(crate) struct OperatorSessionRecord {
     pub(crate) revoked: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct OperatorPreferences {
+    #[serde(default = "default_vps_name_display_mode")]
+    pub(crate) vps_name_display_mode: String,
+    #[serde(default)]
+    pub(crate) timezone: Option<String>,
+    #[serde(default = "default_operator_language")]
+    pub(crate) language: String,
+    #[serde(default = "default_sidebar_subpanel_default")]
+    pub(crate) sidebar_subpanel_default: String,
+    #[serde(default)]
+    pub(crate) dashboard_curve_exclusions: Vec<String>,
+    #[serde(default = "default_dashboard_top_limit")]
+    pub(crate) dashboard_resource_top_limit: u8,
+    #[serde(default = "default_dashboard_top_limit")]
+    pub(crate) dashboard_network_top_limit: u8,
+}
+
+impl Default for OperatorPreferences {
+    fn default() -> Self {
+        Self {
+            vps_name_display_mode: default_vps_name_display_mode(),
+            timezone: None,
+            language: default_operator_language(),
+            sidebar_subpanel_default: default_sidebar_subpanel_default(),
+            dashboard_curve_exclusions: Vec::new(),
+            dashboard_resource_top_limit: default_dashboard_top_limit(),
+            dashboard_network_top_limit: default_dashboard_top_limit(),
+        }
+    }
+}
+
+impl OperatorPreferences {
+    pub(crate) fn normalized(self) -> Self {
+        Self {
+            vps_name_display_mode: normalize_choice(
+                self.vps_name_display_mode,
+                "name_id_suffix",
+                &["name", "name_id_suffix"],
+            ),
+            timezone: self.timezone.and_then(normalize_operator_timezone),
+            language: normalize_choice(self.language, "en", &["en"]),
+            sidebar_subpanel_default: normalize_choice(
+                self.sidebar_subpanel_default,
+                "active",
+                &["active", "all"],
+            ),
+            dashboard_curve_exclusions: normalize_dashboard_curve_exclusions(
+                self.dashboard_curve_exclusions,
+            ),
+            dashboard_resource_top_limit: normalize_dashboard_top_limit(
+                self.dashboard_resource_top_limit,
+            ),
+            dashboard_network_top_limit: normalize_dashboard_top_limit(
+                self.dashboard_network_top_limit,
+            ),
+        }
+    }
+}
+
+pub(crate) fn normalize_operator_timezone(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !is_valid_operator_timezone(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub(crate) fn is_valid_operator_timezone(timezone: &str) -> bool {
+    let timezone = timezone.trim();
+    !timezone.is_empty() && timezone.len() <= 64 && timezone.parse::<chrono_tz::Tz>().is_ok()
+}
+
+fn normalize_choice(value: String, fallback: &str, allowed: &[&str]) -> String {
+    let trimmed = value.trim();
+    if allowed.contains(&trimmed) {
+        trimmed.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn default_vps_name_display_mode() -> String {
+    "name_id_suffix".to_string()
+}
+
+fn default_operator_language() -> String {
+    "en".to_string()
+}
+
+fn default_sidebar_subpanel_default() -> String {
+    "active".to_string()
+}
+
+fn default_dashboard_top_limit() -> u8 {
+    8
+}
+
+fn normalize_dashboard_top_limit(value: u8) -> u8 {
+    value.clamp(3, 16)
+}
+
+fn normalize_dashboard_curve_exclusions(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > 128
+            || normalized.iter().any(|stored| stored == trimmed)
+            || normalized.len() >= 50
+        {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+    normalized
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct OperatorView {
     pub(crate) id: Uuid,
     pub(crate) username: String,
     pub(crate) role: String,
     pub(crate) scopes: Vec<String>,
+    pub(crate) preferences: OperatorPreferences,
     pub(crate) totp_enabled: bool,
 }
 
@@ -153,7 +275,7 @@ pub(crate) enum TotpSetupOutcome {
 
 #[derive(Debug)]
 pub(crate) enum TotpUpdateOutcome {
-    Updated(OperatorView),
+    Updated(Box<OperatorView>),
     InvalidCredentials,
     NotConfigured,
     OperatorMissing,

@@ -86,7 +86,7 @@ export function ProcessSupervisorInventoryPanel({
 
 function formatUnixTime(value: number | null): string {
   if (!value) {
-    return "-";
+    return "Not reported";
   }
   return new Date(value * 1000).toLocaleString();
 }

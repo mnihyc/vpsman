@@ -9,8 +9,8 @@ use vpsman_common::{
 
 use crate::{
     commands_file_transfer::{
-        execute_file_transfer_upload, FileTransferMultiTargetPolicy, FileTransferUploadPlan,
-        FileTransferUploadSource,
+        execute_file_transfer_upload, generate_resume_token, FileTransferMultiTargetPolicy,
+        FileTransferUploadPlan, FileTransferUploadSource,
     },
     commands_file_transfer_download::{
         execute_file_transfer_download, FileTransferDownloadMultiTargetPolicy,
@@ -238,12 +238,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
         "file-transfer-upload requires --confirmed because it writes a remote file"
     );
     let effective_session_id = session_id.unwrap_or_else(Uuid::new_v4);
-    let resume_hash = vpsman_common::payload_hash(
-        resume_token
-            .as_deref()
-            .unwrap_or("vpsman-vty-placeholder-token")
-            .as_bytes(),
-    );
+    let resume_hash = validation_resume_token_hash(resume_token.as_deref());
     validate_file_transfer_session(
         effective_session_id,
         &path,
@@ -466,12 +461,7 @@ pub(crate) fn parse_vty_file_transfer_download(
         "file-transfer-download requires --confirmed because it writes a local file"
     );
     let effective_session_id = session_id.unwrap_or_else(Uuid::new_v4);
-    let resume_hash = vpsman_common::payload_hash(
-        resume_token
-            .as_deref()
-            .unwrap_or("vpsman-vty-placeholder-token")
-            .as_bytes(),
-    );
+    let resume_hash = validation_resume_token_hash(resume_token.as_deref());
     validate_file_transfer_download_session(
         effective_session_id,
         &path,
@@ -526,6 +516,13 @@ pub(crate) fn submit_vty_file_transfer_download(
         &proof_context.password,
         &proof_context.salt_hex,
     )
+}
+
+fn validation_resume_token_hash(resume_token: Option<&str>) -> String {
+    let token = resume_token
+        .map(str::to_owned)
+        .unwrap_or_else(generate_resume_token);
+    vpsman_common::payload_hash(token.as_bytes())
 }
 
 fn parse_mode(value: Option<&str>) -> Result<u32> {

@@ -2,7 +2,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    model::{AuditLogView, AuthContext, OperatorView},
+    model::{AuditLogView, AuthContext, ListQuery, OperatorView},
     model_history::{
         HistoryDomain, HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
     },
@@ -19,6 +19,11 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
     assert_eq!(defaults.len(), HistoryDomain::ALL.len());
     assert!(defaults.iter().any(|policy| {
         policy.domain == "backup_artifacts"
+            && policy.retention_days == 3650
+            && policy.built_in_default
+    }));
+    assert!(defaults.iter().any(|policy| {
+        policy.domain == "telemetry_rollups"
             && policy.retention_days == 3650
             && policy.built_in_default
     }));
@@ -82,6 +87,60 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
 }
 
 #[tokio::test]
+async fn audit_list_query_sorts_searches_and_offsets_memory_rows() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        let mut audits = memory.audits.write().await;
+        audits.push(audit_with_created_at("target:zeta", "1".to_string()));
+        audits.push(audit_with_created_at("target:alpha", "2".to_string()));
+        audits.push(audit_with_created_at("target:beta", "3".to_string()));
+    }
+
+    let by_target = repo
+        .query_audit_logs(&ListQuery {
+            limit: Some(2),
+            offset: None,
+            sort: Some("target".to_string()),
+            dir: Some("asc".to_string()),
+            q: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        by_target
+            .iter()
+            .map(|audit| audit.target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["target:alpha", "target:beta"]
+    );
+
+    let searched = repo
+        .query_audit_logs(&ListQuery {
+            limit: Some(10),
+            offset: Some(0),
+            sort: Some("created_at".to_string()),
+            dir: Some("desc".to_string()),
+            q: Some("zeta".to_string()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(searched.len(), 1);
+    assert_eq!(searched[0].target, "target:zeta");
+
+    let offset = repo
+        .query_audit_logs(&ListQuery {
+            limit: Some(1),
+            offset: Some(1),
+            sort: Some("created_at".to_string()),
+            dir: Some("desc".to_string()),
+            q: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(offset[0].target, "target:alpha");
+}
+
+#[tokio::test]
 async fn history_retention_rejects_unconfirmed_policy_update() {
     let repo = Repository::Memory(MemoryState::default());
     let error = repo
@@ -124,6 +183,7 @@ fn test_operator() -> AuthContext {
             username: "operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
         },
         session_id: Uuid::new_v4(),

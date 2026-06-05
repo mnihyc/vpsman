@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::{ensure, Result};
 use serde_json::json;
 use sqlx::Row;
@@ -6,11 +8,62 @@ use uuid::Uuid;
 use crate::{
     model::{
         AuditLogView, AuthContext, BackupArtifactView, BackupRequestStatus, BackupRequestView,
-        RecordBackupArtifactMetadataRequest,
+        ListQuery, RecordBackupArtifactMetadataRequest,
     },
     repository::Repository,
     unix_now,
+    util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
+
+fn compare_text_or_number(left: &str, right: &str) -> Ordering {
+    match (left.parse::<i128>(), right.parse::<i128>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_backup_artifact(
+    left: &BackupArtifactView,
+    right: &BackupArtifactView,
+    sort: Option<&str>,
+) -> Ordering {
+    match sort.unwrap_or("created_at") {
+        "client_id" | "client" => left.client_id.cmp(&right.client_id),
+        "encrypted" => left.encrypted.cmp(&right.encrypted),
+        "object_key" | "object" => left.object_key.cmp(&right.object_key),
+        "sha256_hex" | "hash" => left.sha256_hex.cmp(&right.sha256_hex),
+        "size_bytes" | "size" => left.size_bytes.cmp(&right.size_bytes),
+        _ => compare_text_or_number(&left.created_at, &right.created_at),
+    }
+}
+
+fn backup_artifact_matches_search(artifact: &BackupArtifactView, needle: &str) -> bool {
+    artifact
+        .id
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(needle)
+        || artifact.client_id.to_ascii_lowercase().contains(needle)
+        || artifact.object_key.to_ascii_lowercase().contains(needle)
+        || artifact.sha256_hex.to_ascii_lowercase().contains(needle)
+}
+
+fn backup_artifact_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("created_at"), descending) {
+        ("client_id" | "client", true) => "client_id DESC, id DESC",
+        ("client_id" | "client", false) => "client_id ASC, id ASC",
+        ("encrypted", true) => "encrypted DESC, id DESC",
+        ("encrypted", false) => "encrypted ASC, id ASC",
+        ("object_key" | "object", true) => "object_key DESC, id DESC",
+        ("object_key" | "object", false) => "object_key ASC, id ASC",
+        ("sha256_hex" | "hash", true) => "sha256_hex DESC, id DESC",
+        ("sha256_hex" | "hash", false) => "sha256_hex ASC, id ASC",
+        ("size_bytes" | "size", true) => "size_bytes DESC, id DESC",
+        ("size_bytes" | "size", false) => "size_bytes ASC, id ASC",
+        (_, true) => "created_at DESC, id DESC",
+        (_, false) => "created_at ASC, id ASC",
+    }
+}
 
 impl Repository {
     pub(crate) async fn list_backup_artifacts(
@@ -44,6 +97,81 @@ impl Repository {
                     "#,
                 )
                 .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(backup_artifact_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn query_backup_artifacts(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<BackupArtifactView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut artifacts = memory
+                    .backup_artifacts
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|artifact| {
+                        q.as_deref()
+                            .map(|needle| backup_artifact_matches_search(artifact, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                artifacts.sort_by(|left, right| {
+                    compare_backup_artifact(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    artifacts.reverse();
+                }
+                Ok(artifacts
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = backup_artifact_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        client_id,
+                        object_key,
+                        sha256_hex,
+                        encrypted,
+                        size_bytes,
+                        created_at::text AS created_at
+                    FROM backup_artifacts
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR client_id ILIKE $3 ESCAPE '\'
+                        OR object_key ILIKE $3 ESCAPE '\'
+                        OR sha256_hex ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(backup_artifact_from_row).collect()
