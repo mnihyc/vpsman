@@ -68,6 +68,7 @@ impl IntoResponse for ApiError {
             self.status,
             Json(ErrorResponse {
                 error: self.code.to_string(),
+                status: self.status.as_u16(),
             }),
         )
             .into_response()

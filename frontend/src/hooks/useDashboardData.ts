@@ -52,15 +52,17 @@ export function useDashboardData(activeView: ActiveView) {
     if (authRequired && !apiToken) {
       return;
     }
-    if (activeView === "Pools") {
-      void inventory.loadPoolsAndTags();
+    if (activeView === "Fleet") {
+      void inventory.loadTagInventory();
+    } else if (activeView === "Tags") {
+      void inventory.loadTagInventory();
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
       void jobs.loadAgentUpdateRollouts();
-      void inventory.loadPoolsAndTags();
+      void inventory.loadTagInventory();
     } else if (activeView === "Schedules") {
       void schedules.loadSchedules();
-      void inventory.loadPoolsAndTags();
+      void inventory.loadTagInventory();
     } else if (activeView === "Topology") {
       void topology.loadTunnelPlans();
       void topology.loadNetworkObservations();
@@ -75,7 +77,7 @@ export function useDashboardData(activeView: ActiveView) {
       void audit.loadAudits();
     } else if (activeView === "Access") {
       void access.loadCurrentOperator();
-      void inventory.loadPoolsAndTags();
+      void inventory.loadTagInventory();
     }
   }, [
     access.loadCurrentOperator,
@@ -84,7 +86,7 @@ export function useDashboardData(activeView: ActiveView) {
     authRequired,
     audit.loadAudits,
     backups.loadBackups,
-    inventory.loadPoolsAndTags,
+    inventory.loadTagInventory,
     jobs.loadJobs,
     jobs.loadAgentUpdateRollouts,
     schedules.loadSchedules,
@@ -102,9 +104,13 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const tokenQuery = apiToken ? `?access_token=${encodeURIComponent(apiToken)}` : "";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws${tokenQuery}`);
-    socket.addEventListener("open", () => setWsState("connected"));
+    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    socket.addEventListener("open", () => {
+      if (apiToken) {
+        socket.send(JSON.stringify({ type: "auth", access_token: apiToken }));
+      }
+      setWsState("connected");
+    });
     socket.addEventListener("close", () => setWsState("closed"));
     socket.addEventListener("error", () => setWsState("error"));
     socket.addEventListener("message", (message) => {
@@ -121,7 +127,7 @@ export function useDashboardData(activeView: ActiveView) {
         void fleet.loadFleet();
       }
       if (event.type === "agent_updated" || event.type === "telemetry_updated") {
-        void inventory.loadPoolsAndTags();
+        void inventory.loadTagInventory();
       }
       if (event.type === "job_rejected") {
         void jobs.loadJobs();
@@ -156,7 +162,7 @@ export function useDashboardData(activeView: ActiveView) {
     fleet.loadFleet,
     fleet.replaceFleetSnapshot,
     backups.loadBackups,
-    inventory.loadPoolsAndTags,
+    inventory.loadTagInventory,
     jobs.loadAgentUpdateRollouts,
     jobs.loadJobs,
     jobs.loadTerminalSessions,
@@ -205,7 +211,6 @@ export function useDashboardData(activeView: ActiveView) {
     apiError: fleet.apiError,
     apiToken,
     assignDataSourcePreset: inventory.assignDataSourcePreset,
-    assignPool: inventory.assignPool,
     assignTag: inventory.assignTag,
     auditError: audit.auditError,
     auditLoading: audit.auditLoading,
@@ -237,6 +242,7 @@ export function useDashboardData(activeView: ActiveView) {
     createRestorePlan: backups.createRestorePlan,
     downloadBackupArtifact: backups.downloadBackupArtifact,
     handoffBackupArtifact: backups.handoffBackupArtifact,
+    prepareBackupArtifactRestore: backups.prepareBackupArtifactRestore,
     pruneBackupPolicies: backups.pruneBackupPolicies,
     uploadBackupArtifact: backups.uploadBackupArtifact,
     uploadBackupArtifactChunked: backups.uploadBackupArtifactChunked,
@@ -247,7 +253,6 @@ export function useDashboardData(activeView: ActiveView) {
     updateAgentUpdateRolloutControl: jobs.updateAgentUpdateRolloutControl,
     uploadAgentUpdateArtifact: jobs.uploadAgentUpdateArtifact,
     createDataSourcePreset: inventory.createDataSourcePreset,
-    createPool: inventory.createPool,
     createSchedule: schedules.createSchedule,
     createTag: inventory.createTag,
     createTunnelPlan: topology.createTunnelPlan,
@@ -301,7 +306,7 @@ export function useDashboardData(activeView: ActiveView) {
     dispatchFleetAlertNotifications: fleet.dispatchFleetAlertNotifications,
     processFleetAlertNotifications: fleet.processFleetAlertNotifications,
     uploadFileTransferSource: jobs.uploadFileTransferSource,
-    loadPoolsAndTags: inventory.loadPoolsAndTags,
+    loadTagInventory: inventory.loadTagInventory,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
     loadNetworkTrends: topology.loadNetworkTrends,
@@ -320,9 +325,6 @@ export function useDashboardData(activeView: ActiveView) {
     dataSourcePresets: inventory.dataSourcePresets,
     dataSourceStatus: inventory.dataSourceStatus,
     diffDataSourcePreset: inventory.diffDataSourcePreset,
-    pools: inventory.pools,
-    poolsError: inventory.poolsError,
-    poolsLoading: inventory.poolsLoading,
     renderDataSourceHotConfig: inventory.renderDataSourceHotConfig,
     resolveBulkPreview: inventory.resolveBulkPreview,
     resolveJobTargets: inventory.resolveJobTargets,
@@ -338,6 +340,8 @@ export function useDashboardData(activeView: ActiveView) {
     telemetryNetworkRates: fleet.telemetryNetworkRates,
     telemetryTunnels: fleet.telemetryTunnels,
     tags: inventory.tags,
+    tagsError: inventory.tagsError,
+    tagsLoading: inventory.tagsLoading,
     telemetryRollups: fleet.telemetryRollups,
     topologyError: topology.topologyError,
     topologyGraph: topology.topologyGraph,

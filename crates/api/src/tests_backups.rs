@@ -106,7 +106,6 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
     let mut request = CreateBackupPolicyRequest {
         name: "nightly".to_string(),
         clients: Vec::new(),
-        pools: Vec::new(),
         tags: vec!["edge".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
@@ -252,7 +251,6 @@ async fn backup_job_dispatch_requires_confirmation() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -310,7 +308,6 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -412,7 +409,6 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let job_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -606,7 +602,6 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: vec!["edge".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
@@ -679,7 +674,6 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
         Json(CreateBackupPolicyRequest {
             name: "nightly-prune".to_string(),
             clients: vec!["client-a".to_string()],
-            pools: Vec::new(),
             tags: Vec::new(),
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,

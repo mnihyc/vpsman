@@ -4,8 +4,8 @@ import {
   DatabaseBackup,
   GitBranch,
   KeyRound,
-  Layers3,
   Server,
+  Tag,
   TerminalSquare,
   type LucideIcon,
 } from "lucide-react";
@@ -13,7 +13,7 @@ import type { ActiveView, FleetSummary } from "./types";
 
 export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
   { view: "Fleet", icon: Server },
-  { view: "Pools", icon: Layers3 },
+  { view: "Tags", icon: Tag },
   { view: "Jobs", icon: TerminalSquare },
   { view: "Schedules", icon: CalendarClock },
   { view: "Topology", icon: GitBranch },
@@ -28,7 +28,7 @@ export const navSections: readonly {
 }[] = [
   {
     label: "Operations",
-    items: navItems.filter((item) => ["Fleet", "Pools", "Jobs", "Schedules"].includes(item.view)),
+    items: navItems.filter((item) => ["Fleet", "Tags", "Jobs", "Schedules"].includes(item.view)),
   },
   {
     label: "Network",

@@ -8,7 +8,6 @@ fn terminal_job_commands_use_operation_payload_and_type() {
     let mut request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -103,7 +102,6 @@ fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
     let mut request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

@@ -39,7 +39,7 @@ fn parses_vty_backup_run_targets_and_scope() {
         "/etc/hostname",
         "--include-config",
         "--timeout=90",
-        "client:client-a",
+        "id:client-a",
         "tag:edge",
         "--confirmed",
     ])
@@ -48,14 +48,14 @@ fn parses_vty_backup_run_targets_and_scope() {
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
     assert_eq!(request.timeout_secs, 90);
-    assert_eq!(request.selection.clients, vec!["client-a"]);
-    assert_eq!(request.selection.tags, vec!["edge"]);
+    assert!(request.selection.clients.is_empty());
+    assert_eq!(request.selection.tags, vec!["edge", "id:client-a"]);
     assert!(request.selection.confirmed);
 }
 
 #[test]
 fn rejects_vty_backup_run_without_safe_scope_or_target() {
-    assert!(parse_vty_backup_run(&["--path", "relative", "client:client-a"]).is_err());
+    assert!(parse_vty_backup_run(&["--path", "relative", "id:client-a"]).is_err());
     assert!(parse_vty_backup_run(&["--include-config"]).is_err());
 }
 
@@ -73,7 +73,7 @@ fn parses_vty_backup_policy_upsert() {
         "--retention-days=45",
         "--keep-last=12",
         "--rotation-generation=keyring/v2",
-        "client:client-a",
+        "id:client-a",
         "tag:edge",
         "--confirmed",
     ])
@@ -90,8 +90,8 @@ fn parses_vty_backup_policy_upsert() {
     assert_eq!(request.retention_days, Some(45));
     assert_eq!(request.keep_last, Some(12));
     assert_eq!(request.rotation_generation.as_deref(), Some("keyring/v2"));
-    assert_eq!(request.selection.clients, vec!["client-a"]);
-    assert_eq!(request.selection.tags, vec!["edge"]);
+    assert!(request.selection.clients.is_empty());
+    assert_eq!(request.selection.tags, vec!["edge", "id:client-a"]);
     assert!(request.selection.confirmed);
 }
 
@@ -102,7 +102,7 @@ fn rejects_vty_backup_policy_without_safe_recipient() {
         "--include-config",
         "--recipient-public-key-hex",
         "bad",
-        "client:client-a",
+        "id:client-a",
         "--confirmed",
     ])
     .is_err());

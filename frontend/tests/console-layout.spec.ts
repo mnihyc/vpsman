@@ -29,8 +29,18 @@ test("renders an operational cloud-console fleet workspace", async ({ page }) =>
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
-  await expect(page.getByPlaceholder("Search VPS, tag, pool, job")).toBeVisible();
-  await expect(page.getByRole("button", { name: /edge-sfo-01/ })).toBeVisible();
+  await expect(page.getByPlaceholder("Search VPS, tag, provider, job")).toBeVisible();
+  await expect(page.getByLabel("VPS name display")).toHaveValue("name_id_suffix");
+  const edgeRow = page.getByRole("button", { name: /edge-sfo-01/ });
+  await expect(edgeRow).toBeVisible();
+  await expect(edgeRow).toContainText("edge-sfo-01 (fo01)");
+  await expect(edgeRow).toContainText("🇺🇸 US");
+  await expect(edgeRow).toContainText("alpha");
+  await expect(edgeRow).not.toContainText("agent-sfo-01");
+  await page.getByLabel("VPS name display").selectOption("name");
+  await expect(edgeRow).toContainText("edge-sfo-01");
+  await expect(edgeRow).not.toContainText("(fo01)");
+  await page.getByLabel("VPS name display").selectOption("name_id_suffix");
   await expect(page.locator(".consoleHeader").getByText("2 connected / 3 total")).toBeVisible();
   await expect(page.getByText("VPS instances")).toBeVisible();
   await expect(page.getByLabel("Fleet alerts")).toBeVisible();
@@ -38,12 +48,13 @@ test("renders an operational cloud-console fleet workspace", async ({ page }) =>
   await expect(page.getByText("Agent is not connected")).toBeVisible();
 
   await activate(page.getByRole("button", { name: /core-fra-02/ }));
-  await expect(page.getByRole("heading", { name: "core-fra-02" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "core-fra-02 (ra02)" })).toBeVisible();
+  await expect(page.getByRole("tabpanel").getByText("agent-fra-02")).toBeVisible();
 
   await activate(page.getByRole("tab", { name: "Network" }));
   await expect(page.getByText("BGP/OSPF")).toBeVisible();
   await expect(page.getByText("Client-managed runtime tunnels enabled")).toBeVisible();
-  await expect(page.getByText("bgp, bird2, pool:europe")).toBeVisible();
+  await expect(page.getByText("bgp, bird2")).toBeVisible();
   await expect(page.getByText(/tun0 tun_tap up/)).toBeVisible();
   await expect(page.getByText(/eth0 RX 8.7 Kbps \/ TX 17 Kbps/)).toBeVisible();
 
@@ -74,11 +85,11 @@ test("keeps console layout usable on desktop and mobile widths", async ({ page }
   }
 });
 
-test("manages data-source preset assignments from the pools view", async ({ page }, testInfo) => {
+test("manages data-source preset assignments from the tags view", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "dense preset management is covered in the desktop console layout");
 
   await page.goto("/");
-  await activate(page.getByRole("navigation", { name: "Primary console navigation" }).getByRole("button", { name: "Pools" }));
+  await activate(page.getByRole("navigation", { name: "Primary console navigation" }).getByRole("button", { name: "Tags" }));
 
   const panel = page.locator(".dataSourcePresetPanel");
   const activeSourcesSearchField = panel.getByRole("combobox", { name: "Active sources search field" });
@@ -111,7 +122,7 @@ test("manages data-source preset assignments from the pools view", async ({ page
   await presetRegistrySearch.fill("");
   await panel.getByLabel("Assignment domain").selectOption("runtime_traffic_accounting_source");
   await panel.getByLabel("Preset", { exact: true }).selectOption("11111111-1111-4111-8111-111111111111");
-  await checkControl(panel.locator(".presetTargetList label", { hasText: "west" }).locator("input"));
+  await checkControl(panel.getByLabel("edge", { exact: true }));
   await activate(panel.getByRole("button", { name: "Assign preset" }));
 
   const request = await page.evaluate(() => {
@@ -123,22 +134,47 @@ test("manages data-source preset assignments from the pools view", async ({ page
   expect(request).toMatchObject({
     confirmed: false,
     domain: "runtime_traffic_accounting_source",
-    pools: ["pool-west"],
     preset_id: "11111111-1111-4111-8111-111111111111",
+    tags: ["edge"],
   });
 });
 
-test("creates bound rebuild enrollment tokens from the access panel", async ({ page }, testInfo) => {
+test("creates server-assigned provision tokens and bound rebuild tokens from the access panel", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "dense access administration is covered in the desktop console layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Access" }));
+  await activate(page.getByRole("button", { name: "Open access controls" }));
+  await activate(page.getByRole("tab", { name: "VPS clients" }));
 
   await expect(page.getByRole("heading", { name: "Enrollment tokens" })).toBeVisible();
   await expect(page.getByText("vpsm12345678")).toBeVisible();
   const inspector = page.locator(".accessInspector");
+  await expect(inspector.getByLabel("Enrollment token existing VPS ID")).toHaveCount(0);
+  await inspector.getByLabel("Enrollment token ttl").fill("1200");
+  await inspector.getByLabel("Enrollment default tags").fill("country:JP,edge");
+  await inspector.getByLabel("Enrollment default display name").fill("edge-tokyo-04");
+  await activate(inspector.getByRole("button", { name: "Create token" }));
+  await expect(inspector.getByText("vpsm_provision_token_secret")).toBeVisible();
+  await expect(inspector.getByText("Name edge-tokyo-04")).toBeVisible();
+  await expect(inspector.getByText("11111111-2222-4333-8444-555555555555")).toHaveCount(0);
+  const provisionRequest = await page.evaluate(() => {
+    const requests = (window as unknown as {
+      __vpsmanTestRequests: { enrollmentTokens: unknown[] };
+    }).__vpsmanTestRequests;
+    return requests.enrollmentTokens.at(-1);
+  });
+  expect(provisionRequest).toMatchObject({
+    allowed_client_id: null,
+    confirmed_reenrollment: false,
+    default_display_name: "edge-tokyo-04",
+    default_tags: ["country:JP", "edge"],
+    preserve_existing_assignments: true,
+    purpose: "provision",
+    ttl_secs: 1200,
+  });
+
   await inspector.getByLabel("Enrollment token purpose").selectOption("rebuild_reenrollment");
-  await inspector.getByLabel("Enrollment token client id").fill("agent-sfo-01");
+  await inspector.getByLabel("Enrollment token existing VPS ID").fill("agent-sfo-01");
   await inspector.getByLabel("Enrollment token ttl").fill("900");
   await inspector.getByLabel("Enrollment default tags").fill("rebuilt,provider:alpha");
   await checkControl(inspector.getByLabel("Confirm rebuild"));
@@ -172,7 +208,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(page.getByText("2 shown / 2 nodes; 1 shown / 1 tunnels")).toBeVisible();
   await expect(page.locator(".topologyGraphPanel").getByText("healthy", { exact: true }).first()).toBeVisible();
   await page.getByLabel("Filter topology graph").fill("fra");
-  await expect(page.locator(".topologyGraphPanel").getByText("core-fra-02")).toBeVisible();
+  await expect(page.locator(".topologyGraphPanel").getByRole("button", { name: /Select core-fra-02/ })).toBeVisible();
   const graphFilter = page.getByRole("group", { name: "Topology health filter" });
   await activate(graphFilter.getByRole("button", { name: "Attention" }));
   await expect(page.locator(".topologyGraphPanel").getByText("0 visible tunnels")).toBeVisible();
@@ -573,7 +609,7 @@ test("requests active in-flight job cancellation from the console", async ({ pag
   });
 });
 
-test("decrypts backup artifacts locally before dispatching executable restores", async ({ page }, testInfo) => {
+test("prepares backup artifacts server-side before dispatching executable restores", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "restore artifact dispatch is covered in the desktop console layout");
 
   const privateKeyHex = "07".repeat(32);
@@ -629,6 +665,16 @@ test("decrypts backup artifacts locally before dispatching executable restores",
   await activate(page.getByRole("button", { name: "Run restore" }));
 
   await expect(page.getByText(/Restore job 11111111 accepted/)).toBeVisible();
+  const prepareRequest = await page.evaluate(() => {
+    const requests = (window as unknown as {
+      __vpsmanTestRequests: { backupArtifactRestorePreparations: unknown[] };
+    }).__vpsmanTestRequests;
+    return requests.backupArtifactRestorePreparations.at(-1);
+  });
+  expect(prepareRequest).toMatchObject({
+    artifact_base64: Buffer.from(JSON.stringify(fixture.artifact)).toString("base64"),
+    private_key_hex: privateKeyHex,
+  });
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -702,7 +748,7 @@ test("decrypts backup artifacts locally before dispatching executable restores",
     { restoreJobId, restoreStatusBase64 },
   );
   await expect(page.getByLabel("Restore rollback source job id")).toHaveValue(restoreJobId);
-  await expect(page.getByLabel("Restore rollback target client")).toHaveValue("agent-fra-02");
+  await expect(page.getByLabel("Restore rollback target VPS ID")).toHaveValue("agent-fra-02");
   await page.getByLabel("Restore rollback timeout seconds").fill("45");
   await checkControl(page.getByLabel("Confirmed restore rollback"));
   await activate(page.getByRole("button", { name: "Rollback restore" }));

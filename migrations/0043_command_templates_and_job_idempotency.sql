@@ -17,7 +17,7 @@ CREATE TABLE command_templates (
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (scope_kind IN ('global', 'provider', 'pool', 'tag', 'client')),
+    CHECK (scope_kind IN ('global', 'provider', 'tag', 'client')),
     CHECK (
         (scope_kind = 'global' AND scope_value IS NULL)
         OR (scope_kind <> 'global' AND scope_value IS NOT NULL)

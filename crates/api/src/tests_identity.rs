@@ -16,7 +16,7 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
         },
         session_id: Uuid::nil(),
     };
-    let first_token = repo
+    let first_created = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -25,7 +25,6 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: vec!["provider:alpha".to_string()],
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -37,40 +36,30 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
             &operator,
         )
         .await
-        .unwrap()
-        .token;
+        .unwrap();
+    let client_id = first_created.assigned_client_id.clone().unwrap();
     repo.claim_enrollment(
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
-            token: first_token,
-            client_id: "client-rebuild".to_string(),
+            token: first_created.token,
+            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
     .await
     .unwrap();
 
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "alpha-sfo".to_string(),
-            provider: Some("alpha".to_string()),
-            region: Some("sfo".to_string()),
-        })
+    repo.update_agent_alias(&client_id, "edge-after-rebuild")
         .await
         .unwrap();
-    repo.assign_agent_pool("client-rebuild", pool.id)
+    repo.assign_agent_tag(&client_id, "pool:alpha-sfo")
         .await
         .unwrap();
-    repo.update_agent_alias("client-rebuild", "edge-after-rebuild")
+    repo.assign_agent_tag(&client_id, "edge").await.unwrap();
+    repo.assign_agent_tag(&client_id, "os:debian")
         .await
         .unwrap();
-    repo.assign_agent_tag("client-rebuild", "edge")
-        .await
-        .unwrap();
-    repo.assign_agent_tag("client-rebuild", "os:debian")
-        .await
-        .unwrap();
-    repo.assign_agent_tag("client-rebuild", "panel:custom")
+    repo.assign_agent_tag(&client_id, "panel:custom")
         .await
         .unwrap();
 
@@ -79,11 +68,10 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
                 purpose: Some(ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT.to_string()),
-                allowed_client_id: Some("client-rebuild".to_string()),
+                allowed_client_id: Some(client_id.clone()),
                 confirmed_reenrollment: true,
                 preserve_existing_assignments: Some(true),
                 default_tags: vec!["rebuilt".to_string()],
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -101,7 +89,7 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: second_token,
-            client_id: "client-rebuild".to_string(),
+            client_id: None,
             client_public_key_hex: "22".repeat(32),
         },
     )
@@ -109,10 +97,9 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
     .unwrap();
 
     let agents = repo.list_agents().await.unwrap();
-    let pool = repo.pool_by_id(pool.id).await.unwrap();
 
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].id, "client-rebuild");
+    assert_eq!(agents[0].id, client_id);
     assert_eq!(agents[0].display_name, "edge-after-rebuild");
     assert_eq!(agents[0].status, "enrolled");
     assert_eq!(
@@ -122,18 +109,17 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
             "edge".to_string(),
             "os:debian".to_string(),
             "panel:custom".to_string(),
+            "pool:alpha-sfo".to_string(),
             "provider:alpha".to_string(),
             "rebuilt".to_string()
         ]
     );
-    assert_eq!(pool.clients.len(), 1);
-    assert_eq!(pool.clients[0].id, "client-rebuild");
     assert!(repo
-        .validate_agent_public_key("client-rebuild", &"22".repeat(32))
+        .validate_agent_public_key(&client_id, &"22".repeat(32))
         .await
         .unwrap());
     assert!(!repo
-        .validate_agent_public_key("client-rebuild", &"11".repeat(32))
+        .validate_agent_public_key(&client_id, &"11".repeat(32))
         .await
         .unwrap());
 }
@@ -151,7 +137,7 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         },
         session_id: Uuid::nil(),
     };
-    let first_token = repo
+    let first_created = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -160,7 +146,6 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -172,13 +157,13 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
             &operator,
         )
         .await
-        .unwrap()
-        .token;
+        .unwrap();
+    let client_id = first_created.assigned_client_id.clone().unwrap();
     repo.claim_enrollment(
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
-            token: first_token,
-            client_id: "client-revoke".to_string(),
+            token: first_created.token,
+            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
@@ -186,13 +171,13 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
     .unwrap();
 
     assert!(repo
-        .validate_agent_public_key("client-revoke", &"11".repeat(32))
+        .validate_agent_public_key(&client_id, &"11".repeat(32))
         .await
         .unwrap());
 
     let revoked = repo
         .revoke_current_client_key(
-            "client-revoke",
+            &client_id,
             &CreateClientKeyRevocationRequest {
                 confirmed: true,
                 reason: Some("rebuilt".to_string()),
@@ -201,10 +186,10 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         )
         .await
         .unwrap();
-    assert_eq!(revoked.client_id, "client-revoke");
+    assert_eq!(revoked.client_id, client_id);
     assert_eq!(revoked.reason.as_deref(), Some("rebuilt"));
     assert!(!repo
-        .validate_agent_public_key("client-revoke", &"11".repeat(32))
+        .validate_agent_public_key(&client_id, &"11".repeat(32))
         .await
         .unwrap());
 
@@ -225,11 +210,10 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
                 purpose: Some(ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT.to_string()),
-                allowed_client_id: Some("client-revoke".to_string()),
+                allowed_client_id: Some(client_id.clone()),
                 confirmed_reenrollment: true,
                 preserve_existing_assignments: Some(true),
                 default_tags: vec!["rebuilt".to_string()],
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -247,7 +231,7 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: second_token,
-            client_id: "client-revoke".to_string(),
+            client_id: None,
             client_public_key_hex: "22".repeat(32),
         },
     )
@@ -255,11 +239,11 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
     .unwrap();
 
     assert!(repo
-        .validate_agent_public_key("client-revoke", &"22".repeat(32))
+        .validate_agent_public_key(&client_id, &"22".repeat(32))
         .await
         .unwrap());
     assert!(!repo
-        .validate_agent_public_key("client-revoke", &"11".repeat(32))
+        .validate_agent_public_key(&client_id, &"11".repeat(32))
         .await
         .unwrap());
     let report = repo
@@ -289,7 +273,7 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
         },
         session_id: Uuid::nil(),
     };
-    let first_token = repo
+    let first_created = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -298,7 +282,6 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -310,20 +293,20 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
             &operator,
         )
         .await
-        .unwrap()
-        .token;
+        .unwrap();
+    let client_id = first_created.assigned_client_id.clone().unwrap();
     repo.claim_enrollment(
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
-            token: first_token,
-            client_id: "client-rebuild".to_string(),
+            token: first_created.token,
+            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
     .await
     .unwrap();
 
-    let normal_token = repo
+    let normal_created = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -332,7 +315,6 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -344,33 +326,55 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
             &operator,
         )
         .await
-        .unwrap()
-        .token;
+        .unwrap();
+    let normal_client_id = normal_created.assigned_client_id.clone().unwrap();
 
     assert!(matches!(
         repo.claim_enrollment(
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
-                token: normal_token,
-                client_id: "client-rebuild".to_string(),
+                token: normal_created.token.clone(),
+                client_id: Some(client_id.clone()),
                 client_public_key_hex: "22".repeat(32),
             },
         )
         .await
         .unwrap(),
-        EnrollmentClaimOutcome::ExistingClientRequiresReenrollmentToken
+        EnrollmentClaimOutcome::ProvisionClientIdSupplied
     ));
+    let normal_response = repo
+        .claim_enrollment(
+            &EnrollmentSettings::default(),
+            &ClaimEnrollmentRequest {
+                token: normal_created.token,
+                client_id: None,
+                client_public_key_hex: "22".repeat(32),
+            },
+        )
+        .await
+        .unwrap();
+    let EnrollmentClaimOutcome::Accepted(normal_response) = normal_response else {
+        panic!("expected separate provision enrollment");
+    };
+    assert_eq!(normal_response.client_id, normal_client_id);
+    assert!(repo
+        .validate_agent_public_key(&client_id, &"11".repeat(32))
+        .await
+        .unwrap());
+    assert!(!repo
+        .validate_agent_public_key(&client_id, &"22".repeat(32))
+        .await
+        .unwrap());
 
     let wrong_client_token = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
                 purpose: Some(ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT.to_string()),
-                allowed_client_id: Some("client-rebuild".to_string()),
+                allowed_client_id: Some(client_id.clone()),
                 confirmed_reenrollment: true,
                 preserve_existing_assignments: Some(true),
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -390,7 +394,7 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
                 token: wrong_client_token,
-                client_id: "client-other".to_string(),
+                client_id: Some("client-other".to_string()),
                 client_public_key_hex: "33".repeat(32),
             },
         )

@@ -75,7 +75,6 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
       size_bytes: 32,
       type: "file_transfer_start",
     },
-    pools: [],
     tags: [],
   });
   expect((transferRequests[1].operation as { offset: number }).offset).toBe(0);
@@ -188,7 +187,6 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
       resume_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       type: "file_transfer_download_start",
     },
-    pools: [],
     tags: [],
   });
   expect((transferRequests[1].operation as { offset: number }).offset).toBe(0);

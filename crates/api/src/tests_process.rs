@@ -22,7 +22,6 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -73,7 +72,6 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -117,7 +115,6 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -155,7 +152,6 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
     let mut request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -236,7 +232,6 @@ async fn process_start_with_limits_degrades_unprivileged_target_without_gateway(
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

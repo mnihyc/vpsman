@@ -250,7 +250,6 @@ pub(crate) fn submit_vty_tunnel_speed_test(
             "command": "network_speed_test",
             "argv": [],
             "clients": target_clients,
-            "pools": [],
             "tags": [],
             "privileged": true,
             "destructive": false,

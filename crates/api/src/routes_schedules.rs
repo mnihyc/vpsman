@@ -40,7 +40,7 @@ pub(crate) fn validate_schedule_request(request: &CreateScheduleRequest) -> Resu
     if request.interval_secs == 0 || request.interval_secs > 31_536_000 {
         return Err(ApiError::bad_request("schedule_interval_out_of_range"));
     }
-    if request.clients.is_empty() && request.pools.is_empty() && request.tags.is_empty() {
+    if request.clients.is_empty() && request.tags.is_empty() {
         return Err(ApiError::bad_request("schedule_targets_required"));
     }
     if !matches!(

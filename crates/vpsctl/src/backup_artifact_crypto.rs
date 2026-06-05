@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io::Cursor, path::PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -15,7 +15,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 const BACKUP_ARTIFACT_FORMAT: &str = "vpsman.backup_artifact.v1";
-const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_archive.v1";
+const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
+const LEGACY_BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_archive.v1";
+const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 
 #[derive(Debug, Deserialize)]
 struct EncryptedBackupArtifact {
@@ -147,13 +149,42 @@ pub(crate) fn decrypt_backup_artifact(
         .map_err(|_| anyhow::anyhow!("failed to decrypt backup artifact"))?;
     let archive_bytes = lz4_flex::decompress_size_prepended(&compressed_archive)
         .context("failed to decompress backup archive")?;
-    let archive: BackupArchive =
-        serde_json::from_slice(&archive_bytes).context("backup archive JSON is invalid")?;
-    anyhow::ensure!(
-        archive.format == BACKUP_ARCHIVE_FORMAT,
-        "backup archive format is invalid"
-    );
+    validate_backup_archive(&archive_bytes)?;
     Ok(archive_bytes)
+}
+
+fn validate_backup_archive(archive_bytes: &[u8]) -> Result<()> {
+    if archive_bytes.first() == Some(&b'{') {
+        let archive: BackupArchive = serde_json::from_slice(archive_bytes)
+            .context("legacy backup archive JSON is invalid")?;
+        anyhow::ensure!(
+            archive.format == LEGACY_BACKUP_ARCHIVE_FORMAT,
+            "backup archive format is invalid"
+        );
+        return Ok(());
+    }
+    let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
+    for entry in archive.entries().context("backup tar archive is invalid")? {
+        let mut entry = entry.context("backup tar entry is invalid")?;
+        if entry
+            .path()
+            .context("backup tar entry path is invalid")?
+            .to_string_lossy()
+            == BACKUP_ARCHIVE_MANIFEST_PATH
+        {
+            let mut manifest_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut manifest_bytes)
+                .context("failed to read backup tar manifest")?;
+            let manifest: BackupArchive = serde_json::from_slice(&manifest_bytes)
+                .context("backup tar manifest JSON is invalid")?;
+            anyhow::ensure!(
+                manifest.format == BACKUP_ARCHIVE_FORMAT,
+                "backup archive format is invalid"
+            );
+            return Ok(());
+        }
+    }
+    anyhow::bail!("backup tar manifest is missing")
 }
 
 fn read_bounded_artifact_file(path: &PathBuf) -> Result<Vec<u8>> {

@@ -58,10 +58,10 @@ export function getHeroCopy(view: ActiveView): string {
       return "Server-side schedule registry and due-run records";
     case "Audit":
       return "Operator and security events from the control plane";
-    case "Pools":
-      return "Resource-pool hierarchy and tag bulk operations";
+    case "Tags":
+      return "Tag inventory and bulk target operations";
     case "Topology":
-      return "BGP, tunnel, and OSPF topology operations";
+      return "VPS network topology and extended operations";
     case "Backups":
       return "Backup, restore, and migration workflows";
     case "Access":
@@ -73,6 +73,54 @@ export function getHeroCopy(view: ActiveView): string {
 
 export function shortId(value: string | null | undefined): string {
   return value ? value.slice(0, 8) : "-";
+}
+
+export type VpsNameDisplayMode = "name" | "name_id_suffix";
+
+export const DEFAULT_VPS_NAME_DISPLAY_MODE: VpsNameDisplayMode = "name_id_suffix";
+
+export function displayNameOrUnnamed(displayName: string | null | undefined): string {
+  return displayName?.trim() || "Unnamed VPS";
+}
+
+export function clientIdSuffix(clientId: string | null | undefined): string | null {
+  const trimmed = clientId?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.replace(/[^A-Za-z0-9]/g, "");
+  const source = normalized || trimmed;
+  return source.slice(-4) || null;
+}
+
+export function formatVpsName(
+  identity: { id?: string | null; client_id?: string | null; display_name?: string | null },
+  mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
+): string {
+  const name = displayNameOrUnnamed(identity.display_name);
+  const suffix = mode === "name_id_suffix" ? clientIdSuffix(identity.id ?? identity.client_id) : null;
+  return suffix ? `${name} (${suffix})` : name;
+}
+
+export function clientDisplayNameMap(
+  clients: Array<{ id: string; display_name?: string | null }>,
+  mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
+): Map<string, string> {
+  return new Map(clients.map((client) => [client.id, formatVpsName(client, mode)]));
+}
+
+export function clientLifecycleNameMap(
+  clients: Array<{ client_id: string; display_name?: string | null }>,
+  mode: VpsNameDisplayMode = DEFAULT_VPS_NAME_DISPLAY_MODE,
+): Map<string, string> {
+  return new Map(clients.map((client) => [client.client_id, formatVpsName(client, mode)]));
+}
+
+export function clientDisplayNameFromMap(clientId: string | null | undefined, namesById: Map<string, string>): string {
+  if (!clientId) {
+    return "Unknown VPS";
+  }
+  return namesById.get(clientId) ?? "Unknown VPS";
 }
 
 export function shortHash(value: string): string {

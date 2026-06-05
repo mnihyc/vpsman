@@ -23,7 +23,6 @@ pub(crate) struct EnrollmentTokenCreateOptions {
     pub(crate) confirmed_reenrollment: bool,
     pub(crate) preserve_existing_assignments: bool,
     pub(crate) default_tags: Vec<String>,
-    pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) unmanaged_update_enabled: bool,
     pub(crate) unmanaged_update_version_url: Option<String>,
@@ -51,7 +50,6 @@ pub(crate) fn enrollment_token_create(
                 "confirmed_reenrollment": options.confirmed_reenrollment,
                 "preserve_existing_assignments": options.preserve_existing_assignments,
                 "default_tags": options.default_tags,
-                "default_pool_name": options.default_pool_name,
                 "default_display_name": options.default_display_name,
                 "unmanaged_update_enabled": options.unmanaged_update_enabled,
                 "unmanaged_update_version_url": options.unmanaged_update_version_url,
@@ -69,7 +67,6 @@ pub(crate) struct ReenrollmentTokenCreateOptions {
     pub(crate) client_id: String,
     pub(crate) ttl_secs: u64,
     pub(crate) default_tags: Vec<String>,
-    pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) confirmed: bool,
     pub(crate) preserve_existing_assignments: bool,
@@ -99,7 +96,6 @@ pub(crate) fn reenrollment_token_create(
                 "confirmed_reenrollment": options.confirmed,
                 "preserve_existing_assignments": options.preserve_existing_assignments,
                 "default_tags": options.default_tags,
-                "default_pool_name": options.default_pool_name,
                 "default_display_name": options.default_display_name,
                 "unmanaged_update_enabled": options.unmanaged_update_enabled,
                 "unmanaged_update_version_url": options.unmanaged_update_version_url,
@@ -174,21 +170,19 @@ fn encode_path(value: &str) -> String {
 pub(crate) fn enroll_claim(
     api_url: &str,
     enrollment_token: String,
-    client_id: String,
+    client_id: Option<String>,
     client_public_key_hex: String,
 ) -> Result<()> {
+    let mut body = serde_json::json!({
+        "token": enrollment_token,
+        "client_public_key_hex": client_public_key_hex,
+    });
+    if let Some(client_id) = client_id {
+        body["client_id"] = serde_json::Value::String(client_id);
+    }
     println!(
         "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/enrollments/claim",
-            None,
-            &serde_json::json!({
-                "token": enrollment_token,
-                "client_id": client_id,
-                "client_public_key_hex": client_public_key_hex,
-            }),
-        )?
+        http_post_json(api_url, "/api/v1/enrollments/claim", None, &body,)?
     );
     Ok(())
 }
@@ -197,7 +191,7 @@ pub(crate) fn enroll_claim(
 pub(crate) fn enroll_config(
     api_url: &str,
     enrollment_token: String,
-    client_id: String,
+    client_id: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
     command_timeout_secs: u64,
@@ -228,20 +222,18 @@ pub(crate) fn enroll_config(
 fn claim_enrollment(
     api_url: &str,
     enrollment_token: String,
-    client_id: String,
+    client_id: Option<String>,
     client_public_key_hex: String,
 ) -> Result<ClaimEnrollmentResponse> {
-    let body = http_post_json(
-        api_url,
-        "/api/v1/enrollments/claim",
-        None,
-        &serde_json::json!({
-            "token": enrollment_token,
-            "client_id": client_id,
-            "client_public_key_hex": client_public_key_hex,
-        }),
-    )?;
-    serde_json::from_str(&body).context("failed to parse enrollment claim response")
+    let mut body = serde_json::json!({
+        "token": enrollment_token,
+        "client_public_key_hex": client_public_key_hex,
+    });
+    if let Some(client_id) = client_id {
+        body["client_id"] = serde_json::Value::String(client_id);
+    }
+    let response_body = http_post_json(api_url, "/api/v1/enrollments/claim", None, &body)?;
+    serde_json::from_str(&response_body).context("failed to parse enrollment claim response")
 }
 
 fn render_agent_config(

@@ -35,7 +35,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     setAuditError(null);
     try {
       const [auditRows, retentionRows] = await Promise.all([
-        apiGet<AuditLogRecord[]>("/api/v1/audit?limit=25", apiToken),
+        apiGet<AuditLogRecord[]>("/api/v1/audit?limit=1000", apiToken),
         apiGet<HistoryRetentionPolicyRecord[]>("/api/v1/history/retention-policies", apiToken),
       ]);
       setAudits(auditRows);
@@ -84,7 +84,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
       try {
         setHistoryExport(
           await apiGet<HistoryExportRecord>(
-            `/api/v1/history/export?limit=25&domains=${encodeURIComponent(domains)}`,
+            `/api/v1/history/export?limit=1000&domains=${encodeURIComponent(domains)}`,
             apiToken,
           ),
         );

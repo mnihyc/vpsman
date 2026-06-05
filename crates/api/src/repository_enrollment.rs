@@ -9,7 +9,6 @@ use crate::{
     model::{
         AuthContext, ClaimEnrollmentRequest, ClaimEnrollmentResponse, CreateEnrollmentTokenRequest,
         CreateEnrollmentTokenResponse, EnrollmentTokenRecord, EnrollmentTokenView,
-        ResourcePoolView,
     },
     repository::Repository,
     security::{generate_token, token_hash},
@@ -28,6 +27,7 @@ pub(crate) enum EnrollmentClaimOutcome {
     InvalidToken,
     ExpiredToken,
     UsedToken,
+    ProvisionClientIdSupplied,
     TokenClientMismatch,
     ExistingClientRequiresReenrollmentToken,
     ReenrollmentClientMissing,
@@ -68,30 +68,40 @@ impl Repository {
         let default_tags = normalize_tags(&request.default_tags);
         let purpose = normalize_enrollment_purpose(request.purpose.as_deref());
         let allowed_client_id = normalize_optional_client_id(request.allowed_client_id.as_deref());
-        let default_pool = self
-            .resolve_enrollment_default_pool(request.default_pool_name.as_deref())
-            .await?;
-        let default_pool_id = default_pool.as_ref().map(|pool| pool.id);
-        let default_pool_name = default_pool.as_ref().map(|pool| pool.name.clone());
         let default_display_name =
             normalize_optional_display_name(request.default_display_name.as_deref());
         let update = enrollment_update_config(request, default_update);
         let requires_existing_client = purpose == ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT;
         let preserve_existing_assignments = request.preserve_existing_assignments.unwrap_or(true);
-        let expected_old_public_key_sha256_hex = if requires_existing_client {
+        let mut expected_old_public_key_sha256_hex = None;
+        let assigned_client_id = if requires_existing_client {
             let Some(client_id) = allowed_client_id.as_deref() else {
                 anyhow::bail!("re-enrollment token requires allowed client id");
             };
             let Some(fingerprint) = self.client_public_key_sha256_hex(client_id).await? else {
                 anyhow::bail!("re-enrollment client does not exist");
             };
-            Some(fingerprint)
+            expected_old_public_key_sha256_hex = Some(fingerprint);
+            client_id.to_string()
         } else {
-            None
+            if allowed_client_id.is_some() {
+                anyhow::bail!("provision enrollment token cannot accept client-supplied id");
+            }
+            self.generate_unique_provision_client_id().await?
         };
+        let token_client_id = Some(assigned_client_id.clone());
 
         match self {
             Self::Memory(memory) => {
+                if !requires_existing_client {
+                    upsert_memory_unenrolled_client(
+                        memory,
+                        &assigned_client_id,
+                        default_display_name.as_deref(),
+                        &default_tags,
+                    )
+                    .await;
+                }
                 memory
                     .enrollment_tokens
                     .write()
@@ -101,7 +111,7 @@ impl Repository {
                         token_hash,
                         token_prefix: token_prefix.clone(),
                         purpose: purpose.to_string(),
-                        allowed_client_id: allowed_client_id.clone(),
+                        allowed_client_id: token_client_id.clone(),
                         requires_existing_client,
                         preserve_existing_assignments,
                         expected_old_public_key_sha256_hex: expected_old_public_key_sha256_hex
@@ -112,7 +122,6 @@ impl Repository {
                         used_at_unix: None,
                         used_by_client_id: None,
                         default_tags: default_tags.clone(),
-                        default_pool_id,
                         default_display_name: default_display_name.clone(),
                         unmanaged_update_enabled: update.unmanaged_enabled,
                         unmanaged_update_version_url: update.unmanaged_version_url.clone(),
@@ -135,13 +144,14 @@ impl Repository {
                             "token_id": id,
                             "token_prefix": token_prefix.clone(),
                             "purpose": purpose,
-                            "allowed_client_id": allowed_client_id.clone(),
+                            "assigned_client_id": assigned_client_id.clone(),
+                            "allowed_client_id": token_client_id.clone(),
                             "requires_existing_client": requires_existing_client,
                             "preserve_existing_assignments": preserve_existing_assignments,
                             "expected_old_public_key_sha256_hex": expected_old_public_key_sha256_hex.clone(),
                             "default_tags": default_tags.clone(),
-                            "default_pool_name": default_pool_name.clone(),
                             "default_display_name": default_display_name.clone(),
+                            "created_placeholder_client": !requires_existing_client,
                             "unmanaged_update_enabled": update.unmanaged_enabled,
                             "unmanaged_update_version_url": update.unmanaged_version_url.clone(),
                             "unmanaged_update_interval_secs": update.unmanaged_interval_secs,
@@ -155,6 +165,15 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                if !requires_existing_client {
+                    insert_postgres_unenrolled_client(
+                        &mut tx,
+                        &assigned_client_id,
+                        default_display_name.as_deref(),
+                        &default_tags,
+                    )
+                    .await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO enrollment_tokens (
@@ -169,7 +188,6 @@ impl Repository {
                         requires_existing_client,
                         preserve_existing_assignments,
                         expected_old_public_key_sha256_hex,
-                        default_pool_id,
                         default_display_name,
                         unmanaged_update_enabled,
                         unmanaged_update_version_url,
@@ -180,7 +198,7 @@ impl Repository {
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, to_timestamp($6::double precision),
-                        $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+                        $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
                     )
                     "#,
                 )
@@ -191,11 +209,10 @@ impl Repository {
                 .bind(sqlx::types::Json(&default_tags))
                 .bind(expires_unix as f64)
                 .bind(purpose)
-                .bind(&allowed_client_id)
+                .bind(&token_client_id)
                 .bind(requires_existing_client)
                 .bind(preserve_existing_assignments)
                 .bind(&expected_old_public_key_sha256_hex)
-                .bind(default_pool_id)
                 .bind(&default_display_name)
                 .bind(update.unmanaged_enabled)
                 .bind(&update.unmanaged_version_url)
@@ -220,13 +237,14 @@ impl Repository {
                     "token_id": id,
                     "token_prefix": token_prefix.clone(),
                     "purpose": purpose,
-                    "allowed_client_id": allowed_client_id.clone(),
+                    "assigned_client_id": assigned_client_id.clone(),
+                    "allowed_client_id": token_client_id.clone(),
                     "requires_existing_client": requires_existing_client,
                     "preserve_existing_assignments": preserve_existing_assignments,
                     "expected_old_public_key_sha256_hex": expected_old_public_key_sha256_hex.clone(),
                     "default_tags": default_tags.clone(),
-                    "default_pool_name": default_pool_name.clone(),
                     "default_display_name": default_display_name.clone(),
+                    "created_placeholder_client": !requires_existing_client,
                     "unmanaged_update_enabled": update.unmanaged_enabled,
                     "unmanaged_update_version_url": update.unmanaged_version_url.clone(),
                     "unmanaged_update_interval_secs": update.unmanaged_interval_secs,
@@ -245,13 +263,13 @@ impl Repository {
             token,
             token_prefix,
             purpose: purpose.to_string(),
-            allowed_client_id,
+            assigned_client_id: token_client_id.clone(),
+            allowed_client_id: token_client_id,
             requires_existing_client,
             preserve_existing_assignments,
             expected_old_public_key_sha256_hex,
             expires_at: expires_unix.to_string(),
             default_tags,
-            default_pool_name,
             default_display_name,
             unmanaged_update_enabled: update.unmanaged_enabled,
             unmanaged_update_version_url: update.unmanaged_version_url,
@@ -264,16 +282,13 @@ impl Repository {
 
     pub(crate) async fn list_enrollment_tokens(&self) -> Result<Vec<EnrollmentTokenView>> {
         match self {
-            Self::Memory(memory) => {
-                let pools = memory.pools.read().await.clone();
-                Ok(memory
-                    .enrollment_tokens
-                    .read()
-                    .await
-                    .iter()
-                    .map(|record| enrollment_token_record_view(record, &pools))
-                    .collect())
-            }
+            Self::Memory(memory) => Ok(memory
+                .enrollment_tokens
+                .read()
+                .await
+                .iter()
+                .map(enrollment_token_record_view)
+                .collect()),
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -291,8 +306,6 @@ impl Repository {
                         EXTRACT(EPOCH FROM enrollment_tokens.used_at)::bigint AS used_unix,
                         enrollment_tokens.used_by_client_id,
                         enrollment_tokens.default_tags,
-                        enrollment_tokens.default_pool_id,
-                        resource_pools.name AS default_pool_name,
                         enrollment_tokens.default_display_name,
                         enrollment_tokens.unmanaged_update_enabled,
                         enrollment_tokens.unmanaged_update_version_url,
@@ -301,7 +314,6 @@ impl Repository {
                         enrollment_tokens.unmanaged_update_activate,
                         enrollment_tokens.unmanaged_update_restart_agent
                     FROM enrollment_tokens
-                    LEFT JOIN resource_pools ON resource_pools.id = enrollment_tokens.default_pool_id
                     ORDER BY enrollment_tokens.created_at DESC
                     LIMIT 200
                     "#,
@@ -317,6 +329,7 @@ impl Repository {
                             id: row.try_get("id")?,
                             token_prefix: row.try_get("token_prefix")?,
                             purpose: row.try_get("purpose")?,
+                            assigned_client_id: row.try_get("allowed_client_id")?,
                             allowed_client_id: row.try_get("allowed_client_id")?,
                             requires_existing_client: row.try_get("requires_existing_client")?,
                             preserve_existing_assignments: row
@@ -329,7 +342,6 @@ impl Repository {
                             used_at: used_unix.map(|value| value.to_string()),
                             used_by_client_id: row.try_get("used_by_client_id")?,
                             default_tags: default_tags.0,
-                            default_pool_name: row.try_get("default_pool_name")?,
                             default_display_name: row.try_get("default_display_name")?,
                             unmanaged_update_enabled: row.try_get("unmanaged_update_enabled")?,
                             unmanaged_update_version_url: row
@@ -355,7 +367,10 @@ impl Repository {
         request: &ClaimEnrollmentRequest,
     ) -> Result<EnrollmentClaimOutcome> {
         let context = EnrollmentClaimContext {
-            fallback_display_name: request.client_id.clone(),
+            fallback_display_name: request
+                .client_id
+                .clone()
+                .unwrap_or_else(|| "pending-enrollment".to_string()),
         };
         self.claim_enrollment_with_context(settings, &context, request)
             .await
@@ -386,8 +401,33 @@ impl Repository {
                     return Ok(EnrollmentClaimOutcome::ExpiredToken);
                 }
                 let tags = enrollment_claim_tags(settings, &token.default_tags);
-                match memory_claim_policy(memory, token, request).await? {
+                let policy = EnrollmentTokenPolicy::from_record(token);
+                let effective_client_id = match claim_client_id(&policy, request) {
+                    Ok(client_id) => client_id,
+                    Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied) => {
+                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
+                    }
+                    Err(EnrollmentClaimPolicy::TokenClientMismatch) => {
+                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
+                    }
+                    Err(EnrollmentClaimPolicy::ReenrollmentClientMissing) => {
+                        return Ok(EnrollmentClaimOutcome::ReenrollmentClientMissing);
+                    }
+                    Err(other) => {
+                        anyhow::bail!("unexpected enrollment claim id policy: {other:?}");
+                    }
+                };
+                let existing_public_key = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(&effective_client_id)
+                    .cloned();
+                match enforce_claim_policy(&policy, existing_public_key.as_deref()) {
                     EnrollmentClaimPolicy::Allowed => {}
+                    EnrollmentClaimPolicy::ProvisionClientIdSupplied => {
+                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
+                    }
                     EnrollmentClaimPolicy::TokenClientMismatch => {
                         return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
                     }
@@ -401,28 +441,27 @@ impl Repository {
                         return Ok(EnrollmentClaimOutcome::ReenrollmentClientKeyChanged);
                     }
                 }
-                let policy = EnrollmentTokenPolicy::from_record(token);
                 let display_name = match policy.default_display_name.clone() {
                     Some(display_name) => display_name,
                     None => {
                         existing_memory_display_name(
                             memory,
-                            &request.client_id,
+                            &effective_client_id,
                             &context.fallback_display_name,
                         )
                         .await
                     }
                 };
                 token.used_at_unix = Some(now);
-                token.used_by_client_id = Some(request.client_id.clone());
+                token.used_by_client_id = Some(effective_client_id.clone());
                 drop(tokens);
 
                 upsert_memory_enrolled_client(
                     memory,
+                    &effective_client_id,
                     request,
                     &display_name,
                     &tags,
-                    policy.default_pool_id,
                 )
                 .await;
                 memory
@@ -433,10 +472,10 @@ impl Repository {
                         id: Uuid::new_v4(),
                         actor_id: None,
                         action: "enrollment.claimed".to_string(),
-                        target: format!("client:{}", request.client_id),
+                        target: format!("client:{effective_client_id}"),
                         command_hash: None,
                         metadata: json!({
-                            "client_id": request.client_id,
+                            "client_id": &effective_client_id,
                             "purpose": policy.purpose,
                             "allowed_client_id": policy.allowed_client_id,
                             "requires_existing_client": policy.requires_existing_client,
@@ -445,7 +484,6 @@ impl Repository {
                             "new_public_key_sha256_hex": public_key_sha256_hex(&public_key),
                             "public_key_bytes": public_key.len(),
                             "tags": tags,
-                            "default_pool_id": policy.default_pool_id,
                             "display_name": display_name,
                             "unmanaged_update_enabled": policy.unmanaged_update_enabled,
                             "unmanaged_update_version_url": policy.unmanaged_update_version_url,
@@ -458,7 +496,7 @@ impl Repository {
                     });
                 Ok(EnrollmentClaimOutcome::Accepted(Box::new(claim_response(
                     settings,
-                    request,
+                    &effective_client_id,
                     display_name,
                     tags,
                     policy.update_config(&settings.update),
@@ -476,7 +514,6 @@ impl Repository {
                         requires_existing_client,
                         preserve_existing_assignments,
                         expected_old_public_key_sha256_hex,
-                        default_pool_id,
                         default_display_name,
                         unmanaged_update_enabled,
                         unmanaged_update_version_url,
@@ -515,7 +552,6 @@ impl Repository {
                     preserve_existing_assignments: row.try_get("preserve_existing_assignments")?,
                     expected_old_public_key_sha256_hex: row
                         .try_get("expected_old_public_key_sha256_hex")?,
-                    default_pool_id: row.try_get("default_pool_id")?,
                     default_display_name: row.try_get("default_display_name")?,
                     unmanaged_update_enabled: row.try_get("unmanaged_update_enabled")?,
                     unmanaged_update_version_url: row.try_get("unmanaged_update_version_url")?,
@@ -526,8 +562,23 @@ impl Repository {
                     unmanaged_update_restart_agent: row
                         .try_get("unmanaged_update_restart_agent")?,
                 };
+                let effective_client_id = match claim_client_id(&policy, request) {
+                    Ok(client_id) => client_id,
+                    Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied) => {
+                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
+                    }
+                    Err(EnrollmentClaimPolicy::TokenClientMismatch) => {
+                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
+                    }
+                    Err(EnrollmentClaimPolicy::ReenrollmentClientMissing) => {
+                        return Ok(EnrollmentClaimOutcome::ReenrollmentClientMissing);
+                    }
+                    Err(other) => {
+                        anyhow::bail!("unexpected enrollment claim id policy: {other:?}");
+                    }
+                };
                 let existing =
-                    current_postgres_client_identity(&mut tx, &request.client_id).await?;
+                    current_postgres_client_identity(&mut tx, &effective_client_id).await?;
                 let display_name = policy
                     .default_display_name
                     .clone()
@@ -537,11 +588,14 @@ impl Repository {
                             .map(|identity| identity.display_name.clone())
                     })
                     .unwrap_or_else(|| context.fallback_display_name.clone());
-                let existing_key = existing
-                    .as_ref()
-                    .map(|identity| identity.public_key.as_slice());
-                match enforce_claim_policy(&policy, request, existing_key) {
+                let existing_key = existing.as_ref().and_then(|identity| {
+                    (!identity.public_key.is_empty()).then_some(identity.public_key.as_slice())
+                });
+                match enforce_claim_policy(&policy, existing_key) {
                     EnrollmentClaimPolicy::Allowed => {}
+                    EnrollmentClaimPolicy::ProvisionClientIdSupplied => {
+                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
+                    }
                     EnrollmentClaimPolicy::TokenClientMismatch => {
                         return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
                     }
@@ -558,20 +612,18 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO clients (
-                        id, display_name, public_key, status, agent_version, os_release, arch, pool_id
+                        id, display_name, public_key, status, agent_version, os_release, arch
                     )
-                    VALUES ($1, $2, $3, 'enrolled', '', '', '', $4)
+                    VALUES ($1, $2, $3, 'enrolled', '', '', '')
                     ON CONFLICT (id) DO UPDATE SET
                         display_name = EXCLUDED.display_name,
                         public_key = EXCLUDED.public_key,
-                        status = 'enrolled',
-                        pool_id = COALESCE(EXCLUDED.pool_id, clients.pool_id)
+                        status = 'enrolled'
                     "#,
                 )
-                .bind(&request.client_id)
+                .bind(&effective_client_id)
                 .bind(&display_name)
                 .bind(&public_key)
-                .bind(policy.default_pool_id)
                 .execute(&mut *tx)
                 .await?;
                 for tag in &tags {
@@ -593,7 +645,7 @@ impl Repository {
                         ON CONFLICT DO NOTHING
                         "#,
                     )
-                    .bind(&request.client_id)
+                    .bind(&effective_client_id)
                     .bind(tag)
                     .execute(&mut *tx)
                     .await?;
@@ -606,7 +658,7 @@ impl Repository {
                     "#,
                 )
                 .bind(token_id)
-                .bind(&request.client_id)
+                .bind(&effective_client_id)
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
@@ -618,10 +670,10 @@ impl Repository {
                     "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(format!("client:{}", request.client_id))
+                .bind(format!("client:{effective_client_id}"))
                 .bind(json!({
                     "token_id": token_id,
-                    "client_id": request.client_id,
+                    "client_id": &effective_client_id,
                     "purpose": policy.purpose,
                     "allowed_client_id": policy.allowed_client_id,
                     "requires_existing_client": policy.requires_existing_client,
@@ -630,7 +682,6 @@ impl Repository {
                     "new_public_key_sha256_hex": public_key_sha256_hex(&public_key),
                     "public_key_bytes": public_key.len(),
                     "tags": tags,
-                    "default_pool_id": policy.default_pool_id,
                     "display_name": display_name,
                     "unmanaged_update_enabled": policy.unmanaged_update_enabled,
                     "unmanaged_update_version_url": policy.unmanaged_update_version_url,
@@ -644,7 +695,7 @@ impl Repository {
                 tx.commit().await?;
                 Ok(EnrollmentClaimOutcome::Accepted(Box::new(claim_response(
                     settings,
-                    request,
+                    &effective_client_id,
                     display_name,
                     tags,
                     policy.update_config(&settings.update),
@@ -663,43 +714,59 @@ impl Repository {
                 .read()
                 .await
                 .get(client_id)
-                .map(|key| public_key_sha256_hex(key))),
+                .and_then(|key| (!key.is_empty()).then(|| public_key_sha256_hex(key)))),
             Self::Postgres(pool) => {
                 let row = sqlx::query("SELECT public_key FROM clients WHERE id = $1")
                     .bind(client_id)
                     .fetch_optional(pool)
                     .await?;
-                row.map(|row| {
-                    let public_key: Vec<u8> = row.try_get("public_key")?;
-                    Ok(public_key_sha256_hex(&public_key))
-                })
-                .transpose()
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                let public_key: Vec<u8> = row.try_get("public_key")?;
+                if public_key.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(public_key_sha256_hex(&public_key)))
             }
         }
     }
 
-    async fn resolve_enrollment_default_pool(
-        &self,
-        default_pool_name: Option<&str>,
-    ) -> Result<Option<ResourcePoolView>> {
-        let Some(default_pool_name) = default_pool_name
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Ok(None);
-        };
-        Ok(Some(self.pool_by_name(default_pool_name).await?))
+    async fn generate_unique_provision_client_id(&self) -> Result<String> {
+        for _ in 0..16 {
+            let candidate = Uuid::new_v4().to_string();
+            if !self.client_id_exists(&candidate).await? {
+                return Ok(candidate);
+            }
+        }
+        anyhow::bail!("failed to generate unique provision client id")
+    }
+
+    async fn client_id_exists(&self, client_id: &str) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .agents
+                .read()
+                .await
+                .iter()
+                .any(|agent| agent.id == client_id)),
+            Self::Postgres(pool) => {
+                let row = sqlx::query("SELECT 1 FROM clients WHERE id = $1 LIMIT 1")
+                    .bind(client_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(row.is_some())
+            }
+        }
     }
 }
 
-fn enrollment_token_record_view(
-    record: &EnrollmentTokenRecord,
-    pools: &[ResourcePoolView],
-) -> EnrollmentTokenView {
+fn enrollment_token_record_view(record: &EnrollmentTokenRecord) -> EnrollmentTokenView {
     EnrollmentTokenView {
         id: record.id,
         token_prefix: record.token_prefix.clone(),
         purpose: record.purpose.clone(),
+        assigned_client_id: record.allowed_client_id.clone(),
         allowed_client_id: record.allowed_client_id.clone(),
         requires_existing_client: record.requires_existing_client,
         preserve_existing_assignments: record.preserve_existing_assignments,
@@ -710,10 +777,6 @@ fn enrollment_token_record_view(
         used_at: record.used_at_unix.map(|value| value.to_string()),
         used_by_client_id: record.used_by_client_id.clone(),
         default_tags: record.default_tags.clone(),
-        default_pool_name: record
-            .default_pool_id
-            .and_then(|pool_id| pools.iter().find(|pool| pool.id == pool_id))
-            .map(|pool| pool.name.clone()),
         default_display_name: record.default_display_name.clone(),
         unmanaged_update_enabled: record.unmanaged_update_enabled,
         unmanaged_update_version_url: record.unmanaged_update_version_url.clone(),
@@ -731,7 +794,6 @@ struct EnrollmentTokenPolicy {
     requires_existing_client: bool,
     preserve_existing_assignments: bool,
     expected_old_public_key_sha256_hex: Option<String>,
-    default_pool_id: Option<Uuid>,
     default_display_name: Option<String>,
     unmanaged_update_enabled: bool,
     unmanaged_update_version_url: String,
@@ -749,7 +811,6 @@ impl EnrollmentTokenPolicy {
             requires_existing_client: record.requires_existing_client,
             preserve_existing_assignments: record.preserve_existing_assignments,
             expected_old_public_key_sha256_hex: record.expected_old_public_key_sha256_hex.clone(),
-            default_pool_id: record.default_pool_id,
             default_display_name: record.default_display_name.clone(),
             unmanaged_update_enabled: record.unmanaged_update_enabled,
             unmanaged_update_version_url: record.unmanaged_update_version_url.clone(),
@@ -778,29 +839,87 @@ impl EnrollmentTokenPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnrollmentClaimPolicy {
     Allowed,
+    ProvisionClientIdSupplied,
     TokenClientMismatch,
     ExistingClientRequiresReenrollmentToken,
     ReenrollmentClientMissing,
     ReenrollmentClientKeyChanged,
 }
 
-async fn memory_claim_policy(
+async fn upsert_memory_unenrolled_client(
     memory: &crate::repository::MemoryState,
-    token: &EnrollmentTokenRecord,
-    request: &ClaimEnrollmentRequest,
-) -> Result<EnrollmentClaimPolicy> {
-    let policy = EnrollmentTokenPolicy::from_record(token);
-    let existing_public_key = memory
-        .client_public_keys
-        .read()
-        .await
-        .get(&request.client_id)
-        .cloned();
-    Ok(enforce_claim_policy(
-        &policy,
-        request,
-        existing_public_key.as_deref(),
-    ))
+    client_id: &str,
+    default_display_name: Option<&str>,
+    tags: &[String],
+) {
+    let display_name = default_display_name.unwrap_or(client_id);
+    let mut agents = memory.agents.write().await;
+    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
+        agent.display_name = display_name.to_string();
+        agent.status = "unenrolled".to_string();
+        for tag in tags {
+            if !agent.tags.iter().any(|existing| existing == tag) {
+                agent.tags.push(tag.clone());
+            }
+        }
+        agent.tags.sort();
+    } else {
+        agents.push(crate::model::AgentView {
+            id: client_id.to_string(),
+            display_name: display_name.to_string(),
+            status: "unenrolled".to_string(),
+            tags: tags.to_vec(),
+            capabilities: Default::default(),
+        });
+    }
+    drop(agents);
+}
+
+async fn insert_postgres_unenrolled_client(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    default_display_name: Option<&str>,
+    tags: &[String],
+) -> Result<()> {
+    let display_name = default_display_name.unwrap_or(client_id);
+    sqlx::query(
+        r#"
+        INSERT INTO clients (
+            id, display_name, public_key, status, agent_version, os_release, arch
+        )
+        VALUES ($1, $2, $3, 'unenrolled', '', '', '')
+        "#,
+    )
+    .bind(client_id)
+    .bind(display_name)
+    .bind(Vec::<u8>::new())
+    .execute(&mut **tx)
+    .await?;
+    for tag in tags {
+        sqlx::query(
+            r#"
+            INSERT INTO tags (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (name) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(tag)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO client_tags (client_id, tag_id)
+            SELECT $1, id FROM tags WHERE name = $2
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(client_id)
+        .bind(tag)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 struct PostgresClientIdentity {
@@ -827,17 +946,8 @@ async fn current_postgres_client_identity(
 
 fn enforce_claim_policy(
     policy: &EnrollmentTokenPolicy,
-    request: &ClaimEnrollmentRequest,
     existing_public_key: Option<&[u8]>,
 ) -> EnrollmentClaimPolicy {
-    if policy
-        .allowed_client_id
-        .as_deref()
-        .is_some_and(|client_id| client_id != request.client_id)
-    {
-        return EnrollmentClaimPolicy::TokenClientMismatch;
-    }
-
     let existing_public_key_sha256_hex = existing_public_key.map(public_key_sha256_hex);
     if existing_public_key_sha256_hex.is_some()
         && policy.purpose != ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT
@@ -858,25 +968,45 @@ fn enforce_claim_policy(
     EnrollmentClaimPolicy::Allowed
 }
 
+fn claim_client_id(
+    policy: &EnrollmentTokenPolicy,
+    request: &ClaimEnrollmentRequest,
+) -> std::result::Result<String, EnrollmentClaimPolicy> {
+    let Some(token_client_id) = policy.allowed_client_id.as_deref() else {
+        return Err(EnrollmentClaimPolicy::ReenrollmentClientMissing);
+    };
+    if policy.purpose == ENROLLMENT_PURPOSE_PROVISION {
+        if request.client_id.as_deref().is_some() {
+            return Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied);
+        }
+        return Ok(token_client_id.to_string());
+    }
+    if request
+        .client_id
+        .as_deref()
+        .is_some_and(|client_id| client_id != token_client_id)
+    {
+        return Err(EnrollmentClaimPolicy::TokenClientMismatch);
+    }
+    Ok(token_client_id.to_string())
+}
+
 async fn upsert_memory_enrolled_client(
     memory: &crate::repository::MemoryState,
+    client_id: &str,
     request: &ClaimEnrollmentRequest,
     display_name: &str,
     tags: &[String],
-    default_pool_id: Option<Uuid>,
 ) {
     if let Ok(public_key) = decode_public_key(&request.client_public_key_hex) {
         memory
             .client_public_keys
             .write()
             .await
-            .insert(request.client_id.clone(), public_key);
+            .insert(client_id.to_string(), public_key);
     }
     let mut agents = memory.agents.write().await;
-    if let Some(agent) = agents
-        .iter_mut()
-        .find(|agent| agent.id == request.client_id)
-    {
+    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
         agent.display_name = display_name.to_string();
         agent.status = "enrolled".to_string();
         for tag in tags {
@@ -885,41 +1015,27 @@ async fn upsert_memory_enrolled_client(
             }
         }
         agent.tags.sort();
-        if let Some(default_pool_id) = default_pool_id {
-            memory
-                .agent_pools
-                .write()
-                .await
-                .insert(request.client_id.clone(), default_pool_id);
-        }
         return;
     }
     agents.push(crate::model::AgentView {
-        id: request.client_id.clone(),
+        id: client_id.to_string(),
         display_name: display_name.to_string(),
         status: "enrolled".to_string(),
         tags: tags.to_vec(),
         capabilities: Default::default(),
     });
     drop(agents);
-    if let Some(default_pool_id) = default_pool_id {
-        memory
-            .agent_pools
-            .write()
-            .await
-            .insert(request.client_id.clone(), default_pool_id);
-    }
 }
 
 fn claim_response(
     settings: &EnrollmentSettings,
-    request: &ClaimEnrollmentRequest,
+    client_id: &str,
     display_name: String,
     tags: Vec<String>,
     update: AgentUpdateConfig,
 ) -> ClaimEnrollmentResponse {
     ClaimEnrollmentResponse {
-        client_id: request.client_id.clone(),
+        client_id: client_id.to_string(),
         display_name,
         tcp_endpoints: settings.tcp_endpoints.clone(),
         discovery_url: settings.discovery_url.clone(),

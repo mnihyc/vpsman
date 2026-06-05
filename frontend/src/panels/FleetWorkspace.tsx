@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Activity, AlertTriangle, Bell, Boxes, Gauge, Network, Server } from "lucide-react";
 import { Metric } from "../components/Metric";
+import { usePanelDisplaySettings } from "../panelDisplay";
+import { formatVpsName, type VpsNameDisplayMode } from "../utils";
 import type {
   AgentView,
   FleetAlertPolicyRecord,
@@ -76,6 +78,7 @@ export function FleetWorkspace({
   telemetryTunnels: TelemetryTunnelRecord[];
   wsState: string;
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [activeDetailTab, setActiveDetailTab] = useState<FleetDetailTab>("Overview");
   const [aliasDraft, setAliasDraft] = useState("");
   const [aliasPending, setAliasPending] = useState(false);
@@ -92,6 +95,9 @@ export function FleetWorkspace({
   const selectedNetworkRates = selectedAgent ? latestNetworkRates.get(selectedAgent.id) ?? [] : [];
   const selectedTunnels = selectedAgent ? latestTunnels.get(selectedAgent.id) ?? [] : [];
   const selectedCapabilities = selectedAgent?.capabilities;
+  const selectedCountry = selectedAgent ? countryFromTags(selectedAgent.tags) : null;
+  const selectedProvider = selectedAgent ? providerFromTags(selectedAgent.tags) : null;
+  const selectedDisplayTags = selectedAgent ? displayTags(selectedAgent.tags) : [];
 
   useEffect(() => {
     setAliasDraft(selectedAgent?.display_name ?? "");
@@ -127,15 +133,15 @@ export function FleetWorkspace({
             <h2>VPS instances</h2>
             <span>{apiError ? "API unavailable" : "Live control-plane inventory"}</span>
           </div>
-          <div className="segmented">
-            <button className="selected" type="button">
-              Pools
-            </button>
-            <button type="button">Tags</button>
-          </div>
+          <span className="sectionContext">Tags scoped from inventory</span>
         </div>
 
-        <FleetAlertList alerts={fleetAlerts} stateCount={fleetAlertStates.length} onUpdate={onUpdateFleetAlertState} />
+        <FleetAlertList
+          agents={agents}
+          alerts={fleetAlerts}
+          stateCount={fleetAlertStates.length}
+          onUpdate={onUpdateFleetAlertState}
+        />
         <FleetAlertPolicyManager policies={fleetAlertPolicies} onUpsert={onUpsertFleetAlertPolicy} />
         <FleetAlertNotificationManager
           channels={fleetAlertNotificationChannels}
@@ -148,33 +154,37 @@ export function FleetWorkspace({
         <div className="table">
           <div className="row heading">
             <span>Name</span>
-            <span>Status</span>
-            <span>CPU</span>
-            <span>RAM</span>
+            <span>Country</span>
+            <span>Provider</span>
             <span>Tags</span>
           </div>
-          {agents.map((agent) => (
-            <button
-              className={selectedAgent?.id === agent.id ? "row agentRow selected" : "row agentRow"}
-              key={agent.id}
-              onClick={() => onSelectAgent(agent.id)}
-              type="button"
-            >
-              <span className="instance">
-                <Server size={17} />
-                <span>
-                  <strong>{agent.display_name || agent.id}</strong>
-                  <small>{agent.id}</small>
+          {agents.map((agent) => {
+            const agentCountry = countryFromTags(agent.tags);
+            const agentProvider = providerFromTags(agent.tags);
+            const agentTags = displayTags(agent.tags);
+            return (
+              <button
+                className={selectedAgent?.id === agent.id ? "row agentRow selected" : "row agentRow"}
+                key={agent.id}
+                onClick={() => onSelectAgent(agent.id)}
+                type="button"
+              >
+                <span className="instance">
+                  <Server size={17} />
+                  <span>
+                    <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+                  </span>
                 </span>
-              </span>
-              <span className={agent.status === "connected" ? "status ok" : "status warn"}>{agent.status}</span>
-              <span className="mutedValue">{formatLoad(latestRollups.get(agent.id)?.cpu_load_1_avg)}</span>
-              <span className="mutedValue">{formatMemoryUsed(latestRollups.get(agent.id))}</span>
-              <span className="tags">
-                {agent.tags.length === 0 ? <em>untagged</em> : agent.tags.map((tag) => <em key={tag}>{tag}</em>)}
-              </span>
-            </button>
-          ))}
+                <span className="countryBadge">{countryLabel(agentCountry)}</span>
+                <span className="tags providerTags">
+                  <em>{agentProvider || "unset"}</em>
+                </span>
+                <span className="tags">
+                  {agentTags.length === 0 ? <em>untagged</em> : agentTags.map((tag) => <em key={tag}>{tag}</em>)}
+                </span>
+              </button>
+            );
+          })}
           {agents.length === 0 && (
             <div className="emptyState">
               <Server size={22} />
@@ -187,15 +197,15 @@ export function FleetWorkspace({
 
       <aside className="inspector">
         <div className="sectionHeader compact">
-          <h2>{selectedAgent?.display_name ?? "No VPS selected"}</h2>
+          <h2>{selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No VPS selected"}</h2>
           <span>WebSocket {wsState}</span>
         </div>
         {selectedAgent && (
           <form className="aliasEditor" onSubmit={submitAlias}>
             <label>
-              <span>Alias</span>
+              <span>Display name</span>
               <input
-                aria-label="VPS alias"
+                aria-label="VPS display name"
                 onChange={(event) => setAliasDraft(event.target.value)}
                 value={aliasDraft}
               />
@@ -231,8 +241,15 @@ export function FleetWorkspace({
         <div className="detailPane" role="tabpanel">
           {activeDetailTab === "Overview" && (
             <>
+              <DetailLine
+                icon={<Server size={18} />}
+                label="Name"
+                value={selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No target"}
+              />
               <DetailLine icon={<Server size={18} />} label="Status" value={selectedAgent?.status ?? "No target"} />
               <DetailLine icon={<Boxes size={18} />} label="Client ID" value={selectedAgent?.id ?? "-"} mono />
+              <DetailLine icon={<Boxes size={18} />} label="Country" value={countryLabel(selectedCountry)} />
+              <DetailLine icon={<Boxes size={18} />} label="Provider" value={selectedProvider || "unset"} />
               <DetailLine icon={<Gauge size={18} />} label="Privilege" value={formatPrivilege(selectedCapabilities)} />
               <DetailLine
                 icon={<Gauge size={18} />}
@@ -273,7 +290,7 @@ export function FleetWorkspace({
                 label="Runtime control"
                 value={formatTunnelCapability(selectedCapabilities)}
               />
-              <DetailLine icon={<Boxes size={18} />} label="Tags" value={selectedTags.join(", ") || "untagged"} />
+              <DetailLine icon={<Boxes size={18} />} label="Tags" value={selectedDisplayTags.join(", ") || "untagged"} />
               <TunnelList tunnels={selectedTunnels} />
               <NetworkRateList rates={selectedNetworkRates} />
               <DetailLine icon={<Activity size={18} />} label="Tunnel apply" value="Observe and plan" />
@@ -342,7 +359,6 @@ function FleetAlertPolicyManager({
         <select aria-label="Policy scope kind" value={scopeKind} onChange={(event) => setScopeKind(event.target.value)}>
           <option value="global">global</option>
           <option value="provider">provider</option>
-          <option value="pool">pool</option>
           <option value="tag">tag</option>
           <option value="client">client</option>
         </select>
@@ -403,6 +419,52 @@ function csvValues(value: string): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function agentNamesById(agents: AgentView[], mode: VpsNameDisplayMode): Map<string, string> {
+  return new Map(agents.map((agent) => [agent.id, formatVpsName(agent, mode)]));
+}
+
+function countryFromTags(tags: string[]): string | null {
+  const countryTag = tags.find((tag) => /^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag));
+  if (!countryTag) {
+    return null;
+  }
+  const [, code] = countryTag.split(/[:=_-]/, 2);
+  return code ? code.toUpperCase() : null;
+}
+
+function providerFromTags(tags: string[]): string | null {
+  const providerTag = tags.find((tag) => /^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag));
+  if (!providerTag) {
+    return null;
+  }
+  const [, provider] = providerTag.split(/[:=_-]/, 2);
+  return provider || null;
+}
+
+function displayTags(tags: string[]): string[] {
+  return tags
+    .filter((tag) => !/^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag))
+    .filter((tag) => !/^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function countryLabel(country: string | null): string {
+  if (!country) {
+    return "unset";
+  }
+  if (/^[A-Z]{2}$/.test(country)) {
+    return `${countryFlag(country)} ${country}`;
+  }
+  return country;
+}
+
+function countryFlag(country: string): string {
+  const base = 0x1f1e6;
+  return Array.from(country)
+    .map((letter) => String.fromCodePoint(base + letter.charCodeAt(0) - 65))
+    .join("");
 }
 
 function FleetAlertNotificationManager({
@@ -498,7 +560,6 @@ function FleetAlertNotificationManager({
         <select aria-label="Notification scope kind" value={scopeKind} onChange={(event) => setScopeKind(event.target.value)}>
           <option value="global">global</option>
           <option value="provider">provider</option>
-          <option value="pool">pool</option>
           <option value="tag">tag</option>
           <option value="client">client</option>
         </select>
@@ -561,18 +622,22 @@ function FleetAlertNotificationManager({
 }
 
 function FleetAlertList({
+  agents,
   alerts,
   stateCount,
   onUpdate,
 }: {
+  agents: AgentView[];
   alerts: FleetAlertRecord[];
   stateCount: number;
   onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [pending, setPending] = useState<string | null>(null);
   const topAlerts = alerts.slice(0, 6);
   const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
   const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
+  const nameById = useMemo(() => agentNamesById(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
 
   async function updateAlert(alert: FleetAlertRecord, action: FleetAlertStateRequest["action"]) {
     const pendingKey = `${alert.id}:${action}`;
@@ -610,7 +675,7 @@ function FleetAlertList({
           <div className={`fleetAlertRow ${alertTone(alert.severity)}`} key={alert.id}>
             <span className="status">{alert.severity}</span>
             <strong>{alert.title}</strong>
-            <small>{alert.client_id ?? alert.target_id}</small>
+            <small>{alert.client_id ? nameById.get(alert.client_id) ?? "Unnamed VPS" : alertTargetLabel(alert)}</small>
             <span>{alert.detail}</span>
             <span className={`fleetAlertState ${alert.operator_state}`}>{alert.operator_state}</span>
             <div className="fleetAlertActions">
@@ -665,6 +730,10 @@ function alertTone(severity: string) {
     return "warning";
   }
   return "info";
+}
+
+function alertTargetLabel(alert: FleetAlertRecord) {
+  return alert.target_kind === "client" ? "Unknown VPS" : alert.target_id;
 }
 
 function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {

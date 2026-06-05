@@ -176,6 +176,14 @@
   display: block;
 }
 
+.sectionContext {
+  flex: 0 0 auto;
+  color: #5f6368;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .segmented {
   display: flex;
   flex: 0 0 auto;

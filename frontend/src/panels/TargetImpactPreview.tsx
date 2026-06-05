@@ -1,6 +1,7 @@
 import { ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import type { AgentView } from "../types";
-import { shortId } from "../utils";
+import { formatVpsName, type VpsNameDisplayMode } from "../utils";
 
 export type TargetImpactMode =
   | "agent_update"
@@ -30,6 +31,7 @@ export function TargetImpactPreview({
   targets: AgentView[];
   title?: string;
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const groups = buildTargetImpactGroups(targets, mode, forceUnprivileged);
   const legacyProtocolTargets = targets.filter(
     (target) => (target.capabilities.command_protocol_version ?? 1) < minCommandProtocolVersion,
@@ -57,7 +59,7 @@ export function TargetImpactPreview({
                 <strong>{group.agents.length}</strong>
                 <span>{group.label}</span>
               </div>
-              <small>{formatAgentNames(group.agents)}</small>
+          <small>{formatAgentNames(group.agents, vpsNameDisplayMode)}</small>
             </div>
           ))}
         </div>
@@ -156,11 +158,11 @@ function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpact
       : "unsupported";
 }
 
-function formatAgentNames(agents: AgentView[]): string {
+function formatAgentNames(agents: AgentView[], mode: VpsNameDisplayMode): string {
   if (agents.length === 0) {
     return "-";
   }
-  const visible = agents.slice(0, 3).map((agent) => agent.display_name || shortId(agent.id));
+  const visible = agents.slice(0, 3).map((agent) => formatVpsName(agent, mode));
   const remaining = agents.length - visible.length;
   return remaining > 0 ? `${visible.join(", ")} +${remaining}` : visible.join(", ");
 }

@@ -30,8 +30,6 @@ pub(crate) struct TerminalOpenCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
@@ -58,8 +56,6 @@ pub(crate) struct TerminalInputCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
@@ -81,8 +77,6 @@ pub(crate) struct TerminalPollCommand {
     pub(crate) replay_from_seq: Option<u64>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -108,8 +102,6 @@ pub(crate) struct TerminalResizeCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
@@ -131,8 +123,6 @@ pub(crate) struct TerminalCloseCommand {
     pub(crate) reason: Option<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -169,7 +159,6 @@ pub(crate) fn terminal_open(
         &operation,
         "terminal_open",
         &command.clients,
-        &command.pools,
         &command.tags,
         &command.password_env,
         command.super_salt_hex.as_deref(),
@@ -200,7 +189,6 @@ pub(crate) fn terminal_input(
             &operation,
             "terminal_input",
             &command.clients,
-            &command.pools,
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
@@ -229,7 +217,6 @@ pub(crate) fn terminal_poll(
             &operation,
             "terminal_poll",
             &command.clients,
-            &command.pools,
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
@@ -259,7 +246,6 @@ pub(crate) fn terminal_resize(
             &operation,
             "terminal_resize",
             &command.clients,
-            &command.pools,
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
@@ -288,7 +274,6 @@ pub(crate) fn terminal_close(
             &operation,
             "terminal_close",
             &command.clients,
-            &command.pools,
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
@@ -307,7 +292,6 @@ fn submit_terminal_operation(
     operation: &JobCommand,
     command_label: &'static str,
     clients: &[String],
-    pools: &[String],
     tags: &[String],
     password_env: &str,
     super_salt_hex: Option<&str>,
@@ -321,7 +305,6 @@ fn submit_terminal_operation(
         operation,
         command_label,
         clients,
-        pools,
         tags,
         password_env,
         super_salt_hex,

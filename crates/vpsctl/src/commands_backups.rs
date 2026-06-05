@@ -132,7 +132,6 @@ pub(crate) fn backup_policy_upsert(
     include_config: bool,
     recipient_public_key_hex: Option<String>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     interval_secs: u64,
     start_at_unix: Option<u64>,
@@ -149,7 +148,7 @@ pub(crate) fn backup_policy_upsert(
     validate_backup_scope(&paths, include_config)?;
     validate_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
-        !clients.is_empty() || !pools.is_empty() || !tags.is_empty(),
+        !clients.is_empty() || !tags.is_empty(),
         "backup-policy-upsert requires at least one target selector"
     );
     anyhow::ensure!(confirmed, "backup-policy-upsert requires --confirmed");
@@ -165,7 +164,6 @@ pub(crate) fn backup_policy_upsert(
                 "include_config": include_config,
                 "recipient_public_key_hex": recipient_public_key_hex,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "interval_secs": interval_secs,
                 "start_at_unix": start_at_unix,
@@ -413,7 +411,6 @@ pub(crate) fn backup_run(
     include_config: bool,
     recipient_public_key_hex: Option<String>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -426,7 +423,7 @@ pub(crate) fn backup_run(
     anyhow::ensure!(confirmed, "backup-run requires --confirmed");
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &pools, &tags, false, confirmed)?;
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
@@ -450,7 +447,6 @@ pub(crate) fn backup_run(
                 "command": "backup",
                 "argv": [],
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "privileged": true,
                 "destructive": false,
@@ -736,7 +732,6 @@ pub(crate) fn restore_run_with_credentials(
             "command": "restore",
             "argv": [],
             "clients": [target_client_id],
-            "pools": [],
             "tags": [],
             "privileged": true,
             "destructive": true,
@@ -791,7 +786,6 @@ pub(crate) fn restore_rollback(
                 "command": "restore_rollback",
                 "argv": [],
                 "clients": [target_client_id],
-                "pools": [],
                 "tags": [],
                 "privileged": true,
                 "destructive": true,

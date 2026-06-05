@@ -357,13 +357,14 @@ mod tests {
                 "100",
                 "--rows",
                 "30",
-                "client:edge-a",
+                "id:edge-a",
                 "--confirmed",
             ],
         )
         .unwrap();
         assert_eq!(request.command_label, "terminal_open");
-        assert_eq!(request.selection.clients, vec!["edge-a".to_string()]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["id:edge-a".to_string()]);
         assert!(request.selection.confirmed);
         match request.operation {
             JobCommand::TerminalOpen {
@@ -388,7 +389,7 @@ mod tests {
                 "7",
                 "--text",
                 "id",
-                "client:edge-a",
+                "id:edge-a",
             ],
         )
         .unwrap();
@@ -414,7 +415,7 @@ mod tests {
                 "11111111-1111-4111-8111-111111111111",
                 "--replay-from-seq",
                 "4",
-                "client:edge-a",
+                "id:edge-a",
             ],
         )
         .unwrap();

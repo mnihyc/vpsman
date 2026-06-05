@@ -45,7 +45,6 @@ fn agent_update_request(operation: JobCommand, clients: Vec<String>) -> CreateJo
     CreateJobRequest {
         targets: Vec::new(),
         clients,
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

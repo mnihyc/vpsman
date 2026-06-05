@@ -135,32 +135,22 @@ fn agent_update_rollout_policy_validation_rejects_ambiguous_scope_and_gate() {
 async fn agent_update_rollout_policy_defaults_match_provider_channel_and_record_provenance() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = rollout_test_operator();
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "hetzner-fsn1".to_string(),
-            provider: Some("hetzner".to_string()),
-            region: Some("fsn1".to_string()),
-        })
-        .await
-        .unwrap();
     if let Repository::Memory(memory) = &repo {
         memory.agents.write().await.push(AgentView {
             id: "edge-a".to_string(),
             display_name: "edge-a".to_string(),
             status: "connected".to_string(),
-            tags: vec!["bgp".to_string()],
+            tags: vec!["bgp".to_string(), "provider:hetzner".to_string()],
             capabilities: Default::default(),
         });
         memory.agents.write().await.push(AgentView {
             id: "edge-b".to_string(),
             display_name: "edge-b".to_string(),
             status: "connected".to_string(),
-            tags: vec!["bgp".to_string()],
+            tags: vec!["bgp".to_string(), "provider:hetzner".to_string()],
             capabilities: Default::default(),
         });
     }
-    repo.assign_agent_pool("edge-a", pool.id).await.unwrap();
-    repo.assign_agent_pool("edge-b", pool.id).await.unwrap();
 
     repo.upsert_agent_update_rollout_policy(
         &rollout_policy_request(
@@ -229,7 +219,6 @@ async fn agent_update_rollout_policy_defaults_match_provider_channel_and_record_
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["edge-a".to_string(), "edge-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -321,7 +310,6 @@ async fn agent_update_dispatch_records_rollout_without_sensitive_artifact_url() 
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -409,7 +397,6 @@ async fn agent_update_rollout_control_updates_pause_gate_and_audits() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -544,7 +531,6 @@ async fn agent_update_rollback_delegation_records_and_claims_timeout_targets_onl
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -674,7 +660,6 @@ async fn agent_update_activation_delegation_claims_recommended_completed_targets
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string(), "client-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -815,7 +800,6 @@ async fn agent_update_delegated_proof_expiry_updates_rollout_read_model() {
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -991,7 +975,6 @@ async fn agent_update_heartbeat_marks_rollout_after_restart() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1081,7 +1064,6 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1130,7 +1112,6 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
     let activation_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1212,7 +1193,6 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1261,7 +1241,6 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     let activation_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1311,7 +1290,6 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     let rollback_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1405,7 +1383,6 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
     let update_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1454,7 +1431,6 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
     let activation_request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -1543,7 +1519,6 @@ async fn agent_update_heartbeat_does_not_upgrade_failed_rollout_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

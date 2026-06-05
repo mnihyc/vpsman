@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { GitBranch, RefreshCcw, Route, Save } from "lucide-react";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildRuntimeControl, buildRuntimeTopology, runtimeManagerLabel } from "../topologyRuntime";
 import type {
   AgentView,
@@ -21,7 +22,14 @@ import type {
   TunnelPlanRecord,
 } from "../types";
 import type { PromoteTunnelPlanToAdapterRequest } from "../typesTopology";
-import { formatTime, runPanelAction, shortId } from "../utils";
+import {
+  clientDisplayNameFromMap,
+  clientDisplayNameMap,
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+} from "../utils";
 import { TopologyApplyControls } from "./topology/TopologyApplyControls";
 import { TopologyEvidencePanel } from "./topology/TopologyEvidencePanel";
 import { TopologyGraphPanel } from "./topology/TopologyGraphPanel";
@@ -83,6 +91,7 @@ export function TopologyPanel({
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [form, setForm] = useState<CreateTunnelPlanRequest>({
     name: "",
     interface_name: "tun0",
@@ -120,6 +129,8 @@ export function TopologyPanel({
   const [topologyStaleRoutesText, setTopologyStaleRoutesText] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const runtimeManager = form.runtime_control?.manager ?? "agent_iproute2_managed";
   const ready =
     form.name.trim() &&
@@ -206,7 +217,7 @@ export function TopologyPanel({
                   <td>{plan.kind.toUpperCase()}</td>
                   <td>{runtimeManagerLabel(plan.plan.runtime_control?.manager)}</td>
                   <td>
-                    {shortId(plan.left_client_id)} / {shortId(plan.right_client_id)}
+                    {clientLabel(plan.left_client_id)} / {clientLabel(plan.right_client_id)}
                   </td>
                   <td>
                     <span className="mutedCell">
@@ -232,7 +243,11 @@ export function TopologyPanel({
         </div>
       </section>
 
-      <TopologyGraphPanel graph={topologyGraph} loading={loading} onRefresh={onLoadTopologyGraph} />
+      <TopologyGraphPanel
+        graph={topologyGraph}
+        loading={loading}
+        onRefresh={onLoadTopologyGraph}
+      />
 
       <section className="fleetPanel scheduleComposer">
         <div className="sectionHeader">
@@ -288,7 +303,7 @@ export function TopologyPanel({
                 <option value="">Select</option>
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
-                    {agent.display_name || agent.id}
+                    {formatVpsName(agent, vpsNameDisplayMode)}
                   </option>
                 ))}
               </select>
@@ -299,7 +314,7 @@ export function TopologyPanel({
                 <option value="">Select</option>
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
-                    {agent.display_name || agent.id}
+                    {formatVpsName(agent, vpsNameDisplayMode)}
                   </option>
                 ))}
               </select>
@@ -487,7 +502,11 @@ export function TopologyPanel({
       />
 
       {tunnelPlans.length > 0 && (
-        <TopologyApplyControls agents={agents} onCreateJob={onCreateJob} tunnelPlans={tunnelPlans} />
+        <TopologyApplyControls
+          agents={agents}
+          onCreateJob={onCreateJob}
+          tunnelPlans={tunnelPlans}
+        />
       )}
       {tunnelPlans.length > 0 && (
         <TopologyOspfUpdateControls
@@ -499,6 +518,7 @@ export function TopologyPanel({
       )}
 
       <TopologyEvidencePanel
+        clientLabel={clientLabel}
         jobs={jobs}
         observations={networkObservations}
         onLoadTrends={onLoadNetworkTrends}

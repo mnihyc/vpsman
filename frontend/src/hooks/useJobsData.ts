@@ -69,15 +69,15 @@ export function useJobsData(
         terminalSessionsResult,
         commandTemplatesResult,
       ] = await Promise.allSettled([
-        apiGet<JobHistoryRecord[]>("/api/v1/jobs?limit=25", apiToken),
-        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=10", apiToken),
-        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=20", apiToken),
-        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=10", apiToken),
-        apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=20", apiToken),
-        apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=20", apiToken),
-        apiGet<FileTransferSourceArtifactRecord[]>("/api/v1/file-transfer-sources?limit=10", apiToken),
-        apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=20", apiToken),
-        apiGet<CommandTemplateRecord[]>("/api/v1/command-templates?limit=100", apiToken),
+        apiGet<JobHistoryRecord[]>("/api/v1/jobs?limit=1000", apiToken),
+        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=200", apiToken),
+        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=200", apiToken),
+        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
+        apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
+        apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
+        apiGet<FileTransferSourceArtifactRecord[]>("/api/v1/file-transfer-sources?limit=200", apiToken),
+        apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken),
+        apiGet<CommandTemplateRecord[]>("/api/v1/command-templates?limit=1000", apiToken),
       ]);
       const settledResults = [
         jobsResult,
@@ -132,9 +132,9 @@ export function useJobsData(
   const loadAgentUpdateRollouts = useCallback(async () => {
     try {
       const [nextRollouts, nextRolloutPolicies, nextReleases] = await Promise.all([
-        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=10", apiToken),
-        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=20", apiToken),
-        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=10", apiToken),
+        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=200", apiToken),
+        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=200", apiToken),
+        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
       ]);
       setAgentUpdateRollouts(nextRollouts);
       setAgentUpdateRolloutPolicies(nextRolloutPolicies);
@@ -153,7 +153,7 @@ export function useJobsData(
 
   const loadTerminalSessions = useCallback(async () => {
     try {
-      setTerminalSessions(await apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=20", apiToken));
+      setTerminalSessions(await apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken));
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();

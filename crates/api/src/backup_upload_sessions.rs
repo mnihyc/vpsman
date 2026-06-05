@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     env,
     io::SeekFrom,
     path::{Path, PathBuf},
@@ -7,11 +6,9 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
-};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{
@@ -44,7 +41,6 @@ pub(crate) fn backup_upload_sessions() -> &'static BackupArtifactUploadSessions 
 #[derive(Clone, Debug)]
 pub(crate) struct BackupArtifactUploadSessions {
     root: Arc<PathBuf>,
-    sessions: Arc<Mutex<HashMap<Uuid, BackupArtifactUploadSession>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +52,7 @@ pub(crate) struct PreparedBackupArtifactUpload {
     pub(crate) size_bytes: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BackupArtifactUploadSession {
     upload_id: Uuid,
     backup_request_id: Uuid,
@@ -76,7 +72,6 @@ impl BackupArtifactUploadSessions {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root: Arc::new(root),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -90,6 +85,7 @@ impl BackupArtifactUploadSessions {
         tokio::fs::create_dir_all(self.root.as_ref())
             .await
             .map_err(internal_error)?;
+        self.cleanup_expired().await;
 
         let now = unix_now();
         let upload_id = Uuid::new_v4();
@@ -117,7 +113,10 @@ impl BackupArtifactUploadSessions {
             staging_path,
         };
         let view = session.view();
-        self.sessions.lock().await.insert(upload_id, session);
+        if let Err(error) = self.save_session(&session).await {
+            let _ = tokio::fs::remove_file(&session.staging_path).await;
+            return Err(error);
+        }
         Ok(view)
     }
 
@@ -128,12 +127,9 @@ impl BackupArtifactUploadSessions {
         request: BackupArtifactUploadChunkRequest,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
         let chunk = validate_backup_artifact_upload_chunk_request(&request)?;
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions
-            .get_mut(&upload_id)
-            .ok_or_else(|| ApiError::not_found("backup_artifact_upload_session_not_found"))?;
-        ensure_session_matches_request(session, backup_request_id)?;
-        ensure_session_not_expired(session)?;
+        let mut session = self.load_session(upload_id).await?;
+        ensure_session_matches_request(&session, backup_request_id)?;
+        ensure_session_not_expired(&session)?;
 
         let offset_bytes = request.offset_bytes;
         let chunk_len = i64::try_from(chunk.len())
@@ -172,6 +168,7 @@ impl BackupArtifactUploadSessions {
         session.received_bytes = chunk_end;
         session.chunk_count = session.chunk_count.saturating_add(1);
         session.updated_unix = unix_now();
+        self.save_session(&session).await?;
         Ok(session.view())
     }
 
@@ -188,21 +185,15 @@ impl BackupArtifactUploadSessions {
             ));
         }
 
-        let session = {
-            let sessions = self.sessions.lock().await;
-            let session = sessions
-                .get(&upload_id)
-                .ok_or_else(|| ApiError::not_found("backup_artifact_upload_session_not_found"))?;
-            ensure_session_matches_request(session, backup_request_id)?;
-            ensure_session_not_expired(session)?;
-            if session.client_id != expected_client_id {
-                return Err(ApiError::conflict("backup_artifact_upload_client_mismatch"));
-            }
-            if session.received_bytes != session.expected_size_bytes {
-                return Err(ApiError::conflict("backup_artifact_upload_incomplete"));
-            }
-            session.clone()
-        };
+        let session = self.load_session(upload_id).await?;
+        ensure_session_matches_request(&session, backup_request_id)?;
+        ensure_session_not_expired(&session)?;
+        if session.client_id != expected_client_id {
+            return Err(ApiError::conflict("backup_artifact_upload_client_mismatch"));
+        }
+        if session.received_bytes != session.expected_size_bytes {
+            return Err(ApiError::conflict("backup_artifact_upload_incomplete"));
+        }
 
         let metadata = tokio::fs::metadata(&session.staging_path)
             .await
@@ -237,9 +228,10 @@ impl BackupArtifactUploadSessions {
     }
 
     pub(crate) async fn finish(&self, upload_id: Uuid) {
-        if let Some(session) = self.sessions.lock().await.remove(&upload_id) {
+        if let Ok(session) = self.load_session(upload_id).await {
             let _ = tokio::fs::remove_file(session.staging_path).await;
         }
+        let _ = tokio::fs::remove_file(self.manifest_path(upload_id)).await;
     }
 
     pub(crate) async fn abort(
@@ -253,21 +245,70 @@ impl BackupArtifactUploadSessions {
                 "backup_artifact_upload_abort_confirmation_required",
             ));
         }
-        let session = {
-            let mut sessions = self.sessions.lock().await;
-            let session = sessions
-                .get(&upload_id)
-                .ok_or_else(|| ApiError::not_found("backup_artifact_upload_session_not_found"))?;
-            ensure_session_matches_request(session, backup_request_id)?;
-            sessions.remove(&upload_id).expect("checked session exists")
-        };
+        let session = self.load_session(upload_id).await?;
+        ensure_session_matches_request(&session, backup_request_id)?;
         let view = session.view_with_status("aborted");
         let _ = tokio::fs::remove_file(session.staging_path).await;
+        let _ = tokio::fs::remove_file(self.manifest_path(upload_id)).await;
         Ok(view)
     }
 
     fn staging_path(&self, upload_id: Uuid) -> PathBuf {
         self.root.join(format!("{upload_id}.part"))
+    }
+
+    fn manifest_path(&self, upload_id: Uuid) -> PathBuf {
+        self.root.join(format!("{upload_id}.json"))
+    }
+
+    async fn load_session(&self, upload_id: Uuid) -> Result<BackupArtifactUploadSession, ApiError> {
+        let manifest_path = self.manifest_path(upload_id);
+        let bytes = tokio::fs::read(&manifest_path)
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    ApiError::not_found("backup_artifact_upload_session_not_found")
+                }
+                _ => internal_error(error),
+            })?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ApiError::conflict("backup_artifact_upload_session_manifest_invalid"))
+    }
+
+    async fn save_session(&self, session: &BackupArtifactUploadSession) -> Result<(), ApiError> {
+        let manifest_path = self.manifest_path(session.upload_id);
+        let temp_path = manifest_path.with_extension(format!("json.tmp-{}", Uuid::new_v4()));
+        let bytes = serde_json::to_vec(session).map_err(internal_error)?;
+        tokio::fs::write(&temp_path, bytes)
+            .await
+            .map_err(internal_error)?;
+        tokio::fs::rename(&temp_path, &manifest_path)
+            .await
+            .map_err(internal_error)?;
+        Ok(())
+    }
+
+    async fn cleanup_expired(&self) {
+        let Ok(mut entries) = tokio::fs::read_dir(self.root.as_ref()).await else {
+            return;
+        };
+        let now = unix_now();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            let Ok(session) = serde_json::from_slice::<BackupArtifactUploadSession>(&bytes) else {
+                continue;
+            };
+            if session.expires_unix <= now {
+                let _ = tokio::fs::remove_file(&session.staging_path).await;
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
     }
 }
 

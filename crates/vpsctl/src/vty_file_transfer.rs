@@ -260,7 +260,6 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
         path,
         mode,
         clients: selection.clients,
-        pools: selection.pools,
         tags: selection.tags,
         proof_ttl_secs,
         timeout_secs,
@@ -485,7 +484,6 @@ pub(crate) fn parse_vty_file_transfer_download(
         destination,
         path,
         clients: selection.clients,
-        pools: selection.pools,
         tags: selection.tags,
         proof_ttl_secs,
         timeout_secs,
@@ -584,7 +582,7 @@ mod tests {
             "2e241391-63b4-4deb-b7d2-5df42a55241a",
             "--resume-token",
             "resume-local",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .unwrap();
@@ -601,7 +599,8 @@ mod tests {
             request.multi_target_policy,
             FileTransferMultiTargetPolicy::IndependentOffsets
         );
-        assert_eq!(request.clients, vec!["edge-a"]);
+        assert!(request.clients.is_empty());
+        assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
     }
 
@@ -612,7 +611,7 @@ mod tests {
             "11111111-2222-4333-8444-555555555555",
             "--path",
             "/tmp/remote.bin",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .unwrap();
@@ -624,7 +623,8 @@ mod tests {
             }
         );
         assert_eq!(request.path, "/tmp/remote.bin");
-        assert_eq!(request.clients, vec!["edge-a"]);
+        assert!(request.clients.is_empty());
+        assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
     }
 
@@ -635,7 +635,7 @@ mod tests {
             "/tmp/source.bin",
             "--path",
             "/tmp/remote.bin",
-            "client:edge-a",
+            "id:edge-a",
         ])
         .is_err());
     }
@@ -657,7 +657,7 @@ mod tests {
             "2e241391-63b4-4deb-b7d2-5df42a55241a",
             "--resume-token",
             "resume-local",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .unwrap();
@@ -670,7 +670,8 @@ mod tests {
             request.multi_target_policy,
             FileTransferDownloadMultiTargetPolicy::PerTargetFiles
         );
-        assert_eq!(request.clients, vec!["edge-a"]);
+        assert!(request.clients.is_empty());
+        assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
     }
 
@@ -681,7 +682,7 @@ mod tests {
             "/tmp/remote.bin",
             "--destination",
             "/tmp/local.bin",
-            "client:edge-a",
+            "id:edge-a",
         ])
         .is_err());
     }

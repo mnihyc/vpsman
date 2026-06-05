@@ -7,6 +7,18 @@ export class ApiUnauthorizedError extends Error {
   }
 }
 
+export class ApiResponseError extends Error {
+  status: number;
+  code: string;
+
+  constructor(status: number, code: string) {
+    super(`${humanizeApiCode(code)} (${status})`);
+    this.name = "ApiResponseError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export function buildAuthHeaders(apiToken: string): HeadersInit | undefined {
   return apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined;
 }
@@ -27,7 +39,7 @@ export async function apiPost<T = JsonValue>(path: string, apiToken: string, bod
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return (await response.json()) as T;
 }
@@ -51,7 +63,7 @@ export async function apiPostBinary<T = JsonValue>(
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return (await response.json()) as T;
 }
@@ -62,7 +74,7 @@ export async function apiGet<T = JsonValue>(path: string, apiToken: string): Pro
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return (await response.json()) as T;
 }
@@ -73,7 +85,7 @@ export async function apiGetBlob(path: string, apiToken: string): Promise<Blob> 
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return await response.blob();
 }
@@ -84,11 +96,42 @@ export async function apiDelete<T = JsonValue>(path: string, apiToken: string): 
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
-    throw new Error(`API ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return (await response.json()) as T;
 }
 
 export function isApiUnauthorized(error: unknown): error is ApiUnauthorizedError {
   return error instanceof ApiUnauthorizedError;
+}
+
+async function apiErrorFromResponse(response: Response): Promise<ApiResponseError> {
+  let code = `http_${response.status}`;
+  try {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const body = (await response.json()) as { error?: unknown };
+      if (typeof body.error === "string" && body.error.trim()) {
+        code = body.error;
+      }
+    } else {
+      const text = (await response.text()).trim();
+      if (text) {
+        code = text.slice(0, 160);
+      }
+    }
+  } catch {
+    code = `http_${response.status}`;
+  }
+  return new ApiResponseError(response.status, code);
+}
+
+function humanizeApiCode(code: string): string {
+  if (!code.trim()) {
+    return "Request failed";
+  }
+  return code
+    .replace(/_/g, " ")
+    .replace(/\bapi\b/i, "API")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }

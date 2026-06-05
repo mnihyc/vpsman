@@ -41,14 +41,14 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiGet<AgentView[]>("/api/v1/agents", apiToken),
       ]);
       const optionalResults = await Promise.allSettled([
-        apiGet<FleetAlertRecord[]>("/api/v1/fleet-alerts?limit=100&include_muted=true", apiToken),
-        apiGet<FleetAlertStateRecord[]>("/api/v1/fleet-alert-states?limit=100", apiToken),
-        apiGet<FleetAlertPolicyRecord[]>("/api/v1/fleet-alert-policies?limit=100", apiToken),
-        apiGet<FleetAlertNotificationChannelRecord[]>("/api/v1/fleet-alert-notification-channels?limit=100", apiToken),
-        apiGet<FleetAlertNotificationDeliveryRecord[]>("/api/v1/fleet-alert-notifications?limit=100", apiToken),
-        apiGet<TelemetryRollupRecord[]>("/api/v1/telemetry/rollups?limit=100", apiToken),
-        apiGet<TelemetryNetworkRateRecord[]>("/api/v1/telemetry/network-rates?limit=100", apiToken),
-        apiGet<TelemetryTunnelRecord[]>("/api/v1/telemetry/tunnels?limit=100", apiToken),
+        apiGet<FleetAlertRecord[]>("/api/v1/fleet-alerts?limit=1000&include_muted=true", apiToken),
+        apiGet<FleetAlertStateRecord[]>("/api/v1/fleet-alert-states?limit=1000", apiToken),
+        apiGet<FleetAlertPolicyRecord[]>("/api/v1/fleet-alert-policies?limit=1000", apiToken),
+        apiGet<FleetAlertNotificationChannelRecord[]>("/api/v1/fleet-alert-notification-channels?limit=1000", apiToken),
+        apiGet<FleetAlertNotificationDeliveryRecord[]>("/api/v1/fleet-alert-notifications?limit=1000", apiToken),
+        apiGet<TelemetryRollupRecord[]>("/api/v1/telemetry/rollups?limit=1000", apiToken),
+        apiGet<TelemetryNetworkRateRecord[]>("/api/v1/telemetry/network-rates?limit=1000", apiToken),
+        apiGet<TelemetryTunnelRecord[]>("/api/v1/telemetry/tunnels?limit=1000", apiToken),
       ]);
 
       const optionalFailure = optionalResults.find((result) => result.status === "rejected");

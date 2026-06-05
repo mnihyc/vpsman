@@ -35,7 +35,6 @@ pub(crate) fn schedule_create(
     argv: Vec<String>,
     pty: bool,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     interval_secs: u64,
     start_at_unix: Option<u64>,
@@ -51,10 +50,6 @@ pub(crate) fn schedule_create(
         retry_delay_secs,
         max_failures,
     )?;
-    let pools = pools
-        .iter()
-        .map(|pool| Uuid::parse_str(pool).context("invalid --pools UUID"))
-        .collect::<Result<Vec<_>>>()?;
     let operation = JobCommand::Shell {
         argv: if argv.is_empty() {
             vec![command.clone()]
@@ -73,7 +68,6 @@ pub(crate) fn schedule_create(
                 "name": name,
                 "operation": operation,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "interval_secs": interval_secs,
                 "start_at_unix": start_at_unix,

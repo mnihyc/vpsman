@@ -34,7 +34,6 @@ import type {
   JobOutputRecord,
   JobTargetSelection,
   UpsertCommandTemplateRequest,
-  ResourcePoolView,
   TagView,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
@@ -107,7 +106,6 @@ export function JobDispatchPanel({
   onLoadOutputs,
   onResolveTargets,
   onUpsertCommandTemplate,
-  pools,
   tags,
 }: {
   agents: AgentView[];
@@ -121,7 +119,6 @@ export function JobDispatchPanel({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
-  pools: ResourcePoolView[];
   tags: TagView[];
 }) {
   const [mode, setMode] = useState<DispatchMode>("shell");
@@ -158,7 +155,7 @@ export function JobDispatchPanel({
     useState<BrowserTransferMultiTargetPolicy>("same-offset");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [templateName, setTemplateName] = useState("");
-  const [templateScopeKind, setTemplateScopeKind] = useState<"global" | "provider" | "pool" | "tag" | "client">("global");
+  const [templateScopeKind, setTemplateScopeKind] = useState<"global" | "provider" | "tag" | "client">("global");
   const [templateScopeValue, setTemplateScopeValue] = useState("");
   const [templatePending, setTemplatePending] = useState(false);
   const [hotConfigToml, setHotConfigToml] = useState("");
@@ -186,7 +183,6 @@ export function JobDispatchPanel({
   const [supervisorEnv, setSupervisorEnv] = useState("");
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
   const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedPools, setSelectedPools] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"any" | "all">("any");
   const [timeoutSecs, setTimeoutSecs] = useState(30);
@@ -225,7 +221,6 @@ export function JobDispatchPanel({
     setTerminalInputText("");
     setTerminalCloseReason(session.close_reason ?? "operator");
     setSelectedClients([session.client_id]);
-    setSelectedPools([]);
     setSelectedTags([]);
     setPreview(null);
     setActionError(null);
@@ -292,7 +287,7 @@ export function JobDispatchPanel({
                                 : mode === "backup"
                                   ? backupReady && confirmed
                                   : true;
-  const selectedTargetCount = selectedClients.length + selectedPools.length + selectedTags.length;
+  const selectedTargetCount = selectedClients.length + selectedTags.length;
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
   const impactTargets = preview?.targets ?? resolveAgentsById(agents, selectedClients);
@@ -326,7 +321,7 @@ export function JobDispatchPanel({
     }
     applyTemplateOperation(template.operation);
     setTemplateName(template.name);
-    setTemplateScopeKind(template.scope_kind as "global" | "provider" | "pool" | "tag" | "client");
+    setTemplateScopeKind(template.scope_kind as "global" | "provider" | "tag" | "client");
     setTemplateScopeValue(template.scope_value ?? "");
     setActionError(null);
   }
@@ -621,7 +616,6 @@ export function JobDispatchPanel({
       });
       const nextJob = await onCreateJob({
         clients: selectedClients,
-        pools: selectedPools,
         tags: selectedTags,
         tag_mode: tagMode,
         destructive,
@@ -650,7 +644,6 @@ export function JobDispatchPanel({
   function targetSelection(): JobTargetSelection {
     return {
       clients: selectedClients,
-      pools: selectedPools,
       tags: selectedTags,
       tag_mode: tagMode,
       destructive,
@@ -698,7 +691,7 @@ export function JobDispatchPanel({
             <input
               aria-label="Command template name"
               onChange={(event) => setTemplateName(event.target.value)}
-              placeholder="pool-health-check"
+              placeholder="provider-health-check"
               value={templateName}
             />
           </label>
@@ -711,7 +704,6 @@ export function JobDispatchPanel({
             >
               <option value="global">Global</option>
               <option value="provider">Provider</option>
-              <option value="pool">Pool</option>
               <option value="tag">Tag</option>
               <option value="client">Client</option>
             </select>
@@ -722,7 +714,7 @@ export function JobDispatchPanel({
               aria-label="Command template scope value"
               disabled={templateScopeKind === "global"}
               onChange={(event) => setTemplateScopeValue(event.target.value)}
-              placeholder={templateScopeKind === "pool" ? "hetzner-fsn1" : templateScopeKind}
+              placeholder={templateScopeKind}
               value={templateScopeKind === "global" ? "" : templateScopeValue}
             />
           </label>
@@ -845,12 +837,9 @@ export function JobDispatchPanel({
         />
         <JobTargetSelector
           agents={agents}
-          pools={pools}
           selectedClients={selectedClients}
-          selectedPools={selectedPools}
           selectedTags={selectedTags}
           setSelectedClients={setSelectedClients}
-          setSelectedPools={setSelectedPools}
           setSelectedTags={setSelectedTags}
           setTagMode={setTagMode}
           tagMode={tagMode}

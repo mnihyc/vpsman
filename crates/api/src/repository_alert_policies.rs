@@ -14,7 +14,6 @@ use crate::{
 
 const SCOPE_GLOBAL: &str = "global";
 const SCOPE_PROVIDER: &str = "provider";
-const SCOPE_POOL: &str = "pool";
 const SCOPE_TAG: &str = "tag";
 const SCOPE_CLIENT: &str = "client";
 const MAX_ALERT_POLICY_NAME_BYTES: usize = 128;
@@ -309,7 +308,7 @@ fn normalize_scope_kind(scope_kind: &str) -> Result<String> {
     anyhow::ensure!(
         matches!(
             scope_kind.as_str(),
-            SCOPE_GLOBAL | SCOPE_PROVIDER | SCOPE_POOL | SCOPE_TAG | SCOPE_CLIENT
+            SCOPE_GLOBAL | SCOPE_PROVIDER | SCOPE_TAG | SCOPE_CLIENT
         ),
         "fleet alert policy scope kind is invalid"
     );

@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { Layers3, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   AgentView,
   AssignDataSourcePresetRequest,
@@ -17,26 +18,23 @@ import type {
   DataSourcePresetTestRequest,
   DataSourcePresetTestResponse,
   DataSourceStatusRecord,
-  ResourcePoolView,
   TagView,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
 } from "../types";
-import { runPanelAction, toggleValue } from "../utils";
+import { formatVpsName, runPanelAction, toggleValue } from "../utils";
 import { CrudPager } from "../components/CrudPager";
 import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
 
-export function PoolsTagsPanel({
+export function TagsPanel({
   agents,
   error,
   loading,
-  onAssignPool,
   onAssignDataSourcePreset,
   onAssignTag,
   onCloneDataSourcePreset,
   onCreateJob,
   onCreateDataSourcePreset,
-  onCreatePool,
   onCreateTag,
   onDiffDataSourcePreset,
   onRefresh,
@@ -47,7 +45,6 @@ export function PoolsTagsPanel({
   dataSourceAssignments,
   dataSourcePresets,
   dataSourceStatus,
-  pools,
   tags,
 }: {
   agents: AgentView[];
@@ -57,51 +54,29 @@ export function PoolsTagsPanel({
   error: string | null;
   loading: boolean;
   onAssignDataSourcePreset: (request: AssignDataSourcePresetRequest) => Promise<AssignDataSourcePresetResponse>;
-  onAssignPool: (clientId: string, poolId: string) => Promise<void>;
   onAssignTag: (clientId: string, tag: string) => Promise<void>;
   onCloneDataSourcePreset: (presetId: string, request: CloneDataSourcePresetRequest) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreateDataSourcePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
-  onCreatePool: (name: string, provider: string, region: string) => Promise<void>;
   onCreateTag: (name: string) => Promise<void>;
   onDiffDataSourcePreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
   onRefresh: () => void;
   onRenderDataSourceHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
-  onResolveBulk: (
-    poolIds: string[],
-    tagNames: string[],
-    destructive: boolean,
-    tagMode: "any" | "all",
-  ) => Promise<BulkResolveResponse>;
+  onResolveBulk: (tagNames: string[], destructive: boolean, tagMode: "any" | "all") => Promise<BulkResolveResponse>;
   onTestDataSourcePreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdateDataSourcePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
-  pools: ResourcePoolView[];
   tags: TagView[];
 }) {
-  const [poolName, setPoolName] = useState("");
-  const [poolProvider, setPoolProvider] = useState("");
-  const [poolRegion, setPoolRegion] = useState("");
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [tagName, setTagName] = useState("");
   const [targetClient, setTargetClient] = useState("");
-  const [targetPool, setTargetPool] = useState("");
   const [targetTag, setTargetTag] = useState("");
-  const [selectedPools, setSelectedPools] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"any" | "all">("any");
   const [destructive, setDestructive] = useState(false);
   const [bulkPreview, setBulkPreview] = useState<BulkResolveResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-
-  async function submitPool(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
-      await onCreatePool(poolName.trim(), poolProvider.trim(), poolRegion.trim());
-      setPoolName("");
-      setPoolProvider("");
-      setPoolRegion("");
-    });
-  }
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -114,9 +89,6 @@ export function PoolsTagsPanel({
   async function submitAssignments(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runPanelAction(setPending, setActionError, async () => {
-      if (targetClient && targetPool) {
-        await onAssignPool(targetClient, targetPool);
-      }
       if (targetClient && targetTag) {
         await onAssignTag(targetClient, targetTag);
       }
@@ -126,11 +98,11 @@ export function PoolsTagsPanel({
 
   async function previewBulk() {
     await runPanelAction(setPending, setActionError, async () => {
-      setBulkPreview(await onResolveBulk(selectedPools, selectedTags, destructive, tagMode));
+      setBulkPreview(await onResolveBulk(selectedTags, destructive, tagMode));
     });
   }
 
-  const status = actionError ?? error ?? (loading ? "Refreshing pool and tag state" : "Live hierarchy and tag targets");
+  const status = actionError ?? error ?? (loading ? "Refreshing tag state" : "Live tag targets");
 
   return (
     <section className="workspace">
@@ -138,7 +110,7 @@ export function PoolsTagsPanel({
         <div className="fleetPanel">
           <div className="sectionHeader">
             <div>
-              <h2>Pools and tags</h2>
+              <h2>Tags</h2>
               <span>{status}</span>
             </div>
             <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
@@ -147,40 +119,13 @@ export function PoolsTagsPanel({
           </div>
 
           <div className="managementGrid">
-            <form className="compactForm" onSubmit={submitPool}>
-              <strong>Resource pool</strong>
-              <div className="formRow">
-                <input
-                  aria-label="Pool name"
-                  onChange={(event) => setPoolName(event.target.value)}
-                  placeholder="pool name"
-                  value={poolName}
-                />
-                <input
-                  aria-label="Provider"
-                  onChange={(event) => setPoolProvider(event.target.value)}
-                  placeholder="provider"
-                  value={poolProvider}
-                />
-                <input
-                  aria-label="Region"
-                  onChange={(event) => setPoolRegion(event.target.value)}
-                  placeholder="region"
-                  value={poolRegion}
-                />
-                <button className="secondaryAction" disabled={pending || !poolName.trim()} type="submit">
-                  Create
-                </button>
-              </div>
-            </form>
-
             <form className="compactForm" onSubmit={submitTag}>
-              <strong>Custom tag</strong>
+              <strong>Create tag</strong>
               <div className="formRow">
                 <input
                   aria-label="Tag name"
                   onChange={(event) => setTagName(event.target.value)}
-                  placeholder="tag name"
+                  placeholder="provider:alpha, country:us, app:edge"
                   value={tagName}
                 />
                 <button className="secondaryAction" disabled={pending || !tagName.trim()} type="submit">
@@ -189,48 +134,6 @@ export function PoolsTagsPanel({
               </div>
             </form>
           </div>
-
-          <CrudPager
-            fields={[
-              { label: "Pool", value: (pool) => pool.name },
-              { label: "Provider", value: (pool) => pool.provider },
-              { label: "Region", value: (pool) => pool.region },
-              { label: "Clients", value: (pool) => pool.clients.length },
-            ]}
-            itemLabel="pools"
-            items={pools}
-            pageSize={8}
-            title="Pool records"
-            empty={
-              <div className="emptyState">
-                <Layers3 size={22} />
-                <strong>No resource pools</strong>
-                <span>{error ?? "Create a provider or resource-pool parent node to group VPSs."}</span>
-              </div>
-            }
-          >
-            {(poolRows) => (
-              <div className="table hierarchyTable">
-                <div className="historyRow heading poolGrid">
-                  <span>Pool</span>
-                  <span>Provider</span>
-                  <span>Region</span>
-                  <span>Clients</span>
-                </div>
-                {poolRows.map((pool) => (
-                  <div className="historyRow poolGrid" key={pool.id}>
-                    <span className="historyPrimary">
-                      <strong>{pool.name}</strong>
-                      <small>{pool.provider || pool.region || "resource pool"}</small>
-                    </span>
-                    <span>{pool.provider || "-"}</span>
-                    <span>{pool.region || "-"}</span>
-                    <span>{pool.clients.length}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CrudPager>
 
           <CrudPager
             fields={[
@@ -244,8 +147,8 @@ export function PoolsTagsPanel({
             empty={
               <div className="emptyState">
                 <ShieldCheck size={22} />
-                <strong>No custom tags</strong>
-                <span>Create tags to target recurring VPS groups.</span>
+                <strong>No tags</strong>
+                <span>Create provider, country, or custom tags to target recurring VPS groups.</span>
               </div>
             }
           >
@@ -280,7 +183,6 @@ export function PoolsTagsPanel({
           onRenderHotConfig={onRenderDataSourceHotConfig}
           onTestPreset={onTestDataSourcePreset}
           onUpdatePreset={onUpdateDataSourcePreset}
-          pools={pools}
           presets={dataSourcePresets}
           tags={tags}
         />
@@ -298,15 +200,7 @@ export function PoolsTagsPanel({
             <option value="">VPS</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
-                {agent.display_name || agent.id}
-              </option>
-            ))}
-          </select>
-          <select aria-label="Pool" onChange={(event) => setTargetPool(event.target.value)} value={targetPool}>
-            <option value="">Pool</option>
-            {pools.map((pool) => (
-              <option key={pool.id} value={pool.id}>
-                {pool.name}
+                {formatVpsName(agent, vpsNameDisplayMode)}
               </option>
             ))}
           </select>
@@ -316,7 +210,7 @@ export function PoolsTagsPanel({
             placeholder="tag"
             value={targetTag}
           />
-          <button className="wideAction" disabled={pending || !targetClient || (!targetPool && !targetTag)} type="submit">
+          <button className="wideAction" disabled={pending || !targetClient || !targetTag} type="submit">
             Apply
           </button>
         </form>
@@ -324,16 +218,6 @@ export function PoolsTagsPanel({
         <div className="sideForm">
           <strong>Bulk preview</strong>
           <div className="chipList">
-            {pools.map((pool) => (
-              <label className="checkChip" key={pool.id}>
-                <input
-                  checked={selectedPools.includes(pool.id)}
-                  onChange={() => setSelectedPools(toggleValue(selectedPools, pool.id))}
-                  type="checkbox"
-                />
-                <span>{pool.name}</span>
-              </label>
-            ))}
             {tags.map((tag) => (
               <label className="checkChip" key={tag.name}>
                 <input
@@ -360,7 +244,7 @@ export function PoolsTagsPanel({
           </div>
           <button
             className="wideAction"
-            disabled={pending || (selectedPools.length === 0 && selectedTags.length === 0)}
+            disabled={pending || selectedTags.length === 0}
             onClick={previewBulk}
             type="button"
           >

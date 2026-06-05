@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 mod agent_update_artifact_ingest;
 mod auth_model;
 mod auth_totp;
+mod backup_artifact_crypto;
 mod backup_auto_artifacts;
 mod backup_handoff;
 mod backup_upload_sessions;
@@ -152,6 +153,8 @@ struct Args {
     bind: SocketAddr,
     #[arg(long, env = "VPSMAN_POSTGRES_URL")]
     postgres_url: Option<String>,
+    #[arg(long, env = "VPSMAN_DEBUG_INTERNAL_TEST_MODE", default_value_t = false)]
+    debug_internal_test_mode: bool,
     #[arg(long, env = "VPSMAN_MIGRATIONS_DIR", default_value = "migrations")]
     migrations_dir: PathBuf,
     #[arg(long, env = "VPSMAN_INTERNAL_TOKEN")]
@@ -328,7 +331,12 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
+    let repo = Repository::connect(
+        args.postgres_url.as_deref(),
+        &args.migrations_dir,
+        args.debug_internal_test_mode,
+    )
+    .await?;
     let (events, _) = broadcast::channel(256);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
     let gateway = GatewayDispatchClient::new(
@@ -344,8 +352,13 @@ async fn main() -> Result<()> {
         .transpose()?
         .map(Arc::new);
     if server_signing_key.is_none() {
+        if !args.debug_internal_test_mode {
+            anyhow::bail!(
+                "VPSMAN_SERVER_SIGNING_KEY_HEX is required. Missing signing keys are allowed only with VPSMAN_DEBUG_INTERNAL_TEST_MODE=true for dangerous internal tests."
+            );
+        }
         warn!(
-            "VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; proof-gated job dispatch remains disabled"
+            "DANGEROUS INTERNAL TEST MODE: VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; proof-gated job dispatch remains disabled"
         );
     }
     let server_ed25519_public_key_hex = server_signing_key
@@ -541,7 +554,6 @@ async fn dispatch_delegated_rollout_rollbacks(state: &AppState) -> Result<usize>
         let request = CreateJobRequest {
             targets: Vec::new(),
             clients: claim.clients.clone(),
-            pools: Vec::new(),
             tags: Vec::new(),
             tag_mode: None,
             destructive: false,
@@ -622,7 +634,6 @@ async fn dispatch_delegated_rollout_activations(state: &AppState) -> Result<usiz
         let request = CreateJobRequest {
             targets: Vec::new(),
             clients: claim.clients.clone(),
-            pools: Vec::new(),
             tags: Vec::new(),
             tag_mode: None,
             destructive: false,

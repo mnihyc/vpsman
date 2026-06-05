@@ -161,7 +161,6 @@ fn file_push_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -237,7 +236,6 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

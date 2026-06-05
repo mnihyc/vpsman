@@ -13,6 +13,7 @@ export function BackupHistoryTables({
   artifacts,
   backupPolicies,
   backups,
+  clientLabel,
   error,
   migrationLinks,
   restorePlans,
@@ -20,6 +21,7 @@ export function BackupHistoryTables({
   artifacts: BackupArtifactRecord[];
   backupPolicies: BackupPolicyRecord[];
   backups: BackupRequestRecord[];
+  clientLabel: (clientId: string) => string;
   error: string | null;
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
@@ -43,11 +45,11 @@ export function BackupHistoryTables({
           <span>Accepted metadata-only requests will appear here.</span>
         </div>
       ) : (
-        <BackupRequestsTable backups={backups} />
+        <BackupRequestsTable backups={backups} clientLabel={clientLabel} />
       )}
-      <ArtifactHistoryTable artifacts={artifacts} />
-      <RestorePlansTable restorePlans={restorePlans} />
-      <MigrationLinksTable migrationLinks={migrationLinks} />
+      <ArtifactHistoryTable artifacts={artifacts} clientLabel={clientLabel} />
+      <RestorePlansTable clientLabel={clientLabel} restorePlans={restorePlans} />
+      <MigrationLinksTable clientLabel={clientLabel} migrationLinks={migrationLinks} />
     </>
   );
 }
@@ -109,12 +111,12 @@ function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
   );
 }
 
-function BackupRequestsTable({ backups }: { backups: BackupRequestRecord[] }) {
+function BackupRequestsTable({ backups, clientLabel }: { backups: BackupRequestRecord[]; clientLabel: (clientId: string) => string }) {
   return (
     <CrudPager
       fields={[
         { label: "Request", value: (backup) => `${backup.id} ${backup.artifact_id ?? ""}` },
-        { label: "Client", value: (backup) => backup.client_id },
+        { label: "Client", value: (backup) => clientLabel(backup.client_id) },
         { label: "Scope", value: (backup) => backupScopeLabel(backup) },
         { label: "Status", value: (backup) => backup.status },
         { label: "Hash", value: (backup) => backup.payload_hash },
@@ -141,7 +143,7 @@ function BackupRequestsTable({ backups }: { backups: BackupRequestRecord[] }) {
                 <strong>{shortId(backup.id)}</strong>
                 <small>{backup.artifact_id ? `artifact ${shortId(backup.artifact_id)}` : "metadata only"}</small>
               </span>
-              <span>{backup.client_id}</span>
+              <span>{clientLabel(backup.client_id)}</span>
               <span>{backupScopeLabel(backup)}</span>
               <span className={`status ${statusClass(backup.status)}`}>{backup.status}</span>
               <span className="monoValue">{shortHash(backup.payload_hash)}</span>
@@ -154,7 +156,7 @@ function BackupRequestsTable({ backups }: { backups: BackupRequestRecord[] }) {
   );
 }
 
-function ArtifactHistoryTable({ artifacts }: { artifacts: BackupArtifactRecord[] }) {
+function ArtifactHistoryTable({ artifacts, clientLabel }: { artifacts: BackupArtifactRecord[]; clientLabel: (clientId: string) => string }) {
   return (
     <div className="restoreHistorySection">
       <div className="sectionHeader compact">
@@ -164,7 +166,7 @@ function ArtifactHistoryTable({ artifacts }: { artifacts: BackupArtifactRecord[]
       <CrudPager
         fields={[
           { label: "Artifact", value: (artifact) => artifact.id },
-          { label: "Client", value: (artifact) => artifact.client_id },
+          { label: "Client", value: (artifact) => clientLabel(artifact.client_id) },
           { label: "Object key", value: (artifact) => artifact.object_key },
           { label: "Status", value: (artifact) => (artifact.encrypted ? "encrypted" : "plaintext") },
           { label: "Hash", value: (artifact) => artifact.sha256_hex },
@@ -197,7 +199,7 @@ function ArtifactHistoryTable({ artifacts }: { artifacts: BackupArtifactRecord[]
                   <strong>{shortId(artifact.id)}</strong>
                   <small>{formatBytes(artifact.size_bytes)}</small>
                 </span>
-                <span>{artifact.client_id}</span>
+                <span>{clientLabel(artifact.client_id)}</span>
                 <span className="monoValue">{artifact.object_key}</span>
                 <span className={`status ${artifact.encrypted ? "ok" : "warn"}`}>
                   {artifact.encrypted ? "encrypted" : "plaintext"}
@@ -213,7 +215,7 @@ function ArtifactHistoryTable({ artifacts }: { artifacts: BackupArtifactRecord[]
   );
 }
 
-function RestorePlansTable({ restorePlans }: { restorePlans: RestorePlanRecord[] }) {
+function RestorePlansTable({ restorePlans, clientLabel }: { restorePlans: RestorePlanRecord[]; clientLabel: (clientId: string) => string }) {
   return (
     <div className="restoreHistorySection">
       <div className="sectionHeader compact">
@@ -224,7 +226,7 @@ function RestorePlansTable({ restorePlans }: { restorePlans: RestorePlanRecord[]
         fields={[
           { label: "Plan", value: (plan) => plan.id },
           { label: "Source", value: (plan) => plan.source_backup_request_id },
-          { label: "Target", value: (plan) => plan.target_client_id },
+          { label: "Target", value: (plan) => clientLabel(plan.target_client_id) },
           { label: "Status", value: (plan) => plan.status },
           { label: "Hash", value: (plan) => plan.payload_hash },
           { label: "Scope", value: (plan) => restoreScopeLabel(plan) },
@@ -258,7 +260,7 @@ function RestorePlansTable({ restorePlans }: { restorePlans: RestorePlanRecord[]
                   <small>{restoreScopeLabel(plan)}</small>
                 </span>
                 <span>{shortId(plan.source_backup_request_id)}</span>
-                <span>{plan.target_client_id}</span>
+                <span>{clientLabel(plan.target_client_id)}</span>
                 <span className={`status ${statusClass(plan.status)}`}>{plan.status}</span>
                 <span className="monoValue">{shortHash(plan.payload_hash)}</span>
                 <span>{formatTime(plan.created_at)}</span>
@@ -271,7 +273,7 @@ function RestorePlansTable({ restorePlans }: { restorePlans: RestorePlanRecord[]
   );
 }
 
-function MigrationLinksTable({ migrationLinks }: { migrationLinks: MigrationLinkRecord[] }) {
+function MigrationLinksTable({ migrationLinks, clientLabel }: { migrationLinks: MigrationLinkRecord[]; clientLabel: (clientId: string) => string }) {
   return (
     <div className="restoreHistorySection">
       <div className="sectionHeader compact">
@@ -281,8 +283,8 @@ function MigrationLinksTable({ migrationLinks }: { migrationLinks: MigrationLink
       <CrudPager
         fields={[
           { label: "Link", value: (link) => `${link.id} ${link.restore_plan_id}` },
-          { label: "Source", value: (link) => link.source_client_id },
-          { label: "Target", value: (link) => link.target_client_id },
+          { label: "Source", value: (link) => clientLabel(link.source_client_id) },
+          { label: "Target", value: (link) => clientLabel(link.target_client_id) },
           { label: "Status", value: (link) => link.status },
           { label: "Scope", value: (link) => migrationScopeLabel(link) },
         ]}
@@ -314,8 +316,8 @@ function MigrationLinksTable({ migrationLinks }: { migrationLinks: MigrationLink
                   <strong>{shortId(link.id)}</strong>
                   <small>plan {shortId(link.restore_plan_id)}</small>
                 </span>
-                <span>{link.source_client_id}</span>
-                <span>{link.target_client_id}</span>
+                <span>{clientLabel(link.source_client_id)}</span>
+                <span>{clientLabel(link.target_client_id)}</span>
                 <span className={`status ${statusClass(link.status)}`}>{link.status}</span>
                 <span>{migrationScopeLabel(link)}</span>
                 <span>{formatTime(link.created_at)}</span>
@@ -343,9 +345,6 @@ function policyTargetLabel(policy: BackupPolicyRecord): string {
   const parts = [];
   if (policy.clients.length > 0) {
     parts.push(`${policy.clients.length} client${policy.clients.length === 1 ? "" : "s"}`);
-  }
-  if (policy.pools.length > 0) {
-    parts.push(`${policy.pools.length} pool${policy.pools.length === 1 ? "" : "s"}`);
   }
   if (policy.tags.length > 0) {
     parts.push(`${policy.tags.length} tag${policy.tags.length === 1 ? "" : "s"}`);

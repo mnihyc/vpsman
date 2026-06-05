@@ -9,6 +9,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use vpsman_common::{encode_json, payload_hash, JobCommand};
 
 use crate::{
+    backup_artifact_crypto::prepare_backup_archive_for_restore,
     backup_auto_artifacts::backup_artifact_object_key,
     backup_handoff::{
         backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout,
@@ -23,7 +24,8 @@ use crate::{
         BackupArtifactUploadSessionView, BackupArtifactView, BackupPolicyPruneRequest,
         BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
         BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
-        HistoryQuery, RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
+        HistoryQuery, PrepareBackupArtifactRestoreRequest, PreparedBackupArtifactRestoreView,
+        RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
     },
     routes_schedules::validate_schedule_request,
     security::operator_has_scope,
@@ -666,6 +668,82 @@ pub(crate) async fn download_backup_artifact(
     Ok(response)
 }
 
+pub(crate) async fn prepare_backup_artifact_restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(backup_request_id): Path<uuid::Uuid>,
+    Json(request): Json<PrepareBackupArtifactRestoreRequest>,
+) -> Result<Json<PreparedBackupArtifactRestoreView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .await?;
+    if request.private_key_hex.trim().is_empty() {
+        return Err(ApiError::bad_request("backup_private_key_required"));
+    }
+    let backup_request = state
+        .repo
+        .find_backup_request(backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
+    let artifact_bytes = match request.artifact_base64.as_deref() {
+        Some(value) if !value.trim().is_empty() => BASE64
+            .decode(value.trim())
+            .map_err(|_| ApiError::bad_request("backup_artifact_base64_invalid"))?,
+        _ => stored_backup_artifact_bytes(&state, &backup_request).await?,
+    };
+    validate_encrypted_backup_artifact_with_limit(
+        &artifact_bytes,
+        &backup_request.client_id,
+        MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
+    )?;
+    let prepared = prepare_backup_archive_for_restore(
+        &artifact_bytes,
+        &request.private_key_hex,
+        &backup_request.client_id,
+    )
+    .map_err(|_| ApiError::bad_request("backup_artifact_restore_prepare_failed"))?;
+    Ok(Json(PreparedBackupArtifactRestoreView {
+        archive_sha256_hex: payload_hash(&prepared.bytes),
+        archive_size_bytes: prepared.bytes.len() as u64,
+        archive_base64: BASE64.encode(&prepared.bytes),
+        artifact_client_id: prepared.client_id,
+        file_count: prepared.file_count,
+        archive_format: prepared.archive_format,
+    }))
+}
+
+async fn stored_backup_artifact_bytes(
+    state: &AppState,
+    backup_request: &BackupRequestView,
+) -> Result<Vec<u8>, ApiError> {
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let artifact_id = backup_request
+        .artifact_id
+        .ok_or_else(|| ApiError::conflict("backup_artifact_not_recorded"))?;
+    let artifact = state
+        .repo
+        .find_backup_artifact(artifact_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("backup_artifact_not_found"))?;
+    if artifact.client_id != backup_request.client_id {
+        return Err(ApiError::conflict("backup_artifact_client_mismatch"));
+    }
+    let bytes = store
+        .get(&artifact.object_key)
+        .await
+        .map_err(|_| ApiError::not_found("backup_artifact_object_not_found"))?;
+    if i64::try_from(bytes.len()).ok() != Some(artifact.size_bytes) {
+        return Err(ApiError::conflict("backup_artifact_object_size_mismatch"));
+    }
+    if payload_hash(&bytes) != artifact.sha256_hex {
+        return Err(ApiError::conflict("backup_artifact_object_hash_mismatch"));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn validate_create_backup_request(
     request: &CreateBackupRequest,
 ) -> Result<(), ApiError> {
@@ -714,7 +792,6 @@ pub(crate) fn validate_create_backup_policy_request(
                 .map(|value| value.to_ascii_lowercase()),
         },
         clients: request.clients.clone(),
-        pools: request.pools.clone(),
         tags: request.tags.clone(),
         interval_secs: request.interval_secs,
         start_at_unix: request.start_at_unix,
@@ -789,7 +866,6 @@ async fn ensure_single_backup_client(
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
             clients: vec![request.client_id.clone()],
-            pools: Vec::new(),
             tags: Vec::new(),
             tag_mode: None,
             destructive: false,

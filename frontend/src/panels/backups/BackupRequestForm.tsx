@@ -1,7 +1,9 @@
 import type { FormEvent } from "react";
 import { DatabaseBackup, Play } from "lucide-react";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import { BACKUP_PATH_PLACEHOLDER } from "../../presets/backupPathPresets";
 import type { AgentView } from "../../types";
+import { formatVpsName } from "../../utils";
 
 type BackupRequestFormProps = {
   agents: AgentView[];
@@ -44,6 +46,7 @@ export function BackupRequestForm({
   proofTtlSecs,
   selectedAgentName,
 }: BackupRequestFormProps) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <>
       <div className="sectionHeader compact">
@@ -57,7 +60,7 @@ export function BackupRequestForm({
             <option value="">Select VPS</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
-                {agent.display_name || agent.id}
+                {formatVpsName(agent, vpsNameDisplayMode)}
               </option>
             ))}
           </select>

@@ -544,7 +544,6 @@ async fn process_due_schedule(pool: &PgPool, schedule_id: Uuid) -> Result<usize>
             name,
             operation,
             target_clients,
-            target_pools,
             target_tags,
             interval_secs,
             catch_up_policy,
@@ -577,7 +576,6 @@ async fn process_due_schedule(pool: &PgPool, schedule_id: Uuid) -> Result<usize>
             name: row.try_get("name")?,
             operation: row.try_get::<SqlJson<Value>, _>("operation")?.0,
             target_clients: row.try_get("target_clients")?,
-            target_pools: row.try_get("target_pools")?,
             target_tags: row.try_get("target_tags")?,
             interval_secs: row.try_get("interval_secs")?,
             catch_up_policy: row.try_get("catch_up_policy")?,
@@ -613,7 +611,6 @@ struct DueSchedule {
     name: String,
     operation: Value,
     target_clients: Vec<String>,
-    target_pools: Vec<Uuid>,
     target_tags: Vec<String>,
     interval_secs: i64,
     catch_up_policy: String,
@@ -703,7 +700,6 @@ async fn materialize_due_schedule(
         "job_id": job_id,
         "resolved_targets": &targets,
         "target_clients": &schedule.target_clients,
-        "target_pools": &schedule.target_pools,
         "target_tags": &schedule.target_tags,
         "catch_up_policy": &schedule.catch_up_policy,
         "catch_up_run_index": run_index + 1,
@@ -839,22 +835,15 @@ async fn resolve_schedule_targets(
         WITH explicit_targets AS (
             SELECT unnest($1::TEXT[]) AS client_id
         ),
-        pool_targets AS (
-            SELECT id AS client_id
-            FROM clients
-            WHERE pool_id = ANY($2::UUID[])
-        ),
         tag_targets AS (
             SELECT ct.client_id
             FROM client_tags ct
             JOIN tags t ON t.id = ct.tag_id
-            WHERE t.name = ANY($3::TEXT[])
+            WHERE t.name = ANY($2::TEXT[])
         )
         SELECT DISTINCT client_id
         FROM (
             SELECT client_id FROM explicit_targets
-            UNION ALL
-            SELECT client_id FROM pool_targets
             UNION ALL
             SELECT client_id FROM tag_targets
         ) targets
@@ -863,7 +852,6 @@ async fn resolve_schedule_targets(
         "#,
     )
     .bind(&schedule.target_clients)
-    .bind(&schedule.target_pools)
     .bind(&schedule.target_tags)
     .fetch_all(&mut **tx)
     .await?;
@@ -883,7 +871,6 @@ mod schedule_tests {
             name: "test".to_string(),
             operation: serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
             target_clients: Vec::new(),
-            target_pools: Vec::new(),
             target_tags: vec!["edge".to_string()],
             interval_secs: 60,
             catch_up_policy: policy.to_string(),

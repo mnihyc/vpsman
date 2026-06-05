@@ -137,7 +137,7 @@ pub(crate) async fn claim_enrollment(
     }
     let context = EnrollmentClaimContext {
         fallback_display_name: default_alias_from_headers(&headers)
-            .unwrap_or_else(|| request.client_id.clone()),
+            .unwrap_or_else(|| "pending-enrollment".to_string()),
     };
     match state
         .repo
@@ -160,6 +160,9 @@ pub(crate) async fn claim_enrollment(
         EnrollmentClaimOutcome::UsedToken => {
             Err(ApiError::conflict("enrollment_token_already_used"))
         }
+        EnrollmentClaimOutcome::ProvisionClientIdSupplied => Err(ApiError::bad_request(
+            "provision_enrollment_client_id_must_not_be_supplied",
+        )),
         EnrollmentClaimOutcome::TokenClientMismatch => {
             Err(ApiError::conflict("enrollment_token_client_mismatch"))
         }
@@ -196,6 +199,10 @@ fn country_tag_from_headers(headers: &HeaderMap) -> Option<String> {
 }
 
 fn default_alias_from_headers(headers: &HeaderMap) -> Option<String> {
+    origin_ip_from_headers(headers).map(|ip| ip.to_string())
+}
+
+fn origin_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
     let ip = headers
         .get("cf-connecting-ip")
         .or_else(|| headers.get("x-real-ip"))
@@ -207,7 +214,7 @@ fn default_alias_from_headers(headers: &HeaderMap) -> Option<String> {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.split(',').find_map(first_valid_ip))
         })?;
-    Some(ip.to_string())
+    Some(ip)
 }
 
 fn first_valid_ip(value: &str) -> Option<IpAddr> {
@@ -234,15 +241,19 @@ fn validate_create_enrollment_token(
     ) {
         return Err(ApiError::bad_request("enrollment_purpose_invalid"));
     }
+    if purpose == ENROLLMENT_PURPOSE_PROVISION
+        && normalize_optional_client_id(request.allowed_client_id.as_deref()).is_some()
+    {
+        return Err(ApiError::bad_request(
+            "provision_enrollment_client_id_must_not_be_supplied",
+        ));
+    }
     if let Some(client_id) = normalize_optional_client_id(request.allowed_client_id.as_deref()) {
         validate_client_id(&client_id)?;
     }
     validate_tags(&request.default_tags)?;
     if let Some(default_display_name) = request.default_display_name.as_deref() {
         validate_optional_display_name(default_display_name)?;
-    }
-    if let Some(default_pool_name) = request.default_pool_name.as_deref() {
-        validate_pool_name(default_pool_name)?;
     }
     if let Some(version_url) = request.unmanaged_update_version_url.as_deref() {
         validate_update_version_url(version_url)?;
@@ -272,9 +283,6 @@ async fn validate_enrollment_token_policy(
 ) -> Result<(), ApiError> {
     let purpose = normalize_enrollment_purpose(request.purpose.as_deref());
     let allowed_client_id = normalize_optional_client_id(request.allowed_client_id.as_deref());
-    if let Some(default_pool_name) = request.default_pool_name.as_deref() {
-        state.repo.pool_by_name(default_pool_name.trim()).await?;
-    }
     if purpose == ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT {
         let Some(client_id) = allowed_client_id.as_deref() else {
             return Err(ApiError::bad_request("reenrollment_client_id_required"));
@@ -298,7 +306,9 @@ fn validate_claim_enrollment(request: &ClaimEnrollmentRequest) -> Result<(), Api
     if request.token.trim().is_empty() {
         return Err(ApiError::bad_request("enrollment_token_required"));
     }
-    validate_client_id(&request.client_id)?;
+    if let Some(client_id) = request.client_id.as_deref() {
+        validate_client_id(client_id)?;
+    }
     if request.client_public_key_hex.len() != 64
         || !request
             .client_public_key_hex
@@ -318,17 +328,6 @@ fn validate_optional_display_name(value: &str) -> Result<(), ApiError> {
         || value.chars().any(|character| character.is_control())
     {
         return Err(ApiError::bad_request("default_display_name_invalid"));
-    }
-    Ok(())
-}
-
-fn validate_pool_name(value: &str) -> Result<(), ApiError> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 128
-        || value.chars().any(|character| character.is_control())
-    {
-        return Err(ApiError::bad_request("default_pool_name_invalid"));
     }
     Ok(())
 }
@@ -424,6 +423,9 @@ fn validate_tags(tags: &[String]) -> Result<(), ApiError> {
     for tag in normalize_tags(tags) {
         if tag.len() > 64 {
             return Err(ApiError::bad_request("tag_too_long"));
+        }
+        if tag.starts_with("id:") || tag.starts_with("name:") {
+            return Err(ApiError::bad_request("reserved_inner_tag_selector"));
         }
         if !tag
             .bytes()

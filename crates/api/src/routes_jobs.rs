@@ -449,7 +449,6 @@ pub(crate) async fn dispatch_scheduled_job(
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
             clients: scheduled.targets.clone(),
-            pools: Vec::new(),
             tags: Vec::new(),
             tag_mode: None,
             destructive: false,
@@ -1042,7 +1041,6 @@ async fn reject_job(
     warn!(
         targets = request.targets.len(),
         clients = request.clients.len(),
-        pools = request.pools.len(),
         tags = request.tags.len(),
         privileged = request.privileged,
         has_legacy_envelope = request.envelope.is_some(),

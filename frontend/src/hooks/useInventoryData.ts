@@ -15,33 +15,29 @@ import type {
   DataSourcePresetTestResponse,
   DataSourceStatusRecord,
   JobTargetSelection,
-  ResourcePoolView,
   TagView,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
 } from "../types";
 
 export function useInventoryData(apiToken: string, onUnauthorized: () => void, onFleetChanged: () => Promise<void>) {
-  const [pools, setPools] = useState<ResourcePoolView[]>([]);
   const [tags, setTags] = useState<TagView[]>([]);
   const [dataSourcePresets, setDataSourcePresets] = useState<DataSourcePresetRecord[]>([]);
   const [dataSourceAssignments, setDataSourceAssignments] = useState<DataSourcePresetAssignmentRecord[]>([]);
   const [dataSourceStatus, setDataSourceStatus] = useState<DataSourceStatusRecord[]>([]);
-  const [poolsError, setPoolsError] = useState<string | null>(null);
-  const [poolsLoading, setPoolsLoading] = useState(false);
+  const [tagsError, setTagsError] = useState<string | null>(null);
+  const [tagsLoading, setTagsLoading] = useState(false);
 
-  const loadPoolsAndTags = useCallback(async () => {
-    setPoolsLoading(true);
-    setPoolsError(null);
+  const loadTagInventory = useCallback(async () => {
+    setTagsLoading(true);
+    setTagsError(null);
     try {
-      const [nextPools, nextTags, nextDataSourcePresets, nextDataSourceAssignments, nextDataSourceStatus] = await Promise.all([
-        apiGet<ResourcePoolView[]>("/api/v1/pools", apiToken),
+      const [nextTags, nextDataSourcePresets, nextDataSourceAssignments, nextDataSourceStatus] = await Promise.all([
         apiGet<TagView[]>("/api/v1/tags", apiToken),
         apiGet<DataSourcePresetRecord[]>("/api/v1/data-source-presets", apiToken),
         apiGet<DataSourcePresetAssignmentRecord[]>("/api/v1/data-source-assignments", apiToken),
         apiGet<DataSourceStatusRecord[]>("/api/v1/data-source-status", apiToken),
       ]);
-      setPools(nextPools);
       setTags(nextTags);
       setDataSourcePresets(nextDataSourcePresets);
       setDataSourceAssignments(nextDataSourceAssignments);
@@ -49,70 +45,49 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
-        setPools([]);
         setTags([]);
         setDataSourcePresets([]);
         setDataSourceAssignments([]);
         setDataSourceStatus([]);
-        setPoolsError("Operator login required");
+        setTagsError("Operator login required");
         return;
       }
-      setPoolsError(error instanceof Error ? error.message : "Pool/tag data unavailable");
+      setTagsError(error instanceof Error ? error.message : "Tag inventory unavailable");
     } finally {
-      setPoolsLoading(false);
+      setTagsLoading(false);
     }
   }, [apiToken, onUnauthorized]);
-
-  const createPool = useCallback(
-    async (name: string, provider: string, region: string) => {
-      await apiPost("/api/v1/pools", apiToken, {
-        name,
-        provider: provider || null,
-        region: region || null,
-      });
-      await loadPoolsAndTags();
-    },
-    [apiToken, loadPoolsAndTags],
-  );
 
   const createTag = useCallback(
     async (name: string) => {
       await apiPost("/api/v1/tags", apiToken, { name });
-      await loadPoolsAndTags();
+      await loadTagInventory();
     },
-    [apiToken, loadPoolsAndTags],
-  );
-
-  const assignPool = useCallback(
-    async (clientId: string, poolId: string) => {
-      await apiPost(`/api/v1/agents/${encodeURIComponent(clientId)}/pool`, apiToken, { pool_id: poolId });
-      await Promise.all([onFleetChanged(), loadPoolsAndTags()]);
-    },
-    [apiToken, loadPoolsAndTags, onFleetChanged],
+    [apiToken, loadTagInventory],
   );
 
   const assignTag = useCallback(
     async (clientId: string, tag: string) => {
       await apiPost(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, { tag });
-      await Promise.all([onFleetChanged(), loadPoolsAndTags()]);
+      await Promise.all([onFleetChanged(), loadTagInventory()]);
     },
-    [apiToken, loadPoolsAndTags, onFleetChanged],
+    [apiToken, loadTagInventory, onFleetChanged],
   );
 
   const createDataSourcePreset = useCallback(
     async (request: CreateDataSourcePresetRequest) => {
       await apiPost("/api/v1/data-source-presets", apiToken, request);
-      await loadPoolsAndTags();
+      await loadTagInventory();
     },
-    [apiToken, loadPoolsAndTags],
+    [apiToken, loadTagInventory],
   );
 
   const cloneDataSourcePreset = useCallback(
     async (presetId: string, request: CloneDataSourcePresetRequest) => {
       await apiPost(`/api/v1/data-source-presets/${encodeURIComponent(presetId)}/clone`, apiToken, request);
-      await loadPoolsAndTags();
+      await loadTagInventory();
     },
-    [apiToken, loadPoolsAndTags],
+    [apiToken, loadTagInventory],
   );
 
   const diffDataSourcePreset = useCallback(
@@ -142,10 +117,10 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
-      await loadPoolsAndTags();
+      await loadTagInventory();
       return response;
     },
-    [apiToken, loadPoolsAndTags],
+    [apiToken, loadTagInventory],
   );
 
   const assignDataSourcePreset = useCallback(
@@ -155,10 +130,10 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiToken,
         request,
       );
-      await loadPoolsAndTags();
+      await loadTagInventory();
       return response;
     },
-    [apiToken, loadPoolsAndTags],
+    [apiToken, loadTagInventory],
   );
 
   const renderDataSourceHotConfig = useCallback(
@@ -171,10 +146,9 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const resolveBulkPreview = useCallback(
-    async (poolIds: string[], tagNames: string[], destructive: boolean, tagMode: "any" | "all" = "any") =>
+    async (tagNames: string[], destructive: boolean, tagMode: "any" | "all" = "any") =>
       apiPost<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, {
         clients: [],
-        pools: poolIds,
         tags: tagNames,
         tag_mode: tagMode,
         destructive,
@@ -191,25 +165,22 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   return {
     assignDataSourcePreset,
-    assignPool,
     assignTag,
     cloneDataSourcePreset,
     createDataSourcePreset,
-    createPool,
     createTag,
     dataSourceAssignments,
     dataSourcePresets,
     dataSourceStatus,
     diffDataSourcePreset,
-    loadPoolsAndTags,
-    pools,
-    poolsError,
-    poolsLoading,
+    loadTagInventory,
     renderDataSourceHotConfig,
     resolveBulkPreview,
     resolveJobTargets,
     testDataSourcePreset,
     tags,
+    tagsError,
+    tagsLoading,
     updateDataSourcePreset,
   };
 }

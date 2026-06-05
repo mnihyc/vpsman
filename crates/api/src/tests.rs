@@ -39,7 +39,7 @@ fn discovery_document_uses_configured_gateway_endpoints() {
 }
 
 #[tokio::test]
-async fn memory_pool_assignment_participates_in_bulk_resolution() {
+async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -56,20 +56,16 @@ async fn memory_pool_assignment_participates_in_bulk_resolution() {
         .await;
     }
 
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "provider-a".to_string(),
-            provider: Some("provider".to_string()),
-            region: Some("region".to_string()),
-        })
+    repo.assign_agent_tag("client-a", "provider:provider-a")
         .await
         .unwrap();
-    let pool = repo.assign_agent_pool("client-a", pool.id).await.unwrap();
+    repo.assign_agent_tag("client-a", "country:US")
+        .await
+        .unwrap();
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             clients: Vec::new(),
-            pools: vec![pool.id],
-            tags: vec!["edge".to_string()],
+            tags: vec!["provider:provider-a".to_string(), "country:US".to_string()],
             tag_mode: None,
             destructive: true,
             confirmed: false,
@@ -77,10 +73,68 @@ async fn memory_pool_assignment_participates_in_bulk_resolution() {
         .await
         .unwrap();
 
-    assert_eq!(pool.clients.len(), 1);
     assert_eq!(targets.target_count, 1);
     assert!(targets.confirmation_required);
     assert_eq!(targets.targets[0].id, "client-a");
+
+    let explicit_tag_selector = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            clients: Vec::new(),
+            tags: vec![
+                "tag:provider:provider-a".to_string(),
+                "provider:provider-a".to_string(),
+                "country:US".to_string(),
+            ],
+            tag_mode: Some("all".to_string()),
+            destructive: false,
+            confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(explicit_tag_selector.target_count, 1);
+    assert_eq!(explicit_tag_selector.targets[0].id, "client-a");
+
+    let inner_any = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            clients: Vec::new(),
+            tags: vec!["id:client-a".to_string()],
+            tag_mode: None,
+            destructive: false,
+            confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(inner_any.target_count, 1);
+    assert_eq!(inner_any.targets[0].id, "client-a");
+
+    let inner_all = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            clients: Vec::new(),
+            tags: vec![
+                "name:client-a".to_string(),
+                "provider:provider-a".to_string(),
+                "country:US".to_string(),
+            ],
+            tag_mode: Some("all".to_string()),
+            destructive: false,
+            confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(inner_all.target_count, 1);
+    assert_eq!(inner_all.targets[0].id, "client-a");
+
+    let mismatch = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            clients: Vec::new(),
+            tags: vec!["id:client-a".to_string(), "country:DE".to_string()],
+            tag_mode: Some("all".to_string()),
+            destructive: false,
+            confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(mismatch.target_count, 0);
 }
 
 #[tokio::test]
@@ -105,7 +159,6 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: vec!["bgp".to_string(), "edge".to_string()],
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -122,13 +175,15 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
     assert_eq!(created.token.len(), 64);
     assert_eq!(created.token_prefix.len(), 12);
     assert!(!created.token.contains("bgp"));
+    let assigned_client_id = created.assigned_client_id.clone().unwrap();
+    assert!(uuid::Uuid::parse_str(&assigned_client_id).is_ok());
 
     let response = repo
         .claim_enrollment(
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
                 token: created.token.clone(),
-                client_id: "client-enrolled".to_string(),
+                client_id: None,
                 client_public_key_hex: "11".repeat(32),
             },
         )
@@ -140,7 +195,7 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
     let agents = repo.list_agents().await.unwrap();
     let listed_tokens = repo.list_enrollment_tokens().await.unwrap();
 
-    assert_eq!(response.client_id, "client-enrolled");
+    assert_eq!(response.client_id, assigned_client_id);
     assert_eq!(response.noise_mode, AgentNoiseMode::EnrolledIk);
     assert_eq!(
         response.tags,
@@ -151,12 +206,13 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
         ]
     );
     assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].id, response.client_id);
     assert_eq!(agents[0].status, "enrolled");
     assert_eq!(listed_tokens.len(), 1);
     assert_eq!(listed_tokens[0].token_prefix, created.token_prefix);
     assert_eq!(
         listed_tokens[0].used_by_client_id.as_deref(),
-        Some("client-enrolled")
+        Some(response.client_id.as_str())
     );
     assert!(listed_tokens[0].used_at.is_some());
 }
@@ -183,7 +239,6 @@ async fn enrollment_token_rejects_reuse_and_never_lists_plaintext_token() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -198,7 +253,7 @@ async fn enrollment_token_rejects_reuse_and_never_lists_plaintext_token() {
         .unwrap();
     let request = ClaimEnrollmentRequest {
         token: created.token.clone(),
-        client_id: "client-a".to_string(),
+        client_id: None,
         client_public_key_hex: "22".repeat(32),
     };
 
@@ -251,7 +306,7 @@ async fn gateway_identity_validation_uses_enrolled_client_public_key() {
         },
         session_id: Uuid::nil(),
     };
-    let token = repo
+    let created = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -260,7 +315,6 @@ async fn gateway_identity_validation_uses_enrolled_client_public_key() {
                 confirmed_reenrollment: false,
                 preserve_existing_assignments: None,
                 default_tags: Vec::new(),
-                default_pool_name: None,
                 default_display_name: None,
                 unmanaged_update_enabled: None,
                 unmanaged_update_version_url: None,
@@ -272,13 +326,13 @@ async fn gateway_identity_validation_uses_enrolled_client_public_key() {
             &operator,
         )
         .await
-        .unwrap()
-        .token;
+        .unwrap();
+    let client_id = created.assigned_client_id.clone().unwrap();
     repo.claim_enrollment(
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
-            token,
-            client_id: "client-a".to_string(),
+            token: created.token,
+            client_id: None,
             client_public_key_hex: "55".repeat(32),
         },
     )
@@ -286,11 +340,11 @@ async fn gateway_identity_validation_uses_enrolled_client_public_key() {
     .unwrap();
 
     assert!(repo
-        .validate_agent_public_key("client-a", &"55".repeat(32))
+        .validate_agent_public_key(&client_id, &"55".repeat(32))
         .await
         .unwrap());
     assert!(!repo
-        .validate_agent_public_key("client-a", &"66".repeat(32))
+        .validate_agent_public_key(&client_id, &"66".repeat(32))
         .await
         .unwrap());
     assert!(!repo
@@ -333,7 +387,6 @@ async fn rejected_job_records_frozen_target_results() {
             "missing-client".to_string(),
         ],
         clients: Vec::new(),
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -370,7 +423,7 @@ async fn rejected_job_records_frozen_target_results() {
 }
 
 #[tokio::test]
-async fn rejected_job_freezes_pool_and_tag_targets() {
+async fn rejected_job_freezes_tag_targets() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         for client_id in ["client-a", "client-b"] {
@@ -389,16 +442,10 @@ async fn rejected_job_freezes_pool_and_tag_targets() {
         }
     }
     repo.assign_agent_tag("client-a", "edge").await.unwrap();
-    repo.assign_agent_tag("client-b", "bgp").await.unwrap();
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "provider-a".to_string(),
-            provider: None,
-            region: None,
-        })
+    repo.assign_agent_tag("client-a", "provider:provider-a")
         .await
         .unwrap();
-    repo.assign_agent_pool("client-a", pool.id).await.unwrap();
+    repo.assign_agent_tag("client-b", "bgp").await.unwrap();
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
@@ -412,8 +459,7 @@ async fn rejected_job_freezes_pool_and_tag_targets() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: Vec::new(),
-        pools: vec![pool.id],
-        tags: vec!["bgp".to_string()],
+        tags: vec!["provider:provider-a".to_string(), "bgp".to_string()],
         tag_mode: None,
         destructive: true,
         confirmed: true,
@@ -468,7 +514,6 @@ fn server_signs_proof_bearing_envelope_for_resolved_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -514,7 +559,6 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -546,7 +590,6 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -583,7 +626,6 @@ fn file_pull_job_command_requires_absolute_path() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -612,7 +654,6 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -644,7 +685,6 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
     let mut request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -679,7 +719,6 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -709,7 +748,6 @@ fn process_list_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -739,7 +777,6 @@ fn process_list_job_command_bounds_limit() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -777,7 +814,6 @@ async fn dispatching_job_records_and_updates_target_results() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

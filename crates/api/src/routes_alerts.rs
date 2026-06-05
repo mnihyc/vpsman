@@ -595,10 +595,7 @@ fn validate_alert_state_value(state: &str, code: &'static str) -> Result<(), Api
 }
 
 fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<(), ApiError> {
-    if matches!(
-        scope_kind.trim(),
-        "global" | "provider" | "pool" | "tag" | "client"
-    ) {
+    if matches!(scope_kind.trim(), "global" | "provider" | "tag" | "client") {
         Ok(())
     } else {
         Err(ApiError::bad_request(

@@ -60,7 +60,6 @@ impl Repository {
                     .map(|value| value.to_ascii_lowercase()),
             },
             clients: request.clients,
-            pools: request.pools,
             tags: request.tags,
             interval_secs: request.interval_secs,
             start_at_unix: request.start_at_unix,
@@ -389,7 +388,6 @@ impl Repository {
         let audit_metadata = serde_json::json!({
             "name": &schedule.name,
             "clients": &schedule.clients,
-            "pools": &schedule.pools,
             "tags": &schedule.tags,
             "interval_secs": schedule.interval_secs,
             "retention_days": metadata.retention_days,
@@ -555,7 +553,6 @@ fn backup_policy_view(
         name: schedule.name,
         enabled: schedule.enabled,
         clients: schedule.clients,
-        pools: schedule.pools,
         tags: schedule.tags,
         paths,
         include_config,

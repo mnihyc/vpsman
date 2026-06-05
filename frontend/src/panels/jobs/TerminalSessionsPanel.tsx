@@ -7,6 +7,7 @@ import type { TerminalReplayRecord, TerminalSessionRecord } from "../../typesTer
 import { formatTime, shortId, statusClass } from "../../utils";
 
 export function TerminalSessionsPanel({
+  clientLabel,
   sessions,
   lastTerminalOutputEvent,
   loading,
@@ -14,6 +15,7 @@ export function TerminalSessionsPanel({
   onReplay,
   onRefresh,
 }: {
+  clientLabel: (clientId: string) => string;
   sessions: TerminalSessionRecord[];
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
@@ -89,7 +91,7 @@ export function TerminalSessionsPanel({
       </div>
       <CrudPager
         fields={[
-          { label: "VPS", value: (session) => session.client_id },
+          { label: "VPS", value: (session) => clientLabel(session.client_id) },
           { label: "Session", value: (session) => session.session_id },
           { label: "State", value: (session) => `${session.state} ${session.last_status}` },
           { label: "Command", value: (session) => `${formatArgv(session.argv)} ${session.last_command_type}` },
@@ -125,7 +127,7 @@ export function TerminalSessionsPanel({
               return (
                 <div className="historyRow terminalSessionGrid" key={`${session.client_id}:${session.session_id}`}>
                   <span className="historyPrimary">
-                    <strong>{session.client_id}</strong>
+                    <strong>{clientLabel(session.client_id)}</strong>
                     <small>{shortId(session.session_id)}</small>
                   </span>
                   <span className="historyPrimary">

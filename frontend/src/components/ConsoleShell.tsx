@@ -15,6 +15,7 @@ import { Metric } from "./Metric";
 import { navSections } from "../constants";
 import type { ActiveView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
+import { usePanelDisplaySettings } from "../panelDisplay";
 
 type ConsoleShellProps = {
   activeSavedFleetViewId: string | null;
@@ -32,6 +33,7 @@ type ConsoleShellProps = {
   onClearFleetView: () => void;
   onDeleteSavedFleetView: () => void;
   onFleetQueryChange: (query: string) => void;
+  onOpenAccessControls: () => void;
   onSaveFleetView: () => void;
   onSelectView: (view: ActiveView) => void;
   onSavedFleetViewNameChange: (name: string) => void;
@@ -55,12 +57,14 @@ export function ConsoleShell({
   onClearSession,
   onDeleteSavedFleetView,
   onFleetQueryChange,
+  onOpenAccessControls,
   onSaveFleetView,
   onSelectView,
   onSavedFleetViewNameChange,
   savedFleetViews,
   summary,
 }: ConsoleShellProps) {
+  const { vpsNameDisplayMode, setVpsNameDisplayMode } = usePanelDisplaySettings();
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
@@ -115,11 +119,22 @@ export function ConsoleShell({
               id="fleet-search"
               name="fleet-search"
               onChange={(event) => onFleetQueryChange(event.target.value)}
-              placeholder="Search VPS, tag, pool, job"
+              placeholder="Search VPS, tag, provider, job"
               value={fleetQuery}
             />
           </div>
           <div className="topbarActions">
+            <label className="panelDisplayControl">
+              <span>Panel display</span>
+              <select
+                aria-label="VPS name display"
+                onChange={(event) => setVpsNameDisplayMode(event.target.value === "name" ? "name" : "name_id_suffix")}
+                value={vpsNameDisplayMode}
+              >
+                <option value="name_id_suffix">Name (last4)</option>
+                <option value="name">Name only</option>
+              </select>
+            </label>
             <div className="savedViewControls" aria-label="Saved fleet views">
               <select
                 aria-label="Saved fleet view"
@@ -174,7 +189,13 @@ export function ConsoleShell({
               <RadioTower size={17} />
               <span>Live control plane</span>
             </span>
-            <button className="iconButton" aria-label="Open command palette" title="Command palette" type="button">
+            <button
+              className="iconButton"
+              aria-label="Focus fleet search"
+              onClick={() => document.getElementById("fleet-search")?.focus()}
+              title="Focus fleet search"
+              type="button"
+            >
               <Command size={19} />
             </button>
             {apiToken && (
@@ -183,7 +204,12 @@ export function ConsoleShell({
                 <span>Session</span>
               </button>
             )}
-            <button className="primaryAction" type="button">
+            <button
+              aria-label="Open access controls"
+              className="primaryAction"
+              onClick={onOpenAccessControls}
+              type="button"
+            >
               <ShieldCheck size={18} />
               <span>Unlock</span>
             </button>

@@ -28,7 +28,6 @@ impl Repository {
                         enabled,
                         operation,
                         target_clients,
-                        target_pools,
                         target_tags,
                         interval_secs,
                         catch_up_policy,
@@ -56,7 +55,6 @@ impl Repository {
                             enabled: row.try_get("enabled")?,
                             operation: operation.0,
                             clients: row.try_get("target_clients")?,
-                            pools: row.try_get("target_pools")?,
                             tags: row.try_get("target_tags")?,
                             interval_secs: row.try_get("interval_secs")?,
                             catch_up_policy: row.try_get("catch_up_policy")?,
@@ -94,7 +92,6 @@ impl Repository {
                     enabled: request.enabled,
                     operation: request.operation,
                     clients: request.clients,
-                    pools: request.pools,
                     tags: request.tags,
                     interval_secs: request.interval_secs as i64,
                     catch_up_policy: request.catch_up_policy,
@@ -126,7 +123,6 @@ impl Repository {
                         "name": &schedule.name,
                         "operation_type": &schedule.command_type,
                         "clients": &schedule.clients,
-                        "pools": &schedule.pools,
                         "tags": &schedule.tags,
                         "interval_secs": schedule.interval_secs,
                         "catch_up_policy": &schedule.catch_up_policy,
@@ -151,7 +147,6 @@ impl Repository {
                         enabled,
                         operation,
                         target_clients,
-                        target_pools,
                         target_tags,
                         interval_secs,
                         catch_up_policy,
@@ -160,13 +155,12 @@ impl Repository {
                         max_failures,
                         next_run_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, to_timestamp($13))
                     ON CONFLICT (name) DO UPDATE SET
                         actor_id = EXCLUDED.actor_id,
                         enabled = EXCLUDED.enabled,
                         operation = EXCLUDED.operation,
                         target_clients = EXCLUDED.target_clients,
-                        target_pools = EXCLUDED.target_pools,
                         target_tags = EXCLUDED.target_tags,
                         interval_secs = EXCLUDED.interval_secs,
                         catch_up_policy = EXCLUDED.catch_up_policy,
@@ -183,7 +177,6 @@ impl Repository {
                         enabled,
                         operation,
                         target_clients,
-                        target_pools,
                         target_tags,
                         interval_secs,
                         catch_up_policy,
@@ -203,7 +196,6 @@ impl Repository {
                 .bind(request.enabled)
                 .bind(SqlJson(request.operation.clone()))
                 .bind(&request.clients)
-                .bind(&request.pools)
                 .bind(&request.tags)
                 .bind(request.interval_secs as i64)
                 .bind(&request.catch_up_policy)
@@ -220,7 +212,6 @@ impl Repository {
                     enabled: row.try_get("enabled")?,
                     operation: operation.0,
                     clients: row.try_get("target_clients")?,
-                    pools: row.try_get("target_pools")?,
                     tags: row.try_get("target_tags")?,
                     interval_secs: row.try_get("interval_secs")?,
                     catch_up_policy: row.try_get("catch_up_policy")?,
@@ -249,7 +240,6 @@ impl Repository {
                     "name": &schedule.name,
                     "operation_type": &schedule.command_type,
                     "clients": &schedule.clients,
-                    "pools": &schedule.pools,
                     "tags": &schedule.tags,
                     "interval_secs": schedule.interval_secs,
                     "catch_up_policy": &schedule.catch_up_policy,
@@ -274,7 +264,6 @@ struct ScheduleRowParts {
     enabled: bool,
     operation: vpsman_common::JobCommand,
     clients: Vec<String>,
-    pools: Vec<Uuid>,
     tags: Vec<String>,
     interval_secs: i64,
     catch_up_policy: String,
@@ -297,7 +286,6 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> ScheduleView {
         command_type,
         operation: parts.operation,
         clients: parts.clients,
-        pools: parts.pools,
         tags: parts.tags,
         interval_secs: parts.interval_secs,
         catch_up_policy: parts.catch_up_policy,

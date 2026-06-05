@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { GitGraph, RefreshCcw, Search } from "lucide-react";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import type { TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
-import { formatTime, shortId, statusClass } from "../../utils";
+import { formatTime, formatVpsName, statusClass, type VpsNameDisplayMode } from "../../utils";
 
 type PositionedNode = TopologyGraphNode & {
   x: number;
@@ -31,6 +32,7 @@ export function TopologyGraphPanel({
   loading: boolean;
   onRefresh: () => Promise<void>;
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [query, setQuery] = useState("");
   const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
@@ -144,7 +146,7 @@ export function TopologyGraphPanel({
             })}
             {nodes.map((node) => (
               <g
-                aria-label={`Select ${node.display_name || node.client_id}`}
+                aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
                 className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${node.degraded_tunnel_count > 0 ? "degraded" : node.status}`}
                 key={node.client_id}
                 onClick={() => setSelectedClientId(node.client_id)}
@@ -158,7 +160,7 @@ export function TopologyGraphPanel({
               >
                 <circle cx={node.x} cy={node.y} r="34" />
                 <text x={node.x} y={node.y - 3}>
-                  {truncateLabel(node.display_name || node.client_id, 14)}
+                  {truncateLabel(nodeLabel(node, vpsNameDisplayMode), 14)}
                 </text>
                 <text className="topologyGraphMetric" x={node.x} y={node.y + 14}>
                   {node.applied_tunnel_count}/{node.tunnel_count} applied
@@ -169,7 +171,7 @@ export function TopologyGraphPanel({
           {selectedNode && (
             <div className="topologyNodeInspector">
               <span className="historyPrimary">
-                <strong>{selectedNode.display_name || selectedNode.client_id}</strong>
+                <strong>{nodeLabel(selectedNode, vpsNameDisplayMode)}</strong>
                 <small>{selectedNode.status}; {selectedEdges.length} visible tunnels</small>
               </span>
               <span className="topologyTagList">
@@ -194,7 +196,7 @@ export function TopologyGraphPanel({
                 <span className="historyPrimary">
                   <strong>{edge.plan_name}</strong>
                   <small>
-                    {shortId(edge.left_client_id)} {"->"} {shortId(edge.right_client_id)}
+                    {edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}
                   </small>
                 </span>
                 <span className={`status ${statusClass(edge.health)}`}>{edge.health}</span>
@@ -377,7 +379,8 @@ function edgeMetric(edge: TopologyGraphEdge): string {
 
 function edgeStatusDetail(edge: TopologyGraphEdge): string {
   if (edge.convergence_blocked) {
-    return `blocked: ${edgeOfflineClientIds(edge).map(shortId).join(", ")}`;
+    const blockedCount = edgeOfflineClientIds(edge).length;
+    return blockedCount > 0 ? `${blockedCount} endpoint${blockedCount === 1 ? "" : "s"} offline` : "convergence blocked";
   }
   if ((edge.import_candidate_count ?? 0) > 0) {
     return `${edge.import_candidate_count} import candidate${edge.import_candidate_count === 1 ? "" : "s"}`;
@@ -453,6 +456,20 @@ function edgeRuntimeReasons(edge: TopologyGraphEdge): string[] {
 
 function humanStatus(value: string | null | undefined): string {
   return value ? value.replace(/_/g, " ") : "unknown";
+}
+
+function nodeLabel(node: Pick<TopologyGraphNode, "client_id" | "display_name">, mode: VpsNameDisplayMode): string {
+  return formatVpsName(node, mode);
+}
+
+function edgeEndpointLabel(
+  edge: TopologyGraphEdge,
+  nodeById: Map<string, TopologyGraphNode>,
+  mode: VpsNameDisplayMode,
+): string {
+  const left = nodeById.get(edge.left_client_id);
+  const right = nodeById.get(edge.right_client_id);
+  return `${left ? nodeLabel(left, mode) : "Unknown VPS"} -> ${right ? nodeLabel(right, mode) : "Unknown VPS"}`;
 }
 
 function truncateLabel(value: string, maxLength: number): string {

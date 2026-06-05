@@ -163,7 +163,6 @@ pub(crate) fn submit_vty_tunnel_probe(
             "command": "network_probe",
             "argv": [],
             "clients": [endpoint.local_client_id],
-            "pools": [],
             "tags": [],
             "privileged": true,
             "destructive": false,

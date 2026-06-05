@@ -8,17 +8,17 @@ use crate::{
     data_source_builtin_presets::DATA_SOURCE_DOMAINS,
     error::ApiError,
     model::{
-        AgentView, AssignDataSourcePresetRequest, AssignPoolRequest, AssignTagRequest,
-        BulkResolveRequest, BulkResolveResponse, CloneDataSourcePresetRequest,
-        CreateDataSourcePresetRequest, CreatePoolRequest, CreateTagRequest,
-        DataSourceHotConfigQuery, DataSourceHotConfigView, DataSourcePresetAssignmentQuery,
-        DataSourcePresetAssignmentView, DataSourcePresetDiffRequest, DataSourcePresetDiffView,
-        DataSourcePresetQuery, DataSourcePresetTestView, DataSourcePresetView,
-        DataSourceStatusQuery, DataSourceStatusView, FleetSummary, GatewaySessionView,
-        HistoryQuery, ResourcePoolView, TagView, TelemetryNetworkRateQuery,
-        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery,
-        TelemetryTunnelView, TestDataSourcePresetRequest, UpdateAgentAliasRequest,
-        UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse, WsEvent,
+        AgentView, AssignDataSourcePresetRequest, AssignTagRequest, BulkResolveRequest,
+        BulkResolveResponse, CloneDataSourcePresetRequest, CreateDataSourcePresetRequest,
+        CreateTagRequest, DataSourceHotConfigQuery, DataSourceHotConfigView,
+        DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
+        DataSourcePresetDiffRequest, DataSourcePresetDiffView, DataSourcePresetQuery,
+        DataSourcePresetTestView, DataSourcePresetView, DataSourceStatusQuery,
+        DataSourceStatusView, FleetSummary, GatewaySessionView, HistoryQuery, TagView,
+        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
+        TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
+        UpdateDataSourcePresetResponse, WsEvent,
     },
     state::AppState,
     util::limit_or_default,
@@ -137,25 +137,6 @@ pub(crate) async fn list_telemetry_tunnels(
             )
             .await?,
     ))
-}
-
-pub(crate) async fn list_pools(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ResourcePoolView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(state.repo.list_pools().await?))
-}
-
-pub(crate) async fn create_pool(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<CreatePoolRequest>,
-) -> Result<Json<ResourcePoolView>, ApiError> {
-    let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
-        .await?;
-    Ok(Json(state.repo.create_pool(request).await?))
 }
 
 pub(crate) async fn list_tags(
@@ -356,6 +337,7 @@ pub(crate) async fn create_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    validate_persisted_tag_name(&request.name)?;
     Ok(Json(state.repo.create_tag(request).await?))
 }
 
@@ -436,7 +418,7 @@ fn validate_assign_data_source_preset(
     request: &AssignDataSourcePresetRequest,
 ) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
-    if request.clients.is_empty() && request.pools.is_empty() && request.tags.is_empty() {
+    if request.clients.is_empty() && request.tags.is_empty() {
         return Err(ApiError::bad_request(
             "data_source_assignment_targets_required",
         ));
@@ -570,27 +552,11 @@ pub(crate) async fn assign_agent_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    validate_persisted_tag_name(&request.tag)?;
     Ok(Json(
         state
             .repo
             .assign_agent_tag(&client_id, &request.tag)
-            .await?,
-    ))
-}
-
-pub(crate) async fn assign_agent_pool(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(client_id): Path<String>,
-    Json(request): Json<AssignPoolRequest>,
-) -> Result<Json<ResourcePoolView>, ApiError> {
-    let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
-        .await?;
-    Ok(Json(
-        state
-            .repo
-            .assign_agent_pool(&client_id, request.pool_id)
             .await?,
     ))
 }
@@ -617,6 +583,22 @@ fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), A
         .is_some_and(|bucket_secs| !(60..=86_400).contains(&bucket_secs))
     {
         return Err(ApiError::bad_request("invalid_bucket_secs"));
+    }
+    Ok(())
+}
+
+fn validate_persisted_tag_name(tag: &str) -> Result<(), ApiError> {
+    if tag.is_empty() || tag.len() > 128 {
+        return Err(ApiError::bad_request("invalid_tag_name"));
+    }
+    if tag.starts_with("id:") || tag.starts_with("name:") {
+        return Err(ApiError::bad_request("reserved_inner_tag_selector"));
+    }
+    if !tag
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(ApiError::bad_request("invalid_tag_name"));
     }
     Ok(())
 }
@@ -674,4 +656,19 @@ fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), A
         return Err(ApiError::bad_request("invalid_tunnel_interface"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_persisted_tag_name;
+
+    #[test]
+    fn persisted_tags_reject_inner_selector_prefixes() {
+        validate_persisted_tag_name("provider:alpha").unwrap();
+        validate_persisted_tag_name("country:US").unwrap();
+        validate_persisted_tag_name("pool:legacy-name").unwrap();
+
+        assert!(validate_persisted_tag_name("id:edge-a").is_err());
+        assert!(validate_persisted_tag_name("name:edge-a").is_err());
+    }
 }

@@ -88,94 +88,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn list_pools(&self) -> Result<Vec<ResourcePoolView>> {
-        match self {
-            Self::Memory(memory) => {
-                let agents = memory.agents.read().await;
-                let memberships = memory.agent_pools.read().await;
-                let mut pools = memory.pools.read().await.clone();
-                for pool in &mut pools {
-                    pool.clients = agents
-                        .iter()
-                        .filter(|agent| memberships.get(&agent.id) == Some(&pool.id))
-                        .cloned()
-                        .collect();
-                }
-                Ok(pools)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, name, provider, region
-                    FROM resource_pools
-                    ORDER BY name, id
-                    "#,
-                )
-                .fetch_all(pool)
-                .await?;
-                let mut pools = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let id: Uuid = row.try_get("id")?;
-                    pools.push(ResourcePoolView {
-                        id,
-                        name: row.try_get("name")?,
-                        provider: row.try_get("provider")?,
-                        region: row.try_get("region")?,
-                        clients: self.clients_for_pool(id).await?,
-                    });
-                }
-                Ok(pools)
-            }
-        }
-    }
-
-    pub(crate) async fn create_pool(&self, request: CreatePoolRequest) -> Result<ResourcePoolView> {
-        match self {
-            Self::Memory(memory) => {
-                let mut pools = memory.pools.write().await;
-                if let Some(pool) = pools.iter().find(|pool| pool.name == request.name) {
-                    return Ok(pool.clone());
-                }
-                let pool = ResourcePoolView {
-                    id: Uuid::new_v4(),
-                    name: request.name,
-                    provider: request.provider,
-                    region: request.region,
-                    clients: Vec::new(),
-                };
-                pools.push(pool.clone());
-                Ok(pool)
-            }
-            Self::Postgres(pool) => {
-                let id = Uuid::new_v4();
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO resource_pools (id, name, provider, region)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (name) DO UPDATE SET
-                        provider = EXCLUDED.provider,
-                        region = EXCLUDED.region
-                    RETURNING id, name, provider, region
-                    "#,
-                )
-                .bind(id)
-                .bind(&request.name)
-                .bind(&request.provider)
-                .bind(&request.region)
-                .fetch_one(pool)
-                .await?;
-                let id: Uuid = row.try_get("id")?;
-                Ok(ResourcePoolView {
-                    id,
-                    name: row.try_get("name")?,
-                    provider: row.try_get("provider")?,
-                    region: row.try_get("region")?,
-                    clients: self.clients_for_pool(id).await?,
-                })
-            }
-        }
-    }
-
     pub(crate) async fn list_tags(&self) -> Result<Vec<TagView>> {
         match self {
             Self::Memory(memory) => {
@@ -391,151 +303,20 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn assign_agent_pool(
-        &self,
-        client_id: &str,
-        pool_id: Uuid,
-    ) -> Result<ResourcePoolView> {
-        match self {
-            Self::Memory(memory) => {
-                let pool_exists = memory
-                    .pools
-                    .read()
-                    .await
-                    .iter()
-                    .any(|pool| pool.id == pool_id);
-                anyhow::ensure!(pool_exists, "pool_not_found");
-                memory
-                    .agent_pools
-                    .write()
-                    .await
-                    .insert(client_id.to_string(), pool_id);
-                self.pool_by_id(pool_id).await
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    UPDATE clients
-                    SET pool_id = $2
-                    WHERE id = $1
-                    "#,
-                )
-                .bind(client_id)
-                .bind(pool_id)
-                .execute(pool)
-                .await?;
-                self.pool_by_id(pool_id).await
-            }
-        }
-    }
-
-    pub(crate) async fn pool_by_id(&self, pool_id: Uuid) -> Result<ResourcePoolView> {
-        match self {
-            Self::Memory(memory) => {
-                let pool = memory
-                    .pools
-                    .read()
-                    .await
-                    .iter()
-                    .find(|pool| pool.id == pool_id)
-                    .cloned()
-                    .with_context(|| format!("pool_not_found:{pool_id}"))?;
-                let agents = memory.agents.read().await;
-                let memberships = memory.agent_pools.read().await;
-                Ok(ResourcePoolView {
-                    clients: agents
-                        .iter()
-                        .filter(|agent| memberships.get(&agent.id) == Some(&pool.id))
-                        .cloned()
-                        .collect(),
-                    ..pool
-                })
-            }
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT id, name, provider, region
-                    FROM resource_pools
-                    WHERE id = $1
-                    "#,
-                )
-                .bind(pool_id)
-                .fetch_one(pool)
-                .await?;
-                let id: Uuid = row.try_get("id")?;
-                Ok(ResourcePoolView {
-                    id,
-                    name: row.try_get("name")?,
-                    provider: row.try_get("provider")?,
-                    region: row.try_get("region")?,
-                    clients: self.clients_for_pool(id).await?,
-                })
-            }
-        }
-    }
-
-    pub(crate) async fn pool_by_name(&self, pool_name: &str) -> Result<ResourcePoolView> {
-        match self {
-            Self::Memory(memory) => {
-                let pool = memory
-                    .pools
-                    .read()
-                    .await
-                    .iter()
-                    .find(|pool| pool.name == pool_name)
-                    .cloned()
-                    .with_context(|| format!("pool_not_found_by_name:{pool_name}"))?;
-                let agents = memory.agents.read().await;
-                let memberships = memory.agent_pools.read().await;
-                Ok(ResourcePoolView {
-                    clients: agents
-                        .iter()
-                        .filter(|agent| memberships.get(&agent.id) == Some(&pool.id))
-                        .cloned()
-                        .collect(),
-                    ..pool
-                })
-            }
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT id, name, provider, region
-                    FROM resource_pools
-                    WHERE name = $1
-                    "#,
-                )
-                .bind(pool_name)
-                .fetch_one(pool)
-                .await?;
-                let id: Uuid = row.try_get("id")?;
-                Ok(ResourcePoolView {
-                    id,
-                    name: row.try_get("name")?,
-                    provider: row.try_get("provider")?,
-                    region: row.try_get("region")?,
-                    clients: self.clients_for_pool(id).await?,
-                })
-            }
-        }
-    }
-
     pub(crate) async fn resolve_bulk_targets(
         &self,
         request: &BulkResolveRequest,
     ) -> Result<BulkResolveResponse> {
         let tag_mode = normalize_bulk_tag_mode(request.tag_mode.as_deref());
+        let selectors = bulk_tag_selectors(&request.tags);
         let mut targets = match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await;
-                let memberships = memory.agent_pools.read().await;
                 agents
                     .iter()
                     .filter(|agent| {
                         request.clients.iter().any(|client| client == &agent.id)
-                            || memberships.get(&agent.id).is_some_and(|pool_id| {
-                                request.pools.iter().any(|target| target == pool_id)
-                            })
-                            || agent_matches_bulk_tags(&agent.tags, &request.tags, tag_mode)
+                            || agent_matches_bulk_selectors(agent, &selectors, tag_mode)
                     })
                     .cloned()
                     .collect::<Vec<_>>()
@@ -557,33 +338,45 @@ impl Repository {
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE
                         c.id = ANY($1)
-                        OR c.pool_id = ANY($2)
-                        OR EXISTS (
-                            SELECT 1
-                            FROM client_tags matching_ct
-                            JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
-                            WHERE matching_ct.client_id = c.id
-                              AND matching_tag.name = ANY($3)
-                              AND $4 = 'any'
+                        OR (
+                            $6 = 'any'
+                            AND $5 > 0
+                            AND (
+                                c.id = ANY($2)
+                                OR c.display_name = ANY($3)
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM client_tags matching_ct
+                                    JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
+                                    WHERE matching_ct.client_id = c.id
+                                      AND matching_tag.name = ANY($4)
+                                )
+                            )
                         )
                         OR (
-                            $4 = 'all'
-                            AND cardinality($3::text[]) > 0
+                            $6 = 'all'
+                            AND $5 > 0
                             AND (
-                                SELECT COUNT(DISTINCT matching_tag.name)
-                                FROM client_tags matching_ct
-                                JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
-                                WHERE matching_ct.client_id = c.id
-                                  AND matching_tag.name = ANY($3)
-                            ) = cardinality($3::text[])
+                                (CASE WHEN c.id = ANY($2) THEN 1 ELSE 0 END)
+                                + (CASE WHEN c.display_name = ANY($3) THEN 1 ELSE 0 END)
+                                + (
+                                    SELECT COUNT(DISTINCT matching_tag.name)::INT
+                                    FROM client_tags matching_ct
+                                    JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
+                                    WHERE matching_ct.client_id = c.id
+                                      AND matching_tag.name = ANY($4)
+                                )
+                            ) = $5
                         )
                     GROUP BY c.id, c.display_name, c.status, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
                 .bind(&request.clients)
-                .bind(&request.pools)
-                .bind(&request.tags)
+                .bind(&selectors.ids)
+                .bind(&selectors.names)
+                .bind(&selectors.tags)
+                .bind(selectors.selector_count)
                 .bind(tag_mode)
                 .fetch_all(pool)
                 .await?;
@@ -613,51 +406,6 @@ impl Repository {
             confirmation_required: request.destructive && !request.confirmed,
         })
     }
-    pub(crate) async fn clients_for_pool(&self, pool_id: Uuid) -> Result<Vec<AgentView>> {
-        match self {
-            Self::Memory(_) => Ok(Vec::new()),
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        c.id,
-                        c.display_name,
-                        c.status,
-                        c.capabilities,
-                        COALESCE(
-                            array_remove(array_agg(t.name ORDER BY t.name), NULL),
-                            ARRAY[]::TEXT[]
-                        ) AS tags
-                    FROM clients c
-                    LEFT JOIN client_tags ct ON ct.client_id = c.id
-                    LEFT JOIN tags t ON t.id = ct.tag_id
-                    WHERE c.pool_id = $1
-                    GROUP BY c.id, c.display_name, c.status, c.capabilities
-                    ORDER BY c.display_name, c.id
-                    "#,
-                )
-                .bind(pool_id)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(AgentView {
-                            id: row.try_get("id")?,
-                            display_name: row.try_get("display_name")?,
-                            status: row.try_get("status")?,
-                            tags: row.try_get("tags")?,
-                            capabilities: row
-                                .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
-                                    "capabilities",
-                                )?
-                                .0,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn clients_for_tag(&self, tag: &str) -> Result<Vec<AgentView>> {
         match self {
             Self::Memory(memory) => Ok(memory
@@ -720,20 +468,83 @@ fn normalize_bulk_tag_mode(value: Option<&str>) -> &'static str {
     }
 }
 
-fn agent_matches_bulk_tags(
-    agent_tags: &[String],
-    requested_tags: &[String],
+#[derive(Debug, Default)]
+struct BulkTagSelectors {
+    ids: Vec<String>,
+    names: Vec<String>,
+    tags: Vec<String>,
+    selector_count: i32,
+}
+
+fn bulk_tag_selectors(tags: &[String]) -> BulkTagSelectors {
+    let mut selectors = BulkTagSelectors::default();
+    let mut seen = HashSet::new();
+    for raw in tags {
+        let selector = raw.trim();
+        if selector.is_empty() {
+            continue;
+        }
+        if let Some(client_id) = selector.strip_prefix("id:") {
+            push_bulk_selector(&mut selectors, &mut seen, "id", client_id);
+        } else if let Some(display_name) = selector.strip_prefix("name:") {
+            push_bulk_selector(&mut selectors, &mut seen, "name", display_name);
+        } else if let Some(tag) = selector.strip_prefix("tag:") {
+            push_bulk_selector(&mut selectors, &mut seen, "tag", tag);
+        } else {
+            push_bulk_selector(&mut selectors, &mut seen, "tag", selector);
+        }
+    }
+    selectors
+}
+
+fn push_bulk_selector(
+    selectors: &mut BulkTagSelectors,
+    seen: &mut HashSet<String>,
+    kind: &str,
+    value: &str,
+) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    let key = format!("{kind}\0{value}");
+    if !seen.insert(key) {
+        return;
+    }
+    match kind {
+        "id" => selectors.ids.push(value.to_string()),
+        "name" => selectors.names.push(value.to_string()),
+        _ => selectors.tags.push(value.to_string()),
+    }
+    selectors.selector_count += 1;
+}
+
+fn agent_matches_bulk_selectors(
+    agent: &AgentView,
+    selectors: &BulkTagSelectors,
     tag_mode: &str,
 ) -> bool {
-    if requested_tags.is_empty() {
+    if selectors.selector_count == 0 {
         return false;
     }
     if tag_mode == "all" {
-        return requested_tags
-            .iter()
-            .all(|tag| agent_tags.iter().any(|agent_tag| agent_tag == tag));
+        return selectors.ids.iter().all(|id| &agent.id == id)
+            && selectors
+                .names
+                .iter()
+                .all(|name| &agent.display_name == name)
+            && selectors
+                .tags
+                .iter()
+                .all(|tag| agent.tags.iter().any(|agent_tag| agent_tag == tag));
     }
-    requested_tags
-        .iter()
-        .any(|tag| agent_tags.iter().any(|agent_tag| agent_tag == tag))
+    selectors.ids.iter().any(|id| &agent.id == id)
+        || selectors
+            .names
+            .iter()
+            .any(|name| &agent.display_name == name)
+        || selectors
+            .tags
+            .iter()
+            .any(|tag| agent.tags.iter().any(|agent_tag| agent_tag == tag))
 }

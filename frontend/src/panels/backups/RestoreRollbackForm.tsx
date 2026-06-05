@@ -52,11 +52,11 @@ export function RestoreRollbackForm({
           />
         </label>
         <label>
-          <span>Target client</span>
+          <span>Target VPS</span>
           <input
-            aria-label="Restore rollback target client"
+            aria-label="Restore rollback target VPS ID"
             onChange={(event) => onTargetClientIdChange(event.target.value)}
-            placeholder="client id"
+            placeholder="VPS ID from details"
             value={targetClientId}
           />
         </label>

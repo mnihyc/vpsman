@@ -3,22 +3,31 @@ import { ConsoleShell } from "./components/ConsoleShell";
 import { AuthPanel } from "./panels/AuthPanel";
 import { FleetWorkspace } from "./panels/FleetWorkspace";
 import { JobHistoryPanel } from "./panels/JobHistoryPanel";
-import { PoolsTagsPanel } from "./panels/PoolsTagsPanel";
+import { TagsPanel } from "./panels/TagsPanel";
 import { SchedulesPanel } from "./panels/SchedulesPanel";
 import { AccessPanel } from "./panels/AccessPanel";
 import { AuditLogPanel } from "./panels/AuditLogPanel";
 import { BackupsPanel } from "./panels/BackupsPanel";
 import { TopologyPanel } from "./panels/TopologyPanel";
+import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
-import { getHeroCopy, getHeroTitle } from "./utils";
+import {
+  DEFAULT_VPS_NAME_DISPLAY_MODE,
+  getHeroCopy,
+  getHeroTitle,
+  type VpsNameDisplayMode,
+} from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
+
+const VPS_NAME_DISPLAY_MODE_STORAGE_KEY = "vpsman.panelDisplay.vpsNameMode";
 
 export function App() {
   const [activeView, setActiveView] = useState<ActiveView>("Fleet");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [vpsNameDisplayMode, setVpsNameDisplayMode] = useState<VpsNameDisplayMode>(() => readVpsNameDisplayMode());
   const dashboard = useDashboardData(activeView);
-  const fleetViews = useFleetViews(dashboard.agents, dashboard.pools);
+  const fleetViews = useFleetViews(dashboard.agents);
   const visibleAgents = fleetViews.filteredAgents;
   const selectedAgent = useMemo(
     () => visibleAgents.find((agent) => agent.id === selectedAgentId) ?? visibleAgents[0] ?? null,
@@ -46,7 +55,17 @@ export function App() {
         ? `${dashboard.summary.connected} connected / ${dashboard.summary.total} total`
       : getHeroCopy(activeView);
 
+  function updateVpsNameDisplayMode(mode: VpsNameDisplayMode) {
+    setVpsNameDisplayMode(mode);
+    try {
+      window.localStorage.setItem(VPS_NAME_DISPLAY_MODE_STORAGE_KEY, mode);
+    } catch {
+      // The display preference is non-critical and should not block the panel.
+    }
+  }
+
   return (
+    <PanelDisplayProvider value={{ vpsNameDisplayMode, setVpsNameDisplayMode: updateVpsNameDisplayMode }}>
     <ConsoleShell
       activeSavedFleetViewId={fleetViews.activeSavedViewId}
       activeView={activeView}
@@ -62,6 +81,7 @@ export function App() {
       onClearSession={dashboard.clearSession}
       onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
       onFleetQueryChange={fleetViews.setFleetQuery}
+      onOpenAccessControls={() => setActiveView("Access")}
       onSaveFleetView={fleetViews.saveFleetView}
       onSelectView={setActiveView}
       onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
@@ -103,29 +123,26 @@ export function App() {
               wsState={dashboard.wsState}
             />
           )}
-          {activeView === "Pools" && (
-            <PoolsTagsPanel
+          {activeView === "Tags" && (
+            <TagsPanel
               agents={visibleAgents}
               dataSourceAssignments={dashboard.dataSourceAssignments}
               dataSourcePresets={dashboard.dataSourcePresets}
               dataSourceStatus={dashboard.dataSourceStatus}
-              error={dashboard.poolsError}
-              loading={dashboard.poolsLoading}
+              error={dashboard.tagsError}
+              loading={dashboard.tagsLoading}
               onAssignDataSourcePreset={dashboard.assignDataSourcePreset}
-              onAssignPool={dashboard.assignPool}
               onAssignTag={dashboard.assignTag}
               onCloneDataSourcePreset={dashboard.cloneDataSourcePreset}
               onCreateJob={dashboard.createJob}
               onCreateDataSourcePreset={dashboard.createDataSourcePreset}
-              onCreatePool={dashboard.createPool}
               onCreateTag={dashboard.createTag}
               onDiffDataSourcePreset={dashboard.diffDataSourcePreset}
-              onRefresh={dashboard.loadPoolsAndTags}
+              onRefresh={dashboard.loadTagInventory}
               onRenderDataSourceHotConfig={dashboard.renderDataSourceHotConfig}
               onResolveBulk={dashboard.resolveBulkPreview}
               onTestDataSourcePreset={dashboard.testDataSourcePreset}
               onUpdateDataSourcePreset={dashboard.updateDataSourcePreset}
-              pools={dashboard.pools}
               tags={dashboard.tags}
             />
           )}
@@ -165,7 +182,6 @@ export function App() {
               onResolveTargets={dashboard.resolveJobTargets}
               onUploadFileTransferSource={dashboard.uploadFileTransferSource}
               onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
-              pools={dashboard.pools}
               processSupervisorInventory={dashboard.processSupervisorInventory}
               terminalSessions={dashboard.terminalSessions}
               tags={dashboard.tags}
@@ -178,7 +194,6 @@ export function App() {
               loading={dashboard.schedulesLoading}
               onCreateSchedule={dashboard.createSchedule}
               onRefresh={dashboard.loadSchedules}
-              pools={dashboard.pools}
               schedules={dashboard.schedules}
               tags={dashboard.tags}
             />
@@ -241,6 +256,7 @@ export function App() {
               onDownloadBackupArtifact={dashboard.downloadBackupArtifact}
               onHandoffBackupArtifact={dashboard.handoffBackupArtifact}
               onLoadJobOutputs={dashboard.loadJobOutputs}
+              onPrepareBackupArtifactRestore={dashboard.prepareBackupArtifactRestore}
               onPruneBackupPolicies={dashboard.pruneBackupPolicies}
               onRefresh={dashboard.loadBackups}
               onUploadBackupArtifact={dashboard.uploadBackupArtifact}
@@ -269,7 +285,6 @@ export function App() {
               keyLifecycleReport={dashboard.keyLifecycleReport}
               operatorSessions={dashboard.operatorSessions}
               operators={dashboard.operators}
-              pools={dashboard.pools}
               proofRotations={dashboard.proofRotations}
               sessionVaultAvailable={dashboard.authVaultAvailable}
               wsState={dashboard.wsState}
@@ -278,5 +293,15 @@ export function App() {
         </>
       )}
     </ConsoleShell>
+    </PanelDisplayProvider>
   );
+}
+
+function readVpsNameDisplayMode(): VpsNameDisplayMode {
+  try {
+    const stored = window.localStorage.getItem(VPS_NAME_DISPLAY_MODE_STORAGE_KEY);
+    return stored === "name" ? "name" : DEFAULT_VPS_NAME_DISPLAY_MODE;
+  } catch {
+    return DEFAULT_VPS_NAME_DISPLAY_MODE;
+  }
 }

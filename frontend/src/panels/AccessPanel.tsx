@@ -1,13 +1,13 @@
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { Ban, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
 import { clearProofVault, hasProofVault } from "../vault";
 import { CrudPager } from "../components/CrudPager";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   AuthProofRotationHistoryRecord,
   GatewaySessionRecord,
   OperatorSessionRecord,
   OperatorView,
-  ResourcePoolView,
   TotpSetupResponse,
 } from "../types";
 import type {
@@ -18,9 +18,20 @@ import type {
   EnrollmentTokenView,
   KeyLifecycleReportView,
 } from "../typesAccess";
-import { formatTime, shortHash, shortId, statusClass } from "../utils";
+import {
+  clientDisplayNameFromMap,
+  clientLifecycleNameMap,
+  formatVpsName,
+  formatTime,
+  shortHash,
+  shortId,
+  statusClass,
+} from "../utils";
 
 const DEFAULT_UNMANAGED_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
+const accessSubpages = ["Overview", "Server", "VPS clients", "Gateway"] as const;
+
+type AccessSubpage = (typeof accessSubpages)[number];
 
 type AccessPanelProps = {
   apiToken: string;
@@ -43,7 +54,6 @@ type AccessPanelProps = {
   keyLifecycleReport: KeyLifecycleReportView | null;
   operatorSessions: OperatorSessionRecord[];
   operators: OperatorView[];
-  pools: ResourcePoolView[];
   proofRotations: AuthProofRotationHistoryRecord[];
   sessionVaultAvailable: boolean;
   wsState: string;
@@ -70,11 +80,12 @@ export function AccessPanel({
   keyLifecycleReport,
   operatorSessions,
   operators,
-  pools,
   proofRotations,
   sessionVaultAvailable,
   wsState,
 }: AccessPanelProps) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>("Overview");
   const [vaultAvailable, setVaultAvailable] = useState(() => hasProofVault());
   const [newOperatorUsername, setNewOperatorUsername] = useState("");
   const [newOperatorPassword, setNewOperatorPassword] = useState("");
@@ -91,7 +102,6 @@ export function AccessPanel({
   const [tokenClientId, setTokenClientId] = useState("");
   const [tokenTtlSecs, setTokenTtlSecs] = useState("1800");
   const [tokenTags, setTokenTags] = useState("");
-  const [tokenPoolName, setTokenPoolName] = useState("");
   const [tokenDisplayName, setTokenDisplayName] = useState("");
   const [tokenUnmanagedUpdateEnabled, setTokenUnmanagedUpdateEnabled] = useState(true);
   const [tokenUnmanagedUpdateVersionUrl, setTokenUnmanagedUpdateVersionUrl] = useState(DEFAULT_UNMANAGED_UPDATE_VERSION_URL);
@@ -124,6 +134,11 @@ export function AccessPanel({
     (tokenPurpose === "provision" || (tokenClientId.trim().length > 0 && tokenConfirmed));
   const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && revokeConfirmed && !revokePending;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
+  const lifecycleNameById = useMemo(
+    () => clientLifecycleNameMap(lifecycleClients, vpsNameDisplayMode),
+    [lifecycleClients, vpsNameDisplayMode],
+  );
+  const lifecycleClientLabel = (clientId: string | null | undefined) => clientDisplayNameFromMap(clientId, lifecycleNameById);
 
   function clearVault() {
     clearProofVault();
@@ -218,11 +233,10 @@ export function AccessPanel({
       const response = await onCreateEnrollmentToken({
         ttl_secs: Number.parseInt(tokenTtlSecs, 10),
         purpose: tokenPurpose,
-        allowed_client_id: tokenClientId.trim() || null,
+        allowed_client_id: tokenPurpose === "rebuild_reenrollment" ? tokenClientId.trim() : null,
         confirmed_reenrollment: tokenPurpose === "rebuild_reenrollment" ? tokenConfirmed : false,
         preserve_existing_assignments: true,
         default_tags: parseScopeInput(tokenTags),
-        default_pool_name: tokenPoolName.trim() || null,
         default_display_name: tokenDisplayName.trim() || null,
         unmanaged_update_enabled: tokenUnmanagedUpdateEnabled,
         unmanaged_update_version_url: tokenUnmanagedUpdateVersionUrl.trim() || null,
@@ -233,7 +247,6 @@ export function AccessPanel({
       });
       setCreatedToken(response);
       setTokenTags("");
-      setTokenPoolName("");
       setTokenDisplayName("");
       setTokenConfirmed(false);
       if (tokenPurpose === "provision") {
@@ -259,7 +272,7 @@ export function AccessPanel({
       setRevokeReason("");
       setRevokeConfirmed(false);
     } catch (error) {
-      setRevokeError(error instanceof Error ? error.message : "Client key revoke failed");
+      setRevokeError(error instanceof Error ? error.message : "VPS key revoke failed");
     } finally {
       setRevokePending(false);
     }
@@ -267,7 +280,22 @@ export function AccessPanel({
 
   return (
     <section className="workspace accessWorkspace">
-      <div className="fleetPanel">
+      <div aria-label="Access sections" className="accessSubnav" role="tablist">
+        {accessSubpages.map((subpage) => (
+          <button
+            aria-selected={activeSubpage === subpage}
+            className={activeSubpage === subpage ? "selected" : ""}
+            key={subpage}
+            onClick={() => setActiveSubpage(subpage)}
+            role="tab"
+            type="button"
+          >
+            {subpage}
+          </button>
+        ))}
+      </div>
+
+      <div className="fleetPanel accessOverviewPanel" hidden={activeSubpage !== "Overview"}>
         <div className="sectionHeader">
           <div>
             <h2>Operator session</h2>
@@ -307,7 +335,7 @@ export function AccessPanel({
           </div>
           <div className="accessTile">
             <Fingerprint size={20} />
-            <span>Client keys</span>
+            <span>VPS keys</span>
             <strong>{keyLifecycleReport ? `${keyLifecycleReport.enrolled_client_count} enrolled` : "not loaded"}</strong>
             <small>
               {keyLifecycleReport
@@ -334,7 +362,7 @@ export function AccessPanel({
         </div>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
         <div className="sectionHeader">
           <div>
             <h2>Operators</h2>
@@ -385,7 +413,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
         <div className="sectionHeader">
           <div>
             <h2>Proof rotation history</h2>
@@ -441,7 +469,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
         <div className="sectionHeader">
           <div>
             <h2>Operator sessions</h2>
@@ -501,7 +529,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "VPS clients"}>
         <div className="sectionHeader">
           <div>
             <h2>Enrollment tokens</h2>
@@ -511,8 +539,8 @@ export function AccessPanel({
         <CrudPager
           fields={[
             { label: "Token", value: (record) => record.token_prefix },
-            { label: "Policy", value: (record) => `${record.purpose} ${record.allowed_client_id ?? ""}` },
-            { label: "Status", value: (record) => (record.used_at ? `used ${record.used_by_client_id ?? ""}` : "available") },
+            { label: "Policy", value: (record) => `${record.purpose} ${enrollmentTokenDisplayName(record)}` },
+            { label: "Status", value: (record) => (record.used_at ? `used ${lifecycleClientLabel(record.used_by_client_id)}` : "available") },
             { label: "Defaults", value: enrollmentTokenDefaultsLabel },
             { label: "Expires", value: (record) => record.expires_at },
           ]}
@@ -544,10 +572,10 @@ export function AccessPanel({
                   </span>
                   <span className="historyPrimary">
                     <strong>{enrollmentPurposeLabel(record.purpose)}</strong>
-                    <small>{record.allowed_client_id ?? "any new client"}</small>
+                    <small>{enrollmentTokenDisplayName(record)}</small>
                   </span>
                   <span className={`status ${record.used_at ? "warn" : "ok"}`}>
-                    {record.used_at ? `used by ${record.used_by_client_id ?? "unknown"}` : "available"}
+                    {record.used_at ? `used by ${lifecycleClientLabel(record.used_by_client_id)}` : "available"}
                   </span>
                   <span className="monoValue">{enrollmentTokenDefaultsLabel(record) || "none"}</span>
                 </div>
@@ -557,7 +585,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "VPS clients"}>
         <div className="sectionHeader">
           <div>
             <h2>Key lifecycle</h2>
@@ -570,12 +598,12 @@ export function AccessPanel({
         </div>
         <CrudPager
           fields={[
-            { label: "Client", value: (client) => `${client.client_id} ${client.display_name}` },
+            { label: "VPS", value: (client) => formatVpsName(client, vpsNameDisplayMode) },
             { label: "Key", value: (client) => client.current_public_key_sha256_hex },
             { label: "Status", value: (client) => `${client.status} ${client.current_key_revoked ? "revoked" : ""}` },
             { label: "Revoked", value: (client) => `${client.latest_revoked_at ?? ""} ${client.latest_revocation_reason ?? ""}` },
           ]}
-          itemLabel="clients"
+          itemLabel="VPSs"
           items={lifecycleClients}
           pageSize={10}
           title="Key lifecycle records"
@@ -590,7 +618,7 @@ export function AccessPanel({
           {(clientRows) => (
             <div className="table historyTable">
               <div className="historyRow keyLifecycleGrid heading">
-                <span>Client</span>
+                <span>VPS</span>
                 <span>Current key</span>
                 <span>Status</span>
                 <span>Latest revoke</span>
@@ -598,8 +626,8 @@ export function AccessPanel({
               {clientRows.map((client) => (
                 <div className="historyRow keyLifecycleGrid" key={client.client_id}>
                   <span className="historyPrimary">
-                    <strong>{client.client_id}</strong>
-                    <small>{client.display_name}</small>
+                    <strong>{formatVpsName(client, vpsNameDisplayMode)}</strong>
+                    <small>{client.status}</small>
                   </span>
                   <span className="monoValue">{client.current_public_key_sha256_hex ? shortHash(client.current_public_key_sha256_hex) : "no key"}</span>
                   <span className={`status ${client.current_key_revoked ? "warn" : statusClass(client.status)}`}>
@@ -616,7 +644,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel">
+      <div className="fleetPanel" hidden={activeSubpage !== "Gateway"}>
         <div className="sectionHeader">
           <div>
             <h2>Gateway sessions</h2>
@@ -629,7 +657,7 @@ export function AccessPanel({
         </div>
         <CrudPager
           fields={[
-            { label: "Client", value: (session) => session.client_id },
+            { label: "VPS", value: (session) => lifecycleClientLabel(session.client_id) },
             { label: "Status", value: (session) => `${session.status} ${session.end_reason ?? ""}` },
             { label: "Gateway", value: (session) => session.gateway_id },
             { label: "Last seen", value: (session) => session.last_seen_at },
@@ -649,7 +677,7 @@ export function AccessPanel({
           {(gatewayRows) => (
             <div className="table historyTable">
               <div className="historyRow heading gatewaySessionGrid">
-                <span>Client</span>
+                <span>VPS</span>
                 <span>Status</span>
                 <span>Gateway</span>
                 <span>Last seen</span>
@@ -657,7 +685,7 @@ export function AccessPanel({
               {gatewayRows.map((session) => (
                 <div className="historyRow gatewaySessionGrid" key={session.id}>
                   <span className="historyPrimary">
-                    <strong>{session.client_id}</strong>
+                    <strong>{lifecycleClientLabel(session.client_id)}</strong>
                     <small>{shortId(session.id)}</small>
                   </span>
                   <span className={`status ${statusClass(session.status)}`}>{session.status}</span>
@@ -673,12 +701,16 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <aside className="inspector accessInspector">
-        <div className="sectionHeader compact">
+      <aside className="inspector accessInspector" hidden={activeSubpage === "Overview"}>
+        <div className="accessConfigHeading" hidden={activeSubpage !== "Server"}>
+          <strong>Server configuration</strong>
+          <span>Operators, TOTP, sessions, and local proof state</span>
+        </div>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
           <h2>Create operator</h2>
           <span>{operatorActionError ?? (canManageOperators ? "Admin role" : "Admin role required")}</span>
         </div>
-        <form className="sideForm" onSubmit={(event) => void createOperator(event)}>
+        <form className="sideForm" hidden={activeSubpage !== "Server"} onSubmit={(event) => void createOperator(event)}>
           <input
             aria-label="Operator username"
             disabled={!canManageOperators || operatorActionPending}
@@ -718,35 +750,102 @@ export function AccessPanel({
           </button>
         </form>
 
-        <div className="sectionHeader compact">
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
           <h2>TOTP</h2>
           <span>{totpError ?? (operator?.totp_enabled ? "Enabled" : "Optional")}</span>
         </div>
+        <div className="sideForm" hidden={activeSubpage !== "Server"}>
+          <input
+            aria-label="TOTP password"
+            autoComplete="current-password"
+            onChange={(event) => setTotpPassword(event.target.value)}
+            placeholder="current password"
+            type="password"
+            value={totpPassword}
+          />
+          <input
+            aria-label="TOTP code"
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            maxLength={6}
+            onChange={(event) => setTotpCode(event.target.value)}
+            placeholder="6-digit code"
+            value={totpCode}
+          />
+          {totpSetup && (
+            <div className="inlineSecret">
+              <strong>{totpSetup.secret_base32}</strong>
+              <small>{totpSetup.otpauth_uri}</small>
+            </div>
+          )}
+          <button
+            className="secondaryAction"
+            disabled={totpPending || !totpPassword || operator?.totp_enabled}
+            onClick={() => void setupTotp()}
+            type="button"
+          >
+            <ShieldCheck size={17} />
+            Setup TOTP
+          </button>
+          <button
+            className="secondaryAction"
+            disabled={totpPending || !totpPassword || !totpCode || operator?.totp_enabled}
+            onClick={() => void confirmTotp()}
+            type="button"
+          >
+            <LockKeyhole size={17} />
+            Confirm TOTP
+          </button>
+          <button
+            className="secondaryAction dangerAction"
+            disabled={totpPending || !totpPassword || !totpCode || !operator?.totp_enabled}
+            onClick={() => void disableTotp()}
+            type="button"
+          >
+            <Trash2 size={17} />
+            Disable TOTP
+          </button>
+        </div>
 
-        <div className="sectionHeader compact">
+        <div className="accessConfigHeading" hidden={activeSubpage !== "VPS clients"}>
+          <strong>VPS client configuration</strong>
+          <span>Enrollment, rebuild tokens, default tags, and key revocation</span>
+        </div>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
           <h2>Create token</h2>
           <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
         </div>
-        <form className="sideForm" onSubmit={(event) => void createEnrollmentToken(event)}>
+        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void createEnrollmentToken(event)}>
           <select
             aria-label="Enrollment token purpose"
             disabled={!canManageOperators || tokenPending}
             onChange={(event) => {
-              setTokenPurpose(event.target.value as EnrollmentTokenPurpose);
+              const nextPurpose = event.target.value as EnrollmentTokenPurpose;
+              setTokenPurpose(nextPurpose);
               setTokenConfirmed(false);
+              if (nextPurpose === "provision") {
+                setTokenClientId("");
+              }
             }}
             value={tokenPurpose}
           >
             <option value="provision">Provision token</option>
             <option value="rebuild_reenrollment">Rebuild token</option>
           </select>
-          <input
-            aria-label="Enrollment token client id"
-            disabled={!canManageOperators || tokenPending}
-            onChange={(event) => setTokenClientId(event.target.value)}
-            placeholder={tokenPurpose === "rebuild_reenrollment" ? "existing client id" : "optional client id"}
-            value={tokenClientId}
-          />
+          {tokenPurpose === "rebuild_reenrollment" ? (
+            <input
+              aria-label="Enrollment token existing VPS ID"
+              disabled={!canManageOperators || tokenPending}
+              onChange={(event) => setTokenClientId(event.target.value)}
+              placeholder="VPS ID from details"
+              value={tokenClientId}
+            />
+          ) : (
+            <div className="formNote">
+              <strong>VPS identity</strong>
+              <span>System ID is assigned server-side; set the display name below.</span>
+            </div>
+          )}
           <input
             aria-label="Enrollment token ttl"
             disabled={!canManageOperators || tokenPending}
@@ -763,25 +862,12 @@ export function AccessPanel({
             value={tokenTags}
           />
           <input
-            aria-label="Enrollment default alias"
+            aria-label="Enrollment default display name"
             disabled={!canManageOperators || tokenPending}
             onChange={(event) => setTokenDisplayName(event.target.value)}
-            placeholder="initial alias"
+            placeholder="initial display name"
             value={tokenDisplayName}
           />
-          <select
-            aria-label="Enrollment default pool"
-            disabled={!canManageOperators || tokenPending}
-            onChange={(event) => setTokenPoolName(event.target.value)}
-            value={tokenPoolName}
-          >
-            <option value="">No default pool</option>
-            {pools.map((pool) => (
-              <option key={pool.name} value={pool.name}>
-                {pool.name}
-              </option>
-            ))}
-          </select>
           <label className="inlineCheck">
             <input
               checked={tokenUnmanagedUpdateEnabled}
@@ -851,24 +937,25 @@ export function AccessPanel({
             <div className="inlineSecret enrollmentSecret">
               <strong>{createdToken.token}</strong>
               <small>{enrollmentPurposeLabel(createdToken.purpose)} / {createdToken.token_prefix}</small>
+              <small>Name {enrollmentTokenDisplayName(createdToken)}</small>
             </div>
           )}
         </form>
 
-        <div className="sectionHeader compact">
+        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
           <h2>Revoke key</h2>
-          <span>{revokeError ?? (canManageOperators ? "Current client key" : "Admin role required")}</span>
+          <span>{revokeError ?? (canManageOperators ? "Current VPS key" : "Admin role required")}</span>
         </div>
-        <form className="sideForm" onSubmit={(event) => void revokeClientKey(event)}>
+        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void revokeClientKey(event)}>
           <input
-            aria-label="Client key revoke client id"
+            aria-label="VPS key revoke VPS ID"
             disabled={!canManageOperators || revokePending}
             onChange={(event) => setRevokeClientId(event.target.value)}
-            placeholder="client id"
+            placeholder="VPS ID from details"
             value={revokeClientId}
           />
           <input
-            aria-label="Client key revoke reason"
+            aria-label="VPS key revoke reason"
             disabled={!canManageOperators || revokePending}
             onChange={(event) => setRevokeReason(event.target.value)}
             placeholder="reason"
@@ -888,64 +975,16 @@ export function AccessPanel({
             Revoke current key
           </button>
         </form>
-        <div className="sideForm">
-          <input
-            aria-label="TOTP password"
-            autoComplete="current-password"
-            onChange={(event) => setTotpPassword(event.target.value)}
-            placeholder="current password"
-            type="password"
-            value={totpPassword}
-          />
-          <input
-            aria-label="TOTP code"
-            autoComplete="one-time-code"
-            inputMode="numeric"
-            maxLength={6}
-            onChange={(event) => setTotpCode(event.target.value)}
-            placeholder="6-digit code"
-            value={totpCode}
-          />
-          {totpSetup && (
-            <div className="inlineSecret">
-              <strong>{totpSetup.secret_base32}</strong>
-              <small>{totpSetup.otpauth_uri}</small>
-            </div>
-          )}
-          <button
-            className="secondaryAction"
-            disabled={totpPending || !totpPassword || operator?.totp_enabled}
-            onClick={() => void setupTotp()}
-            type="button"
-          >
-            <ShieldCheck size={17} />
-            Setup TOTP
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={totpPending || !totpPassword || !totpCode || operator?.totp_enabled}
-            onClick={() => void confirmTotp()}
-            type="button"
-          >
-            <LockKeyhole size={17} />
-            Confirm TOTP
-          </button>
-          <button
-            className="secondaryAction dangerAction"
-            disabled={totpPending || !totpPassword || !totpCode || !operator?.totp_enabled}
-            onClick={() => void disableTotp()}
-            type="button"
-          >
-            <Trash2 size={17} />
-            Disable TOTP
-          </button>
-        </div>
 
-        <div className="sectionHeader compact">
+        <div className="accessConfigHeading" hidden={activeSubpage !== "Server"}>
+          <strong>Local panel state</strong>
+          <span>Browser session and proof vault controls</span>
+        </div>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
           <h2>Session controls</h2>
           <span>Local browser state only</span>
         </div>
-        <div className="sideForm">
+        <div className="sideForm" hidden={activeSubpage !== "Server"}>
           <button className="secondaryAction" onClick={onClearSession} type="button">
             <KeyRound size={17} />
             Clear bearer session
@@ -955,18 +994,47 @@ export function AccessPanel({
             Clear proof vault
           </button>
         </div>
-        <div className="timeline">
+        <div className="timeline" hidden={activeSubpage !== "Server"}>
           <ShieldCheck size={18} />
           <div>
             <strong>Deny by default</strong>
             <span>Non-telemetry actions still require local proof envelopes.</span>
           </div>
         </div>
-        <div className="timeline">
+        <div className="timeline" hidden={activeSubpage !== "Server"}>
           <LockKeyhole size={18} />
           <div>
             <strong>Secret handling</strong>
             <span>Plaintext super password is not sent to the control-plane API.</span>
+          </div>
+        </div>
+
+        <div className="accessConfigHeading" hidden={activeSubpage !== "Gateway"}>
+          <strong>Gateway lifecycle</strong>
+          <span>Noise-over-TCP VPS session inventory</span>
+        </div>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Gateway"}>
+          <h2>Gateway records</h2>
+          <span>{gatewaySessions.length} retained sessions</span>
+        </div>
+        <div className="sideForm" hidden={activeSubpage !== "Gateway"}>
+          <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+            <RefreshCw size={17} />
+            Refresh sessions
+          </button>
+        </div>
+        <div className="timeline" hidden={activeSubpage !== "Gateway"}>
+          <Wifi size={18} />
+          <div>
+            <strong>Agent connectivity</strong>
+            <span>Current and recently closed gateway routes are retained as lifecycle records.</span>
+          </div>
+        </div>
+        <div className="timeline" hidden={activeSubpage !== "Gateway"}>
+          <Fingerprint size={18} />
+          <div>
+            <strong>VPS identity</strong>
+            <span>Gateway tables show display names; system IDs stay available from VPS details.</span>
           </div>
         </div>
       </aside>
@@ -989,7 +1057,11 @@ function enrollmentTokenDefaultsLabel(record: EnrollmentTokenView): string {
   const updateLabel = record.unmanaged_update_enabled
     ? `updates ${Math.round(record.unmanaged_update_interval_secs / 3600)}h`
     : "updates off";
-  return [record.default_display_name, record.default_pool_name, ...record.default_tags, updateLabel]
+  return [record.default_display_name, ...record.default_tags, updateLabel]
     .filter((value): value is string => Boolean(value))
     .join(", ");
+}
+
+function enrollmentTokenDisplayName(record: EnrollmentTokenView | CreateEnrollmentTokenResponse): string {
+  return record.default_display_name?.trim() || (record.purpose === "rebuild_reenrollment" ? "Existing VPS" : "Pending VPS");
 }

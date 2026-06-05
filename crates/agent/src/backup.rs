@@ -1,4 +1,4 @@
-use std::{os::unix::fs::PermissionsExt, path::Path};
+use std::{os::unix::fs::PermissionsExt, path::Path, time::UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -21,7 +21,8 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use crate::telemetry::unix_now;
 
 pub(crate) const BACKUP_ARTIFACT_FORMAT: &str = "vpsman.backup_artifact.v1";
-pub(crate) const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_archive.v1";
+pub(crate) const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
+pub(crate) const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_PATHS: usize = 64;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -32,21 +33,27 @@ pub(crate) struct BackupArchive {
     pub(crate) files: Vec<BackupFileEntry>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct BackupFileEntry {
     pub(crate) path: String,
     pub(crate) source: BackupFileSource,
+    pub(crate) tar_path: String,
     pub(crate) mode: u32,
     pub(crate) size_bytes: u64,
     pub(crate) sha256_hex: String,
-    pub(crate) data_base64: String,
+    pub(crate) mtime_unix: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BackupFileSource {
     SelectedPath,
     AgentConfig,
+}
+
+struct BackupFilePayload {
+    entry: BackupFileEntry,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -126,13 +133,15 @@ async fn create_encrypted_backup(
     )
     .await?;
     let file_count = files.len();
+    let created_unix = unix_now();
     let archive = BackupArchive {
         format: BACKUP_ARCHIVE_FORMAT.to_string(),
         client_id: config.client_id.clone(),
-        created_unix: unix_now(),
-        files,
+        created_unix,
+        files: files.iter().map(|file| file.entry.clone()).collect(),
     };
-    let plaintext = serde_json::to_vec(&archive).context("failed to encode backup archive")?;
+    let plaintext = encode_backup_tar_archive(&archive, &files)
+        .context("failed to encode backup tar archive")?;
     if plaintext.len() as u64 > config.backup.max_plaintext_bytes {
         anyhow::bail!(
             "backup archive exceeds plaintext limit: {} > {} bytes",
@@ -178,6 +187,7 @@ async fn create_encrypted_backup(
         "encrypted": true,
         "compression": "lz4-size-prepended",
         "cipher": "x25519-chacha20poly1305",
+        "archive_format": BACKUP_ARCHIVE_FORMAT,
         "paths": paths,
         "include_config": include_config,
         "file_count": file_count,
@@ -206,15 +216,16 @@ async fn collect_backup_files(
     paths: &[String],
     include_config: bool,
     max_plaintext_bytes: u64,
-) -> Result<Vec<BackupFileEntry>> {
+) -> Result<Vec<BackupFilePayload>> {
     let mut files = Vec::new();
     let mut total_bytes = 0_u64;
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         files.push(
             read_backup_file(
                 Path::new(path),
                 path,
                 BackupFileSource::SelectedPath,
+                index,
                 &mut total_bytes,
                 max_plaintext_bytes,
             )
@@ -227,6 +238,7 @@ async fn collect_backup_files(
                 config_path,
                 "vpsman:agent_config",
                 BackupFileSource::AgentConfig,
+                files.len(),
                 &mut total_bytes,
                 max_plaintext_bytes,
             )
@@ -240,9 +252,10 @@ async fn read_backup_file(
     path: &Path,
     archive_path: &str,
     source: BackupFileSource,
+    tar_index: usize,
     total_bytes: &mut u64,
     max_plaintext_bytes: u64,
-) -> Result<BackupFileEntry> {
+) -> Result<BackupFilePayload> {
     if matches!(source, BackupFileSource::SelectedPath) {
         validate_absolute_file_path(archive_path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -266,14 +279,71 @@ async fn read_backup_file(
     let data = tokio::fs::read(path)
         .await
         .with_context(|| format!("failed to read backup path {}", path.display()))?;
-    Ok(BackupFileEntry {
-        path: archive_path.to_string(),
-        source,
-        mode: metadata.permissions().mode() & 0o777,
-        size_bytes: data.len() as u64,
-        sha256_hex: payload_hash(&data),
-        data_base64: BASE64_STANDARD.encode(data),
+    let mtime_unix = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    Ok(BackupFilePayload {
+        entry: BackupFileEntry {
+            path: archive_path.to_string(),
+            source,
+            tar_path: format!("vpsman-backup/files/{tar_index:04}.bin"),
+            mode: metadata.permissions().mode() & 0o777,
+            size_bytes: data.len() as u64,
+            sha256_hex: payload_hash(&data),
+            mtime_unix,
+        },
+        data,
     })
+}
+
+fn encode_backup_tar_archive(
+    archive: &BackupArchive,
+    files: &[BackupFilePayload],
+) -> Result<Vec<u8>> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let manifest =
+        serde_json::to_vec(archive).context("failed to encode backup archive manifest")?;
+    append_tar_bytes(
+        &mut builder,
+        BACKUP_ARCHIVE_MANIFEST_PATH,
+        0o600,
+        archive.created_unix,
+        &manifest,
+    )?;
+    for file in files {
+        append_tar_bytes(
+            &mut builder,
+            &file.entry.tar_path,
+            file.entry.mode,
+            file.entry.mtime_unix.unwrap_or(archive.created_unix),
+            &file.data,
+        )?;
+    }
+    builder
+        .finish()
+        .context("failed to finish backup tar archive")?;
+    builder
+        .into_inner()
+        .context("failed to collect backup tar archive")
+}
+
+fn append_tar_bytes(
+    builder: &mut tar::Builder<Vec<u8>>,
+    path: &str,
+    mode: u32,
+    mtime_unix: u64,
+    bytes: &[u8],
+) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(mode);
+    header.set_mtime(mtime_unix);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, path, bytes)
+        .with_context(|| format!("failed to append backup tar entry {path}"))
 }
 
 fn validate_backup_scope(paths: &[String], include_config: bool) -> Result<()> {
@@ -370,7 +440,7 @@ mod tests {
             client_id: "client-a".to_string(),
             backup: AgentBackupConfig {
                 recipient_public_key_hex: Some(hex::encode(recipient_public.as_bytes())),
-                max_plaintext_bytes: 4096,
+                max_plaintext_bytes: 8192,
             },
             ..AgentConfig::default()
         };
@@ -401,17 +471,14 @@ mod tests {
         let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
         assert_eq!(artifact.format, BACKUP_ARTIFACT_FORMAT);
         let archive = decrypt_artifact(&recipient_secret, &artifact);
-        assert_eq!(archive["format"], BACKUP_ARCHIVE_FORMAT);
-        assert_eq!(archive["client_id"], "client-a");
-        assert_eq!(archive["files"].as_array().unwrap().len(), 2);
-        assert!(archive["files"]
-            .as_array()
-            .unwrap()
+        assert_eq!(archive.format, BACKUP_ARCHIVE_FORMAT);
+        assert_eq!(archive.client_id, "client-a");
+        assert_eq!(archive.files.len(), 2);
+        assert!(archive
+            .files
             .iter()
-            .any(
-                |file| file["path"] == selected_path.to_string_lossy().as_ref()
-                    && file["sha256_hex"] == payload_hash(b"selected secret contents")
-            ));
+            .any(|file| file.path == selected_path.to_string_lossy().as_ref()
+                && file.sha256_hex == payload_hash(b"selected secret contents")));
         let status = outputs.iter().find(|output| output.done).unwrap();
         let status: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
         assert_eq!(status["type"], "backup");
@@ -485,8 +552,8 @@ mod tests {
         assert!(!artifact_text.contains("secret-proof-key"));
         let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
         let archive = decrypt_artifact(&recipient_secret, &artifact);
-        assert_eq!(archive["client_id"], "client-stream");
-        assert_eq!(archive["files"].as_array().unwrap().len(), 2);
+        assert_eq!(archive.client_id, "client-stream");
+        assert_eq!(archive.files.len(), 2);
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
@@ -561,7 +628,7 @@ mod tests {
     fn decrypt_artifact(
         recipient_secret: &StaticSecret,
         artifact: &EncryptedBackupArtifact,
-    ) -> serde_json::Value {
+    ) -> BackupArchive {
         let ephemeral_public = decode_public_key(&artifact.ephemeral_public_key_hex).unwrap();
         let shared = recipient_secret.diffie_hellman(&ephemeral_public);
         let recipient_public = PublicKey::from(recipient_secret);
@@ -577,6 +644,15 @@ mod tests {
             .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
             .unwrap();
         let plaintext = lz4_flex::decompress_size_prepended(&compressed).unwrap();
-        serde_json::from_slice(&plaintext).unwrap()
+        let mut tar_archive = tar::Archive::new(std::io::Cursor::new(plaintext));
+        for entry in tar_archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().to_string_lossy() == BACKUP_ARCHIVE_MANIFEST_PATH {
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+                return serde_json::from_slice(&data).unwrap();
+            }
+        }
+        panic!("backup manifest missing")
     }
 }

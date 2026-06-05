@@ -70,7 +70,10 @@ pub(crate) struct EnrollmentTokenCreateCommand {
     pub(crate) ttl_secs: u64,
     #[arg(long, default_value = "provision")]
     pub(crate) purpose: String,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "existing client id for rebuild re-enrollment tokens only"
+    )]
     pub(crate) allowed_client_id: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed_reenrollment: bool,
@@ -78,8 +81,6 @@ pub(crate) struct EnrollmentTokenCreateCommand {
     pub(crate) preserve_existing_assignments: bool,
     #[arg(long, value_delimiter = ',')]
     pub(crate) default_tags: Vec<String>,
-    #[arg(long)]
-    pub(crate) default_pool_name: Option<String>,
     #[arg(long)]
     pub(crate) default_display_name: Option<String>,
     #[arg(long, default_value_t = true)]
@@ -104,8 +105,6 @@ pub(crate) struct ReenrollmentTokenCreateCommand {
     pub(crate) ttl_secs: u64,
     #[arg(long, value_delimiter = ',')]
     pub(crate) default_tags: Vec<String>,
-    #[arg(long)]
-    pub(crate) default_pool_name: Option<String>,
     #[arg(long)]
     pub(crate) default_display_name: Option<String>,
     #[arg(long, default_value_t = false)]
@@ -140,8 +139,11 @@ pub(crate) struct ClientKeyRevokeCommand {
 pub(crate) struct EnrollClaimCommand {
     #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
     pub(crate) token: String,
-    #[arg(long)]
-    pub(crate) client_id: String,
+    #[arg(
+        long,
+        help = "existing client id only when claiming a rebuild re-enrollment token"
+    )]
+    pub(crate) client_id: Option<String>,
     #[arg(long)]
     pub(crate) client_public_key_hex: String,
 }
@@ -150,8 +152,11 @@ pub(crate) struct EnrollClaimCommand {
 pub(crate) struct EnrollConfigCommand {
     #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
     pub(crate) token: String,
-    #[arg(long)]
-    pub(crate) client_id: String,
+    #[arg(
+        long,
+        help = "existing client id only when claiming a rebuild re-enrollment token"
+    )]
+    pub(crate) client_id: Option<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
     #[arg(long)]
@@ -473,8 +478,6 @@ pub(crate) struct DataSourcePresetAssignCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -519,24 +522,6 @@ pub(crate) struct TelemetryTunnelsCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct PoolCreateCommand {
-    #[arg(long)]
-    pub(crate) name: String,
-    #[arg(long)]
-    pub(crate) provider: Option<String>,
-    #[arg(long)]
-    pub(crate) region: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AgentPoolCommand {
-    #[arg(long)]
-    pub(crate) client_id: String,
-    #[arg(long)]
-    pub(crate) pool_id: String,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct NameCommand {
     #[arg(long)]
     pub(crate) name: String,
@@ -554,8 +539,6 @@ pub(crate) struct AgentTagCommand {
 pub(crate) struct BulkResolveCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long, default_value_t = false)]
@@ -576,8 +559,6 @@ pub(crate) struct ScheduleCreateCommand {
     pub(crate) pty: bool,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) pools: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
     #[arg(long)]

@@ -105,6 +105,9 @@ impl Repository {
                     anyhow::bail!("client not found: {client_id}");
                 };
                 let current_public_key: Vec<u8> = row.try_get("public_key")?;
+                if current_public_key.is_empty() {
+                    anyhow::bail!("client public key missing for {client_id}");
+                }
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
                     fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
@@ -217,9 +220,10 @@ impl Repository {
                 let mut clients = agents
                     .into_iter()
                     .map(|agent| {
-                        let current_public_key_sha256_hex = public_keys
-                            .get(&agent.id)
-                            .map(|key| public_key_sha256_hex(key.as_slice()));
+                        let current_public_key_sha256_hex =
+                            public_keys.get(&agent.id).and_then(|key| {
+                                (!key.is_empty()).then(|| public_key_sha256_hex(key.as_slice()))
+                            });
                         let latest = latest_current_revocation(
                             &revocations,
                             &agent.id,
@@ -256,7 +260,10 @@ impl Repository {
                     discovery_trusted_server_key_count: trust.discovery_trusted_server_key_count,
                     gateway_server_public_key_configured: trust
                         .gateway_server_public_key_configured,
-                    enrolled_client_count: clients.len(),
+                    enrolled_client_count: clients
+                        .iter()
+                        .filter(|client| client.current_public_key_sha256_hex.is_some())
+                        .count(),
                     current_key_revoked_count: public_keys
                         .iter()
                         .filter(|(client_id, key)| {
@@ -323,11 +330,12 @@ impl Repository {
                         let display_name: String = row.try_get("display_name")?;
                         let status: String = row.try_get("status")?;
                         let public_key: Vec<u8> = row.try_get("public_key")?;
-                        let fingerprint = public_key_sha256_hex(&public_key);
+                        let fingerprint =
+                            (!public_key.is_empty()).then(|| public_key_sha256_hex(&public_key));
                         let latest = latest_current_revocation(
                             &revocations,
                             &client_id,
-                            Some(fingerprint.as_str()),
+                            fingerprint.as_deref(),
                         );
                         if latest.is_some() {
                             current_key_revoked_count += 1;
@@ -336,7 +344,7 @@ impl Repository {
                             client_id,
                             display_name,
                             status,
-                            current_public_key_sha256_hex: Some(fingerprint),
+                            current_public_key_sha256_hex: fingerprint,
                             current_key_revoked: latest.is_some(),
                             latest_revoked_at: latest.map(|record| record.created_at.clone()),
                             latest_revocation_reason: latest
@@ -344,13 +352,17 @@ impl Repository {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let enrolled_client_count = clients
+                    .iter()
+                    .filter(|client| client.current_public_key_sha256_hex.is_some())
+                    .count();
                 Ok(KeyLifecycleReportView {
                     server_ed25519_public_key_configured: trust
                         .server_ed25519_public_key_configured,
                     discovery_trusted_server_key_count: trust.discovery_trusted_server_key_count,
                     gateway_server_public_key_configured: trust
                         .gateway_server_public_key_configured,
-                    enrolled_client_count: clients.len(),
+                    enrolled_client_count,
                     current_key_revoked_count,
                     revocation_count: revocations.len(),
                     rebuild_reenrollment_token_count: token_row

@@ -3,20 +3,20 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::cli_access::{
-    AgentPoolCommand, AgentTagCommand, BootstrapCommand, BulkResolveCommand,
-    ClientKeyRevokeCommand, DataSourceAssignmentListCommand, DataSourceHotConfigApplyCommand,
-    DataSourceHotConfigCommand, DataSourcePresetAssignCommand, DataSourcePresetCloneCommand,
-    DataSourcePresetCreateCommand, DataSourcePresetDiffCommand, DataSourcePresetListCommand,
-    DataSourcePresetTestCommand, DataSourcePresetUpdateCommand, DataSourceStatusCommand,
-    EnrollClaimCommand, EnrollConfigCommand, EnrollmentTokenCreateCommand, FleetAlertExportCommand,
+    AgentTagCommand, BootstrapCommand, BulkResolveCommand, ClientKeyRevokeCommand,
+    DataSourceAssignmentListCommand, DataSourceHotConfigApplyCommand, DataSourceHotConfigCommand,
+    DataSourcePresetAssignCommand, DataSourcePresetCloneCommand, DataSourcePresetCreateCommand,
+    DataSourcePresetDiffCommand, DataSourcePresetListCommand, DataSourcePresetTestCommand,
+    DataSourcePresetUpdateCommand, DataSourceStatusCommand, EnrollClaimCommand,
+    EnrollConfigCommand, EnrollmentTokenCreateCommand, FleetAlertExportCommand,
     FleetAlertNotificationChannelUpsertCommand, FleetAlertNotificationChannelsCommand,
     FleetAlertNotificationDispatchCommand, FleetAlertNotificationProcessCommand,
     FleetAlertNotificationsCommand, FleetAlertPoliciesCommand, FleetAlertPolicyUpsertCommand,
     FleetAlertStateUpdateCommand, FleetAlertStatesCommand, FleetAlertsCommand, LimitCommand,
     LoginCommand, NameCommand, OperatorCreateCommand, OperatorSessionRevokeCommand,
-    OperatorSessionsCommand, PoolCreateCommand, ReenrollmentTokenCreateCommand, RefreshCommand,
-    ScheduleCreateCommand, ScheduleDispatchCommand, TelemetryNetworkRatesCommand,
-    TelemetryRollupsCommand, TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
+    OperatorSessionsCommand, ReenrollmentTokenCreateCommand, RefreshCommand, ScheduleCreateCommand,
+    ScheduleDispatchCommand, TelemetryNetworkRatesCommand, TelemetryRollupsCommand,
+    TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
 };
 use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
@@ -93,9 +93,6 @@ pub(crate) enum Command {
     TelemetryRollups(TelemetryRollupsCommand),
     TelemetryNetworkRates(TelemetryNetworkRatesCommand),
     TelemetryTunnels(TelemetryTunnelsCommand),
-    Pools,
-    PoolCreate(PoolCreateCommand),
-    AgentPool(AgentPoolCommand),
     Tags,
     TagCreate(NameCommand),
     AgentTag(AgentTagCommand),
@@ -135,8 +132,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long)]
         envelope_file: Option<PathBuf>,
@@ -167,8 +162,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -186,8 +179,6 @@ pub(crate) enum Command {
         path: String,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -254,8 +245,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -283,8 +272,6 @@ pub(crate) enum Command {
         mode: String,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -319,8 +306,6 @@ pub(crate) enum Command {
         destination: PathBuf,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -388,8 +373,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -407,8 +390,6 @@ pub(crate) enum Command {
         config_file: PathBuf,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -434,8 +415,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -459,8 +438,6 @@ pub(crate) enum Command {
         artifact_signing_key_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -488,8 +465,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -512,8 +487,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -535,8 +508,6 @@ pub(crate) enum Command {
         rollback_sha256_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -669,8 +640,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -713,8 +682,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -735,8 +702,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -755,8 +720,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -774,8 +737,6 @@ pub(crate) enum Command {
         name: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -796,8 +757,6 @@ pub(crate) enum Command {
         max_bytes: u32,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -933,8 +892,6 @@ pub(crate) enum Command {
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value_t = 86_400)]
         interval_secs: u64,
@@ -1006,8 +963,6 @@ pub(crate) enum Command {
         recipient_public_key_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        pools: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]

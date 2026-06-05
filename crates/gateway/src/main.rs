@@ -40,9 +40,11 @@ pub(crate) struct Args {
         long,
         env = "VPSMAN_GATEWAY_NOISE_MODE",
         value_enum,
-        default_value = "dev_xx"
+        default_value = "enrolled_ik"
     )]
     noise_mode: GatewayNoiseMode,
+    #[arg(long, env = "VPSMAN_DEBUG_INTERNAL_TEST_MODE", default_value_t = false)]
+    debug_internal_test_mode: bool,
     #[arg(long, env = "VPSMAN_GATEWAY_PRIVATE_KEY_HEX")]
     private_key_hex: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX")]
@@ -73,6 +75,7 @@ async fn main() -> Result<()> {
 
     let mut args = Args::parse();
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
+    validate_gateway_runtime_mode(&args)?;
     let state = GatewayState::default();
     let agent_args = args.clone();
     let agent_state = state.clone();
@@ -105,6 +108,20 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
         "VPSMAN_INTERNAL_TOKEN must be changed from the deployment template placeholder"
     );
     Ok(token.to_string())
+}
+
+fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
+    if args.noise_mode == GatewayNoiseMode::DevXx {
+        if !args.debug_internal_test_mode {
+            anyhow::bail!(
+                "VPSMAN_GATEWAY_NOISE_MODE=dev_xx is disabled by default. Set VPSMAN_DEBUG_INTERNAL_TEST_MODE=true only for dangerous internal tests."
+            );
+        }
+        warn!(
+            "DANGEROUS INTERNAL TEST MODE: gateway dev_xx identity mode is enabled; do not expose this gateway"
+        );
+    }
+    Ok(())
 }
 
 async fn run_agent_listener(args: Args, state: GatewayState) -> Result<()> {

@@ -13,7 +13,6 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "telemetry-rollups",
     "telemetry-network-rates",
     "telemetry-tunnels",
-    "pools",
     "tags",
     "jobs",
     "job-targets",
@@ -161,7 +160,7 @@ pub(crate) fn render_vty_degraded_policy() -> String {
         ],
         "frequent_use_guidance": [
             "inspect show capabilities before bulk operations across mixed VPS environments",
-            "prefer tags and pools to target agents with similar privilege and distro capabilities",
+            "prefer tags to target agents with similar privilege and distro capabilities",
             "review job target status for ready, degraded, forced, or unsupported outcomes"
         ]
     }))

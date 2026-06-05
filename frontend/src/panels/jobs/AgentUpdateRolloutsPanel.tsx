@@ -189,7 +189,6 @@ export function AgentUpdateRolloutsPanel({
             >
               <option value="global">Global</option>
               <option value="tag">Tag</option>
-              <option value="pool">Pool</option>
               <option value="provider">Provider</option>
             </select>
           </label>

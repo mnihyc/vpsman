@@ -33,7 +33,6 @@ pub(crate) fn submit_vty_direct_command(
             "/api/v1/operator-sessions?limit=50",
             token,
         )?)),
-        "pools" => Ok(Some(http_get(api_url, "/api/v1/pools", token)?)),
         "tags" => Ok(Some(http_get(api_url, "/api/v1/tags", token)?)),
         "jobs" => Ok(Some(http_get(api_url, "/api/v1/jobs", token)?)),
         "schedules" => Ok(Some(http_get(api_url, "/api/v1/schedules", token)?)),

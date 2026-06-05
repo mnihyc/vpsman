@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
 import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
 import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
 import {
@@ -19,7 +20,7 @@ import type {
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
-import { runPanelAction, shortId } from "../../utils";
+import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
 import { clampInteger } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
@@ -32,6 +33,7 @@ export function TopologyApplyControls({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
@@ -53,6 +55,8 @@ export function TopologyApplyControls({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const endpoint = useMemo(
     () => (selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null),
     [selectedPlan, side],
@@ -143,7 +147,6 @@ export function TopologyApplyControls({
         envelope: null,
         envelopes: builtProof.envelopes,
         operation: builtOperation.operation,
-        pools: [],
         force_unprivileged: isMutation(mode) ? forceUnprivileged : false,
         privileged: true,
         tags: [],
@@ -315,7 +318,7 @@ export function TopologyApplyControls({
         </div>
         {endpoint && (
           <div className="operationNote">
-            <strong>{endpoint.localClientId}</strong>
+            <strong>{clientLabel(endpoint.localClientId)}</strong>
             <span>
               {backendLabel(backend)} / {selectedPlan?.plan.bird2_file}
             </span>

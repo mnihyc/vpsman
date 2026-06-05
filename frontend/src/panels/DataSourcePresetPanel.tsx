@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
 import { CrudPager } from "../components/CrudPager";
 import { ProofVaultBox } from "../components/ProofVaultBox";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildEnvelopesForOperation, type ProofMaterial } from "../proof";
 import type {
   AgentView,
@@ -21,12 +22,18 @@ import type {
   DataSourceStatusRecord,
   JobOperation,
   JsonValue,
-  ResourcePoolView,
   TagView,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
 } from "../types";
-import { formatTime, runPanelAction, shortId, statusClass, toggleValue } from "../utils";
+import {
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+  statusClass,
+  toggleValue,
+} from "../utils";
 
 const DATA_SOURCE_DOMAINS = [
   "telemetry_metrics_source",
@@ -61,7 +68,6 @@ export function DataSourcePresetPanel({
   onRenderHotConfig,
   onTestPreset,
   onUpdatePreset,
-  pools,
   presets,
   tags,
 }: {
@@ -76,10 +82,10 @@ export function DataSourcePresetPanel({
   onRenderHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
   onTestPreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdatePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
-  pools: ResourcePoolView[];
   presets: DataSourcePresetRecord[];
   tags: TagView[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [createDomain, setCreateDomain] = useState(DATA_SOURCE_DOMAINS[1]);
   const [createName, setCreateName] = useState("");
   const [createScope, setCreateScope] = useState("shared");
@@ -89,7 +95,6 @@ export function DataSourcePresetPanel({
   const [assignDomain, setAssignDomain] = useState(DATA_SOURCE_DOMAINS[1]);
   const [assignPresetId, setAssignPresetId] = useState("");
   const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedPools, setSelectedPools] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [assignTagMode, setAssignTagMode] = useState<"any" | "all">("any");
   const [confirmed, setConfirmed] = useState(false);
@@ -128,7 +133,7 @@ export function DataSourcePresetPanel({
     () => presets.find((preset) => preset.id === effectiveLifecyclePresetId) ?? null,
     [effectiveLifecyclePresetId, presets],
   );
-  const assignmentTargetCount = selectedClients.length + selectedPools.length + selectedTags.length;
+  const assignmentTargetCount = selectedClients.length + selectedTags.length;
   const lifecycleStatus =
     lastUpdate?.confirmation_required
       ? `${lastUpdate.affected_client_count} VPSs inherit this preset; confirmation required`
@@ -188,7 +193,6 @@ export function DataSourcePresetPanel({
         clients: selectedClients,
         confirmed,
         domain: assignDomain,
-        pools: selectedPools,
         preset_id: effectivePresetId,
         tags: selectedTags,
         tag_mode: assignTagMode,
@@ -240,7 +244,6 @@ export function DataSourcePresetPanel({
         envelopes: built.envelopes,
         force_unprivileged: false,
         operation,
-        pools: [],
         privileged: true,
         tags: [],
         timeout_secs: clampInteger(applyTimeoutSecs, 1, 3600),
@@ -361,7 +364,7 @@ export function DataSourcePresetPanel({
               <option value="">Owner VPS</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.display_name || "Unnamed VPS"}
+                  {formatVpsName(agent, vpsNameDisplayMode)}
                 </option>
               ))}
             </select>
@@ -412,17 +415,7 @@ export function DataSourcePresetPanel({
                   onChange={() => setSelectedClients(toggleValue(selectedClients, agent.id))}
                   type="checkbox"
                 />
-                <span>{agent.display_name || "Unnamed VPS"}</span>
-              </label>
-            ))}
-            {pools.map((pool) => (
-              <label className="checkChip" key={pool.id}>
-                <input
-                  checked={selectedPools.includes(pool.id)}
-                  onChange={() => setSelectedPools(toggleValue(selectedPools, pool.id))}
-                  type="checkbox"
-                />
-                <span>{pool.name}</span>
+                <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
               </label>
             ))}
             {tags.map((tag) => (
@@ -464,7 +457,7 @@ export function DataSourcePresetPanel({
             <option value="">VPS</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.display_name || "Unnamed VPS"}
+                  {formatVpsName(agent, vpsNameDisplayMode)}
                 </option>
               ))}
           </select>
@@ -609,7 +602,7 @@ export function DataSourcePresetPanel({
         </div>
         <CrudPager
           fields={[
-            { label: "VPS", value: (row) => `${row.display_name} ${row.client_id}` },
+            { label: "VPS", value: (row) => formatVpsName(row, vpsNameDisplayMode) },
             { label: "Module", value: (row) => `${row.module} ${row.domain}` },
             { label: "Preset", value: (row) => row.preset_name },
             { label: "Source", value: (row) => row.source_kind },
@@ -640,7 +633,7 @@ export function DataSourcePresetPanel({
               {sourceStatusRows.map((row) => (
                 <div className="historyRow dataSourceStatusGrid" key={`${row.client_id}:${row.domain}`}>
                   <span className="historyPrimary">
-                    <strong>{row.display_name || row.client_id}</strong>
+                    <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
                     <small>{row.client_status}</small>
                   </span>
                   <span className="historyPrimary">

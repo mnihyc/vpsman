@@ -1,15 +1,15 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { CalendarClock, Layers3, RefreshCcw, Save, Server, Tag } from "lucide-react";
+import { CalendarClock, RefreshCcw, Save, Server, Tag } from "lucide-react";
 import { CrudPager } from "../components/CrudPager";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import { parseCommandArgv } from "../proof";
 import type {
   AgentView,
   CreateScheduleRequest,
-  ResourcePoolView,
   ScheduleRecord,
   TagView,
 } from "../types";
-import { formatTime, runPanelAction, shortId, toggleValue } from "../utils";
+import { formatTime, formatVpsName, runPanelAction, shortId, toggleValue } from "../utils";
 
 export function SchedulesPanel({
   agents,
@@ -17,7 +17,6 @@ export function SchedulesPanel({
   loading,
   onCreateSchedule,
   onRefresh,
-  pools,
   schedules,
   tags,
 }: {
@@ -26,10 +25,10 @@ export function SchedulesPanel({
   loading: boolean;
   onCreateSchedule: (request: CreateScheduleRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
-  pools: ResourcePoolView[];
   schedules: ScheduleRecord[];
   tags: TagView[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [name, setName] = useState("");
   const [commandText, setCommandText] = useState("");
   const [intervalSecs, setIntervalSecs] = useState(3600);
@@ -39,7 +38,6 @@ export function SchedulesPanel({
   const [retryDelaySecs, setRetryDelaySecs] = useState(300);
   const [maxFailures, setMaxFailures] = useState(3);
   const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedPools, setSelectedPools] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -51,7 +49,7 @@ export function SchedulesPanel({
       return [];
     }
   }, [commandText]);
-  const selectedTargetCount = selectedClients.length + selectedPools.length + selectedTags.length;
+  const selectedTargetCount = selectedClients.length + selectedTags.length;
   const ready = name.trim().length > 0 && argv.length > 0 && selectedTargetCount > 0;
   const status = actionError ?? error ?? (loading ? "Loading" : `${schedules.length} schedules`);
 
@@ -65,7 +63,6 @@ export function SchedulesPanel({
         name: name.trim(),
         operation: { type: "shell", argv, pty: false },
         clients: selectedClients,
-        pools: selectedPools,
         tags: selectedTags,
         interval_secs: clampInteger(intervalSecs, 1, 31_536_000),
         start_at_unix: null,
@@ -97,7 +94,7 @@ export function SchedulesPanel({
           fields={[
             { label: "Name", value: (schedule) => `${schedule.name} ${schedule.id}` },
             { label: "Operation", value: (schedule) => schedule.command_type },
-            { label: "Targets", value: (schedule) => [...schedule.clients, ...schedule.pools, ...schedule.tags].join(" ") },
+            { label: "Targets", value: (schedule) => [...schedule.clients, ...schedule.tags].join(" ") },
             { label: "Policy", value: (schedule) => schedule.catch_up_policy },
             { label: "State", value: (schedule) => `${schedule.enabled ? "enabled" : "disabled"} ${schedule.last_error ?? ""}` },
           ]}
@@ -129,7 +126,7 @@ export function SchedulesPanel({
                         <span className="mutedCell">{shortId(schedule.id)}</span>
                       </td>
                       <td>{schedule.command_type}</td>
-                      <td>{schedule.clients.length + schedule.pools.length + schedule.tags.length}</td>
+                      <td>{schedule.clients.length + schedule.tags.length}</td>
                       <td>{formatInterval(schedule.interval_secs)}</td>
                       <td>
                         <strong>{formatCatchUpPolicy(schedule.catch_up_policy)}</strong>
@@ -259,21 +256,10 @@ export function SchedulesPanel({
                     type="checkbox"
                   />
                   <Server size={14} />
-                  <span>{agent.display_name || shortId(agent.id)}</span>
+                  <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
                 </label>
               ))}
-              {pools.map((pool) => (
-                <label className="checkChip" key={pool.id}>
-                  <input
-                    checked={selectedPools.includes(pool.id)}
-                    onChange={() => setSelectedPools(toggleValue(selectedPools, pool.id))}
-                    type="checkbox"
-                  />
-                  <Layers3 size={14} />
-                  <span>{pool.name}</span>
-                </label>
-              ))}
-              {tags.map((tag) => (
+            {tags.map((tag) => (
                 <label className="checkChip" key={tag.name}>
                   <input
                     checked={selectedTags.includes(tag.name)}

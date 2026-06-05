@@ -346,7 +346,7 @@ pub(crate) fn validate_command_template_request(
     ensure!(
         matches!(
             request.scope_kind.as_str(),
-            "global" | "provider" | "pool" | "tag" | "client"
+            "global" | "provider" | "tag" | "client"
         ),
         "command template scope kind is invalid"
     );

@@ -115,7 +115,6 @@ pub(crate) struct BackupPolicyView {
     pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) clients: Vec<String>,
-    pub(crate) pools: Vec<Uuid>,
     pub(crate) tags: Vec<String>,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
@@ -150,8 +149,6 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) pools: Vec<Uuid>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     #[serde(default)]
@@ -282,6 +279,23 @@ pub(crate) struct BackupArtifactHandoffView {
     pub(crate) source_job_id: Uuid,
     pub(crate) source_chunk_count: usize,
     pub(crate) source: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PrepareBackupArtifactRestoreRequest {
+    pub(crate) private_key_hex: String,
+    #[serde(default)]
+    pub(crate) artifact_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PreparedBackupArtifactRestoreView {
+    pub(crate) archive_base64: String,
+    pub(crate) archive_sha256_hex: String,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) artifact_client_id: String,
+    pub(crate) file_count: usize,
+    pub(crate) archive_format: String,
 }
 
 #[derive(Clone, Debug, Serialize)]

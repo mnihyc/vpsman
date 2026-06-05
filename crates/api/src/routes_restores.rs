@@ -141,7 +141,6 @@ async fn ensure_single_restore_target(
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
             clients: vec![request.target_client_id.clone()],
-            pools: Vec::new(),
             tags: Vec::new(),
             tag_mode: None,
             destructive: false,

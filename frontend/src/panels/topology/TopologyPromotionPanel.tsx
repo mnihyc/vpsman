@@ -1,5 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Network, Save, ShieldCheck } from "lucide-react";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
   buildRuntimeControl,
   buildRuntimeTopology,
@@ -15,7 +16,13 @@ import type {
   TunnelPlanRecord,
 } from "../../types";
 import type { PromoteTunnelPlanToAdapterRequest } from "../../typesTopology";
-import { runPanelAction, shortId } from "../../utils";
+import {
+  clientDisplayNameFromMap,
+  clientDisplayNameMap,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+} from "../../utils";
 
 const bandwidthTiers: BandwidthTier[] = ["10m", "100m", "1000m"];
 
@@ -52,6 +59,7 @@ export function TopologyPromotionPanel({
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [promoteForm, setPromoteForm] = useState<PromoteTelemetryTunnelRequest>({
     client_id: "",
     interface: "",
@@ -86,6 +94,8 @@ export function TopologyPromotionPanel({
   });
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const importCandidates = useMemo(
     () =>
       telemetryTunnels
@@ -193,7 +203,7 @@ export function TopologyPromotionPanel({
                 <option value="">Select</option>
                 {importCandidates.map((candidate) => (
                   <option key={`${candidate.client_id}:${candidate.interface}`} value={`${candidate.client_id}:${candidate.interface}`}>
-                    {candidate.client_id} / {candidate.interface} / {candidate.kind}
+                    {clientLabel(candidate.client_id)} / {candidate.interface} / {candidate.kind}
                   </option>
                 ))}
               </select>
@@ -209,7 +219,7 @@ export function TopologyPromotionPanel({
                   .filter((agent) => agent.id !== promoteForm.client_id)
                   .map((agent) => (
                     <option key={agent.id} value={agent.id}>
-                      {agent.display_name || agent.id}
+                      {formatVpsName(agent, vpsNameDisplayMode)}
                     </option>
                   ))}
               </select>
@@ -452,7 +462,7 @@ export function TopologyPromotionPanel({
       ...current,
       client_id: candidate.client_id,
       interface: candidate.interface,
-      name: current.name || `${candidate.client_id}-${candidate.interface}-observed`,
+      name: current.name || `${clientLabel(candidate.client_id)}-${candidate.interface}-observed`,
       topology_version: current.topology_version || `telemetry-import:${candidate.interface}`,
     }));
   }

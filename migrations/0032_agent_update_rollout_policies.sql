@@ -12,7 +12,7 @@ CREATE TABLE agent_update_rollout_policies (
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (scope_kind IN ('global', 'tag', 'pool', 'provider')),
+    CHECK (scope_kind IN ('global', 'tag', 'provider')),
     CHECK (
         (scope_kind = 'global' AND scope_value IS NULL)
         OR (scope_kind <> 'global' AND scope_value IS NOT NULL)

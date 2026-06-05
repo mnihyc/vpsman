@@ -17,8 +17,9 @@ Protocol surfaces are separate:
 
 ## 1. Prepare The Public Gateway
 
-Public agent ingress must use enrolled Noise IK identity. The default `dev_xx`
-mode is for local development and should not be exposed to the internet.
+Public agent ingress must use enrolled Noise IK identity. `dev_xx` mode is
+disabled unless `VPSMAN_DEBUG_INTERNAL_TEST_MODE=true` and is for dangerous
+internal tests only.
 
 Generate a gateway Noise keypair with the released `vpsctl` binary, or from a
 source checkout with `cargo run -p vpsctl -- noise-keygen`:
@@ -65,9 +66,9 @@ cd deploy
 
 ## 2. Create An Enrollment Token
 
-Create short-lived tokens. For a new VPS, do not bind the token to a semantic
-client id; the installer generates an opaque random `client-*` id. Use
-`--default-display-name` for the human label stored in the control plane.
+Create short-lived tokens. For a new VPS, the panel assigns an opaque UUID
+client id when the token is created. Use `--default-display-name` for the human
+label stored in the control plane.
 
 ```sh
 export VPSMAN_ENROLLMENT_API_URL=https://panel.example.com
@@ -81,11 +82,13 @@ vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" \
   --ttl-secs 1800
 ```
 
-Copy the `token` value from the response. Tokens are consumed when claimed.
+Copy the `token` value from the response. Tokens are consumed when claimed. The
+`assigned_client_id` value is the server-side VPS identity that will be written
+to the agent config during claim.
 
-`--default-display-name` is not written into `agent.toml`. `--allowed-client-id`
-is only for binding a token to a known existing opaque client id, such as a
-rebuild or a tightly pinned provisioning workflow. It is not a display label.
+`--default-display-name` is not written into `agent.toml`. Do not supply a
+client id for normal provisioning; use `reenrollment-token-create` when a
+rebuilt VPS must keep an existing server identity.
 
 Keep a local super password and a 32-byte salt for privileged operations. The
 agent config stores only the derived proof key, not the plaintext password.
@@ -242,8 +245,8 @@ journalctl --user -u vpsman-agent -n 100 --no-pager
 
 ## Re-Enroll A Rebuilt VPS
 
-Use a confirmed re-enrollment token to preserve server-side identity, pools,
-tags, history, and migration context:
+Use a confirmed re-enrollment token to preserve server-side identity, tags,
+history, and migration context:
 
 ```sh
 vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" \
@@ -255,6 +258,6 @@ vpsctl --api-url "$VPSMAN_ENROLLMENT_API_URL" --api-token "$VPSMAN_API_TOKEN" \
   --confirmed
 ```
 
-Then rerun `deploy/enroll-agent.sh` on the rebuilt VPS with the same
-opaque `VPSMAN_CLIENT_ID` and the new token. For re-enrollment only, the
-`client-id` is the existing server identity, not the human display name.
+Then rerun `deploy/enroll-agent.sh` on the rebuilt VPS with the new token. The
+token is already bound to the existing server identity; the installer does not
+send or generate a client id during claim.

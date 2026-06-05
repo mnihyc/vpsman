@@ -3,13 +3,58 @@
   align-items: start;
 }
 
+.accessWorkspace [hidden] {
+  display: none !important;
+}
+
+.accessSubnav {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.accessSubnav button {
+  min-height: 38px;
+  border: 0;
+  border-right: 1px solid #dfe3eb;
+  padding: 0 14px;
+  background: #fff;
+  color: #3c4043;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.accessSubnav button:last-child {
+  border-right: 0;
+}
+
+.accessSubnav button:hover {
+  background: #f8fafd;
+}
+
+.accessSubnav button.selected {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
 .accessWorkspace > .fleetPanel {
   grid-column: 1;
 }
 
+.accessWorkspace > .accessOverviewPanel {
+  grid-column: 1 / -1;
+}
+
 .accessWorkspace > .accessInspector {
   grid-column: 2;
-  grid-row: 1 / span 8;
+  grid-row: 2 / span 8;
 }
 
 .accessGrid {
@@ -59,6 +104,46 @@
   overflow: hidden;
 }
 
+.accessInspector .inlineCheck {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  color: #202124;
+}
+
+.accessInspector .inlineCheck input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+}
+
+.accessConfigHeading {
+  display: grid;
+  gap: 3px;
+  border-top: 1px solid #dfe3eb;
+  padding: 14px 18px 8px;
+}
+
+.accessConfigHeading:first-child {
+  border-top: 0;
+}
+
+.accessConfigHeading strong {
+  color: #202124;
+  font-size: 0.86rem;
+  line-height: 1.25;
+}
+
+.accessConfigHeading span {
+  color: #5f6368;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
 .enrollmentTokenGrid {
   grid-template-columns: 1.2fr 1.2fr minmax(120px, 0.8fr) minmax(120px, 1fr);
 }
@@ -88,4 +173,29 @@
 
 .enrollmentSecret strong {
   font-size: 0.82rem;
+}
+
+.formNote {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 10px;
+}
+
+.formNote strong,
+.formNote span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.formNote strong {
+  font-size: 0.82rem;
+}
+
+.formNote span {
+  color: #5f6368;
+  font-size: 0.78rem;
+  line-height: 1.35;
 }

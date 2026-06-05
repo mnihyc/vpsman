@@ -1,4 +1,6 @@
 use std::{
+    collections::HashMap,
+    io::Cursor,
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
 };
@@ -15,7 +17,10 @@ use vpsman_common::{
     CommandOutput, OutputStream,
 };
 
-use crate::backup::{BackupArchive, BackupFileEntry, BackupFileSource, BACKUP_ARCHIVE_FORMAT};
+use crate::backup::{
+    BackupArchive, BackupFileEntry, BackupFileSource, BACKUP_ARCHIVE_FORMAT,
+    BACKUP_ARCHIVE_MANIFEST_PATH,
+};
 
 #[derive(Debug, Serialize)]
 struct RestoredFileStatus {
@@ -39,6 +44,33 @@ struct AppliedRestore {
 struct RollbackSnapshot {
     path: PathBuf,
     mode: u32,
+}
+
+struct DecodedBackupArchive {
+    client_id: String,
+    files: Vec<DecodedBackupFile>,
+}
+
+struct DecodedBackupFile {
+    entry: BackupFileEntry,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyBackupArchive {
+    format: String,
+    client_id: String,
+    files: Vec<LegacyBackupFileEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LegacyBackupFileEntry {
+    path: String,
+    source: BackupFileSource,
+    mode: u32,
+    size_bytes: u64,
+    sha256_hex: String,
+    data_base64: String,
 }
 
 pub(crate) struct RestoreCommandInput<'a> {
@@ -104,21 +136,17 @@ async fn restore_archive(
         archive_sha256_hex,
     )
     .await?;
-    let archive: BackupArchive =
-        serde_json::from_slice(&archive_bytes).context("restore archive JSON is invalid")?;
-    if archive.format != BACKUP_ARCHIVE_FORMAT {
-        anyhow::bail!("restore archive format is invalid");
-    }
+    let archive = decode_backup_archive(&archive_bytes)?;
 
     let mut restored = Vec::new();
     let mut matched_count = 0_usize;
     for entry in archive.files {
-        if !entry_requested(&entry, paths, include_config) {
+        if !entry_requested(&entry.entry, paths, include_config) {
             continue;
         }
         matched_count += 1;
         if dry_run {
-            validate_restore_entry(&entry, destination_root)?;
+            validate_restore_entry(&entry.entry, &entry.data, destination_root)?;
             continue;
         }
         match restore_entry(job_id, &entry, destination_root).await {
@@ -239,6 +267,94 @@ async fn archive_bytes_from_source(
     }
 }
 
+fn decode_backup_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
+    if bytes.first() == Some(&b'{') {
+        return decode_legacy_json_archive(bytes);
+    }
+    decode_tar_archive(bytes)
+}
+
+fn decode_legacy_json_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
+    let archive: LegacyBackupArchive =
+        serde_json::from_slice(bytes).context("legacy restore archive JSON is invalid")?;
+    if archive.format != "vpsman.backup_archive.v1" {
+        anyhow::bail!("restore archive format is invalid");
+    }
+    let files = archive
+        .files
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let data = BASE64_STANDARD
+                .decode(&entry.data_base64)
+                .with_context(|| {
+                    format!("restore archive entry {} has invalid base64", entry.path)
+                })?;
+            let decoded = BackupFileEntry {
+                path: entry.path,
+                source: entry.source,
+                tar_path: format!("legacy/{index:04}.bin"),
+                mode: entry.mode,
+                size_bytes: entry.size_bytes,
+                sha256_hex: entry.sha256_hex,
+                mtime_unix: None,
+            };
+            validate_restore_entry_payload(&decoded, &data)?;
+            Ok(DecodedBackupFile {
+                entry: decoded,
+                data,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(DecodedBackupArchive {
+        client_id: archive.client_id,
+        files,
+    })
+}
+
+fn decode_tar_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
+    let mut manifest = None::<BackupArchive>;
+    let mut payloads = HashMap::<String, Vec<u8>>::new();
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    for entry in archive
+        .entries()
+        .context("restore tar archive is invalid")?
+    {
+        let mut entry = entry.context("restore tar entry is invalid")?;
+        let path = entry
+            .path()
+            .context("restore tar entry path is invalid")?
+            .to_string_lossy()
+            .to_string();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data)
+            .context("failed to read restore tar entry")?;
+        if path == BACKUP_ARCHIVE_MANIFEST_PATH {
+            manifest = Some(
+                serde_json::from_slice(&data).context("restore tar manifest JSON is invalid")?,
+            );
+        } else {
+            payloads.insert(path, data);
+        }
+    }
+    let manifest = manifest.context("restore tar manifest is missing")?;
+    if manifest.format != BACKUP_ARCHIVE_FORMAT {
+        anyhow::bail!("restore archive format is invalid");
+    }
+    let mut files = Vec::with_capacity(manifest.files.len());
+    for entry in manifest.files {
+        let data = payloads
+            .remove(&entry.tar_path)
+            .with_context(|| format!("restore tar payload {} is missing", entry.tar_path))?;
+        validate_restore_entry_payload(&entry, &data)?;
+        files.push(DecodedBackupFile { entry, data });
+    }
+    Ok(DecodedBackupArchive {
+        client_id: manifest.client_id,
+        files,
+    })
+}
+
 fn archive_source_label(archive_path: Option<&str>) -> &'static str {
     if archive_path.is_some() {
         "staged_file"
@@ -276,21 +392,13 @@ fn entry_requested(entry: &BackupFileEntry, paths: &[String], include_config: bo
 
 async fn restore_entry(
     job_id: uuid::Uuid,
-    entry: &BackupFileEntry,
+    decoded: &DecodedBackupFile,
     destination_root: Option<&str>,
 ) -> Result<AppliedRestore> {
-    validate_restore_entry(entry, destination_root)?;
-    let data = BASE64_STANDARD
-        .decode(&entry.data_base64)
-        .with_context(|| format!("restore archive entry {} has invalid base64", entry.path))?;
-    if data.len() as u64 != entry.size_bytes {
-        anyhow::bail!("restore archive entry {} size mismatch", entry.path);
-    }
-    if payload_hash(&data) != entry.sha256_hex {
-        anyhow::bail!("restore archive entry {} sha256 mismatch", entry.path);
-    }
+    let entry = &decoded.entry;
+    validate_restore_entry(entry, &decoded.data, destination_root)?;
     let destination = destination_path_for_entry(entry, destination_root)?;
-    let rollback = write_restored_file(job_id, &destination, &data, entry.mode).await?;
+    let rollback = write_restored_file(job_id, &destination, &decoded.data, entry.mode).await?;
     let status = RestoredFileStatus {
         archive_path: entry.path.clone(),
         destination_path: destination.display().to_string(),
@@ -298,8 +406,8 @@ async fn restore_entry(
             BackupFileSource::SelectedPath => "selected_path",
             BackupFileSource::AgentConfig => "agent_config",
         },
-        size_bytes: data.len() as u64,
-        sha256_hex: payload_hash(&data),
+        size_bytes: decoded.data.len() as u64,
+        sha256_hex: payload_hash(&decoded.data),
         mode: entry.mode,
         rollback_path: rollback
             .as_ref()
@@ -312,18 +420,24 @@ async fn restore_entry(
     })
 }
 
-fn validate_restore_entry(entry: &BackupFileEntry, destination_root: Option<&str>) -> Result<()> {
+fn validate_restore_entry(
+    entry: &BackupFileEntry,
+    data: &[u8],
+    destination_root: Option<&str>,
+) -> Result<()> {
+    validate_restore_entry_payload(entry, data)?;
+    let _ = destination_path_for_entry(entry, destination_root)?;
+    Ok(())
+}
+
+fn validate_restore_entry_payload(entry: &BackupFileEntry, data: &[u8]) -> Result<()> {
     validate_file_mode(entry.mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let data = BASE64_STANDARD
-        .decode(&entry.data_base64)
-        .with_context(|| format!("restore archive entry {} has invalid base64", entry.path))?;
     if data.len() as u64 != entry.size_bytes {
         anyhow::bail!("restore archive entry {} size mismatch", entry.path);
     }
-    if payload_hash(&data) != entry.sha256_hex {
+    if payload_hash(data) != entry.sha256_hex {
         anyhow::bail!("restore archive entry {} sha256 mismatch", entry.path);
     }
-    let _ = destination_path_for_entry(entry, destination_root)?;
     Ok(())
 }
 
@@ -551,24 +665,20 @@ mod tests {
             .await
             .unwrap();
 
-        let archive = BackupArchive {
-            format: BACKUP_ARCHIVE_FORMAT.to_string(),
-            client_id: "source-client".to_string(),
-            created_unix: 1,
-            files: vec![
-                backup_entry(
-                    "/tmp/source.txt",
-                    BackupFileSource::SelectedPath,
-                    b"new-data",
-                ),
-                backup_entry(
-                    "vpsman:agent_config",
-                    BackupFileSource::AgentConfig,
-                    b"config",
-                ),
-            ],
-        };
-        let archive_bytes = serde_json::to_vec(&archive).unwrap();
+        let archive_bytes = backup_archive_bytes(vec![
+            backup_entry(
+                0,
+                "/tmp/source.txt",
+                BackupFileSource::SelectedPath,
+                b"new-data",
+            ),
+            backup_entry(
+                1,
+                "vpsman:agent_config",
+                BackupFileSource::AgentConfig,
+                b"config",
+            ),
+        ]);
         let paths = vec!["/tmp/source.txt".to_string()];
         let archive_base64 = BASE64_STANDARD.encode(&archive_bytes);
         let archive_sha256_hex = payload_hash(&archive_bytes);
@@ -659,6 +769,7 @@ mod tests {
         let destination_root = root.join("restore-root");
         let first_destination = destination_root.join("tmp/first.txt");
         let created_destination = destination_root.join("tmp/created.txt");
+        let broken_destination = destination_root.join("tmp/broken.txt");
         tokio::fs::create_dir_all(first_destination.parent().unwrap())
             .await
             .unwrap();
@@ -668,32 +779,30 @@ mod tests {
         tokio::fs::set_permissions(&first_destination, std::fs::Permissions::from_mode(0o640))
             .await
             .unwrap();
+        tokio::fs::create_dir_all(&broken_destination)
+            .await
+            .unwrap();
 
-        let mut bad_entry = backup_entry(
-            "/tmp/broken.txt",
-            BackupFileSource::SelectedPath,
-            b"broken-data",
-        );
-        bad_entry.sha256_hex = "0".repeat(64);
-        let archive = BackupArchive {
-            format: BACKUP_ARCHIVE_FORMAT.to_string(),
-            client_id: "source-client".to_string(),
-            created_unix: 1,
-            files: vec![
-                backup_entry(
-                    "/tmp/first.txt",
-                    BackupFileSource::SelectedPath,
-                    b"new-first",
-                ),
-                backup_entry(
-                    "/tmp/created.txt",
-                    BackupFileSource::SelectedPath,
-                    b"new-created",
-                ),
-                bad_entry,
-            ],
-        };
-        let archive_bytes = serde_json::to_vec(&archive).unwrap();
+        let archive_bytes = backup_archive_bytes(vec![
+            backup_entry(
+                0,
+                "/tmp/first.txt",
+                BackupFileSource::SelectedPath,
+                b"new-first",
+            ),
+            backup_entry(
+                1,
+                "/tmp/created.txt",
+                BackupFileSource::SelectedPath,
+                b"new-created",
+            ),
+            backup_entry(
+                2,
+                "/tmp/broken.txt",
+                BackupFileSource::SelectedPath,
+                b"broken-data",
+            ),
+        ]);
         let paths = vec![
             "/tmp/first.txt".to_string(),
             "/tmp/created.txt".to_string(),
@@ -737,14 +846,58 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
-    fn backup_entry(path: &str, source: BackupFileSource, data: &[u8]) -> BackupFileEntry {
-        BackupFileEntry {
-            path: path.to_string(),
-            source,
-            mode: 0o600,
-            size_bytes: data.len() as u64,
-            sha256_hex: payload_hash(data),
-            data_base64: BASE64_STANDARD.encode(data),
+    fn backup_archive_bytes(entries: Vec<(BackupFileEntry, Vec<u8>)>) -> Vec<u8> {
+        let manifest = BackupArchive {
+            format: BACKUP_ARCHIVE_FORMAT.to_string(),
+            client_id: "source-client".to_string(),
+            created_unix: 1,
+            files: entries.iter().map(|(entry, _)| entry.clone()).collect(),
+        };
+        let mut builder = tar::Builder::new(Vec::new());
+        append_test_tar_entry(
+            &mut builder,
+            BACKUP_ARCHIVE_MANIFEST_PATH,
+            0o600,
+            serde_json::to_vec(&manifest).unwrap().as_slice(),
+        );
+        for (entry, data) in entries {
+            append_test_tar_entry(&mut builder, &entry.tar_path, entry.mode, &data);
         }
+        builder.finish().unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    fn append_test_tar_entry(
+        builder: &mut tar::Builder<Vec<u8>>,
+        path: &str,
+        mode: u32,
+        data: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_mtime(1);
+        header.set_cksum();
+        builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    fn backup_entry(
+        index: usize,
+        path: &str,
+        source: BackupFileSource,
+        data: &[u8],
+    ) -> (BackupFileEntry, Vec<u8>) {
+        (
+            BackupFileEntry {
+                path: path.to_string(),
+                source,
+                tar_path: format!("vpsman-backup/files/{index:04}.bin"),
+                mode: 0o600,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                mtime_unix: Some(1),
+            },
+            data.to_vec(),
+        )
     }
 }

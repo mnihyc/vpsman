@@ -39,21 +39,21 @@ const agents = [
     display_name: "edge-sfo-01",
     id: "agent-sfo-01",
     status: "connected",
-    tags: ["provider:alpha", "pool:west"],
+    tags: ["country:US", "provider:alpha"],
   },
   {
     capabilities: rootCapabilities,
     display_name: "core-fra-02",
     id: "agent-fra-02",
     status: "connected",
-    tags: ["bgp", "bird2", "pool:europe"],
+    tags: ["bgp", "bird2", "country:DE"],
   },
   {
     capabilities: unprivilegedCapabilities,
     display_name: "backup-nyc-03",
     id: "agent-nyc-03",
     status: "stale",
-    tags: [],
+    tags: ["country:US"],
   },
 ];
 
@@ -208,16 +208,6 @@ const historyRetentionPolicies = [
   },
 ];
 
-const pools = [
-  {
-    clients: [agents[0]],
-    id: "pool-west",
-    name: "west",
-    provider: "alpha",
-    region: "sfo",
-  },
-];
-
 const tags = [
   {
     clients: [agents[0], agents[1]],
@@ -340,6 +330,7 @@ const dataSourceStatus = [
 
 const enrollmentTokens = [
   {
+    assigned_client_id: null,
     allowed_client_id: null,
     created_at: "2026-05-31T10:00:00Z",
     created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
@@ -1093,7 +1084,6 @@ export async function installConsoleApiMock(page: Page) {
       ospfRecommendationsFixture,
       ospfUpdatePlansFixture,
       networkTrendsFixture,
-      poolsFixture,
       processSupervisorInventoryFixture,
       summaryFixture,
       tagsFixture,
@@ -1104,6 +1094,7 @@ export async function installConsoleApiMock(page: Page) {
       const originalFetch = window.fetch.bind(window);
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
+        backupArtifactRestorePreparations: [] as unknown[],
         agentUpdateRolloutPolicies: [] as unknown[],
         bulkResolve: [] as unknown[],
         dataSourcePresetAssignments: [] as unknown[],
@@ -1154,22 +1145,20 @@ export async function installConsoleApiMock(page: Page) {
         const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
         return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
       };
+      const bytesToBase64 = (bytes: Uint8Array) => {
+        let binary = "";
+        for (const byte of bytes) {
+          binary += String.fromCharCode(byte);
+        }
+        return btoa(binary);
+      };
       const resolveBulkTargets = (body: unknown) => {
-        const request = body as { clients?: string[]; pools?: string[]; tags?: string[] } | null;
+        const request = body as { clients?: string[]; tags?: string[] } | null;
         const selected = new Map<string, (typeof agentsFixture)[number]>();
         const selectedClients = new Set(request?.clients ?? []);
-        const selectedPools = new Set(request?.pools ?? []);
         const selectedTags = new Set(request?.tags ?? []);
         for (const agent of agentsFixture) {
           if (selectedClients.has(agent.id) || agent.tags.some((tag) => selectedTags.has(tag))) {
-            selected.set(agent.id, agent);
-          }
-        }
-        for (const pool of poolsFixture) {
-          if (!selectedPools.has(pool.id)) {
-            continue;
-          }
-          for (const agent of pool.clients) {
             selected.set(agent.id, agent);
           }
         }
@@ -1283,16 +1272,23 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/enrollment-tokens" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.enrollmentTokens.push(body);
+          const purpose = (body as { purpose?: string }).purpose ?? "provision";
+          const assignedClientId =
+            purpose === "rebuild_reenrollment"
+              ? (body as { allowed_client_id?: string | null }).allowed_client_id ?? "agent-sfo-01"
+              : "11111111-2222-4333-8444-555555555555";
           return jsonResponse({
             ...(body as Record<string, unknown>),
+            assigned_client_id: assignedClientId,
+            allowed_client_id: assignedClientId,
             created_at: "2026-05-31T10:05:00Z",
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-            expected_old_public_key_sha256_hex: "f".repeat(64),
+            expected_old_public_key_sha256_hex: purpose === "rebuild_reenrollment" ? "f".repeat(64) : null,
             expires_at: "2026-05-31T10:35:00Z",
             id: "bcbcbcbc-dede-4faf-8bbb-cccccccccccc",
-            requires_existing_client: (body as { purpose?: string }).purpose === "rebuild_reenrollment",
-            token: "vpsm_rebuild_token_secret",
-            token_prefix: "vpsm_rebuild",
+            requires_existing_client: purpose === "rebuild_reenrollment",
+            token: purpose === "rebuild_reenrollment" ? "vpsm_rebuild_token_secret" : "vpsm_provision_token_secret",
+            token_prefix: purpose === "rebuild_reenrollment" ? "vpsm_rebuild" : "vpsm_provision",
             used_at: null,
             used_by_client_id: null,
           });
@@ -1542,9 +1538,6 @@ export async function installConsoleApiMock(page: Page) {
             },
           );
         }
-        if (pathname === "/api/v1/pools") {
-          return jsonResponse(poolsFixture);
-        }
         if (pathname === "/api/v1/tags") {
           return jsonResponse(tagsFixture);
         }
@@ -1576,6 +1569,42 @@ export async function installConsoleApiMock(page: Page) {
             source: "retained_job_outputs",
             source_chunk_count: 2,
             source_job_id: body.job_id ?? "99999999-2222-4333-8444-555555555555",
+          });
+        }
+        const backupArtifactPrepareRestoreMatch = pathname.match(
+          /^\/api\/v1\/backups\/([^/]+)\/artifact\/prepare-restore$/,
+        );
+        if (backupArtifactPrepareRestoreMatch && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            artifact_base64?: string | null;
+            private_key_hex?: string | null;
+          };
+          requests.backupArtifactRestorePreparations.push(body);
+          const fileBody = "edge-sfo-01\n";
+          const archive = {
+            client_id: "agent-sfo-01",
+            created_unix: 1_780_000_000,
+            files: [
+              {
+                data_base64: btoa(fileBody),
+                mode: 0o644,
+                path: "/etc/hostname",
+                sha256_hex: await sha256HexForText(fileBody),
+                size_bytes: new TextEncoder().encode(fileBody).byteLength,
+                source: "selected_path",
+              },
+            ],
+            format: "vpsman.backup_archive.v1",
+          };
+          const archiveText = JSON.stringify(archive);
+          const archiveBytes = new TextEncoder().encode(archiveText);
+          return jsonResponse({
+            archive_base64: bytesToBase64(archiveBytes),
+            archive_sha256_hex: await sha256HexForText(archiveText),
+            archive_size_bytes: archiveBytes.byteLength,
+            artifact_client_id: "agent-sfo-01",
+            archive_format: "vpsman.backup_archive.v1",
+            file_count: 1,
           });
         }
         if (pathname === "/api/v1/restore-plans" && method === "GET") {
@@ -1777,7 +1806,6 @@ export async function installConsoleApiMock(page: Page) {
       ospfRecommendationsFixture: ospfRecommendations,
       ospfUpdatePlansFixture: ospfUpdatePlans,
       networkTrendsFixture: networkTrends,
-      poolsFixture: pools,
       processSupervisorInventoryFixture: processSupervisorInventory,
       summaryFixture: summary,
       tagsFixture: tags,

@@ -132,7 +132,6 @@ pub(crate) fn submit_vty_schedule_create(
                 pty: false,
             },
             "clients": selection.clients,
-            "pools": selection.pools,
             "tags": selection.tags,
             "interval_secs": interval_secs,
             "start_at_unix": null,

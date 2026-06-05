@@ -1,35 +1,31 @@
 import type { Dispatch, SetStateAction } from "react";
-import { Layers3, Server, Tag } from "lucide-react";
-import type { AgentView, ResourcePoolView, TagView } from "../types";
-import { shortId, toggleValue } from "../utils";
+import { Server, Tag } from "lucide-react";
+import { usePanelDisplaySettings } from "../panelDisplay";
+import type { AgentView, TagView } from "../types";
+import { formatVpsName, toggleValue } from "../utils";
 
 type SetValue<T> = Dispatch<SetStateAction<T>>;
 
 export function JobTargetSelector({
   agents,
-  pools,
   selectedClients,
-  selectedPools,
   selectedTags,
   setSelectedClients,
-  setSelectedPools,
   setSelectedTags,
   setTagMode,
   tagMode,
   tags,
 }: {
   agents: AgentView[];
-  pools: ResourcePoolView[];
   selectedClients: string[];
-  selectedPools: string[];
   selectedTags: string[];
   setSelectedClients: SetValue<string[]>;
-  setSelectedPools: SetValue<string[]>;
   setSelectedTags: SetValue<string[]>;
   setTagMode: (value: "any" | "all") => void;
   tagMode: "any" | "all";
   tags: TagView[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <div className="targetSelector">
       <strong>Targets</strong>
@@ -42,18 +38,7 @@ export function JobTargetSelector({
               type="checkbox"
             />
             <Server size={14} />
-            <span>{agent.display_name || shortId(agent.id)}</span>
-          </label>
-        ))}
-        {pools.map((pool) => (
-          <label className="checkChip" key={pool.id}>
-            <input
-              checked={selectedPools.includes(pool.id)}
-              onChange={() => setSelectedPools((values) => toggleValue(values, pool.id))}
-              type="checkbox"
-            />
-            <Layers3 size={14} />
-            <span>{pool.name}</span>
+            <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
           </label>
         ))}
         {tags.map((tag) => (

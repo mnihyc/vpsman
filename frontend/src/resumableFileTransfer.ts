@@ -470,7 +470,6 @@ async function submitTransferStep(
   return request.createJob({
     argv: [],
     clients: targetClientIds,
-    pools: [],
     tags: [],
     destructive: false,
     confirmed: request.confirmed,

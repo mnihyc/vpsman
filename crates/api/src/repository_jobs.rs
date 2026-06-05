@@ -390,7 +390,6 @@ impl Repository {
             .collect::<Vec<_>>();
         let metadata = json!({
             "requested_targets": request.all_requested_clients(),
-            "requested_pools": &request.pools,
             "requested_tags": &request.tags,
             "resolved_targets": &resolved_targets,
             "destructive": request.destructive,
@@ -544,7 +543,6 @@ impl Repository {
         let job_id = Uuid::new_v4();
         let metadata = json!({
             "requested_targets": request.all_requested_clients(),
-            "requested_pools": &request.pools,
             "requested_tags": &request.tags,
             "resolved_targets": resolved_targets,
             "destructive": request.destructive,

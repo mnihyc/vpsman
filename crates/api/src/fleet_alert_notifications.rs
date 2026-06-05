@@ -49,8 +49,7 @@ impl AppState {
             .list_fleet_alert_notification_channels(1000, Some(true), None, None, None)
             .await?;
         let agents = self.repo.list_agents().await?;
-        let pools = self.repo.list_pools().await?;
-        let agent_scopes = build_agent_alert_scopes(&agents, &pools);
+        let agent_scopes = build_agent_alert_scopes(&agents);
         let candidates = notification_candidates(&alerts, &channels, &agent_scopes);
         if dry_run {
             return Ok(candidates
@@ -178,9 +177,6 @@ fn scope_matches(
         }
         ("provider", Some(provider)) => {
             scope.and_then(|scope| scope.provider.as_deref()) == Some(provider)
-        }
-        ("pool", Some(pool_id)) => {
-            scope.and_then(|scope| scope.pool_id.as_deref()) == Some(pool_id)
         }
         ("tag", Some(tag)) => {
             scope.is_some_and(|scope| scope.tags.iter().any(|stored| stored == tag))

@@ -1,40 +1,39 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        State,
     },
     response::{IntoResponse, Response},
 };
-use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use tokio::sync::broadcast;
-
-use crate::{
-    error::ApiError,
-    model::{WsAuthQuery, WsEvent},
-    state::AppState,
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
+use serde::Deserialize;
+use tokio::{
+    sync::broadcast,
+    time::{self, Duration},
 };
 
-pub(crate) async fn ws_handler(
-    State(state): State<AppState>,
-    Query(query): Query<WsAuthQuery>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    if state.repo.auth_required() {
-        let Some(token) = query.access_token.as_deref() else {
-            return ApiError::unauthorized("missing_websocket_token").into_response();
-        };
-        match state.repo.authenticate_access_token(token).await {
-            Ok(Some(_operator)) => {}
-            Ok(None) => return ApiError::unauthorized("invalid_websocket_token").into_response(),
-            Err(error) => return ApiError::from(error).into_response(),
-        }
-    }
+use crate::{model::WsEvent, state::AppState};
+
+#[derive(Debug, Deserialize)]
+struct WsClientAuth {
+    r#type: String,
+    access_token: String,
+}
+
+pub(crate) async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
         .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
+    if state.repo.auth_required() && !authenticate_socket(&mut receiver, &state).await {
+        let _ = sender.send(Message::Close(None)).await;
+        return;
+    }
     let mut events = state.events.subscribe();
 
     let hello = WsEvent::Hello {
@@ -78,6 +77,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+async fn authenticate_socket(receiver: &mut SplitStream<WebSocket>, state: &AppState) -> bool {
+    let Ok(Some(Ok(Message::Text(payload)))) =
+        time::timeout(Duration::from_secs(10), receiver.next()).await
+    else {
+        return false;
+    };
+    let Ok(auth) = serde_json::from_str::<WsClientAuth>(&payload) else {
+        return false;
+    };
+    if auth.r#type != "auth" || auth.access_token.trim().is_empty() {
+        return false;
+    }
+    matches!(
+        state
+            .repo
+            .authenticate_access_token(&auth.access_token)
+            .await,
+        Ok(Some(_))
+    )
 }
 
 async fn send_ws_event(sender: &mut SplitSink<WebSocket, Message>, event: &WsEvent) -> bool {

@@ -182,7 +182,6 @@ async fn agent_update_degrades_unprivileged_target_without_gateway() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

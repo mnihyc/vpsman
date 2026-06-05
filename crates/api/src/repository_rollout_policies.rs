@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
@@ -7,7 +5,7 @@ use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
-    model::{AgentView, AuditLogView, AuthContext, CreateJobRequest, ResourcePoolView},
+    model::{AgentView, AuditLogView, AuthContext, CreateJobRequest},
     model_rollout_policies::{
         AgentUpdateRolloutPolicyView, CreateAgentUpdateRolloutPolicyRequest,
         ResolvedAgentUpdateRolloutPolicy,
@@ -18,7 +16,6 @@ use crate::{
 
 const POLICY_SCOPE_GLOBAL: &str = "global";
 const POLICY_SCOPE_TAG: &str = "tag";
-const POLICY_SCOPE_POOL: &str = "pool";
 const POLICY_SCOPE_PROVIDER: &str = "provider";
 
 impl Repository {
@@ -231,7 +228,6 @@ impl Repository {
         let policies = self
             .list_agent_update_rollout_policies(1000, Some(true), None)
             .await?;
-        let pools = self.list_pools().await?;
         let mut matches = policies
             .into_iter()
             .filter_map(|policy| {
@@ -239,7 +235,6 @@ impl Repository {
                     &policy,
                     request,
                     resolved_agents,
-                    &pools,
                     release_channel.as_deref(),
                 )
                 .map(|score| (policy, score))
@@ -292,7 +287,6 @@ fn policy_match_score(
     policy: &AgentUpdateRolloutPolicyView,
     request: &CreateJobRequest,
     resolved_agents: &[AgentView],
-    pools: &[ResourcePoolView],
     release_channel: Option<&str>,
 ) -> Option<i32> {
     if !policy.enabled || !policy_channel_matches(policy, release_channel) {
@@ -304,13 +298,9 @@ fn policy_match_score(
             let value = policy.scope_value.as_deref()?;
             tag_scope_matches(value, request, resolved_agents).then_some(30)
         }
-        POLICY_SCOPE_POOL => {
-            let value = policy.scope_value.as_deref()?;
-            pool_scope_matches(value, request, resolved_agents, pools).then_some(40)
-        }
         POLICY_SCOPE_PROVIDER => {
             let value = policy.scope_value.as_deref()?;
-            provider_scope_matches(value, request, resolved_agents, pools).then_some(20)
+            provider_scope_matches(value, request, resolved_agents).then_some(20)
         }
         _ => None,
     }
@@ -342,56 +332,28 @@ fn tag_scope_matches(
         })
 }
 
-fn pool_scope_matches(
-    scope_value: &str,
-    request: &CreateJobRequest,
-    resolved_agents: &[AgentView],
-    pools: &[ResourcePoolView],
-) -> bool {
-    let requested_pool_ids = request
-        .pools
-        .iter()
-        .map(Uuid::to_string)
-        .collect::<HashSet<_>>();
-    let target_ids = resolved_agents
-        .iter()
-        .map(|agent| agent.id.as_str())
-        .collect::<HashSet<_>>();
-    pools.iter().any(|pool| {
-        (pool.id.to_string() == scope_value || pool.name.eq_ignore_ascii_case(scope_value))
-            && (requested_pool_ids.contains(&pool.id.to_string())
-                || pool
-                    .clients
-                    .iter()
-                    .any(|agent| target_ids.contains(agent.id.as_str())))
-    })
-}
-
 fn provider_scope_matches(
     scope_value: &str,
     request: &CreateJobRequest,
     resolved_agents: &[AgentView],
-    pools: &[ResourcePoolView],
 ) -> bool {
-    let requested_pool_ids = request
-        .pools
+    request
+        .tags
         .iter()
-        .map(Uuid::to_string)
-        .collect::<HashSet<_>>();
-    let target_ids = resolved_agents
-        .iter()
-        .map(|agent| agent.id.as_str())
-        .collect::<HashSet<_>>();
-    pools.iter().any(|pool| {
-        pool.provider
-            .as_deref()
-            .is_some_and(|provider| provider.eq_ignore_ascii_case(scope_value))
-            && (requested_pool_ids.contains(&pool.id.to_string())
-                || pool
-                    .clients
-                    .iter()
-                    .any(|agent| target_ids.contains(agent.id.as_str())))
-    })
+        .any(|tag| tag_matches_namespace_value(tag, "provider", scope_value))
+        || resolved_agents.iter().any(|agent| {
+            agent
+                .tags
+                .iter()
+                .any(|tag| tag_matches_namespace_value(tag, "provider", scope_value))
+        })
+}
+
+fn tag_matches_namespace_value(tag: &str, namespace: &str, value: &str) -> bool {
+    let Some(stored) = tag.strip_prefix(&format!("{namespace}:")) else {
+        return false;
+    };
+    stored.eq_ignore_ascii_case(value)
 }
 
 fn trimmed_optional(value: Option<&str>) -> Option<String> {

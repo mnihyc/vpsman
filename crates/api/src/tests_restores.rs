@@ -341,7 +341,6 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: true,

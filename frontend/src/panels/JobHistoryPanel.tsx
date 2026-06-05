@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, Server, ShieldCheck, TerminalSquare } from "lucide-react";
 import { CrudPager } from "../components/CrudPager";
 import { ProofVaultBox } from "../components/ProofVaultBox";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildEnvelopesForOperation, buildEnvelopesForPayloadHash, type ProofMaterial } from "../proof";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
@@ -29,7 +30,6 @@ import type {
   JobTargetRecord,
   JobTargetSelection,
   ProcessSupervisorInventoryRecord,
-  ResourcePoolView,
   TagView,
   UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
@@ -43,7 +43,16 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type { TerminalReplayRecord, TerminalSessionRecord } from "../typesTerminal";
-import { decodeOutputPreview, formatTime, runPanelAction, shortHash, shortId, statusClass } from "../utils";
+import {
+  clientDisplayNameFromMap,
+  clientDisplayNameMap,
+  decodeOutputPreview,
+  formatTime,
+  runPanelAction,
+  shortHash,
+  shortId,
+  statusClass,
+} from "../utils";
 import { JobDispatchPanel, type TerminalComposerAction } from "./JobDispatchPanel";
 import { AgentUpdateReleasesPanel } from "./jobs/AgentUpdateReleasesPanel";
 import { AgentUpdateRolloutsPanel } from "./jobs/AgentUpdateRolloutsPanel";
@@ -117,7 +126,6 @@ export function JobHistoryPanel({
   onUpdateAgentUpdateRolloutControl,
   onUploadFileTransferSource,
   onUpsertCommandTemplate,
-  pools,
   processSupervisorInventory,
   terminalSessions,
   tags,
@@ -175,11 +183,11 @@ export function JobHistoryPanel({
   ) => Promise<void>;
   onUploadFileTransferSource: (request: UploadFileTransferSourceArtifactRequest) => Promise<FileTransferSourceArtifactRecord>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
-  pools: ResourcePoolView[];
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   terminalSessions: TerminalSessionRecord[];
   tags: TagView[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [targets, setTargets] = useState<JobTargetRecord[]>([]);
   const [outputs, setOutputs] = useState<JobOutputRecord[]>([]);
@@ -210,6 +218,8 @@ export function JobHistoryPanel({
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactPendingKey, setArtifactPendingKey] = useState<string | null>(null);
   const scheduledApprovalCount = jobs.filter(isScheduledApprovalJob).length;
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
 
   const openTargets = useCallback(async (jobId: string) => {
     setSelectedJobId(jobId);
@@ -346,7 +356,6 @@ export function JobHistoryPanel({
       setLastApprovalHash(built.payloadHashHex);
       await onCreateJob({
         clients: clientIds,
-        pools: [],
         tags: [],
         destructive: false,
         confirmed: true,
@@ -398,7 +407,6 @@ export function JobHistoryPanel({
       setLastApprovalHash(built.payloadHashHex);
       await onCreateJob({
         clients: clientIds,
-        pools: [],
         tags: [],
         destructive: false,
         confirmed: true,
@@ -513,7 +521,6 @@ export function JobHistoryPanel({
         onLoadOutputs={onLoadOutputs}
         onResolveTargets={onResolveTargets}
         onUpsertCommandTemplate={onUpsertCommandTemplate}
-        pools={pools}
         tags={tags}
       />
       <div className="jobConsoleStack">
@@ -548,8 +555,14 @@ export function JobHistoryPanel({
           policies={agentUpdateRolloutPolicies}
           rollouts={agentUpdateRollouts}
         />
-        <ProcessSupervisorInventoryPanel inventory={processSupervisorInventory} loading={loading} onRefresh={onRefresh} />
+        <ProcessSupervisorInventoryPanel
+          clientLabel={clientLabel}
+          inventory={processSupervisorInventory}
+          loading={loading}
+          onRefresh={onRefresh}
+        />
         <FileTransferSessionsPanel
+          clientLabel={clientLabel}
           transfers={fileTransfers}
           sources={fileTransferSources}
           loading={loading}
@@ -560,6 +573,7 @@ export function JobHistoryPanel({
           onUploadSource={onUploadFileTransferSource}
         />
         <TerminalSessionsPanel
+          clientLabel={clientLabel}
           sessions={terminalSessions}
           lastTerminalOutputEvent={lastTerminalOutputEvent}
           loading={loading}
@@ -705,7 +719,7 @@ export function JobHistoryPanel({
             </div>
             <CrudPager
               fields={[
-                { label: "Client", value: (target) => target.client_id },
+                { label: "Client", value: (target) => clientLabel(target.client_id) },
                 { label: "Status", value: (target) => target.status },
                 { label: "Exit", value: (target) => target.exit_code },
                 { label: "Completed", value: (target) => target.completed_at },
@@ -734,7 +748,7 @@ export function JobHistoryPanel({
                   {targetRows.map((target) => (
                     <div className="historyRow targetHistoryGrid" key={`${target.job_id}:${target.client_id}`}>
                       <span className="historyPrimary">
-                        <strong>{target.client_id}</strong>
+                        <strong>{clientLabel(target.client_id)}</strong>
                         <small>{shortId(target.job_id)}</small>
                       </span>
                       <span className={`status ${statusClass(target.status)}`}>{target.status}</span>
@@ -764,7 +778,7 @@ export function JobHistoryPanel({
               {outputComparison.length > 0 && (
                 <CrudPager
                   fields={[
-                    { label: "Client", value: (row) => row.client_id },
+                    { label: "Client", value: (row) => clientLabel(row.client_id) },
                     { label: "Hash", value: (row) => row.output_sha256_hex },
                     { label: "Majority", value: (row) => (row.matches_majority ? "match" : "diff") },
                     { label: "Exit", value: (row) => row.exit_code },
@@ -785,7 +799,7 @@ export function JobHistoryPanel({
                       {comparisonRows.map((row) => (
                         <div className="historyRow targetHistoryGrid" key={row.client_id}>
                           <span className="historyPrimary">
-                            <strong>{row.client_id}</strong>
+                            <strong>{clientLabel(row.client_id)}</strong>
                             <small>{row.stream_count} chunks, exit {row.exit_code ?? "-"}</small>
                           </span>
                           <span className={`status ${row.matches_majority ? "ok" : "warn"}`}>
@@ -804,7 +818,7 @@ export function JobHistoryPanel({
                   <article className="outputChunk" key={`${output.client_id}:${output.seq}`}>
                     <div className="outputMeta">
                       <span className={`status ${output.stream === "stderr" ? "warn" : "info"}`}>{output.stream}</span>
-                      <strong>{output.client_id}</strong>
+                      <strong>{clientLabel(output.client_id)}</strong>
                       <small>
                         #{output.seq} {output.exit_code === null ? "" : `exit ${output.exit_code}`}
                         {output.storage === "object_store" && output.artifact_size_bytes ? ` · ${formatBytes(output.artifact_size_bytes)}` : ""}

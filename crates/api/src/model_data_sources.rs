@@ -136,8 +136,6 @@ pub(crate) struct AssignDataSourcePresetRequest {
     #[serde(default)]
     pub(crate) clients: Vec<String>,
     #[serde(default)]
-    pub(crate) pools: Vec<Uuid>,
-    #[serde(default)]
     pub(crate) tags: Vec<String>,
     #[serde(default)]
     pub(crate) tag_mode: Option<String>,

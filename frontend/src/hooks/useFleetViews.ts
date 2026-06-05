@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AgentView, ResourcePoolView } from "../types";
+import type { AgentView } from "../types";
 
 const FLEET_VIEW_STORAGE_KEY = "vpsman.fleetViews";
 
@@ -17,14 +17,14 @@ type StoredFleetViewState = {
   savedViews?: SavedFleetView[];
 };
 
-export function useFleetViews(agents: AgentView[], pools: ResourcePoolView[]) {
+export function useFleetViews(agents: AgentView[]) {
   const [storedState] = useState(readFleetViewState);
   const [fleetQuery, setFleetQueryState] = useState(storedState.query ?? "");
   const [savedViews, setSavedViews] = useState<SavedFleetView[]>(storedState.savedViews ?? []);
   const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(storedState.activeSavedViewId ?? null);
   const [draftSavedViewName, setDraftSavedViewName] = useState("");
   const activeSavedView = savedViews.find((view) => view.id === activeSavedViewId) ?? null;
-  const filteredAgents = useMemo(() => filterAgents(agents, pools, fleetQuery), [agents, fleetQuery, pools]);
+  const filteredAgents = useMemo(() => filterAgents(agents, fleetQuery), [agents, fleetQuery]);
 
   useEffect(() => {
     writeFleetViewState({ activeSavedViewId, query: fleetQuery, savedViews });
@@ -102,7 +102,7 @@ export function useFleetViews(agents: AgentView[], pools: ResourcePoolView[]) {
   };
 }
 
-function filterAgents(agents: AgentView[], pools: ResourcePoolView[], query: string): AgentView[] {
+function filterAgents(agents: AgentView[], query: string): AgentView[] {
   const terms = query
     .trim()
     .toLowerCase()
@@ -111,30 +111,21 @@ function filterAgents(agents: AgentView[], pools: ResourcePoolView[], query: str
   if (terms.length === 0) {
     return agents;
   }
-  const poolIndex = buildPoolIndex(pools);
   return agents.filter((agent) => {
-    const poolContext = poolIndex.get(agent.id) ?? { names: [], providers: [], regions: [] };
-    return terms.every((term) => agentMatchesTerm(agent, poolContext, term));
+    return terms.every((term) => agentMatchesTerm(agent, term));
   });
 }
 
-function agentMatchesTerm(
-  agent: AgentView,
-  poolContext: { names: string[]; providers: string[]; regions: string[] },
-  term: string,
-): boolean {
+function agentMatchesTerm(agent: AgentView, term: string): boolean {
   const [kind, value] = splitFilterTerm(term);
   if (kind === "tag") {
     return matchesAny(agent.tags, value);
   }
-  if (kind === "pool") {
-    return matchesAny(poolContext.names, value);
-  }
   if (kind === "provider") {
-    return matchesAny(poolContext.providers, value);
+    return matchesAny(agent.tags, `provider:${value}`);
   }
-  if (kind === "region") {
-    return matchesAny(poolContext.regions, value);
+  if (kind === "country" || kind === "region") {
+    return matchesAny(agent.tags, `country:${value}`);
   }
   if (kind === "status") {
     return agent.status.toLowerCase().includes(value);
@@ -145,9 +136,6 @@ function agentMatchesTerm(
     agent.status,
     agent.capabilities.privilege_mode,
     ...agent.tags,
-    ...poolContext.names,
-    ...poolContext.providers,
-    ...poolContext.regions,
   ]
     .join(" ")
     .toLowerCase();
@@ -160,24 +148,6 @@ function splitFilterTerm(term: string): [string | null, string] {
     return [null, term];
   }
   return [term.slice(0, separator), term.slice(separator + 1)];
-}
-
-function buildPoolIndex(pools: ResourcePoolView[]) {
-  const index = new Map<string, { names: string[]; providers: string[]; regions: string[] }>();
-  for (const pool of pools) {
-    for (const client of pool.clients) {
-      const entry = index.get(client.id) ?? { names: [], providers: [], regions: [] };
-      entry.names.push(pool.id, pool.name);
-      if (pool.provider) {
-        entry.providers.push(pool.provider);
-      }
-      if (pool.region) {
-        entry.regions.push(pool.region);
-      }
-      index.set(client.id, entry);
-    }
-  }
-  return index;
 }
 
 function matchesAny(values: string[], term: string): boolean {

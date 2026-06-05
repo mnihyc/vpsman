@@ -91,7 +91,6 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["right-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: true,

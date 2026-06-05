@@ -1,12 +1,14 @@
 import type { FormEvent } from "react";
 import { RotateCcw } from "lucide-react";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import { RESTORE_PATH_PLACEHOLDER } from "../../presets/backupPathPresets";
 import type { AgentView, BackupRequestRecord } from "../../types";
-import { shortId } from "../../utils";
+import { formatVpsName, shortId } from "../../utils";
 
 type RestorePlanFormProps = {
   agents: AgentView[];
   backups: BackupRequestRecord[];
+  clientLabel: (clientId: string) => string;
   onDestinationRootChange: (value: string) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onNoteChange: (value: string) => void;
@@ -31,6 +33,7 @@ type RestorePlanFormProps = {
 export function RestorePlanForm({
   agents,
   backups,
+  clientLabel,
   onDestinationRootChange,
   onIncludeConfigChange,
   onNoteChange,
@@ -51,6 +54,7 @@ export function RestorePlanForm({
   restoreTargetId,
   restoreTargetName,
 }: RestorePlanFormProps) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <>
       <div className="sectionHeader compact restoreFormHeader">
@@ -64,7 +68,7 @@ export function RestorePlanForm({
             <option value="">Select backup request</option>
             {backups.map((backup) => (
               <option key={backup.id} value={backup.id}>
-                {shortId(backup.id)} from {backup.client_id}
+                {shortId(backup.id)} from {clientLabel(backup.client_id)}
               </option>
             ))}
           </select>
@@ -75,7 +79,7 @@ export function RestorePlanForm({
             <option value="">Select VPS</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
-                {agent.display_name || agent.id}
+                {formatVpsName(agent, vpsNameDisplayMode)}
               </option>
             ))}
           </select>

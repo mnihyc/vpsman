@@ -45,7 +45,6 @@ pub(crate) fn hot_config(
     token: Option<&str>,
     config_file: PathBuf,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -79,7 +78,6 @@ pub(crate) fn hot_config(
             operation: &operation,
             command_label: "hot_config",
             clients: &clients,
-            pools: &pools,
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
@@ -101,7 +99,6 @@ pub(crate) fn super_password_rotate(
     new_super_salt_hex: Option<String>,
     rotation_generation: Option<String>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -131,7 +128,6 @@ pub(crate) fn super_password_rotate(
             operation: &operation,
             command_label: "auth_proof_key_rotate",
             clients: &clients,
-            pools: &pools,
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
@@ -153,7 +149,6 @@ pub(crate) fn agent_update(
     artifact_signature_hex: Option<String>,
     artifact_signing_key_hex: Option<String>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -181,7 +176,7 @@ pub(crate) fn agent_update(
     };
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &pools, &tags, false, confirmed)?;
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
     let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
         &target_ids,
         &operation,
@@ -200,7 +195,6 @@ pub(crate) fn agent_update(
                 "argv": [],
                 "operation": operation,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "privileged": true,
                 "destructive": false,
@@ -224,7 +218,6 @@ pub(crate) fn agent_update_check(
     activate: bool,
     restart_agent: bool,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -254,7 +247,7 @@ pub(crate) fn agent_update_check(
     };
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &pools, &tags, false, confirmed)?;
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
     let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
         &target_ids,
         &operation,
@@ -273,7 +266,6 @@ pub(crate) fn agent_update_check(
                 "argv": [],
                 "operation": operation,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "privileged": true,
                 "destructive": false,
@@ -901,8 +893,8 @@ fn validate_rollout_health_gate(value: &str) -> Result<()> {
 fn validate_rollout_policy_scope(scope_kind: &str, scope_value: Option<&str>) -> Result<()> {
     let scope_kind = scope_kind.trim();
     anyhow::ensure!(
-        matches!(scope_kind, "global" | "tag" | "pool" | "provider"),
-        "--scope-kind must be global, tag, pool, or provider"
+        matches!(scope_kind, "global" | "tag" | "provider"),
+        "--scope-kind must be global, tag, or provider"
     );
     if scope_kind == "global" {
         anyhow::ensure!(
@@ -952,7 +944,6 @@ fn submit_rollout_operation(
                 "argv": [],
                 "operation": operation,
                 "clients": clients,
-                "pools": [],
                 "tags": [],
                 "privileged": true,
                 "destructive": false,
@@ -1185,7 +1176,6 @@ pub(crate) fn agent_update_activate(
     token: Option<&str>,
     staged_sha256_hex: String,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -1212,7 +1202,6 @@ pub(crate) fn agent_update_activate(
             operation: &operation,
             command_label: "agent_update_activate",
             clients: &clients,
-            pools: &pools,
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
@@ -1231,7 +1220,6 @@ pub(crate) fn agent_update_rollback(
     token: Option<&str>,
     rollback_sha256_hex: Option<String>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -1259,7 +1247,6 @@ pub(crate) fn agent_update_rollback(
             operation: &operation,
             command_label: "agent_update_rollback",
             clients: &clients,
-            pools: &pools,
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),

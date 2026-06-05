@@ -534,7 +534,6 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["right-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: true,
@@ -607,7 +606,6 @@ async fn network_apply_degrades_unprivileged_target_without_gateway() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["left-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: true,
@@ -660,7 +658,6 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["right-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: true,
@@ -713,7 +710,6 @@ async fn network_status_create_job_rejects_wrong_side_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["right-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -766,7 +762,6 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["right-b".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -821,7 +816,6 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["left-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,

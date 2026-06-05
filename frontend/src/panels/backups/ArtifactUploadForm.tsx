@@ -10,6 +10,7 @@ type ArtifactUploadFormProps = {
   artifactObjectKey: string;
   artifactUploadMode: "inline" | "chunked";
   backups: BackupRequestRecord[];
+  clientLabel: (clientId: string) => string;
   onArtifactBackupIdChange: (value: string) => void;
   onArtifactConfirmedChange: (value: boolean) => void;
   onArtifactFileChange: (value: File | null) => void;
@@ -31,6 +32,7 @@ export function ArtifactUploadForm({
   artifactObjectKey,
   artifactUploadMode,
   backups,
+  clientLabel,
   onArtifactBackupIdChange,
   onArtifactConfirmedChange,
   onArtifactFileChange,
@@ -57,7 +59,7 @@ export function ArtifactUploadForm({
             <option value="">Select backup request</option>
             {backups.map((backup) => (
               <option key={backup.id} value={backup.id}>
-                {shortId(backup.id)} from {backup.client_id}
+                {shortId(backup.id)} from {clientLabel(backup.client_id)}
               </option>
             ))}
           </select>

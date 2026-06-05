@@ -21,7 +21,6 @@ pub(crate) fn resolve_target_ids(
     api_url: &str,
     token: Option<&str>,
     clients: &[String],
-    pools: &[String],
     tags: &[String],
     destructive: bool,
     confirmed: bool,
@@ -32,7 +31,6 @@ pub(crate) fn resolve_target_ids(
         token,
         &serde_json::json!({
             "clients": clients,
-            "pools": pools,
             "tags": tags,
             "destructive": destructive,
             "confirmed": confirmed,
@@ -47,7 +45,7 @@ pub(crate) fn resolve_target_ids(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         !target_ids.is_empty(),
-        "job-create resolved no targets; provide explicit clients, pools, or tags with connected agents"
+        "job-create resolved no targets; provide explicit clients or tags with connected agents"
     );
     Ok(target_ids)
 }
@@ -58,7 +56,6 @@ pub(crate) struct PrivilegedOperationRequest<'a> {
     pub(crate) operation: &'a JobCommand,
     pub(crate) command_label: &'a str,
     pub(crate) clients: &'a [String],
-    pub(crate) pools: &'a [String],
     pub(crate) tags: &'a [String],
     pub(crate) password_env: &'a str,
     pub(crate) super_salt_hex: Option<&'a str>,
@@ -77,7 +74,6 @@ pub(crate) fn submit_privileged_operation(
         request.api_url,
         request.token,
         request.clients,
-        request.pools,
         request.tags,
         false,
         request.confirmed,
@@ -98,7 +94,6 @@ pub(crate) fn submit_privileged_operation(
             "argv": [],
             "operation": request.operation,
             "clients": request.clients,
-            "pools": request.pools,
             "tags": request.tags,
             "privileged": true,
             "destructive": false,

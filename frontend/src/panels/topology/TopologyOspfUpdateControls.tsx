@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Gauge, ShieldCheck } from "lucide-react";
 import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
 import { buildNetworkOspfCostUpdateOperation } from "../../topologyApply";
 import type {
@@ -11,7 +12,7 @@ import type {
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
-import { runPanelAction, shortId } from "../../utils";
+import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
 import { clampInteger } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
@@ -26,6 +27,7 @@ export function TopologyOspfUpdateControls({
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedPlanId, setSelectedPlanId] = useState(() => ospfUpdatePlans[0]?.plan_id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [timeoutSecs, setTimeoutSecs] = useState(60);
@@ -44,6 +46,8 @@ export function TopologyOspfUpdateControls({
     () => tunnelPlans.find((plan) => plan.id === selectedUpdatePlan?.plan_id) ?? null,
     [selectedUpdatePlan?.plan_id, tunnelPlans],
   );
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const targetClientId =
     side === "left" ? selectedUpdatePlan?.left_client_id : selectedUpdatePlan?.right_client_id;
   const mutationTargets = resolveAgentsById(agents, targetClientId ? [targetClientId] : []);
@@ -97,7 +101,6 @@ export function TopologyOspfUpdateControls({
         envelope: null,
         envelopes: builtProof.envelopes,
         operation: builtOperation.operation,
-        pools: [],
         force_unprivileged: forceUnprivileged,
         privileged: true,
         tags: [],
@@ -179,7 +182,7 @@ export function TopologyOspfUpdateControls({
               {selectedUpdatePlan.current_ospf_cost} to {selectedUpdatePlan.recommended_ospf_cost}
             </strong>
             <span>
-              {selectedUpdatePlan.interface_name} / {targetClientId}
+              {selectedUpdatePlan.interface_name} / {targetClientId ? clientLabel(targetClientId) : "Unknown VPS"}
             </span>
           </div>
         )}

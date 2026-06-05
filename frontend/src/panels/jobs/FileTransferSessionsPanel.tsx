@@ -13,6 +13,7 @@ import { formatTime, shortHash, shortId, statusClass } from "../../utils";
 const MAX_SOURCE_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 export function FileTransferSessionsPanel({
+  clientLabel,
   transfers,
   sources,
   loading,
@@ -22,6 +23,7 @@ export function FileTransferSessionsPanel({
   onSaveHandoff,
   onUploadSource,
 }: {
+  clientLabel: (clientId: string) => string;
   transfers: FileTransferSessionRecord[];
   sources: FileTransferSourceArtifactRecord[];
   loading: boolean;
@@ -66,7 +68,7 @@ export function FileTransferSessionsPanel({
       await onSaveHandoff(handoff.download_path, {
         expectedSha256Hex: handoff.sha256_hex,
         expectedSizeBytes: handoff.size_bytes,
-        fileName: downloadFileNameForTransfer(transfer),
+        fileName: downloadFileNameForTransfer(transfer, clientLabel),
         mode: handoffDownloadMode,
       });
     } catch (error) {
@@ -86,12 +88,12 @@ export function FileTransferSessionsPanel({
     setHandoffError(null);
     try {
       for (const [index, transfer] of transfersToDownload.entries()) {
-        setHandoffProgress(`Downloading ${index + 1}/${transfersToDownload.length}: ${transfer.client_id}`);
+        setHandoffProgress(`Downloading ${index + 1}/${transfersToDownload.length}: ${clientLabel(transfer.client_id)}`);
         const handoff = await onCreateHandoff(transfer.client_id, transfer.session_id);
         await onSaveHandoff(handoff.download_path, {
           expectedSha256Hex: handoff.sha256_hex,
           expectedSizeBytes: handoff.size_bytes,
-          fileName: downloadFileNameForTransfer(transfer),
+          fileName: downloadFileNameForTransfer(transfer, clientLabel),
           mode: handoffDownloadMode,
         });
         completedKeys.add(transferKey(transfer));
@@ -314,7 +316,7 @@ export function FileTransferSessionsPanel({
       </div>
       <CrudPager
         fields={[
-          { label: "VPS", value: (transfer) => transfer.client_id },
+          { label: "VPS", value: (transfer) => clientLabel(transfer.client_id) },
           { label: "Session", value: (transfer) => transfer.session_id },
           { label: "Direction", value: (transfer) => transfer.direction },
           { label: "Status", value: (transfer) => `${transfer.status} ${transfer.last_event}` },
@@ -353,7 +355,7 @@ export function FileTransferSessionsPanel({
                   <span className="rowSelectCell">
                     {selectable ? (
                       <input
-                        aria-label={`Select transfer handoff ${transfer.client_id}`}
+                        aria-label={`Select transfer handoff session ${shortId(transfer.session_id)}`}
                         checked={selectedHandoffKeySet.has(key)}
                         disabled={handoffBusy}
                         onChange={(event) => toggleHandoffSelection(transfer, event.target.checked)}
@@ -365,7 +367,7 @@ export function FileTransferSessionsPanel({
                   </span>
                   <span className="historyPrimary">
                     <strong>{transfer.direction}</strong>
-                    <small>{transfer.client_id} / {shortId(transfer.session_id)}</small>
+                    <small>{clientLabel(transfer.client_id)} / {shortId(transfer.session_id)}</small>
                   </span>
                   <span className="historyPrimary">
                     <span className={`status ${statusClass(transfer.status)}`}>{transfer.status}</span>
@@ -389,7 +391,7 @@ export function FileTransferSessionsPanel({
                   <span className="rowActions">
                     {selectable ? (
                       <button
-                        aria-label={`Create transfer handoff for ${transfer.client_id}`}
+                        aria-label={`Create transfer handoff session ${shortId(transfer.session_id)}`}
                         className="iconButton"
                         disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
                         onClick={() => void createAndDownloadHandoff(transfer)}
@@ -470,9 +472,9 @@ function downloadFileName(path: string): string {
   return sanitizeFileName(name, "vpsman-transfer.bin");
 }
 
-function downloadFileNameForTransfer(transfer: FileTransferSessionRecord): string {
+function downloadFileNameForTransfer(transfer: FileTransferSessionRecord, clientLabel: (clientId: string) => string): string {
   return sanitizeFileName(
-    `${transfer.client_id}-${shortId(transfer.session_id)}-${downloadFileName(transfer.path)}`,
+    `${clientLabel(transfer.client_id)}-${shortId(transfer.session_id)}-${downloadFileName(transfer.path)}`,
     "vpsman-transfer.bin",
   );
 }

@@ -237,7 +237,7 @@ mod tests {
         for command in [
             "tunnel-plans",
             "network-observations",
-            "job-create uptime client:edge",
+            "job-create uptime id:edge",
             "tunnel-plan",
         ] {
             assert!(!is_vty_network_dispatch_command(command), "{command}");

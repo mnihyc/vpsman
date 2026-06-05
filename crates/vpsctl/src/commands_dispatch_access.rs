@@ -84,7 +84,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     confirmed_reenrollment: command.confirmed_reenrollment,
                     preserve_existing_assignments: command.preserve_existing_assignments,
                     default_tags: command.default_tags,
-                    default_pool_name: command.default_pool_name,
                     default_display_name: command.default_display_name,
                     unmanaged_update_enabled: command.unmanaged_update_enabled,
                     unmanaged_update_version_url: command.unmanaged_update_version_url,
@@ -104,7 +103,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     client_id: command.client_id,
                     ttl_secs: command.ttl_secs,
                     default_tags: command.default_tags,
-                    default_pool_name: command.default_pool_name,
                     default_display_name: command.default_display_name,
                     confirmed: command.confirmed,
                     preserve_existing_assignments: command.preserve_existing_assignments,
@@ -360,24 +358,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::Pools => {
-            commands_inventory::pools(api_url, token)?;
-            Ok(None)
-        }
-        Command::PoolCreate(command) => {
-            commands_inventory::pool_create(
-                api_url,
-                token,
-                command.name,
-                command.provider,
-                command.region,
-            )?;
-            Ok(None)
-        }
-        Command::AgentPool(command) => {
-            commands_inventory::agent_pool(api_url, token, command.client_id, command.pool_id)?;
-            Ok(None)
-        }
         Command::Tags => {
             commands_inventory::tags(api_url, token)?;
             Ok(None)
@@ -507,7 +487,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     domain: command.domain,
                     preset_id: command.preset_id,
                     clients: command.clients,
-                    pools: command.pools,
                     tags: command.tags,
                     confirmed: command.confirmed,
                 },
@@ -519,7 +498,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 api_url,
                 token,
                 command.clients,
-                command.pools,
                 command.tags,
                 command.destructive,
                 command.confirmed,
@@ -539,7 +517,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.argv,
                 command.pty,
                 command.clients,
-                command.pools,
                 command.tags,
                 command.interval_secs,
                 command.start_at_unix,

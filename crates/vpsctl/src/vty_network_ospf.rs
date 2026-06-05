@@ -195,7 +195,6 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
             "command": "network_ospf_cost_update",
             "argv": [],
             "clients": [endpoint.local_client_id],
-            "pools": [],
             "tags": [],
             "privileged": true,
             "destructive": true,

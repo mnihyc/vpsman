@@ -27,7 +27,6 @@ struct VtyTarget {
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct VtyJobSelection {
     pub(crate) clients: Vec<String>,
-    pub(crate) pools: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) destructive: bool,
     pub(crate) confirmed: bool,
@@ -54,30 +53,22 @@ impl VtyJobSelection {
                 "--confirmed" => selection.confirmed = true,
                 "" => {}
                 value => {
-                    let (kind, target) = value.split_once(':').unwrap_or(("tag", value));
-                    anyhow::ensure!(!target.is_empty(), "empty target in {value}");
-                    match kind {
-                        "client" => selection.clients.push(target.to_string()),
-                        "pool" => selection.pools.push(target.to_string()),
-                        "tag" => selection.tags.push(target.to_string()),
-                        _ => anyhow::bail!(
-                            "unknown target selector {kind}; use client:<id>, pool:<uuid>, or tag:<name>"
-                        ),
+                    if let Some(target) = value.strip_prefix("tag:") {
+                        anyhow::ensure!(!target.is_empty(), "empty target in {value}");
+                        selection.tags.push(target.to_string());
+                    } else {
+                        selection.tags.push(value.to_string());
                     }
                 }
             }
         }
         selection.clients.sort();
         selection.clients.dedup();
-        selection.pools.sort();
-        selection.pools.dedup();
         selection.tags.sort();
         selection.tags.dedup();
         anyhow::ensure!(
-            !selection.clients.is_empty()
-                || !selection.pools.is_empty()
-                || !selection.tags.is_empty(),
-            "job target selection requires at least one client, pool, or tag target"
+            !selection.clients.is_empty() || !selection.tags.is_empty(),
+            "job target selection requires at least one client or tag target"
         );
         Ok(selection)
     }
@@ -166,7 +157,6 @@ pub(crate) fn vty_submit_operation_with_force(
         token,
         &serde_json::json!({
             "clients": &selection.clients,
-            "pools": &selection.pools,
             "tags": &selection.tags,
             "destructive": selection.destructive,
             "confirmed": selection.confirmed,
@@ -200,7 +190,6 @@ pub(crate) fn vty_submit_operation_with_force(
             "argv": [],
             "operation": operation,
             "clients": selection.clients,
-            "pools": selection.pools,
             "tags": selection.tags,
             "privileged": true,
             "destructive": selection.destructive,
@@ -220,30 +209,41 @@ mod tests {
     #[test]
     fn parses_explicit_vty_job_targets_and_flags() {
         let selection = VtyJobSelection::parse(&[
-            "client:client-a",
-            "pool:8f38c322-7987-4ffe-9206-9a01144ef9d9",
+            "id:client-a",
+            "name:edge-a",
+            "pool:edge",
+            "provider:alpha",
+            "country:US",
             "tag:bgp",
             "edge",
             "--destructive",
             "--confirmed",
-            "client:client-a",
+            "id:client-a",
         ])
         .unwrap();
 
-        assert_eq!(selection.clients, vec!["client-a"]);
+        assert!(selection.clients.is_empty());
         assert_eq!(
-            selection.pools,
-            vec!["8f38c322-7987-4ffe-9206-9a01144ef9d9"]
+            selection.tags,
+            vec![
+                "bgp",
+                "country:US",
+                "edge",
+                "id:client-a",
+                "name:edge-a",
+                "pool:edge",
+                "provider:alpha"
+            ]
         );
-        assert_eq!(selection.tags, vec!["bgp", "edge"]);
         assert!(selection.destructive);
         assert!(selection.confirmed);
     }
 
     #[test]
-    fn rejects_unknown_or_empty_vty_job_targets() {
-        assert!(VtyJobSelection::parse(&["role:edge"]).is_err());
-        assert!(VtyJobSelection::parse(&["client:"]).is_err());
+    fn treats_namespaced_values_as_tags_and_rejects_empty_selectors() {
+        let selection = VtyJobSelection::parse(&["client:edge-a", "role:edge"]).unwrap();
+        assert_eq!(selection.tags, vec!["client:edge-a", "role:edge"]);
+        assert!(VtyJobSelection::parse(&["tag:"]).is_err());
         assert!(VtyJobSelection::parse(&["--destructive"]).is_err());
     }
 }

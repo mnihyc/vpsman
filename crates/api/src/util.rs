@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vpsman_common::OutputStream;
 
 pub(crate) fn limit_or_default(limit: Option<i64>) -> i64 {
-    limit.unwrap_or(50).clamp(1, 200)
+    limit.unwrap_or(100).clamp(1, 1000)
 }
 
 pub(crate) fn output_stream_name(stream: OutputStream) -> &'static str {

@@ -446,55 +446,6 @@ pub(crate) fn telemetry_tunnels(
     Ok(())
 }
 
-pub(crate) fn pools(api_url: &str, token: Option<&str>) -> Result<()> {
-    println!("{}", http_get(api_url, "/api/v1/pools", token)?);
-    Ok(())
-}
-
-pub(crate) fn pool_create(
-    api_url: &str,
-    token: Option<&str>,
-    name: String,
-    provider: Option<String>,
-    region: Option<String>,
-) -> Result<()> {
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/pools",
-            token,
-            &serde_json::json!({
-                "name": name,
-                "provider": provider,
-                "region": region,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-pub(crate) fn agent_pool(
-    api_url: &str,
-    token: Option<&str>,
-    client_id: String,
-    pool_id: String,
-) -> Result<()> {
-    let pool_id = Uuid::parse_str(&pool_id).context("invalid --pool-id UUID")?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!("/api/v1/agents/{client_id}/pool"),
-            token,
-            &serde_json::json!({
-                "pool_id": pool_id,
-            }),
-        )?
-    );
-    Ok(())
-}
-
 pub(crate) fn tags(api_url: &str, token: Option<&str>) -> Result<()> {
     println!("{}", http_get(api_url, "/api/v1/tags", token)?);
     Ok(())
@@ -539,7 +490,6 @@ pub(crate) fn bulk_resolve(
     api_url: &str,
     token: Option<&str>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     destructive: bool,
     confirmed: bool,
@@ -552,7 +502,6 @@ pub(crate) fn bulk_resolve(
             token,
             &serde_json::json!({
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "destructive": destructive,
                 "confirmed": confirmed
@@ -834,7 +783,6 @@ pub(crate) fn data_source_hot_config_apply(
             operation: &operation,
             command_label: "data_source_config_patch",
             clients: &[client_id],
-            pools: &[],
             tags: &[],
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
@@ -851,7 +799,6 @@ pub(crate) struct DataSourcePresetAssignOptions {
     pub(crate) domain: String,
     pub(crate) preset_id: String,
     pub(crate) clients: Vec<String>,
-    pub(crate) pools: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) confirmed: bool,
 }
@@ -1301,11 +1248,8 @@ fn validate_alert_state(value: &str, flag: &str) -> Result<()> {
 
 fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<()> {
     anyhow::ensure!(
-        matches!(
-            scope_kind,
-            "global" | "provider" | "pool" | "tag" | "client"
-        ),
-        "--scope-kind must be global, provider, pool, tag, or client"
+        matches!(scope_kind, "global" | "provider" | "tag" | "client"),
+        "--scope-kind must be global, provider, tag, or client"
     );
     Ok(())
 }
@@ -1362,11 +1306,6 @@ pub(crate) fn data_source_preset_assign(
     options: DataSourcePresetAssignOptions,
 ) -> Result<()> {
     let preset_id = Uuid::parse_str(&options.preset_id).context("invalid --preset-id UUID")?;
-    let pools = options
-        .pools
-        .into_iter()
-        .map(|pool| Uuid::parse_str(&pool).context("invalid --pools UUID"))
-        .collect::<Result<Vec<_>>>()?;
     println!(
         "{}",
         http_post_json(
@@ -1377,7 +1316,6 @@ pub(crate) fn data_source_preset_assign(
                 "domain": options.domain,
                 "preset_id": preset_id,
                 "clients": options.clients,
-                "pools": pools,
                 "tags": options.tags,
                 "confirmed": options.confirmed,
             }),

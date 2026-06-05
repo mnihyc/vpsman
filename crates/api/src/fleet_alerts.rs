@@ -7,8 +7,8 @@ use vpsman_common::payload_hash;
 use crate::{
     model::{
         AgentUpdateRolloutView, AgentView, BackupRequestView, DataSourceStatusView,
-        FleetAlertQuery, FleetAlertView, JobHistoryView, JobTargetView, ResourcePoolView,
-        TelemetryRollupView, TelemetryTunnelView,
+        FleetAlertQuery, FleetAlertView, JobHistoryView, JobTargetView, TelemetryRollupView,
+        TelemetryTunnelView,
     },
     model_alert_policies::FleetAlertPolicyOverrideView,
     model_alert_states::FleetAlertStateView,
@@ -146,7 +146,6 @@ fn validate_cpu_thresholds(warning: f64, critical: f64) -> Result<()> {
 pub(crate) struct AgentAlertScope {
     pub(crate) client_id: String,
     pub(crate) tags: Vec<String>,
-    pub(crate) pool_id: Option<String>,
     pub(crate) provider: Option<String>,
 }
 
@@ -159,11 +158,8 @@ impl AgentAlertScope {
     }
 }
 
-pub(crate) fn build_agent_alert_scopes(
-    agents: &[AgentView],
-    pools: &[ResourcePoolView],
-) -> HashMap<String, AgentAlertScope> {
-    let mut scopes = agents
+pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, AgentAlertScope> {
+    agents
         .iter()
         .map(|agent| {
             (
@@ -171,28 +167,11 @@ pub(crate) fn build_agent_alert_scopes(
                 AgentAlertScope {
                     client_id: agent.id.clone(),
                     tags: agent.tags.clone(),
-                    pool_id: None,
-                    provider: None,
+                    provider: tag_namespace_value(&agent.tags, "provider"),
                 },
             )
         })
-        .collect::<HashMap<_, _>>();
-
-    for pool in pools {
-        for agent in &pool.clients {
-            let scope = scopes
-                .entry(agent.id.clone())
-                .or_insert_with(|| AgentAlertScope {
-                    client_id: agent.id.clone(),
-                    tags: agent.tags.clone(),
-                    pool_id: None,
-                    provider: None,
-                });
-            scope.pool_id = Some(pool.id.to_string());
-            scope.provider = pool.provider.clone();
-        }
-    }
-    scopes
+        .collect()
 }
 
 fn effective_policy_for_scope(
@@ -228,7 +207,6 @@ fn alert_policy_matches_scope(
     match (policy.scope_kind.as_str(), policy.scope_value.as_deref()) {
         ("global", _) => true,
         ("provider", Some(provider)) => scope.provider.as_deref() == Some(provider),
-        ("pool", Some(pool_id)) => scope.pool_id.as_deref() == Some(pool_id),
         ("tag", Some(tag)) => scope.tags.iter().any(|stored| stored == tag),
         ("client", Some(client_id)) => scope.client_id == client_id,
         _ => false,
@@ -239,11 +217,17 @@ fn alert_policy_specificity(policy: &FleetAlertPolicyOverrideView) -> u8 {
     match policy.scope_kind.as_str() {
         "global" => 0,
         "provider" => 1,
-        "pool" => 2,
-        "tag" => 3,
-        "client" => 4,
+        "tag" => 2,
+        "client" => 3,
         _ => 0,
     }
+}
+
+fn tag_namespace_value(tags: &[String], namespace: &str) -> Option<String> {
+    let prefix = format!("{namespace}:");
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(&prefix).filter(|value| !value.is_empty()))
+        .map(ToString::to_string)
 }
 
 impl AppState {
@@ -257,7 +241,7 @@ impl AppState {
             .iter()
             .map(|agent| (agent.id.as_str(), agent))
             .collect::<HashMap<_, _>>();
-        let agent_scopes = build_agent_alert_scopes(&agents, &self.repo.list_pools().await?);
+        let agent_scopes = build_agent_alert_scopes(&agents);
         let alert_policies = self
             .repo
             .list_fleet_alert_policies(1000, Some(true), None, None)
@@ -344,7 +328,6 @@ fn append_resource_alerts(
             "matched_policy_ids": matched_policy_ids,
             "scope": {
                 "client_id": &scope.client_id,
-                "pool_id": &scope.pool_id,
                 "provider": &scope.provider,
                 "tags": &scope.tags,
             },

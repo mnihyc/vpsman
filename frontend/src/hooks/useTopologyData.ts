@@ -108,7 +108,7 @@ export function useTopologyData(
 
   const loadTopologyGraph = useCallback(async () => {
     try {
-      setTopologyGraph(await apiGet<TopologyGraph>("/api/v1/network/topology-graph?limit=100", apiToken));
+      setTopologyGraph(await apiGet<TopologyGraph>("/api/v1/network/topology-graph?limit=1000", apiToken));
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();

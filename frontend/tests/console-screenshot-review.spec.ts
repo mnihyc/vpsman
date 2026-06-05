@@ -5,7 +5,7 @@ import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 
 const desktopViews = [
   { heading: "Fleet overview", view: "Fleet" },
-  { heading: "Pools management", view: "Pools" },
+  { heading: "Tags management", view: "Tags" },
   { heading: "Job history", view: "Jobs" },
   { heading: "Schedules", view: "Schedules" },
   { heading: "Topology management", view: "Topology" },

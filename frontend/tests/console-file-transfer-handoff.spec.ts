@@ -16,8 +16,8 @@ test("creates server-side handoff for a completed download session", async ({ pa
   await activate(page.getByRole("button", { name: "Jobs" }));
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("agent-fra-02")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Create transfer handoff for agent-fra-02" }));
+  await expect(panel.getByText("core-fra-02")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferHandoffs);
   expect(requests).toEqual([
@@ -92,7 +92,7 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await panel.getByLabel("Transfer handoff save method").selectOption("stream-to-file");
-  await activate(panel.getByRole("button", { name: "Create transfer handoff for agent-fra-02" }));
+  await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
 
   await expect
     .poll(() => page.evaluate(() => (window as any).__vpsmanStreamedArtifact.closed))
@@ -104,7 +104,7 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
       text: new TextDecoder().decode(new Uint8Array(state.chunks.flat())),
     };
   });
-  expect(streamed.suggestedName).toBe("agent-fra-02-51515151-bird.log");
+  expect(streamed.suggestedName).toBe("core-fra-02 (ra02)-51515151-bird.log");
   expect(streamed.text).toContain("server-side transfer handoff agent-fra-02");
 });
 

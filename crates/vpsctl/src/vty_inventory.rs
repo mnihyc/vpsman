@@ -5,15 +5,6 @@ use crate::util::percent_encode_query_value;
 
 #[derive(Debug, PartialEq)]
 enum VtyInventoryCommand {
-    PoolCreate {
-        name: String,
-        provider: Option<String>,
-        region: Option<String>,
-    },
-    AgentPool {
-        client_id: String,
-        pool_id: String,
-    },
     TagCreate {
         name: String,
     },
@@ -164,7 +155,6 @@ enum VtyInventoryCommand {
         domain: String,
         preset_id: String,
         clients: Vec<String>,
-        pools: Vec<String>,
         tags: Vec<String>,
         confirmed: bool,
     },
@@ -249,9 +239,7 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
     let name = command.split_whitespace().next().unwrap_or_default();
     matches!(
         name,
-        "pool-create"
-            | "agent-pool"
-            | "tag-create"
+        "tag-create"
             | "agent-tag"
             | "data-source-presets"
             | "data-source-preset-create"
@@ -326,28 +314,6 @@ pub(crate) fn submit_vty_inventory_command(
     command: &str,
 ) -> Result<String> {
     match parse_vty_inventory_command(command)? {
-        VtyInventoryCommand::PoolCreate {
-            name,
-            provider,
-            region,
-        } => http_post_json(
-            api_url,
-            "/api/v1/pools",
-            token,
-            &serde_json::json!({
-                "name": name,
-                "provider": provider,
-                "region": region,
-            }),
-        ),
-        VtyInventoryCommand::AgentPool { client_id, pool_id } => http_post_json(
-            api_url,
-            &format!("/api/v1/agents/{client_id}/pool"),
-            token,
-            &serde_json::json!({
-                "pool_id": pool_id,
-            }),
-        ),
         VtyInventoryCommand::TagCreate { name } => http_post_json(
             api_url,
             "/api/v1/tags",
@@ -699,7 +665,6 @@ pub(crate) fn submit_vty_inventory_command(
             domain,
             preset_id,
             clients,
-            pools,
             tags,
             confirmed,
         } => http_post_json(
@@ -710,7 +675,6 @@ pub(crate) fn submit_vty_inventory_command(
                 "domain": domain,
                 "preset_id": preset_id,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "confirmed": confirmed,
             }),
@@ -721,7 +685,6 @@ pub(crate) fn submit_vty_inventory_command(
             token,
             &serde_json::json!({
                 "clients": [],
-                "pools": [],
                 "tags": tags,
                 "destructive": false,
                 "confirmed": false,
@@ -767,27 +730,6 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let name = parts.first().copied().context("empty inventory command")?;
     match name {
-        "pool-create" => {
-            anyhow::ensure!(
-                (2..=4).contains(&parts.len()),
-                "usage: pool-create <name> [provider] [region]"
-            );
-            Ok(VtyInventoryCommand::PoolCreate {
-                name: parts[1].to_string(),
-                provider: parts.get(2).map(|value| (*value).to_string()),
-                region: parts.get(3).map(|value| (*value).to_string()),
-            })
-        }
-        "agent-pool" => {
-            anyhow::ensure!(
-                parts.len() == 3,
-                "usage: agent-pool <client_id> <pool_uuid>"
-            );
-            Ok(VtyInventoryCommand::AgentPool {
-                client_id: parts[1].to_string(),
-                pool_id: parts[2].to_string(),
-            })
-        }
         "tag-create" => {
             anyhow::ensure!(parts.len() == 2, "usage: tag-create <name>");
             Ok(VtyInventoryCommand::TagCreate {
@@ -2060,11 +2002,8 @@ fn parse_bool(value: &str) -> Result<bool> {
 
 fn validate_fleet_alert_policy_scope_kind(scope_kind: &str) -> Result<()> {
     anyhow::ensure!(
-        matches!(
-            scope_kind,
-            "global" | "provider" | "pool" | "tag" | "client"
-        ),
-        "fleet alert policy scope kind must be global, provider, pool, tag, or client"
+        matches!(scope_kind, "global" | "provider" | "tag" | "client"),
+        "fleet alert policy scope kind must be global, provider, tag, or client"
     );
     Ok(())
 }
@@ -2179,7 +2118,6 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
     let mut domain = None;
     let mut preset_id = None;
     let mut clients = Vec::new();
-    let mut pools = Vec::new();
     let mut tags = Vec::new();
     let mut confirmed = false;
     let mut index = 1;
@@ -2195,10 +2133,6 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
             }
             "--client" => {
                 clients.push(next_arg(parts, index, "--client")?.to_string());
-                index += 2;
-            }
-            "--pool" => {
-                pools.push(next_arg(parts, index, "--pool")?.to_string());
                 index += 2;
             }
             "--tag" => {
@@ -2221,10 +2155,6 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
                 clients.push(value.trim_start_matches("--client=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--pool=") => {
-                pools.push(value.trim_start_matches("--pool=").to_string());
-                index += 1;
-            }
             value if value.starts_with("--tag=") => {
                 tags.push(value.trim_start_matches("--tag=").to_string());
                 index += 1;
@@ -2236,7 +2166,6 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
         domain: domain.context("data-source-preset-assign requires --domain")?,
         preset_id: preset_id.context("data-source-preset-assign requires --preset-id")?,
         clients,
-        pools,
         tags,
         confirmed,
     })

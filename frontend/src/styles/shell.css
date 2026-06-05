@@ -166,10 +166,39 @@ nav {
 
 .savedViewControls {
   display: grid;
-  grid-template-columns: minmax(118px, 0.9fr) minmax(104px, 0.8fr) repeat(3, 40px);
+  grid-template-columns: minmax(112px, 0.9fr) minmax(96px, 0.8fr) repeat(3, 36px);
   align-items: center;
   gap: 6px;
-  min-width: min(100%, 386px);
+  min-width: min(100%, 334px);
+}
+
+.panelDisplayControl {
+  display: grid;
+  gap: 2px;
+  min-width: 116px;
+}
+
+.panelDisplayControl span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.panelDisplayControl select {
+  min-width: 0;
+  height: 36px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  outline: 0;
+  padding: 0 10px;
+}
+
+.panelDisplayControl select:focus {
+  border-color: #1a73e8;
 }
 
 .savedViewControls select,
@@ -191,7 +220,7 @@ nav {
 
 .savedViewControls .iconButton {
   height: 36px;
-  width: 40px;
+  width: 36px;
 }
 
 .controlPlanePill {

@@ -15,6 +15,8 @@ import type {
   CreateMigrationLinkRequest,
   CreateRestorePlanRequest,
   MigrationLinkRecord,
+  PrepareBackupArtifactRestoreRequest,
+  PreparedBackupArtifactRestoreRecord,
   RestorePlanRecord,
   UploadBackupArtifactRequest,
 } from "../types";
@@ -40,11 +42,11 @@ export function useBackupsData(
     setBackupsError(null);
     try {
       const [backupRows, policyRows, artifactRows, restoreRows, migrationRows] = await Promise.all([
-        apiGet<BackupRequestRecord[]>("/api/v1/backups?limit=25", apiToken),
+        apiGet<BackupRequestRecord[]>("/api/v1/backups?limit=1000", apiToken),
         apiGet<BackupPolicyRecord[]>("/api/v1/backup-policies", apiToken),
-        apiGet<BackupArtifactRecord[]>("/api/v1/backup-artifacts?limit=25", apiToken),
-        apiGet<RestorePlanRecord[]>("/api/v1/restore-plans?limit=25", apiToken),
-        apiGet<MigrationLinkRecord[]>("/api/v1/migration-links?limit=25", apiToken),
+        apiGet<BackupArtifactRecord[]>("/api/v1/backup-artifacts?limit=1000", apiToken),
+        apiGet<RestorePlanRecord[]>("/api/v1/restore-plans?limit=1000", apiToken),
+        apiGet<MigrationLinkRecord[]>("/api/v1/migration-links?limit=1000", apiToken),
       ]);
       setBackups(backupRows);
       setBackupPolicies(policyRows);
@@ -204,6 +206,24 @@ export function useBackupsData(
     [apiToken, onUnauthorized],
   );
 
+  const prepareBackupArtifactRestore = useCallback(
+    async (backupRequestId: string, request: PrepareBackupArtifactRestoreRequest) => {
+      try {
+        return await apiPost<PreparedBackupArtifactRestoreRecord>(
+          `/api/v1/backups/${backupRequestId}/artifact/prepare-restore`,
+          apiToken,
+          request,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
   return {
     backups,
     backupPolicies,
@@ -218,6 +238,7 @@ export function useBackupsData(
     createRestorePlan,
     downloadBackupArtifact,
     handoffBackupArtifact,
+    prepareBackupArtifactRestore,
     pruneBackupPolicies,
     uploadBackupArtifact,
     uploadBackupArtifactChunked,

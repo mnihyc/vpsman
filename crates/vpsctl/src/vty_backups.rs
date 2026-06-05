@@ -245,7 +245,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
 pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
     let name = tokens
         .first()
-        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--interval <secs>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <client:id|pool:uuid|tag:name>... --confirmed")?
+        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--interval <secs>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <id:<id>|name:<display>|tag:<name>|tag>... --confirmed")?
         .to_string();
     let mut paths = Vec::new();
     let mut include_config = false;
@@ -807,7 +807,6 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "include_config": request.include_config,
             "recipient_public_key_hex": request.recipient_public_key_hex,
             "clients": request.selection.clients,
-            "pools": request.selection.pools,
             "tags": request.selection.tags,
             "interval_secs": request.interval_secs,
             "start_at_unix": null,
@@ -899,7 +898,6 @@ pub(crate) fn submit_vty_restore_run(
         &operation,
         VtyJobSelection {
             clients: vec![request.target_client_id],
-            pools: Vec::new(),
             tags: Vec::new(),
             destructive: true,
             confirmed: request.confirmed,
@@ -929,7 +927,6 @@ pub(crate) fn submit_vty_restore_rollback(
         &operation,
         VtyJobSelection {
             clients: vec![request.target_client_id],
-            pools: Vec::new(),
             tags: Vec::new(),
             destructive: true,
             confirmed: request.confirmed,

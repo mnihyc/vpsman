@@ -40,7 +40,7 @@ fn object_key_rejects_path_traversal() {
 }
 
 #[test]
-fn s3_settings_reject_unsafe_bucket_or_https_for_current_adapter() {
+fn s3_settings_accept_https_and_reject_unsafe_bucket() {
     assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
         endpoint: "https://s3.example".to_string(),
         bucket: "vpsman-artifacts".to_string(),
@@ -49,7 +49,7 @@ fn s3_settings_reject_unsafe_bucket_or_https_for_current_adapter() {
         region: "us-east-1".to_string(),
         create_bucket: false,
     })
-    .is_err());
+    .is_ok());
     assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
         endpoint: "http://127.0.0.1:9000".to_string(),
         bucket: "../bad".to_string(),
@@ -136,7 +136,7 @@ async fn s3_object_store_rejects_truncated_content_length() {
     let store = s3_store(&endpoint);
 
     let error = store.get(object_key).await.unwrap_err().to_string();
-    assert!(error.contains("ended before content-length"));
+    assert!(error.contains("failed to read S3 response"));
     server.await.unwrap();
 }
 

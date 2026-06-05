@@ -19,6 +19,7 @@ const networkCommands = new Set([
 ]);
 
 export function TopologyEvidencePanel({
+  clientLabel,
   jobs,
   observations,
   onLoadObservations,
@@ -30,6 +31,7 @@ export function TopologyEvidencePanel({
   ospfUpdatePlans,
   trends,
 }: {
+  clientLabel: (clientId: string) => string;
   jobs: JobHistoryRecord[];
   observations: NetworkObservationRecord[];
   onLoadObservations: () => Promise<void>;
@@ -48,11 +50,11 @@ export function TopologyEvidencePanel({
   const [outputsByJob, setOutputsByJob] = useState<Record<string, JobOutputRecord[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const rows = networkJobs.map((job) => buildEvidenceRow(job, outputsByJob[job.id] ?? []));
+  const rows = networkJobs.map((job) => buildEvidenceRow(job, outputsByJob[job.id] ?? [], clientLabel));
   const ospfUpdateRows = ospfUpdatePlans.slice(0, 6).map(buildOspfUpdatePlanRow);
   const ospfRows = ospfRecommendations.slice(0, 6).map(buildOspfRecommendationRow);
-  const observationRows = observations.slice(0, 8).map(buildObservationRow);
-  const trendRows = trends.slice(0, 6).map(buildTrendRow);
+  const observationRows = observations.slice(0, 8).map((observation) => buildObservationRow(observation, clientLabel));
+  const trendRows = trends.slice(0, 6).map((trend) => buildTrendRow(trend, clientLabel));
   const probePoints = rows
     .filter((row) => row.kind === "network_probe" && typeof row.latencyAvgMs === "number")
     .map((row) => ({
@@ -70,7 +72,7 @@ export function TopologyEvidencePanel({
         })),
     );
   const maxLatency = Math.max(1, ...probePoints.map((point) => point.latencyAvgMs));
-  const latencyGroups = useMemo(() => buildLatencyCurveGroups(observations), [observations]);
+  const latencyGroups = useMemo(() => buildLatencyCurveGroups(observations, clientLabel), [clientLabel, observations]);
   const status =
     error ??
     (loading
@@ -437,7 +439,7 @@ function buildOspfRecommendationRow(recommendation: NetworkOspfRecommendationRec
   };
 }
 
-function buildTrendRow(trend: NetworkObservationTrendRecord): TrendRow {
+function buildTrendRow(trend: NetworkObservationTrendRecord, clientLabel: (clientId: string) => string): TrendRow {
   const signalStatus =
     trend.degraded_count > 0 ? "degraded" : trend.healthy_count > 0 ? "healthy" : "recorded";
   const metric = trend.throughput_avg_mbps !== null
@@ -458,12 +460,12 @@ function buildTrendRow(trend: NetworkObservationTrendRecord): TrendRow {
     metric,
     metricDetail,
     target: trend.plan_name ?? trend.interface_name ?? "network",
-    targetDetail: `${trend.client_id} -> ${trend.peer_client_id ?? "peer"}`,
+    targetDetail: endpointLabel(trend.client_id, trend.peer_client_id, clientLabel),
     latestObservedAt: trend.latest_observed_at,
   };
 }
 
-function buildObservationRow(observation: NetworkObservationRecord): ObservationRow {
+function buildObservationRow(observation: NetworkObservationRecord, clientLabel: (clientId: string) => string): ObservationRow {
   const signalStatus =
     observation.healthy === true ? "healthy" : observation.healthy === false ? "degraded" : "recorded";
   if (observation.kind === "network_probe") {
@@ -479,7 +481,7 @@ function buildObservationRow(observation: NetworkObservationRecord): Observation
           ? "loss unavailable"
           : `${formatMetric(observation.packet_loss_ratio * 100)}% loss`,
       target: observation.target ?? "peer tunnel",
-      targetDetail: `${observation.client_id} -> ${observation.peer_client_id ?? "peer"}`,
+      targetDetail: endpointLabel(observation.client_id, observation.peer_client_id, clientLabel),
       observedAt: observation.observed_at,
     };
   }
@@ -493,9 +495,7 @@ function buildObservationRow(observation: NetworkObservationRecord): Observation
         observation.throughput_mbps === null ? "No throughput" : `${formatMetric(observation.throughput_mbps)} Mbps`,
       metricDetail: observation.bytes === null ? "bytes unavailable" : `${formatBytes(observation.bytes)}`,
       target: observation.target ?? "speed endpoint",
-      targetDetail: `${observation.role ?? "role"} ${observation.client_id} -> ${
-        observation.peer_client_id ?? "peer"
-      }`,
+      targetDetail: `${observation.role ?? "role"} ${endpointLabel(observation.client_id, observation.peer_client_id, clientLabel)}`,
       observedAt: observation.observed_at,
     };
   }
@@ -526,12 +526,15 @@ function buildObservationRow(observation: NetworkObservationRecord): Observation
             : "Recorded status",
     metricDetail: runtimeDetail,
     target: observation.plan_name ?? "tunnel plan",
-    targetDetail: `${observation.client_id} -> ${observation.peer_client_id ?? "peer"}`,
+    targetDetail: endpointLabel(observation.client_id, observation.peer_client_id, clientLabel),
     observedAt: observation.observed_at,
   };
 }
 
-function buildLatencyCurveGroups(observations: NetworkObservationRecord[]): LatencyCurveGroup[] {
+function buildLatencyCurveGroups(
+  observations: NetworkObservationRecord[],
+  clientLabel: (clientId: string) => string,
+): LatencyCurveGroup[] {
   const grouped = new Map<string, NetworkObservationRecord[]>();
   for (const observation of observations) {
     if (observation.kind !== "network_probe" || typeof observation.latency_avg_ms !== "number") {
@@ -560,7 +563,7 @@ function buildLatencyCurveGroups(observations: NetworkObservationRecord[]): Late
       return {
         key,
         label: latest.plan_name ?? latest.interface_name ?? "network probe",
-        detail: `${shortId(latest.client_id)} -> ${shortId(latest.peer_client_id ?? latest.target ?? "peer")}`,
+        detail: endpointLabel(latest.client_id, latest.peer_client_id, clientLabel),
         maxLatency: Math.max(1, ...points.map((point) => point.latencyAvgMs)),
         points,
       };
@@ -569,7 +572,11 @@ function buildLatencyCurveGroups(observations: NetworkObservationRecord[]): Late
     .slice(0, 8);
 }
 
-function buildEvidenceRow(job: JobHistoryRecord, outputs: JobOutputRecord[]): EvidenceRow {
+function buildEvidenceRow(
+  job: JobHistoryRecord,
+  outputs: JobOutputRecord[],
+  clientLabel: (clientId: string) => string,
+): EvidenceRow {
   const parsedStatus = parseStatusOutput(outputs);
   if (isProbeStatus(parsedStatus)) {
     const parsed = asRecord(parsedStatus.parsed);
@@ -582,7 +589,7 @@ function buildEvidenceRow(job: JobHistoryRecord, outputs: JobOutputRecord[]): Ev
       metric: latencyAvgMs === null ? "No latency" : `${formatMetric(latencyAvgMs)} ms`,
       metricDetail: lossRatio === null ? "loss unavailable" : `${formatMetric(lossRatio * 100)}% loss`,
       target: asString(parsedStatus.target) ?? "peer tunnel",
-      targetDetail: `${asString(parsedStatus.client_id) ?? "client"} -> ${asString(parsedStatus.peer_client_id) ?? "peer"}`,
+      targetDetail: endpointLabel(asString(parsedStatus.client_id), asString(parsedStatus.peer_client_id), clientLabel),
       latencyAvgMs: latencyAvgMs ?? undefined,
       lossRatio: lossRatio ?? undefined,
     };
@@ -615,7 +622,7 @@ function buildEvidenceRow(job: JobHistoryRecord, outputs: JobOutputRecord[]): Ev
             : "Needs review",
       metricDetail: runtimeDetail,
       target: asString(parsedStatus.interface) ?? "interface",
-      targetDetail: `${asString(parsedStatus.client_id) ?? "client"} -> ${asString(parsedStatus.peer_client_id) ?? "peer"}`,
+      targetDetail: endpointLabel(asString(parsedStatus.client_id), asString(parsedStatus.peer_client_id), clientLabel),
     };
   }
   const speedStatuses = parseStatusOutputs(outputs).filter(isSpeedTestStatus);
@@ -632,9 +639,12 @@ function buildEvidenceRow(job: JobHistoryRecord, outputs: JobOutputRecord[]): Ev
       metric: throughputMbps === null ? "No throughput" : `${formatMetric(throughputMbps)} Mbps`,
       metricDetail: bytes === null ? "bytes unavailable" : `${formatBytes(bytes)} sent`,
       target: `${asString(clientStatus.server_address) ?? "server"}:${asNumber(clientStatus.port) ?? "port"}`,
-      targetDetail: `${asString(clientStatus.client_id) ?? "client"} -> ${
-        asString(serverStatus?.client_id) ?? asString(clientStatus.peer_client_id) ?? "server"
-      }`,
+      targetDetail: endpointLabel(
+        asString(clientStatus.client_id),
+        asString(serverStatus?.client_id) ?? asString(clientStatus.peer_client_id),
+        clientLabel,
+        "server",
+      ),
     };
   }
   return {
@@ -646,6 +656,17 @@ function buildEvidenceRow(job: JobHistoryRecord, outputs: JobOutputRecord[]): Ev
     target: `${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
     targetDetail: shortId(job.payload_hash),
   };
+}
+
+function endpointLabel(
+  clientId: string | null | undefined,
+  peerClientId: string | null | undefined,
+  clientLabel: (clientId: string) => string,
+  peerFallback = "peer",
+): string {
+  const left = clientId ? clientLabel(clientId) : "Unknown VPS";
+  const right = peerClientId ? clientLabel(peerClientId) : peerFallback;
+  return `${left} -> ${right}`;
 }
 
 function parseStatusOutput(outputs: JobOutputRecord[]): unknown {

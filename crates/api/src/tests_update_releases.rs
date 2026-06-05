@@ -114,7 +114,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
     let request = CreateJobRequest {
         targets: Vec::new(),
         clients: vec!["client-a".to_string()],
-        pools: Vec::new(),
         tags: Vec::new(),
         tag_mode: None,
         destructive: false,
@@ -670,6 +669,7 @@ fn test_args() -> Args {
     Args {
         bind: "127.0.0.1:0".parse().unwrap(),
         postgres_url: None,
+        debug_internal_test_mode: false,
         migrations_dir: PathBuf::from("migrations"),
         internal_token: None,
         gateway_control_url: None,

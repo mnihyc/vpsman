@@ -217,10 +217,10 @@ mod tests {
 
     #[test]
     fn parses_vty_file_pull() {
-        let request =
-            parse_vty_file_pull(&["--path", TEST_FILE_PULL_PATH, "client:edge-a"]).unwrap();
+        let request = parse_vty_file_pull(&["--path", TEST_FILE_PULL_PATH, "id:edge-a"]).unwrap();
         assert_eq!(request.command_label, "file_pull");
-        assert_eq!(request.selection.clients, vec!["edge-a"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert!(matches!(request.operation, JobCommand::FilePull { .. }));
     }
 
@@ -235,13 +235,14 @@ mod tests {
             "/tmp/payload",
             "--mode",
             "0600",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .unwrap();
 
         assert_eq!(request.command_label, "file_push");
-        assert_eq!(request.selection.clients, vec!["edge-a"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         match request.operation {
             JobCommand::FilePush {
                 mode, size_bytes, ..
@@ -263,7 +264,7 @@ mod tests {
             source.to_str().unwrap(),
             "--path",
             "/tmp/payload",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .unwrap();
@@ -290,7 +291,7 @@ mod tests {
             source.to_str().unwrap(),
             "--path",
             "/tmp/payload",
-            "client:edge-a",
+            "id:edge-a",
         ])
         .is_err());
         assert!(parse_vty_file_push(&[
@@ -298,7 +299,7 @@ mod tests {
             source.to_str().unwrap(),
             "--path",
             "relative",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .is_err());

@@ -52,18 +52,18 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         nextKeyLifecycleReport,
         nextProofRotations,
       ] = await Promise.all([
-        apiGet<GatewaySessionRecord[]>("/api/v1/gateway-sessions?limit=20", apiToken),
+        apiGet<GatewaySessionRecord[]>("/api/v1/gateway-sessions?limit=200", apiToken),
         nextOperator.role === "admin" ? apiGet<OperatorView[]>("/api/v1/operators", apiToken) : Promise.resolve([]),
         nextOperator.role === "admin"
-          ? apiGet<OperatorSessionRecord[]>("/api/v1/operator-sessions?limit=20", apiToken)
+          ? apiGet<OperatorSessionRecord[]>("/api/v1/operator-sessions?limit=200", apiToken)
           : Promise.resolve([]),
         nextOperator.role === "admin" ? apiGet<EnrollmentTokenView[]>("/api/v1/enrollment-tokens", apiToken) : Promise.resolve([]),
         nextOperator.role === "admin"
-          ? apiGet<ClientKeyRevocationView[]>("/api/v1/client-key-revocations?limit=20", apiToken)
+          ? apiGet<ClientKeyRevocationView[]>("/api/v1/client-key-revocations?limit=200", apiToken)
           : Promise.resolve([]),
         nextOperator.role === "admin" ? apiGet<KeyLifecycleReportView>("/api/v1/key-lifecycle/report", apiToken) : Promise.resolve(null),
         nextOperator.role === "admin"
-          ? apiGet<AuthProofRotationHistoryRecord[]>("/api/v1/auth/proof-rotations?limit=20", apiToken)
+          ? apiGet<AuthProofRotationHistoryRecord[]>("/api/v1/auth/proof-rotations?limit=200", apiToken)
           : Promise.resolve([]),
       ]);
       setOperator(nextOperator);

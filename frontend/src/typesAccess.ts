@@ -4,6 +4,7 @@ export type EnrollmentTokenView = {
   id: string;
   token_prefix: string;
   purpose: EnrollmentTokenPurpose;
+  assigned_client_id: string | null;
   allowed_client_id: string | null;
   requires_existing_client: boolean;
   preserve_existing_assignments: boolean;
@@ -14,7 +15,6 @@ export type EnrollmentTokenView = {
   used_at: string | null;
   used_by_client_id: string | null;
   default_tags: string[];
-  default_pool_name: string | null;
   default_display_name: string | null;
   unmanaged_update_enabled: boolean;
   unmanaged_update_version_url: string;
@@ -31,7 +31,6 @@ export type CreateEnrollmentTokenRequest = {
   confirmed_reenrollment: boolean;
   preserve_existing_assignments: boolean;
   default_tags: string[];
-  default_pool_name?: string | null;
   default_display_name?: string | null;
   unmanaged_update_enabled?: boolean;
   unmanaged_update_version_url?: string | null;
@@ -46,13 +45,13 @@ export type CreateEnrollmentTokenResponse = {
   token: string;
   token_prefix: string;
   purpose: EnrollmentTokenPurpose;
+  assigned_client_id: string | null;
   allowed_client_id: string | null;
   requires_existing_client: boolean;
   preserve_existing_assignments: boolean;
   expected_old_public_key_sha256_hex: string | null;
   expires_at: string;
   default_tags: string[];
-  default_pool_name: string | null;
   default_display_name: string | null;
   unmanaged_update_enabled: boolean;
   unmanaged_update_version_url: string;

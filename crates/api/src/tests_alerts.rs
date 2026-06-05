@@ -187,7 +187,7 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
                 id: "edge-a".to_string(),
                 display_name: "Edge A".to_string(),
                 status: "connected".to_string(),
-                tags: vec!["edge".to_string()],
+                tags: vec!["edge".to_string(), "provider:provider-a".to_string()],
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
@@ -203,15 +203,6 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
             alert_test_rollup("edge-b", 1.2, 300, 800),
         ]);
     }
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "provider-a-sfo".to_string(),
-            provider: Some("provider-a".to_string()),
-            region: Some("sfo".to_string()),
-        })
-        .await
-        .unwrap();
-    repo.assign_agent_pool("edge-a", pool.id).await.unwrap();
     repo.upsert_fleet_alert_policy(
         &CreateFleetAlertPolicyRequest {
             name: "provider-a-cpu".to_string(),
@@ -436,7 +427,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 id: "edge-a".to_string(),
                 display_name: "Edge A".to_string(),
                 status: "stale".to_string(),
-                tags: vec!["edge".to_string()],
+                tags: vec!["edge".to_string(), "provider:provider-a".to_string()],
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
@@ -448,15 +439,6 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
             },
         ]);
     }
-    let pool = repo
-        .create_pool(CreatePoolRequest {
-            name: "provider-a-sfo".to_string(),
-            provider: Some("provider-a".to_string()),
-            region: Some("sfo".to_string()),
-        })
-        .await
-        .unwrap();
-    repo.assign_agent_pool("edge-a", pool.id).await.unwrap();
     repo.upsert_fleet_alert_notification_channel(
         &CreateFleetAlertNotificationChannelRequest {
             name: "edge-audit".to_string(),

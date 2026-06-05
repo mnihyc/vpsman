@@ -6,18 +6,14 @@ use std::{
 
 use anyhow::{bail, ensure, Context, Result};
 use hmac::{Hmac, Mac};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    time,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
 const S3_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_S3_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 const MAX_S3_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -421,29 +417,55 @@ impl S3BackupObjectStore {
             &date_stamp,
             &amz_date,
         );
-        let request = format!(
-            "{method} {canonical_uri} HTTP/1.1\r\nHost: {}\r\nUser-Agent: vpsman-api/{}\r\nConnection: close\r\nContent-Length: {}\r\nx-amz-content-sha256: {payload_sha256}\r\nx-amz-date: {amz_date}\r\nAuthorization: {authorization}\r\n\r\n",
-            self.endpoint.host_header(),
-            env!("CARGO_PKG_VERSION"),
-            body.len(),
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-amz-content-sha256"),
+            HeaderValue::from_str(&payload_sha256).context("invalid S3 payload hash header")?,
         );
-        let addr = format!("{}:{}", self.endpoint.host, self.endpoint.port);
-        let mut stream = time::timeout(S3_HTTP_TIMEOUT, TcpStream::connect(&addr))
+        headers.insert(
+            HeaderName::from_static("x-amz-date"),
+            HeaderValue::from_str(&amz_date).context("invalid S3 date header")?,
+        );
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&authorization).context("invalid S3 authorization header")?,
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_str(&format!("vpsman-api/{}", env!("CARGO_PKG_VERSION")))
+                .context("invalid S3 user-agent header")?,
+        );
+        let client = reqwest::Client::builder()
+            .timeout(S3_HTTP_TIMEOUT)
+            .build()
+            .context("failed to build S3 HTTP client")?;
+        let method =
+            reqwest::Method::from_bytes(method.as_bytes()).context("invalid S3 HTTP method")?;
+        let response = client
+            .request(method, self.endpoint.url(&self.bucket, object_key))
+            .headers(headers)
+            .body(body.to_vec())
+            .send()
             .await
-            .with_context(|| format!("timed out connecting to S3 endpoint {addr}"))?
-            .with_context(|| format!("failed to connect to S3 endpoint {addr}"))?;
-        time::timeout(S3_HTTP_TIMEOUT, stream.write_all(request.as_bytes()))
+            .context("S3 request failed")?;
+        let status_code = response.status().as_u16();
+        let content_length = response.content_length();
+        ensure!(
+            content_length.is_none_or(|length| length <= MAX_S3_RESPONSE_BODY_BYTES as u64),
+            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
+        );
+        let body = response
+            .bytes()
             .await
-            .context("timed out writing S3 request headers")??;
-        if !body.is_empty() {
-            time::timeout(S3_HTTP_TIMEOUT, stream.write_all(body))
-                .await
-                .context("timed out writing S3 request body")??;
-        }
-        time::timeout(S3_HTTP_TIMEOUT, stream.flush())
-            .await
-            .context("timed out flushing S3 request")??;
-        read_s3_response(method, stream).await
+            .context("failed to read S3 response")?;
+        ensure!(
+            body.len() <= MAX_S3_RESPONSE_BODY_BYTES,
+            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
+        );
+        Ok(S3HttpResponse {
+            status_code,
+            body: body.to_vec(),
+        })
     }
 
     fn authorization_header(
@@ -478,6 +500,7 @@ impl S3BackupObjectStore {
 
 #[derive(Clone, Debug)]
 struct S3Endpoint {
+    scheme: String,
     host: String,
     port: u16,
     prefix: String,
@@ -485,10 +508,14 @@ struct S3Endpoint {
 
 impl S3Endpoint {
     fn parse(endpoint: &str) -> Result<Self> {
-        let rest = endpoint
-            .trim()
-            .strip_prefix("http://")
-            .context("S3 endpoint currently must use http://")?;
+        let endpoint = endpoint.trim();
+        let (scheme, rest, default_port) = if let Some(rest) = endpoint.strip_prefix("https://") {
+            ("https", rest, 443)
+        } else if let Some(rest) = endpoint.strip_prefix("http://") {
+            ("http", rest, 80)
+        } else {
+            anyhow::bail!("S3 endpoint must use http:// or https://");
+        };
         ensure!(
             !rest.contains('?') && !rest.contains('#'),
             "S3 endpoint is invalid"
@@ -498,9 +525,14 @@ impl S3Endpoint {
             !authority.is_empty() && !authority.contains('@'),
             "S3 endpoint authority is invalid"
         );
-        let (host, port) = parse_http_authority(authority)?;
+        let (host, port) = parse_http_authority(authority, default_port)?;
         let prefix = normalize_endpoint_prefix(raw_path)?;
-        Ok(Self { host, port, prefix })
+        Ok(Self {
+            scheme: scheme.to_string(),
+            host,
+            port,
+            prefix,
+        })
     }
 
     fn host_header(&self) -> String {
@@ -509,7 +541,9 @@ impl S3Endpoint {
         } else {
             self.host.clone()
         };
-        if self.port == 80 {
+        if (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443)
+        {
             host
         } else {
             format!("{host}:{}", self.port)
@@ -525,6 +559,15 @@ impl S3Endpoint {
             uri.push_str(&percent_encode_path(object_key));
         }
         uri
+    }
+
+    fn url(&self, bucket: &str, object_key: Option<&str>) -> String {
+        format!(
+            "{}://{}{}",
+            self.scheme,
+            self.host_header(),
+            self.canonical_uri(bucket, object_key)
+        )
     }
 }
 
@@ -577,13 +620,13 @@ fn ensure_s3_bucket_name(bucket: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_http_authority(authority: &str) -> Result<(String, u16)> {
+fn parse_http_authority(authority: &str, default_port: u16) -> Result<(String, u16)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let (host, suffix) = rest
             .split_once(']')
             .context("invalid bracketed S3 endpoint host")?;
         let port = if suffix.is_empty() {
-            80
+            default_port
         } else {
             suffix
                 .strip_prefix(':')
@@ -602,7 +645,7 @@ fn parse_http_authority(authority: &str) -> Result<(String, u16)> {
             host,
             port.parse::<u16>().context("invalid S3 endpoint port")?,
         ),
-        _ => (authority, 80),
+        _ => (authority, default_port),
     };
     ensure!(
         port != 0 && !host.is_empty(),
@@ -623,173 +666,6 @@ fn normalize_endpoint_prefix(raw_path: &str) -> Result<String> {
         "S3 endpoint path prefix is invalid"
     );
     Ok(format!("/{}", raw_path.trim_end_matches('/')))
-}
-
-async fn read_s3_response(method: &str, mut stream: TcpStream) -> Result<S3HttpResponse> {
-    let mut response = read_s3_response_headers(&mut stream).await?;
-    let header_end = find_bytes(&response, b"\r\n\r\n").context("invalid S3 HTTP response")?;
-    let head = std::str::from_utf8(&response[..header_end])
-        .context("S3 response header is not UTF-8")?
-        .to_string();
-    let status_line = head.lines().next().context("missing S3 HTTP status line")?;
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .context("missing S3 HTTP status code")?
-        .parse::<u16>()
-        .context("invalid S3 HTTP status code")?;
-    let mut body = response.split_off(header_end + 4);
-    let headers = parse_s3_response_headers(&head)?;
-    if method.eq_ignore_ascii_case("HEAD") || matches!(status_code, 204 | 304) {
-        body.clear();
-    } else if s3_header_contains(&headers, "transfer-encoding", "chunked") {
-        read_s3_body_to_close(&mut stream, &mut body).await?;
-        body = decode_chunked_s3_body(&body)?;
-    } else if let Some(content_length) = s3_content_length(&headers)? {
-        ensure!(
-            content_length <= MAX_S3_RESPONSE_BODY_BYTES,
-            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-        );
-        while body.len() < content_length {
-            let mut chunk = [0_u8; 8192];
-            let read = time::timeout(S3_HTTP_TIMEOUT, stream.read(&mut chunk))
-                .await
-                .context("timed out reading S3 response body")??;
-            ensure!(read != 0, "S3 response ended before content-length");
-            body.extend_from_slice(&chunk[..read]);
-            ensure!(
-                body.len() <= content_length,
-                "S3 response body exceeded declared content-length"
-            );
-        }
-    } else {
-        read_s3_body_to_close(&mut stream, &mut body).await?;
-    }
-    ensure!(
-        body.len() <= MAX_S3_RESPONSE_BODY_BYTES,
-        "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-    );
-    Ok(S3HttpResponse { status_code, body })
-}
-
-async fn read_s3_response_headers(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut response = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 8192];
-        let read = time::timeout(S3_HTTP_TIMEOUT, stream.read(&mut chunk))
-            .await
-            .context("timed out reading S3 response headers")??;
-        ensure!(read != 0, "S3 response ended before headers");
-        response.extend_from_slice(&chunk[..read]);
-        ensure!(
-            response.len() <= MAX_S3_RESPONSE_HEADER_BYTES + MAX_S3_RESPONSE_BODY_BYTES,
-            "S3 response exceeded configured bounds before headers"
-        );
-        if let Some(header_end) = find_bytes(&response, b"\r\n\r\n") {
-            ensure!(
-                header_end <= MAX_S3_RESPONSE_HEADER_BYTES,
-                "S3 response headers exceeded {MAX_S3_RESPONSE_HEADER_BYTES} bytes"
-            );
-            return Ok(response);
-        }
-        ensure!(
-            response.len() <= MAX_S3_RESPONSE_HEADER_BYTES,
-            "S3 response headers exceeded {MAX_S3_RESPONSE_HEADER_BYTES} bytes"
-        );
-    }
-}
-
-async fn read_s3_body_to_close(stream: &mut TcpStream, body: &mut Vec<u8>) -> Result<()> {
-    loop {
-        let mut chunk = [0_u8; 8192];
-        let read = time::timeout(S3_HTTP_TIMEOUT, stream.read(&mut chunk))
-            .await
-            .context("timed out reading S3 response body")??;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
-        ensure!(
-            body.len() <= MAX_S3_RESPONSE_BODY_BYTES,
-            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-        );
-    }
-    Ok(())
-}
-
-fn parse_s3_response_headers(head: &str) -> Result<Vec<(String, String)>> {
-    head.lines()
-        .skip(1)
-        .map(|line| {
-            let (name, value) = line.split_once(':').context("invalid S3 response header")?;
-            Ok((name.trim().to_ascii_lowercase(), value.trim().to_string()))
-        })
-        .collect()
-}
-
-fn s3_content_length(headers: &[(String, String)]) -> Result<Option<usize>> {
-    let mut lengths = headers
-        .iter()
-        .filter(|(name, _)| name == "content-length")
-        .map(|(_, value)| {
-            value
-                .parse::<usize>()
-                .context("invalid S3 response content-length")
-        });
-    let Some(first) = lengths.next().transpose()? else {
-        return Ok(None);
-    };
-    for length in lengths {
-        ensure!(
-            length? == first,
-            "conflicting S3 response content-length headers"
-        );
-    }
-    Ok(Some(first))
-}
-
-fn s3_header_contains(headers: &[(String, String)], name: &str, needle: &str) -> bool {
-    headers.iter().any(|(header_name, value)| {
-        header_name == name
-            && value
-                .split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case(needle))
-    })
-}
-
-fn decode_chunked_s3_body(raw: &[u8]) -> Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    let mut offset = 0;
-    loop {
-        let line_end = find_bytes(&raw[offset..], b"\r\n").context("invalid chunked S3 body")?;
-        let size_line = std::str::from_utf8(&raw[offset..offset + line_end])
-            .context("chunked S3 size is not UTF-8")?;
-        let size_text = size_line.split(';').next().unwrap_or_default().trim();
-        let chunk_size = usize::from_str_radix(size_text, 16).context("invalid chunked S3 size")?;
-        offset += line_end + 2;
-        if chunk_size == 0 {
-            ensure!(
-                raw.get(offset..offset + 2) == Some(b"\r\n"),
-                "invalid final chunk terminator"
-            );
-            break;
-        }
-        ensure!(
-            raw.len() >= offset + chunk_size + 2,
-            "chunked S3 body ended before chunk data"
-        );
-        ensure!(
-            raw.get(offset + chunk_size..offset + chunk_size + 2) == Some(b"\r\n"),
-            "invalid chunked S3 body chunk terminator"
-        );
-        decoded.extend_from_slice(&raw[offset..offset + chunk_size]);
-        ensure!(
-            decoded.len() <= MAX_S3_RESPONSE_BODY_BYTES,
-            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-        );
-        offset += chunk_size + 2;
-    }
-    Ok(decoded)
 }
 
 fn aws_signing_key(secret_key: &str, date_stamp: &str, region: &str) -> Vec<u8> {
@@ -875,10 +751,4 @@ fn percent_encode_segment(segment: &str) -> String {
         }
     }
     encoded
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }

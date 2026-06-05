@@ -6,7 +6,6 @@ use super::{
 
 #[test]
 fn recognizes_inventory_commands() {
-    assert!(is_vty_inventory_command("pool-create pool-a example lax"));
     assert!(is_vty_inventory_command(
         "data-source-presets --domain telemetry_metrics_source"
     ));
@@ -62,22 +61,6 @@ fn recognizes_inventory_commands() {
 
 #[test]
 fn parses_inventory_commands() {
-    assert_eq!(
-        parse_vty_inventory_command("pool-create pool-a provider lax").unwrap(),
-        VtyInventoryCommand::PoolCreate {
-            name: "pool-a".to_string(),
-            provider: Some("provider".to_string()),
-            region: Some("lax".to_string()),
-        }
-    );
-    assert_eq!(
-        parse_vty_inventory_command("agent-pool edge-a 11111111-1111-4111-8111-111111111111")
-            .unwrap(),
-        VtyInventoryCommand::AgentPool {
-            client_id: "edge-a".to_string(),
-            pool_id: "11111111-1111-4111-8111-111111111111".to_string(),
-        }
-    );
     assert_eq!(
         parse_vty_inventory_command("bulk-resolve edge bgp").unwrap(),
         VtyInventoryCommand::BulkResolve {
@@ -162,7 +145,6 @@ fn parses_inventory_commands() {
             domain: "runtime_traffic_accounting_source".to_string(),
             preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
             clients: vec!["edge-a".to_string()],
-            pools: Vec::new(),
             tags: vec!["bgp".to_string()],
             confirmed: true,
         }
@@ -345,7 +327,6 @@ fn parses_inventory_commands() {
 
 #[test]
 fn rejects_invalid_inventory_commands() {
-    assert!(parse_vty_inventory_command("pool-create").is_err());
     assert!(parse_vty_inventory_command("agent-tag edge-a").is_err());
     assert!(parse_vty_inventory_command("data-source-preset-create --name x").is_err());
     assert!(parse_vty_inventory_command("data-source-preset-clone --name x").is_err());

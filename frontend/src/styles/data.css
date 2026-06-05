@@ -83,7 +83,7 @@
 
 .row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.5fr) 120px minmax(110px, 0.7fr) minmax(110px, 0.7fr) minmax(160px, 1fr);
+  grid-template-columns: minmax(190px, 1.4fr) minmax(88px, 0.45fr) minmax(150px, 0.8fr) minmax(180px, 1fr);
   align-items: center;
   min-height: 64px;
   gap: 16px;
@@ -583,10 +583,6 @@
     minmax(150px, 0.8fr) minmax(160px, 0.8fr);
 }
 
-.poolGrid {
-  grid-template-columns: minmax(190px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr) 90px;
-}
-
 .tagGrid {
   grid-template-columns: minmax(190px, 1fr) 90px;
 }
@@ -745,6 +741,23 @@
   font-size: 12px;
   font-style: normal;
   padding: 3px 8px;
+}
+
+.providerTags em {
+  border-color: #c9daf8;
+  background: #eef4ff;
+  color: #174ea6;
+}
+
+.countryBadge {
+  width: fit-content;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  color: #3c4043;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  white-space: nowrap;
 }
 
 .inspector {

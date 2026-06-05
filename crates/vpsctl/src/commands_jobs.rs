@@ -65,7 +65,6 @@ pub(crate) fn job_create(
     argv: Vec<String>,
     pty: bool,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     envelope_file: Option<PathBuf>,
     envelopes_file: Option<PathBuf>,
@@ -94,15 +93,8 @@ pub(crate) fn job_create(
     if privileged && envelope.is_none() && envelopes.is_empty() {
         let password = load_super_password(&password_env)?;
         let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-        let target_ids = resolve_target_ids(
-            api_url,
-            token,
-            &clients,
-            &pools,
-            &tags,
-            destructive,
-            confirmed,
-        )?;
+        let target_ids =
+            resolve_target_ids(api_url, token, &clients, &tags, destructive, confirmed)?;
         let (_payload_hash_hex, built_envelopes) = if let Some(operation) = &operation {
             build_envelopes_for_job_command(
                 &target_ids,
@@ -133,7 +125,6 @@ pub(crate) fn job_create(
                 "argv": if operation.is_some() { Vec::<String>::new() } else { argv },
                 "operation": operation,
                 "clients": clients,
-                "pools": pools,
                 "tags": tags,
                 "privileged": privileged,
                 "destructive": destructive,
@@ -155,7 +146,6 @@ pub(crate) fn job_shell(
     script: Option<String>,
     script_file: Option<PathBuf>,
     clients: Vec<String>,
-    pools: Vec<String>,
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -173,7 +163,6 @@ pub(crate) fn job_shell(
             operation: &operation,
             command_label: "shell_script",
             clients: &clients,
-            pools: &pools,
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),

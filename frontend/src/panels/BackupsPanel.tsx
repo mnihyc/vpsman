@@ -1,9 +1,9 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { RefreshCw } from "lucide-react";
-import { decryptBackupArtifactForRestore } from "../backups/artifactCrypto";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
 import { ProofVaultBox } from "../components/ProofVaultBox";
 import { bytesToBase64 } from "../fileTransfer";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildEnvelopesForOperation, parseCommandArgv, type ProofMaterial } from "../proof";
 import { DEFAULT_BACKUP_SELECTED_PATHS, DEFAULT_RESTORE_SELECTED_PATHS } from "../presets/backupPathPresets";
 import { ArtifactUploadForm } from "./backups/ArtifactUploadForm";
@@ -33,10 +33,17 @@ import type {
   JobOperation,
   JobOutputRecord,
   MigrationLinkRecord,
+  PreparedBackupArtifactRestoreRecord,
   RestorePlanRecord,
   UploadBackupArtifactRequest,
 } from "../types";
-import { runPanelAction, shortId } from "../utils";
+import {
+  clientDisplayNameFromMap,
+  clientDisplayNameMap,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+} from "../utils";
 
 type BackupsPanelProps = {
   agents: AgentView[];
@@ -55,6 +62,10 @@ type BackupsPanelProps = {
   onDownloadBackupArtifact: (backupRequestId: string) => Promise<Blob>;
   onHandoffBackupArtifact: (backupRequestId: string, request: BackupArtifactHandoffRequest) => Promise<BackupArtifactHandoffRecord>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onPrepareBackupArtifactRestore: (
+    backupRequestId: string,
+    request: { private_key_hex: string; artifact_base64?: string | null },
+  ) => Promise<PreparedBackupArtifactRestoreRecord>;
   onPruneBackupPolicies: (request: BackupPolicyPruneRequest) => Promise<BackupPolicyPruneResponse>;
   onUploadBackupArtifact: (backupRequestId: string, request: UploadBackupArtifactRequest) => Promise<BackupArtifactRecord>;
   onUploadBackupArtifactChunked: (
@@ -106,11 +117,13 @@ export function BackupsPanel({
   onDownloadBackupArtifact,
   onHandoffBackupArtifact,
   onLoadJobOutputs,
+  onPrepareBackupArtifactRestore,
   onPruneBackupPolicies,
   onUploadBackupArtifact,
   onUploadBackupArtifactChunked,
   onRefresh,
 }: BackupsPanelProps) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState("");
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
@@ -179,7 +192,7 @@ export function BackupsPanel({
   const policyPaths = useMemo(() => parseBackupPaths(policyPathsText), [policyPathsText]);
   const policyTargets = useMemo(() => parseTargetSelectors(policyTargetsText), [policyTargetsText]);
   const restorePaths = useMemo(() => parseBackupPaths(restorePathsText), [restorePathsText]);
-  const agentNameById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.display_name || agent.id])), [agents]);
+  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const selectedAgent = agents.find((agent) => agent.id === clientId) ?? null;
   const restoreTarget = agents.find((agent) => agent.id === restoreTargetId) ?? null;
   const rollbackTarget = agents.find((agent) => agent.id === rollbackTargetId) ?? null;
@@ -187,7 +200,7 @@ export function BackupsPanel({
   const selectedMigrationSourceBackup = selectedMigrationRestorePlan
     ? backups.find((backup) => backup.id === selectedMigrationRestorePlan.source_backup_request_id) ?? null
     : null;
-  const clientLabel = (clientId: string) => agentNameById.get(clientId) ?? clientId;
+  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const status =
     actionError ??
     (lastPolicyPrune
@@ -223,8 +236,8 @@ export function BackupsPanel({
       if (!policyIncludeConfig && policyPaths.length === 0) {
         throw new Error("Select config or at least one absolute path");
       }
-      if (policyTargets.clients.length === 0 && policyTargets.pools.length === 0 && policyTargets.tags.length === 0) {
-        throw new Error("Add at least one client, pool, or tag selector");
+      if (policyTargets.clients.length === 0 && policyTargets.tags.length === 0) {
+        throw new Error("Add at least one client or tag selector");
       }
       const recipient = policyRecipientPublicKeyHex.trim().toLowerCase();
       if (recipient && !/^[0-9a-f]{64}$/.test(recipient)) {
@@ -236,7 +249,6 @@ export function BackupsPanel({
       const policy = await onCreateBackupPolicy({
         name: policyName.trim(),
         clients: policyTargets.clients,
-        pools: policyTargets.pools,
         tags: policyTargets.tags,
         paths: policyPaths,
         include_config: policyIncludeConfig,
@@ -481,11 +493,14 @@ export function BackupsPanel({
           post_restore_argv: postRestoreArgv,
         };
       } else {
-        const artifactBytes = input.artifactFile
-          ? new Uint8Array(await input.artifactFile.arrayBuffer())
-          : new Uint8Array(await (await onDownloadBackupArtifact(input.sourceBackupRequestId)).arrayBuffer());
-        const artifact = await decryptBackupArtifactForRestore(artifactBytes, input.privateKeyHex);
-        if (sourceBackup && artifact.artifactClientId !== sourceBackup.client_id) {
+        const artifactBase64 = input.artifactFile
+          ? bytesToBase64(new Uint8Array(await input.artifactFile.arrayBuffer()))
+          : null;
+        const artifact = await onPrepareBackupArtifactRestore(input.sourceBackupRequestId, {
+          private_key_hex: input.privateKeyHex,
+          artifact_base64: artifactBase64,
+        });
+        if (sourceBackup && artifact.artifact_client_id !== sourceBackup.client_id) {
           throw new Error("Artifact client does not match selected source backup");
         }
         operation = {
@@ -494,10 +509,10 @@ export function BackupsPanel({
           paths: input.paths,
           include_config: input.includeConfig,
           destination_root: input.destinationRoot.trim() || null,
-          archive_base64: artifact.archiveBase64,
+          archive_base64: artifact.archive_base64,
           archive_path: null,
-          archive_size_bytes: artifact.archiveSizeBytes,
-          archive_sha256_hex: artifact.archiveSha256Hex,
+          archive_size_bytes: artifact.archive_size_bytes,
+          archive_sha256_hex: artifact.archive_sha256_hex,
           dry_run: input.dryRun,
           post_restore_argv: postRestoreArgv,
         };
@@ -511,7 +526,6 @@ export function BackupsPanel({
       });
       const nextJob = await onCreateJob({
         clients: [input.targetClientId],
-        pools: [],
         tags: [],
         destructive: !input.dryRun,
         confirmed: true,
@@ -565,7 +579,7 @@ export function BackupsPanel({
         throw new Error("Restore job ID is required");
       }
       if (!rollbackTargetId.trim()) {
-        throw new Error("Target client is required");
+        throw new Error("Target VPS is required");
       }
       if (!rollbackConfirmed) {
         throw new Error("Restore rollback requires confirmation");
@@ -583,7 +597,6 @@ export function BackupsPanel({
       });
       const nextJob = await onCreateJob({
         clients: [targetClientId],
-        pools: [],
         tags: [],
         destructive: true,
         confirmed: true,
@@ -681,6 +694,7 @@ export function BackupsPanel({
           artifacts={artifacts}
           backupPolicies={backupPolicies}
           backups={backups}
+          clientLabel={clientLabel}
           error={error}
           migrationLinks={migrationLinks}
           restorePlans={restorePlans}
@@ -713,7 +727,7 @@ export function BackupsPanel({
           recipientPublicKeyHex={policyRecipientPublicKeyHex}
           retentionDays={policyRetentionDays}
           rotationGeneration={policyRotationGeneration}
-          targetCount={policyTargets.clients.length + policyTargets.pools.length + policyTargets.tags.length}
+          targetCount={policyTargets.clients.length + policyTargets.tags.length}
           targetsText={policyTargetsText}
         />
         <BackupPolicyPruneForm
@@ -748,7 +762,7 @@ export function BackupsPanel({
           pending={pending}
           proofReady={Boolean(proofMaterial)}
           proofTtlSecs={proofTtlSecs}
-          selectedAgentName={selectedAgent?.display_name ?? null}
+          selectedAgentName={selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : null}
         />
         <ArtifactUploadForm
           artifactBackupId={artifactBackupId}
@@ -757,6 +771,7 @@ export function BackupsPanel({
           artifactObjectKey={artifactObjectKey}
           artifactUploadMode={artifactUploadMode}
           backups={backups}
+          clientLabel={clientLabel}
           handoffConfirmed={handoffConfirmed}
           handoffJobId={handoffJobId}
           onArtifactBackupIdChange={selectArtifactBackupId}
@@ -791,7 +806,8 @@ export function BackupsPanel({
           restorePathsText={restorePathsText}
           restoreSourceId={restoreSourceId}
           restoreTargetId={restoreTargetId}
-          restoreTargetName={restoreTarget?.display_name ?? null}
+          restoreTargetName={restoreTarget ? formatVpsName(restoreTarget, vpsNameDisplayMode) : null}
+          clientLabel={clientLabel}
         />
         <RestoreRunForm
           forceUnprivileged={restoreForceUnprivileged}
@@ -886,27 +902,23 @@ function parseBackupPaths(value: string): string[] {
   );
 }
 
-function parseTargetSelectors(value: string): { clients: string[]; pools: string[]; tags: string[] } {
-  const result = { clients: [] as string[], pools: [] as string[], tags: [] as string[] };
+function parseTargetSelectors(value: string): { clients: string[]; tags: string[] } {
+  const result = { clients: [] as string[], tags: [] as string[] };
   for (const token of value
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter(Boolean)) {
-    const [rawKind, ...rest] = token.includes(":") ? token.split(":") : ["tag", token];
-    const target = rest.join(":").trim();
-    if (!target) {
-      continue;
-    }
-    if (rawKind === "client") {
-      result.clients.push(target);
-    } else if (rawKind === "pool") {
-      result.pools.push(target);
-    } else if (rawKind === "tag") {
+    if (token.startsWith("tag:")) {
+      const target = token.slice("tag:".length).trim();
+      if (!target) {
+        continue;
+      }
       result.tags.push(target);
+    } else {
+      result.tags.push(token);
     }
   }
   result.clients = Array.from(new Set(result.clients)).sort();
-  result.pools = Array.from(new Set(result.pools)).sort();
   result.tags = Array.from(new Set(result.tags)).sort();
   return result;
 }

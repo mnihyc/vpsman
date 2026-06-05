@@ -21,9 +21,10 @@ use crate::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
         create_backup_artifact_handoff, create_backup_artifact_upload_session,
         create_backup_policy, create_backup_request, download_backup_artifact,
-        list_backup_artifacts, list_backup_policies, list_backup_requests, prune_backup_policies,
-        record_backup_artifact_metadata, upload_backup_artifact,
-        upload_backup_artifact_session_chunk, MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
+        list_backup_artifacts, list_backup_policies, list_backup_requests,
+        prepare_backup_artifact_restore, prune_backup_policies, record_backup_artifact_metadata,
+        upload_backup_artifact, upload_backup_artifact_session_chunk,
+        MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
     routes_discovery::discovery_endpoints,
@@ -47,13 +48,12 @@ use crate::{
         validate_agent_identity,
     },
     routes_inventory::{
-        assign_agent_pool, assign_agent_tag, assign_data_source_preset, clone_data_source_preset,
-        create_data_source_preset, create_pool, create_tag, diff_data_source_preset, fleet_summary,
-        list_agents, list_data_source_assignments, list_data_source_presets,
-        list_data_source_status, list_gateway_sessions, list_pools, list_tags,
-        list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
-        render_data_source_hot_config, resolve_bulk_targets, test_data_source_preset,
-        update_agent_alias, update_data_source_preset,
+        assign_agent_tag, assign_data_source_preset, clone_data_source_preset,
+        create_data_source_preset, create_tag, diff_data_source_preset, fleet_summary, list_agents,
+        list_data_source_assignments, list_data_source_presets, list_data_source_status,
+        list_gateway_sessions, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
+        list_telemetry_tunnels, render_data_source_hot_config, resolve_bulk_targets,
+        test_data_source_preset, update_agent_alias, update_data_source_preset,
     },
     routes_job_history::{
         compare_job_outputs, download_job_output_artifact, get_job, list_audit_logs,
@@ -175,7 +175,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(prune_history_retention),
         )
         .route("/api/v1/history/export", get(export_history))
-        .route("/api/v1/pools", get(list_pools).post(create_pool))
         .route("/api/v1/tags", get(list_tags).post(create_tag))
         .route(
             "/api/v1/data-source-presets",
@@ -206,7 +205,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/data-source-hot-config",
             get(render_data_source_hot_config),
         )
-        .route("/api/v1/agents/{client_id}/pool", post(assign_agent_pool))
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
         .route("/api/v1/bulk/resolve", post(resolve_bulk_targets))
@@ -378,6 +376,11 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/backups/{backup_request_id}/artifact",
             get(download_backup_artifact)
                 .post(upload_backup_artifact)
+                .layer(DefaultBodyLimit::max(MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/backups/{backup_request_id}/artifact/prepare-restore",
+            post(prepare_backup_artifact_restore)
                 .layer(DefaultBodyLimit::max(MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES)),
         )
         .route(

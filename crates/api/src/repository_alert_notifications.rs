@@ -15,7 +15,6 @@ use crate::{
 
 const SCOPE_GLOBAL: &str = "global";
 const SCOPE_PROVIDER: &str = "provider";
-const SCOPE_POOL: &str = "pool";
 const SCOPE_TAG: &str = "tag";
 const SCOPE_CLIENT: &str = "client";
 const DEFAULT_MIN_SEVERITY: &str = "warning";
@@ -728,9 +727,7 @@ fn validate_name(name: &str) -> Result<()> {
 fn normalize_scope_kind(scope_kind: &str) -> Result<String> {
     let scope_kind = scope_kind.trim();
     match scope_kind {
-        SCOPE_GLOBAL | SCOPE_PROVIDER | SCOPE_POOL | SCOPE_TAG | SCOPE_CLIENT => {
-            Ok(scope_kind.to_string())
-        }
+        SCOPE_GLOBAL | SCOPE_PROVIDER | SCOPE_TAG | SCOPE_CLIENT => Ok(scope_kind.to_string()),
         _ => anyhow::bail!("fleet alert notification scope kind is invalid"),
     }
 }

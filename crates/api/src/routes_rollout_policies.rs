@@ -125,7 +125,7 @@ fn validate_policy_query(query: &AgentUpdateRolloutPolicyQuery) -> Result<(), Ap
 
 fn validate_scope(scope_kind: &str, scope_value: Option<&str>) -> Result<(), ApiError> {
     let scope_kind = scope_kind.trim();
-    if !matches!(scope_kind, "global" | "tag" | "pool" | "provider") {
+    if !matches!(scope_kind, "global" | "tag" | "provider") {
         return Err(ApiError::bad_request(
             "agent_update_rollout_policy_scope_kind_invalid",
         ));

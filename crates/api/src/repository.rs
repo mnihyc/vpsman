@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -26,9 +26,7 @@ pub(crate) enum Repository {
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
-    pub(crate) pools: Arc<RwLock<Vec<ResourcePoolView>>>,
     pub(crate) tags: Arc<RwLock<Vec<String>>>,
-    pub(crate) agent_pools: Arc<RwLock<HashMap<String, Uuid>>>,
     pub(crate) fleet_alert_policies:
         Arc<RwLock<Vec<crate::model_alert_policies::FleetAlertPolicyOverrideView>>>,
     pub(crate) fleet_alert_states: Arc<RwLock<Vec<crate::model_alert_states::FleetAlertStateView>>>,
@@ -75,9 +73,17 @@ impl Repository {
     pub(crate) async fn connect(
         postgres_url: Option<&str>,
         migrations_dir: &std::path::Path,
+        allow_memory_repository: bool,
     ) -> Result<Self> {
         let Some(postgres_url) = postgres_url else {
-            info!("api using in-memory repository; set VPSMAN_POSTGRES_URL for durable state");
+            if !allow_memory_repository {
+                anyhow::bail!(
+                    "VPSMAN_POSTGRES_URL is required. The in-memory repository is disabled by default; set VPSMAN_DEBUG_INTERNAL_TEST_MODE=true only for dangerous internal tests."
+                );
+            }
+            warn!(
+                "DANGEROUS INTERNAL TEST MODE: api using unauthenticated in-memory repository; do not expose this process"
+            );
             return Ok(Self::Memory(MemoryState::default()));
         };
 

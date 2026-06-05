@@ -577,12 +577,11 @@ mod tests {
 
     #[test]
     fn parses_vty_process_list_targets_and_limit() {
-        let request =
-            parse_vty_process_list(&["client:client-a", "tag:bgp", "--limit", "25"]).unwrap();
+        let request = parse_vty_process_list(&["id:client-a", "tag:bgp", "--limit", "25"]).unwrap();
 
         assert_eq!(request.command_label, "process_list");
-        assert_eq!(request.selection.clients, vec!["client-a"]);
-        assert_eq!(request.selection.tags, vec!["bgp"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["bgp", "id:client-a"]);
         assert!(!request.selection.destructive);
         match request.operation {
             JobCommand::ProcessList { limit } => assert_eq!(limit, 25),
@@ -600,13 +599,13 @@ mod tests {
     #[test]
     fn parses_vty_user_sessions_targets_and_timeout() {
         let request =
-            parse_vty_user_sessions(&["client:client-a", "tag:bgp", "--confirmed", "--timeout=45"])
+            parse_vty_user_sessions(&["id:client-a", "tag:bgp", "--confirmed", "--timeout=45"])
                 .unwrap();
 
         assert_eq!(request.command_label, "user_sessions");
         assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.selection.clients, vec!["client-a"]);
-        assert_eq!(request.selection.tags, vec!["bgp"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["bgp", "id:client-a"]);
         assert!(request.selection.confirmed);
         match request.operation {
             JobCommand::UserSessions => {}
@@ -647,7 +646,7 @@ mod tests {
                 "--cwd",
                 "/tmp",
                 "--env=KEY=value",
-                "client:client-a",
+                "id:client-a",
                 "tag:bgp",
                 "--confirmed",
                 "--timeout=45",
@@ -657,8 +656,8 @@ mod tests {
 
         assert_eq!(request.command_label, "process_start");
         assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.selection.clients, vec!["client-a"]);
-        assert_eq!(request.selection.tags, vec!["bgp"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["bgp", "id:client-a"]);
         assert!(request.selection.confirmed);
         match request.operation {
             JobCommand::ProcessStart {
@@ -698,7 +697,7 @@ mod tests {
                 "--cpu-shares=1024",
                 "--no-new-privileges",
                 "--force-unprivileged",
-                "client:client-a",
+                "id:client-a",
                 "--confirmed",
             ],
         )

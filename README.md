@@ -1,10 +1,8 @@
 # vpsman
 
-Disclaimer: this is a highly personalized project and managed by AI agents.
-
-`vpsman` is a Rust-based VPS management platform with lightweight headless
-agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator tool, and a
-Vite-built web panel.
+`vpsman` is a Rust-based VPS panel with extended special functions: lightweight
+headless agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator
+tool, and a Vite-built web panel.
 
 The public repository intentionally keeps only source, migrations, deployment
 templates, and GitHub Actions build definitions. Local planning notes,
@@ -21,6 +19,10 @@ ignored and are not part of the public tree.
 - `crates/common`: shared protocol, auth, config, and telemetry types.
 - `frontend`: React + TypeScript panel source.
 - `deploy`: Docker Compose and Nginx templates for release binaries.
+
+Targeting is tag-first. Provider/country/group labels are ordinary tags, while
+resolver-only inner selectors such as `id:<client_id>` and
+`name:<display_name>` are documented in [target selectors](docs/target-selectors.md).
 
 ## Release Assets
 
@@ -100,7 +102,8 @@ gateway control port and not to an HTTPS gateway URL. Keep `9444` private. For
 public agents, configure the gateway for enrolled Noise IK identity, expose or
 proxy TCP `9443` as a `host:port` endpoint, create a short-lived enrollment
 token through the HTTP(S) control-plane API, and run the deploy installer on the
-VPS.
+VPS. Provisioning tokens are bound to a server-assigned UUID client id when they
+are created; the agent only claims the token.
 
 The deploy installer supports a root privileged systemd service and an
 unprivileged normal-user systemd service. The agent can hot-replace and restart

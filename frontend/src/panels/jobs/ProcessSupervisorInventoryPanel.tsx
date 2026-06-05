@@ -4,10 +4,12 @@ import type { ProcessSupervisorInventoryRecord } from "../../types";
 import { formatTime, shortId, statusClass } from "../../utils";
 
 export function ProcessSupervisorInventoryPanel({
+  clientLabel,
   inventory,
   loading,
   onRefresh,
 }: {
+  clientLabel: (clientId: string) => string;
   inventory: ProcessSupervisorInventoryRecord[];
   loading: boolean;
   onRefresh: () => void;
@@ -26,7 +28,7 @@ export function ProcessSupervisorInventoryPanel({
       <CrudPager
         fields={[
           { label: "Process", value: (row) => row.name },
-          { label: "VPS", value: (row) => row.client_id },
+          { label: "VPS", value: (row) => clientLabel(row.client_id) },
           { label: "Status", value: (row) => `${row.status} ${formatRestartEvidence(row)} ${formatProcessRuntime(row)}` },
           { label: "PID", value: (row) => row.pid },
           { label: "Source", value: (row) => `${row.source_command_type} ${row.source_job_id}` },
@@ -57,7 +59,7 @@ export function ProcessSupervisorInventoryPanel({
               <div className="historyRow supervisorInventoryGrid" key={`${row.client_id}:${row.name}`}>
                 <span className="historyPrimary">
                   <strong>{row.name}</strong>
-                  <small>{row.client_id}</small>
+                  <small>{clientLabel(row.client_id)}</small>
                 </span>
                 <span className="historyPrimary">
                   <span className={`status ${statusClass(row.status)}`}>{row.status}</span>

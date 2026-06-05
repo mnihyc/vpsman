@@ -5,7 +5,6 @@ CREATE TABLE schedules (
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     operation JSONB NOT NULL,
     target_clients TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-    target_pools UUID[] NOT NULL DEFAULT ARRAY[]::UUID[],
     target_tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     interval_secs BIGINT NOT NULL CHECK (interval_secs BETWEEN 1 AND 31536000),
     next_run_at TIMESTAMPTZ NOT NULL,

@@ -75,7 +75,7 @@ export function BackupPolicyForm({
           <textarea
             aria-label="Backup policy target selectors"
             onChange={(event) => onTargetsTextChange(event.target.value)}
-            placeholder="client:edge-01, pool:<uuid>, tag:backup-critical"
+            placeholder="id:edge-01, name:edge-a, provider:alpha, country:us, tag:backup-critical"
             rows={3}
             value={targetsText}
           />
@@ -168,4 +168,3 @@ export function BackupPolicyForm({
     </>
   );
 }
-

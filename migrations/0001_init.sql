@@ -7,19 +7,10 @@ CREATE TABLE operators (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE resource_pools (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    provider TEXT,
-    region TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE clients (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     public_key BYTEA NOT NULL,
-    pool_id UUID REFERENCES resource_pools(id),
     status TEXT NOT NULL DEFAULT 'unknown',
     agent_version TEXT,
     os_release TEXT,

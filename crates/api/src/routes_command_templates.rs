@@ -57,10 +57,7 @@ pub(crate) async fn upsert_command_template(
 
 fn validate_template_query(query: &CommandTemplateQuery) -> Result<(), ApiError> {
     if let Some(scope_kind) = query.scope_kind.as_deref() {
-        if !matches!(
-            scope_kind,
-            "global" | "provider" | "pool" | "tag" | "client"
-        ) {
+        if !matches!(scope_kind, "global" | "provider" | "tag" | "client") {
             return Err(ApiError::bad_request("command_template_scope_invalid"));
         }
     }

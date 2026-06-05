@@ -47,7 +47,7 @@ export type FleetAlertStateRequest = {
 export type FleetAlertPolicyRecord = {
   id: string;
   name: string;
-  scope_kind: "global" | "provider" | "pool" | "tag" | "client" | string;
+  scope_kind: "global" | "provider" | "tag" | "client" | string;
   scope_value: string | null;
   memory_available_warning_ratio: number | null;
   memory_available_critical_ratio: number | null;
@@ -82,7 +82,7 @@ export type FleetAlertPolicyRequest = {
 export type FleetAlertNotificationChannelRecord = {
   id: string;
   name: string;
-  scope_kind: "global" | "provider" | "pool" | "tag" | "client" | string;
+  scope_kind: "global" | "provider" | "tag" | "client" | string;
   scope_value: string | null;
   min_severity: "critical" | "warning" | "info" | string;
   categories: string[];
@@ -349,7 +349,7 @@ export type AuthProofRotationHistoryRecord = {
 export type CommandTemplateRecord = {
   id: string;
   name: string;
-  scope_kind: "global" | "provider" | "pool" | "tag" | "client" | string;
+  scope_kind: "global" | "provider" | "tag" | "client" | string;
   scope_value: string | null;
   command_type: string;
   operation: JobOperation;
@@ -388,7 +388,6 @@ export type ScheduleRecord = {
   command_type: string;
   operation: JobOperation;
   clients: string[];
-  pools: string[];
   tags: string[];
   interval_secs: number;
   catch_up_policy: string;
@@ -685,7 +684,7 @@ export type AgentUpdateRolloutRecord = {
 export type AgentUpdateRolloutPolicyRecord = {
   id: string;
   name: string;
-  scope_kind: "global" | "tag" | "pool" | "provider" | string;
+  scope_kind: "global" | "tag" | "provider" | string;
   scope_value: string | null;
   channel: string | null;
   canary_count: number | null;
@@ -700,7 +699,7 @@ export type AgentUpdateRolloutPolicyRecord = {
 
 export type CreateAgentUpdateRolloutPolicyRequest = {
   name: string;
-  scope_kind: "global" | "tag" | "pool" | "provider";
+  scope_kind: "global" | "tag" | "provider";
   scope_value?: string | null;
   channel?: string | null;
   canary_count?: number | null;
@@ -1136,7 +1135,6 @@ export type JobOperation =
 export type CreateJobRequest = {
   targets?: string[];
   clients: string[];
-  pools: string[];
   tags: string[];
   tag_mode?: "any" | "all" | string | null;
   destructive: boolean;
@@ -1186,7 +1184,6 @@ export type CreateScheduleRequest = {
   name: string;
   operation: JobOperation;
   clients: string[];
-  pools: string[];
   tags: string[];
   interval_secs: number;
   start_at_unix: number | null;
@@ -1202,7 +1199,6 @@ export type BackupPolicyRecord = {
   name: string;
   enabled: boolean;
   clients: string[];
-  pools: string[];
   tags: string[];
   paths: string[];
   include_config: boolean;
@@ -1226,7 +1222,6 @@ export type BackupPolicyRecord = {
 export type CreateBackupPolicyRequest = {
   name: string;
   clients: string[];
-  pools: string[];
   tags: string[];
   paths: string[];
   include_config: boolean;
@@ -1347,6 +1342,20 @@ export type BackupArtifactHandoffRecord = {
   source: string;
 };
 
+export type PrepareBackupArtifactRestoreRequest = {
+  private_key_hex: string;
+  artifact_base64?: string | null;
+};
+
+export type PreparedBackupArtifactRestoreRecord = {
+  archive_base64: string;
+  archive_sha256_hex: string;
+  archive_size_bytes: number;
+  artifact_client_id: string;
+  file_count: number;
+  archive_format: string;
+};
+
 export type RestorePlanRecord = {
   id: string;
   actor_id: string | null;
@@ -1399,7 +1408,6 @@ export type CreateMigrationLinkRequest = {
 
 export type JobTargetSelection = {
   clients: string[];
-  pools: string[];
   tags: string[];
   tag_mode?: "any" | "all" | string | null;
   destructive: boolean;
@@ -1475,14 +1483,6 @@ export type HistoryExportRecord = {
   limit: number;
   domains: string[];
   data: JsonValue;
-};
-
-export type ResourcePoolView = {
-  id: string;
-  name: string;
-  provider: string | null;
-  region: string | null;
-  clients: AgentView[];
 };
 
 export type TagView = {
@@ -1603,7 +1603,6 @@ export type AssignDataSourcePresetRequest = {
   domain: string;
   preset_id: string;
   clients: string[];
-  pools: string[];
   tags: string[];
   tag_mode?: "any" | "all" | string | null;
   confirmed: boolean;
@@ -1633,4 +1632,4 @@ export type BulkResolveResponse = {
   confirmation_required: boolean;
 };
 
-export type ActiveView = "Fleet" | "Pools" | "Jobs" | "Schedules" | "Audit" | "Topology" | "Backups" | "Access";
+export type ActiveView = "Fleet" | "Tags" | "Jobs" | "Schedules" | "Audit" | "Topology" | "Backups" | "Access";

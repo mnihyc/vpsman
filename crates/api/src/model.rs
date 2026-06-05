@@ -156,15 +156,6 @@ pub(crate) struct TelemetryTunnelView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ResourcePoolView {
-    pub(crate) id: Uuid,
-    pub(crate) name: String,
-    pub(crate) provider: Option<String>,
-    pub(crate) region: Option<String>,
-    pub(crate) clients: Vec<AgentView>,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TagView {
     pub(crate) name: String,
     pub(crate) clients: Vec<AgentView>,
@@ -396,7 +387,6 @@ pub(crate) struct EnrollmentTokenRecord {
     pub(crate) used_at_unix: Option<u64>,
     pub(crate) used_by_client_id: Option<String>,
     pub(crate) default_tags: Vec<String>,
-    pub(crate) default_pool_id: Option<Uuid>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) unmanaged_update_enabled: bool,
     pub(crate) unmanaged_update_version_url: String,
@@ -411,6 +401,7 @@ pub(crate) struct EnrollmentTokenView {
     pub(crate) id: Uuid,
     pub(crate) token_prefix: String,
     pub(crate) purpose: String,
+    pub(crate) assigned_client_id: Option<String>,
     pub(crate) allowed_client_id: Option<String>,
     pub(crate) requires_existing_client: bool,
     pub(crate) preserve_existing_assignments: bool,
@@ -421,7 +412,6 @@ pub(crate) struct EnrollmentTokenView {
     pub(crate) used_at: Option<String>,
     pub(crate) used_by_client_id: Option<String>,
     pub(crate) default_tags: Vec<String>,
-    pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) unmanaged_update_enabled: bool,
     pub(crate) unmanaged_update_version_url: String,
@@ -483,8 +473,6 @@ pub(crate) struct CreateEnrollmentTokenRequest {
     #[serde(default)]
     pub(crate) default_tags: Vec<String>,
     #[serde(default)]
-    pub(crate) default_pool_name: Option<String>,
-    #[serde(default)]
     pub(crate) default_display_name: Option<String>,
     #[serde(default)]
     pub(crate) unmanaged_update_enabled: Option<bool>,
@@ -506,13 +494,13 @@ pub(crate) struct CreateEnrollmentTokenResponse {
     pub(crate) token: String,
     pub(crate) token_prefix: String,
     pub(crate) purpose: String,
+    pub(crate) assigned_client_id: Option<String>,
     pub(crate) allowed_client_id: Option<String>,
     pub(crate) requires_existing_client: bool,
     pub(crate) preserve_existing_assignments: bool,
     pub(crate) expected_old_public_key_sha256_hex: Option<String>,
     pub(crate) expires_at: String,
     pub(crate) default_tags: Vec<String>,
-    pub(crate) default_pool_name: Option<String>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) unmanaged_update_enabled: bool,
     pub(crate) unmanaged_update_version_url: String,
@@ -525,7 +513,8 @@ pub(crate) struct CreateEnrollmentTokenResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClaimEnrollmentRequest {
     pub(crate) token: String,
-    pub(crate) client_id: String,
+    #[serde(default)]
+    pub(crate) client_id: Option<String>,
     pub(crate) client_public_key_hex: String,
 }
 
@@ -593,11 +582,6 @@ pub(crate) struct PromoteTunnelPlanToAdapterRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct WsAuthQuery {
-    pub(crate) access_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     pub(crate) limit: Option<i64>,
 }
@@ -630,8 +614,6 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) operation: JobCommand,
     #[serde(default)]
     pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) pools: Vec<Uuid>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     pub(crate) interval_secs: u64,
@@ -669,7 +651,6 @@ pub(crate) struct ScheduleView {
     pub(crate) command_type: String,
     pub(crate) operation: JobCommand,
     pub(crate) clients: Vec<String>,
-    pub(crate) pools: Vec<Uuid>,
     pub(crate) tags: Vec<String>,
     pub(crate) interval_secs: i64,
     pub(crate) catch_up_policy: String,
@@ -715,13 +696,6 @@ fn default_schedule_max_failures() -> i32 {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct CreatePoolRequest {
-    pub(crate) name: String,
-    pub(crate) provider: Option<String>,
-    pub(crate) region: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct CreateTagRequest {
     pub(crate) name: String,
 }
@@ -737,16 +711,9 @@ pub(crate) struct UpdateAgentAliasRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AssignPoolRequest {
-    pub(crate) pool_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct BulkResolveRequest {
     #[serde(default)]
     pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) pools: Vec<Uuid>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     #[serde(default)]
@@ -823,8 +790,6 @@ pub(crate) struct CreateJobRequest {
     #[serde(default)]
     pub(crate) clients: Vec<String>,
     #[serde(default)]
-    pub(crate) pools: Vec<Uuid>,
-    #[serde(default)]
     pub(crate) tags: Vec<String>,
     #[serde(default)]
     pub(crate) tag_mode: Option<String>,
@@ -863,4 +828,5 @@ pub(crate) struct CreateJobResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct ErrorResponse {
     pub(crate) error: String,
+    pub(crate) status: u16,
 }

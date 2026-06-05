@@ -45,7 +45,6 @@ impl CreateJobRequest {
     pub(crate) fn target_selection(&self) -> BulkResolveRequest {
         BulkResolveRequest {
             clients: self.all_requested_clients(),
-            pools: self.pools.clone(),
             tags: self.tags.clone(),
             tag_mode: self.tag_mode.clone(),
             destructive: self.destructive,

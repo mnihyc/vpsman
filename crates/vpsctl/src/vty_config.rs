@@ -655,7 +655,6 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
     };
     let selection = VtyJobSelection {
         clients: vec![request.client_id],
-        pools: Vec::new(),
         tags: Vec::new(),
         destructive: false,
         confirmed: request.confirmed,
@@ -863,7 +862,6 @@ fn submit_vty_config_operation(
         token,
         &serde_json::json!({
             "clients": &selection.clients,
-            "pools": &selection.pools,
             "tags": &selection.tags,
             "destructive": false,
             "confirmed": selection.confirmed,
@@ -897,7 +895,6 @@ fn submit_vty_config_operation(
             "argv": [],
             "operation": operation,
             "clients": selection.clients,
-            "pools": selection.pools,
             "tags": selection.tags,
             "privileged": true,
             "destructive": false,
@@ -926,7 +923,7 @@ mod tests {
         let request = parse_vty_hot_config(&[
             "--config-file",
             "./agent.toml",
-            "client:edge-a",
+            "id:edge-a",
             "tag:bgp",
             "--timeout",
             "45",
@@ -940,8 +937,8 @@ mod tests {
             request.config_file,
             std::path::PathBuf::from("./agent.toml")
         );
-        assert_eq!(request.selection.clients, vec!["edge-a"]);
-        assert_eq!(request.selection.tags, vec!["bgp"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["bgp", "id:edge-a"]);
         assert_eq!(request.timeout_secs, 45);
         assert_eq!(request.proof_ttl_secs, 120);
         assert!(request.selection.confirmed);
@@ -983,7 +980,7 @@ mod tests {
             &"cc".repeat(32),
             "--rotation-generation",
             "2026-q2",
-            "client:edge-a",
+            "id:edge-a",
             "--timeout",
             "45",
             "--proof-ttl",
@@ -994,7 +991,8 @@ mod tests {
 
         assert_eq!(request.new_proof_key_hex, Some("cc".repeat(32)));
         assert_eq!(request.rotation_generation.as_deref(), Some("2026-q2"));
-        assert_eq!(request.selection.clients, vec!["edge-a"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert_eq!(request.timeout_secs, 45);
         assert_eq!(request.proof_ttl_secs, 120);
         assert!(request.selection.confirmed);
@@ -1059,7 +1057,7 @@ mod tests {
             &signing_key_hex,
             "--canary-count",
             "2",
-            "client:edge-a",
+            "id:edge-a",
             "--timeout",
             "300",
             "--proof-ttl",
@@ -1074,7 +1072,8 @@ mod tests {
         assert_eq!(request.artifact_signature_hex, Some(signature_hex));
         assert_eq!(request.artifact_signing_key_hex, Some(signing_key_hex));
         assert_eq!(request.canary_count, Some(2));
-        assert_eq!(request.selection.clients, vec!["edge-a"]);
+        assert!(request.selection.clients.is_empty());
+        assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert_eq!(request.timeout_secs, 300);
         assert_eq!(request.proof_ttl_secs, 120);
         assert!(request.force_unprivileged);
@@ -1085,7 +1084,7 @@ mod tests {
         let activate = parse_vty_agent_update_activate(&[
             "--staged-sha256-hex",
             &"aa".repeat(32),
-            "client:edge-a",
+            "id:edge-a",
             "--timeout",
             "30",
             "--restart-agent",
@@ -1094,7 +1093,8 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(activate.staged_sha256_hex, "aa".repeat(32));
-        assert_eq!(activate.selection.clients, vec!["edge-a"]);
+        assert!(activate.selection.clients.is_empty());
+        assert_eq!(activate.selection.tags, vec!["id:edge-a"]);
         assert!(activate.restart_agent);
         assert!(activate.selection.confirmed);
         assert!(activate.force_unprivileged);
@@ -1118,20 +1118,20 @@ mod tests {
         assert!(parse_vty_agent_update_activate(&[
             "--staged-sha256-hex",
             &"aa".repeat(32),
-            "client:edge-a",
+            "id:edge-a",
         ])
         .is_err());
         assert!(parse_vty_agent_update_activate(&[
             "--staged-sha256-hex",
             "not-a-hash",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .is_err());
         assert!(parse_vty_agent_update_rollback(&[
             "--rollback-sha256-hex",
             "not-a-hash",
-            "client:edge-a",
+            "id:edge-a",
             "--confirmed",
         ])
         .is_err());

@@ -994,8 +994,8 @@ fn validate_rollout_health_gate(value: &str) -> Result<()> {
 
 fn validate_rollout_policy_scope(scope_kind: &str, scope_value: Option<&str>) -> Result<()> {
     anyhow::ensure!(
-        matches!(scope_kind, "global" | "tag" | "pool" | "provider"),
-        "--scope-kind must be global, tag, pool, or provider"
+        matches!(scope_kind, "global" | "tag" | "provider"),
+        "--scope-kind must be global, tag, or provider"
     );
     if scope_kind == "global" {
         anyhow::ensure!(
@@ -1161,7 +1161,6 @@ fn submit_vty_rollout_operation(
             "argv": [],
             "operation": operation,
             "clients": clients,
-            "pools": [],
             "tags": [],
             "privileged": true,
             "destructive": false,
