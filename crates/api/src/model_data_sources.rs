@@ -130,15 +130,12 @@ pub(crate) struct DataSourceHotConfigQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AssignDataSourcePresetRequest {
     pub(crate) domain: String,
     pub(crate) preset_id: Uuid,
     #[serde(default)]
-    pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
-    #[serde(default)]
-    pub(crate) tag_mode: Option<String>,
+    pub(crate) selector_expression: String,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }

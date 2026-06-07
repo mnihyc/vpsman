@@ -115,6 +115,7 @@ mod tests {
         plan_tunnel, render_tunnel_endpoint_config, verify_privilege_proof, BandwidthTier,
         OspfCostPolicy, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
     };
+    use vpsman_common::{FileExistingPolicy, FileOwnershipPolicy};
 
     const TEST_TRUE_ARGV: &str = "/bin/true";
     const TEST_TERMINAL_SHELL: &str = "/bin/sh";
@@ -267,6 +268,12 @@ mod tests {
             size_bytes: data.len() as u64,
             sha256_hex: payload_hash(data),
             data_base64: vpsman_common::encode_inline_file_payload(data).unwrap(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         };
         let (payload_hash_hex, envelopes) =
             build_envelopes_for_job_command(&clients, &command, "correct horse", "01020304", 60)
@@ -290,6 +297,12 @@ mod tests {
             size_bytes: data.len() as u64,
             sha256_hex: payload_hash(&data),
             chunks: vpsman_common::encode_chunked_file_payload(&data).unwrap(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         };
         let (payload_hash_hex, envelopes) =
             build_envelopes_for_job_command(&clients, &command, "correct horse", "01020304", 60)

@@ -40,15 +40,14 @@
 
 .crudSearch {
   display: grid;
-  grid-template-columns: auto minmax(110px, 150px) minmax(150px, 260px);
+  grid-template-columns: minmax(110px, 150px) minmax(180px, 320px);
   align-items: center;
   gap: 8px;
   min-width: 0;
   color: #5f6368;
 }
 
-.crudSearch select,
-.crudSearch input {
+.crudSearch select {
   min-width: 0;
   height: 34px;
   border: 1px solid #dfe3eb;
@@ -618,12 +617,6 @@
   grid-template-columns: minmax(180px, 1.1fr) minmax(160px, 1fr) minmax(120px, 0.6fr);
 }
 
-.presetTargetList {
-  max-height: 170px;
-  overflow: auto;
-  padding-right: 4px;
-}
-
 .configPreview {
   display: grid;
   gap: 8px;
@@ -838,12 +831,6 @@
   margin: 18px;
 }
 
-.chipList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 .checkChip,
 .checkLine {
   display: inline-flex;
@@ -855,7 +842,15 @@
 .checkChip {
   border: 1px solid #dfe3eb;
   border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
   padding: 5px 10px;
+}
+
+.checkChip:hover {
+  border-color: #c6dafc;
+  background: #f8fbff;
+  color: #174ea6;
 }
 
 .checkChip input,

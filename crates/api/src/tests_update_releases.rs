@@ -112,10 +112,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),

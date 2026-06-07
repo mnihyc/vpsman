@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::{
     body::to_bytes,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -21,11 +21,13 @@ use crate::{
         download_file_transfer_source_artifact, list_file_transfer_source_artifacts,
         upload_file_transfer_source_artifact,
     },
+    routes_job_history::download_file_download_bundle,
     state::{AppState, EnrollmentSettings},
 };
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash, CommandOutput,
-    FilePushChunk, JobCommand, OutputStream, MAX_INLINE_FILE_PUSH_BYTES,
+    FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk, JobCommand,
+    OutputStream, MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 #[test]
@@ -37,6 +39,12 @@ fn validates_file_push_job_document() {
         size_bytes: data.len() as u64,
         sha256_hex: payload_hash(data),
         data_base64: encode_inline_file_payload(data).unwrap(),
+        existing_policy: FileExistingPolicy::Replace,
+        owner: None,
+        group: None,
+        uid: None,
+        gid: None,
+        ownership_policy: FileOwnershipPolicy::Fail,
     };
 
     validate_job_command(&command).unwrap();
@@ -54,6 +62,12 @@ fn rejects_invalid_file_push_job_document() {
             size_bytes: data.len() as u64,
             sha256_hex: valid_hash.clone(),
             data_base64: valid_data_base64.clone(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         },
         JobCommand::FilePush {
             path: "/tmp/vpsman-upload.txt".to_string(),
@@ -61,6 +75,12 @@ fn rejects_invalid_file_push_job_document() {
             size_bytes: data.len() as u64,
             sha256_hex: valid_hash.clone(),
             data_base64: valid_data_base64.clone(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         },
         JobCommand::FilePush {
             path: "/tmp/vpsman-upload.txt".to_string(),
@@ -68,6 +88,12 @@ fn rejects_invalid_file_push_job_document() {
             size_bytes: data.len() as u64 + 1,
             sha256_hex: valid_hash.clone(),
             data_base64: valid_data_base64.clone(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         },
         JobCommand::FilePush {
             path: "/tmp/vpsman-upload.txt".to_string(),
@@ -75,8 +101,76 @@ fn rejects_invalid_file_push_job_document() {
             size_bytes: data.len() as u64,
             sha256_hex: "00".repeat(32),
             data_base64: valid_data_base64.clone(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         },
     ] {
+        assert!(validate_job_command(&command).is_err(), "{command:?}");
+    }
+}
+
+#[test]
+fn rejects_unknown_file_operation_fields() {
+    let command = serde_json::json!({
+        "type": "file_copy",
+        "path": "/tmp/source",
+        "new_path": "/tmp/destination",
+        "overwrite": false,
+        "recursive": true,
+        "policy": "fail",
+        "overwite": true
+    });
+    assert!(serde_json::from_value::<JobCommand>(command).is_err());
+}
+
+#[test]
+fn rejects_root_mutating_file_operations() {
+    let data = b"file contents";
+    let data_base64 = encode_inline_file_payload(data).unwrap();
+    let sha256_hex = payload_hash(data);
+    let commands = [
+        JobCommand::FilePush {
+            path: "/".to_string(),
+            mode: 0o640,
+            size_bytes: data.len() as u64,
+            sha256_hex,
+            data_base64,
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
+        },
+        JobCommand::FileDelete {
+            path: "/".to_string(),
+            recursive: true,
+            policy: FileActionPolicy::Fail,
+        },
+        JobCommand::FileDelete {
+            path: "/tmp/..".to_string(),
+            recursive: true,
+            policy: FileActionPolicy::Fail,
+        },
+        JobCommand::FileRename {
+            path: "/tmp/source".to_string(),
+            new_path: "/".to_string(),
+            overwrite: true,
+            policy: FileActionPolicy::Fail,
+        },
+        JobCommand::FileCopy {
+            path: "/tmp/source".to_string(),
+            new_path: "/".to_string(),
+            overwrite: true,
+            recursive: true,
+            policy: FileActionPolicy::Fail,
+        },
+    ];
+    for command in commands {
         assert!(validate_job_command(&command).is_err(), "{command:?}");
     }
 }
@@ -137,6 +231,77 @@ fn download_chunk_outputs(
     ]
 }
 
+fn file_download_outputs(
+    job_id: uuid::Uuid,
+    path: &str,
+    filename: &str,
+    data: &[u8],
+) -> Vec<CommandOutput> {
+    vec![
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: data.to_vec(),
+            exit_code: None,
+            done: false,
+        },
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "file_download",
+                "status": "completed",
+                "path": path,
+                "source_kind": "file",
+                "filename": filename,
+                "content_type": "application/octet-stream",
+                "size_bytes": data.len(),
+                "sha256_hex": payload_hash(data),
+                "archive": false,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        },
+    ]
+}
+
+fn file_download_outputs_with_hash(
+    job_id: uuid::Uuid,
+    path: &str,
+    filename: &str,
+    data: &[u8],
+    sha256_hex: &str,
+) -> Vec<CommandOutput> {
+    vec![
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: data.to_vec(),
+            exit_code: None,
+            done: false,
+        },
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "file_download",
+                "status": "completed",
+                "path": path,
+                "source_kind": "file",
+                "filename": filename,
+                "content_type": "application/octet-stream",
+                "size_bytes": data.len(),
+                "sha256_hex": sha256_hex,
+                "archive": false,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        },
+    ]
+}
+
 fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState {
     AppState {
         repo,
@@ -159,10 +324,7 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
 fn file_push_job_command_uses_operation_payload_and_type() {
     let data = b"file contents";
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -173,6 +335,12 @@ fn file_push_job_command_uses_operation_payload_and_type() {
             size_bytes: data.len() as u64,
             sha256_hex: payload_hash(data),
             data_base64: encode_inline_file_payload(data).unwrap(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         }),
         timeout_secs: Some(5),
         canary_count: None,
@@ -209,6 +377,12 @@ fn validates_chunked_file_push_job_document() {
         size_bytes: data.len() as u64,
         sha256_hex: payload_hash(&data),
         chunks: encode_chunked_file_payload(&data).unwrap(),
+        existing_policy: FileExistingPolicy::Replace,
+        owner: None,
+        group: None,
+        uid: None,
+        gid: None,
+        ownership_policy: FileOwnershipPolicy::Fail,
     };
 
     validate_job_command(&command).unwrap();
@@ -225,6 +399,12 @@ fn rejects_invalid_chunked_file_push_job_document() {
         size_bytes: data.len() as u64,
         sha256_hex: payload_hash(&data),
         chunks,
+        existing_policy: FileExistingPolicy::Replace,
+        owner: None,
+        group: None,
+        uid: None,
+        gid: None,
+        ownership_policy: FileOwnershipPolicy::Fail,
     };
 
     assert!(validate_job_command(&command).is_err());
@@ -234,10 +414,7 @@ fn rejects_invalid_chunked_file_push_job_document() {
 fn chunked_file_push_job_command_uses_operation_payload_and_type() {
     let data = vec![7_u8; MAX_INLINE_FILE_PUSH_BYTES + 17];
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -248,6 +425,12 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
             size_bytes: data.len() as u64,
             sha256_hex: payload_hash(&data),
             chunks: encode_chunked_file_payload(&data).unwrap(),
+            existing_policy: FileExistingPolicy::Replace,
+            owner: None,
+            group: None,
+            uid: None,
+            gid: None,
+            ownership_policy: FileOwnershipPolicy::Fail,
         }),
         timeout_secs: Some(5),
         canary_count: None,
@@ -298,6 +481,7 @@ fn validates_resumable_file_transfer_job_documents() {
             sha256_hex: "11".repeat(32),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            existing_policy: FileExistingPolicy::Replace,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferChunk {
@@ -342,6 +526,7 @@ fn rejects_invalid_resumable_file_transfer_job_documents() {
             sha256_hex: "11".repeat(32),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            existing_policy: FileExistingPolicy::Replace,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferStart {
@@ -352,6 +537,7 @@ fn rejects_invalid_resumable_file_transfer_job_documents() {
             sha256_hex: "11".repeat(32),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            existing_policy: FileExistingPolicy::Replace,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferStart {
@@ -362,6 +548,7 @@ fn rejects_invalid_resumable_file_transfer_job_documents() {
             sha256_hex: "11".repeat(32),
             chunk_size_bytes: 0,
             rate_limit_kbps: 0,
+            existing_policy: FileExistingPolicy::Replace,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferStart {
@@ -372,6 +559,7 @@ fn rejects_invalid_resumable_file_transfer_job_documents() {
             sha256_hex: "11".repeat(32),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 1_000_001,
+            existing_policy: FileExistingPolicy::Replace,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferChunk {
@@ -497,6 +685,184 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
     assert_eq!(body.as_ref(), all.as_slice());
     let stored = store.get(&handoff.object_key).await.unwrap();
     assert_eq!(stored, all);
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_download_bundle_route_returns_tar_archive_from_target_outputs() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-file-download-bundle-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let job_id = uuid::Uuid::new_v4();
+
+    repo.record_job_outputs(
+        job_id,
+        "edge-a",
+        &file_download_outputs(job_id, "/etc/app.conf", "app.conf", b"listen=443\n"),
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        job_id,
+        "edge-b",
+        &file_download_outputs(job_id, "/etc/app.conf", "app.conf", b"listen=8443\n"),
+    )
+    .await
+    .unwrap();
+
+    let response = download_file_download_bundle(
+        State(state),
+        HeaderMap::new(),
+        Path(job_id),
+        Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/x-tar"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-vpsman-artifact-delivery")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "spooled-filesystem"
+    );
+    assert!(response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .is_some());
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut entries = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        entries.push((path, bytes));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        entries,
+        vec![
+            ("edge-a/app.conf".to_string(), b"listen=443\n".to_vec()),
+            ("edge-b/app.conf".to_string(), b"listen=8443\n".to_vec()),
+        ]
+    );
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_download_bundle_route_handles_more_than_twenty_target_outputs() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-file-download-bundle-many-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let job_id = uuid::Uuid::new_v4();
+
+    for index in 0..24 {
+        let client_id = format!("edge-{index:02}");
+        let data = format!("client={client_id}\n");
+        repo.record_job_outputs(
+            job_id,
+            &client_id,
+            &file_download_outputs(job_id, "/var/log/app.log", "app.log", data.as_bytes()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let response = download_file_download_bundle(
+        State(state),
+        HeaderMap::new(),
+        Path(job_id),
+        Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
+    )
+    .await
+    .unwrap();
+
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut entries = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        entries.push((path, bytes));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(entries.len(), 24);
+    assert_eq!(
+        entries.first().unwrap(),
+        &("edge-00/app.log".to_string(), b"client=edge-00\n".to_vec())
+    );
+    assert_eq!(
+        entries.last().unwrap(),
+        &("edge-23/app.log".to_string(), b"client=edge-23\n".to_vec())
+    );
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_download_bundle_route_rejects_output_integrity_mismatch() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-file-download-bundle-mismatch-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let job_id = uuid::Uuid::new_v4();
+
+    repo.record_job_outputs(
+        job_id,
+        "edge-a",
+        &file_download_outputs_with_hash(
+            job_id,
+            "/etc/app.conf",
+            "app.conf",
+            b"listen=443\n",
+            &"00".repeat(32),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let result = download_file_download_bundle(
+        State(state),
+        HeaderMap::new(),
+        Path(job_id),
+        Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
+    )
+    .await;
+    let error = result.expect_err("bundle route should reject mismatched output");
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "file_download_output_integrity_mismatch");
     let _ = tokio::fs::remove_dir_all(store_root).await;
 }
 

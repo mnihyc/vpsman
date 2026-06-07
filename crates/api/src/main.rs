@@ -95,6 +95,7 @@ mod routes_terminal_sessions;
 mod routes_update_releases;
 mod routes_ws;
 mod security;
+mod selector_expression;
 mod state;
 mod util;
 
@@ -554,10 +555,12 @@ async fn dispatch_delegated_rollout_rollbacks(state: &AppState) -> Result<usize>
             rollback_sha256_hex: claim.rollback_sha256_hex.clone(),
         };
         let request = CreateJobRequest {
-            targets: Vec::new(),
-            clients: claim.clients.clone(),
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: selector_expression::or_selector_expression(
+                claim
+                    .clients
+                    .iter()
+                    .map(|client_id| selector_expression::id_selector_expression(client_id)),
+            ),
             destructive: false,
             confirmed: true,
             command: "agent_update_rollback".to_string(),
@@ -634,10 +637,12 @@ async fn dispatch_delegated_rollout_activations(state: &AppState) -> Result<usiz
             restart_agent: claim.restart_agent,
         };
         let request = CreateJobRequest {
-            targets: Vec::new(),
-            clients: claim.clients.clone(),
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: selector_expression::or_selector_expression(
+                claim
+                    .clients
+                    .iter()
+                    .map(|client_id| selector_expression::id_selector_expression(client_id)),
+            ),
             destructive: false,
             confirmed: true,
             command: "agent_update_activate".to_string(),
@@ -883,6 +888,19 @@ fn build_s3_object_store(
         region: region.to_string(),
         create_bucket,
     })?))
+}
+
+#[cfg(test)]
+fn test_selector_expression_for_clients<I, S>(clients: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    clients
+        .into_iter()
+        .map(|client| format!("id:{}", client.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 #[cfg(test)]

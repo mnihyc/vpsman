@@ -1,26 +1,30 @@
-import { useMemo, useState, type FormEvent } from "react";
-import { RefreshCcw, Save, Server, Tag } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { RefreshCcw, Save } from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ConsoleCollapsibleSection } from "../components/ConsoleLayout";
-import { usePanelDisplaySettings } from "../panelDisplay";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { parseCommandArgv } from "../proof";
+import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+} from "../searchExpression";
 import type {
   AgentView,
   CreateScheduleRequest,
   ScheduleRecord,
-  TagView,
 } from "../types";
 import {
   formatCompactTime,
   formatTime,
-  formatVpsName,
   runPanelAction,
   shortId,
-  toggleValue,
 } from "../utils";
+
+const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
 
 export function SchedulesPanel({
   activeSubpage: _activeSubpage,
@@ -30,7 +34,6 @@ export function SchedulesPanel({
   onCreateSchedule,
   onRefresh,
   schedules,
-  tags,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -39,9 +42,7 @@ export function SchedulesPanel({
   onCreateSchedule: (request: CreateScheduleRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
   schedules: ScheduleRecord[];
-  tags: TagView[];
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [name, setName] = useState("");
   const [commandText, setCommandText] = useState("");
   const [intervalSecs, setIntervalSecs] = useState(3600);
@@ -50,8 +51,10 @@ export function SchedulesPanel({
   const [catchUpLimit, setCatchUpLimit] = useState(1);
   const [retryDelaySecs, setRetryDelaySecs] = useState(300);
   const [maxFailures, setMaxFailures] = useState(3);
-  const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectorExpression, setSelectorExpression] = useState(() =>
+    readLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, ""),
+  );
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -62,13 +65,37 @@ export function SchedulesPanel({
       return [];
     }
   }, [commandText]);
-  const selectedTargetCount = selectedClients.length + selectedTags.length;
+  const selectorParse = useMemo(
+    () => parseSearchExpression(selectorExpression),
+    [selectorExpression],
+  );
+  const selectedTargetCount = useMemo(
+    () =>
+      selectorParse.error
+        ? 0
+        : agentsMatchingExpression(agents, selectorExpression).length,
+    [agents, selectorExpression, selectorParse.error],
+  );
   const ready =
-    name.trim().length > 0 && argv.length > 0 && selectedTargetCount > 0;
+    name.trim().length > 0 &&
+    argv.length > 0 &&
+    selectorExpression.trim().length > 0 &&
+    !selectorParse.error &&
+    selectedTargetCount > 0;
   const status =
     actionError ??
     error ??
     (loading ? "Loading" : `${schedules.length} schedules`);
+  const confirmationItems = [
+    { label: "Name", value: name.trim() || "-" },
+    { label: "Selector", value: selectorExpression.trim() || "-" },
+    { label: "Targets", value: `${selectedTargetCount} resolved` },
+    { label: "Command", value: argv[0] ?? "-" },
+    { label: "Interval", value: formatInterval(clampInteger(intervalSecs, 1, 31_536_000)) },
+    { label: "Catch-up", value: formatCatchUpPolicy(catchUpPolicy) },
+    { label: "Retry", value: formatInterval(clampInteger(retryDelaySecs, 1, 86_400)) },
+    { label: "State", value: enabled ? "Enabled" : "Disabled" },
+  ];
   const scheduleColumns = useMemo<ConsoleDataGridColumn<ScheduleRecord>[]>(
     () => [
       {
@@ -100,10 +127,13 @@ export function SchedulesPanel({
         size: 85,
         minSize: 75,
         align: "end",
-        sortValue: (schedule) => schedule.clients.length + schedule.tags.length,
-        searchValue: (schedule) =>
-          [...schedule.clients, ...schedule.tags].join(" "),
-        cell: (schedule) => schedule.clients.length + schedule.tags.length,
+        sortValue: (schedule) => schedule.selector_expression,
+        searchValue: (schedule) => schedule.selector_expression,
+        cell: (schedule) => (
+          <span className="monoCell compactSelectorText">
+            {schedule.selector_expression}
+          </span>
+        ),
       },
       {
         id: "interval",
@@ -171,6 +201,17 @@ export function SchedulesPanel({
 
   async function submitSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setActionError(null);
+    if (!ready) {
+      setActionError("Schedule is incomplete");
+      return;
+    }
+    blurActiveElement();
+    window.setTimeout(() => setConfirmationOpen(true), 140);
+  }
+
+  async function saveScheduleNow() {
+    setConfirmationOpen(false);
     await runPanelAction(setPending, setActionError, async () => {
       if (!ready) {
         throw new Error("Schedule is incomplete");
@@ -178,8 +219,7 @@ export function SchedulesPanel({
       await onCreateSchedule({
         name: name.trim(),
         operation: { type: "shell", argv, pty: false },
-        clients: selectedClients,
-        tags: selectedTags,
+        selector_expression: selectorExpression.trim(),
         interval_secs: clampInteger(intervalSecs, 1, 31_536_000),
         start_at_unix: null,
         enabled,
@@ -192,6 +232,10 @@ export function SchedulesPanel({
       setCommandText("");
     });
   }
+
+  useEffect(() => {
+    writeLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, selectorExpression);
+  }, [selectorExpression]);
 
   return (
     <div className="workspace singleColumn">
@@ -223,10 +267,7 @@ export function SchedulesPanel({
               onSelect: (rows) =>
                 void copyText(
                   rows
-                    .flatMap((schedule) => [
-                      ...schedule.clients,
-                      ...schedule.tags.map((tag) => `tag:${tag}`),
-                    ])
+                    .map((schedule) => schedule.selector_expression)
                     .join("\n"),
                 ),
             },
@@ -243,8 +284,7 @@ export function SchedulesPanel({
           renderExpandedRow={(schedule) => (
             <div className="gridDetailLine">
               <strong>{schedule.command_type}</strong>
-              <span>{schedule.clients.length} clients</span>
-              <span>{schedule.tags.length} tags</span>
+              <span className="monoCell">{schedule.selector_expression}</span>
               <span>
                 last{" "}
                 {schedule.last_run_at
@@ -363,46 +403,42 @@ export function SchedulesPanel({
               </label>
             </div>
             <div className="targetSelector">
-              <strong>Targets</strong>
-              <div className="chipList">
-                {agents.map((agent) => (
-                  <label className="checkChip" key={agent.id}>
-                    <input
-                      checked={selectedClients.includes(agent.id)}
-                      onChange={() =>
-                        setSelectedClients(
-                          toggleValue(selectedClients, agent.id),
-                        )
-                      }
-                      type="checkbox"
-                    />
-                    <Server size={14} />
-                    <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
-                  </label>
-                ))}
-                {tags.map((tag) => (
-                  <label className="checkChip" key={tag.name}>
-                    <input
-                      checked={selectedTags.includes(tag.name)}
-                      onChange={() =>
-                        setSelectedTags(toggleValue(selectedTags, tag.name))
-                      }
-                      type="checkbox"
-                    />
-                    <Tag size={14} />
-                    <span>{tag.name}</span>
-                  </label>
-                ))}
+              <div className="targetSelectorHeader">
+                <strong>Targets</strong>
+                <span>{selectedTargetCount} matching VPSs</span>
               </div>
+              <SearchExpressionInput
+                agents={agents}
+                ariaLabel="Schedule target expression"
+                className="targetExpressionBar"
+                onChange={setSelectorExpression}
+                placeholder="id:edge-sfo-01 || provider:hetzner && country:US"
+                showMatchCount
+                value={selectorExpression}
+                verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
+                verificationMessage={selectorParse.error ?? `${selectedTargetCount}/${agents.length}`}
+              />
             </div>
-            <button
-              className="primaryAction"
-              disabled={pending || !ready}
-              type="submit"
-            >
-              <Save size={17} />
-              Save
-            </button>
+            {!confirmationOpen && (
+              <button
+                className="primaryAction"
+                disabled={pending || !ready}
+                type="submit"
+              >
+                <Save size={17} />
+                Save
+              </button>
+            )}
+            <ConfirmationPrompt
+              confirmLabel="Save schedule"
+              detail={`Recurring ${argv[0] ?? "command"} on ${vpsCountLabel(selectedTargetCount)}.`}
+              items={confirmationItems}
+              onCancel={() => setConfirmationOpen(false)}
+              onConfirm={() => void saveScheduleNow()}
+              open={confirmationOpen}
+              pending={pending}
+              title="Confirm schedule"
+            />
           </form>
         </ConsoleCollapsibleSection>
       </section>
@@ -440,9 +476,38 @@ function formatCatchUpPolicy(policy: string): string {
   return "skip missed";
 }
 
+function vpsCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function blurActiveElement() {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+    document.activeElement.blur();
+  }
+}
+
 async function copyText(value: string) {
   if (!value.trim()) {
     return;
   }
   await navigator.clipboard?.writeText(value);
+}
+
+function readLocalString(key: string, fallback: string): string {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  return window.localStorage.getItem(key) ?? fallback;
+}
+
+function writeLocalString(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (value.trim()) {
+    window.localStorage.setItem(key, value);
+  } else {
+    window.localStorage.removeItem(key);
+  }
 }

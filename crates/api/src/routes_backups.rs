@@ -29,6 +29,7 @@ use crate::{
     },
     routes_schedules::validate_schedule_request,
     security::operator_has_scope,
+    selector_expression::id_selector_expression,
     state::AppState,
     unix_now,
 };
@@ -780,8 +781,7 @@ pub(crate) fn validate_create_backup_policy_request(
                 .clone()
                 .map(|value| value.to_ascii_lowercase()),
         },
-        clients: request.clients.clone(),
-        tags: request.tags.clone(),
+        selector_expression: request.selector_expression.clone(),
         interval_secs: request.interval_secs,
         start_at_unix: request.start_at_unix,
         enabled: request.enabled,
@@ -854,9 +854,7 @@ async fn ensure_single_backup_client(
     let resolved = state
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: vec![request.client_id.clone()],
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: id_selector_expression(&request.client_id),
             destructive: false,
             confirmed: true,
         })

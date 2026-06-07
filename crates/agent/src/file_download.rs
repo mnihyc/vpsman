@@ -1,4 +1,6 @@
 use std::{
+    ffi::OsStr,
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -8,14 +10,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
+    sync::mpsc,
     time::sleep,
 };
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, validate_file_transfer_download_chunk_request,
+    payload_hash, validate_absolute_file_path, validate_file_transfer_download_chunk_request,
     validate_file_transfer_download_session, CommandOutput, OutputStream,
     FILE_TRANSFER_CHUNK_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
+
+use crate::file_pull::{
+    chunked_output, stream_buffered_payload_output, COMMAND_OUTPUT_CHUNK_BYTES,
+};
+
+const FILE_DOWNLOAD_MANIFEST_ENTRY_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FileDownloadSessionMetadata {
@@ -26,6 +35,506 @@ struct FileDownloadSessionMetadata {
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
     resume_token_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FileDownloadManifestEntry {
+    path: String,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symlink_target: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct FileDownloadManifestSummary {
+    entries: Vec<FileDownloadManifestEntry>,
+    hierarchy_sha256_hex: String,
+    content_manifest_sha256_hex: String,
+    file_count: u64,
+    directory_count: u64,
+    symlink_count: u64,
+    other_count: u64,
+    total_file_bytes: u64,
+    truncated: bool,
+}
+
+struct FileDownloadManifestBuilder {
+    entries: Vec<FileDownloadManifestEntry>,
+    hierarchy_hasher: Sha256,
+    content_hasher: Sha256,
+    file_count: u64,
+    directory_count: u64,
+    symlink_count: u64,
+    other_count: u64,
+    total_file_bytes: u64,
+    truncated: bool,
+}
+
+struct DirectoryDownloadArtifact {
+    archive: Vec<u8>,
+    manifest: FileDownloadManifestSummary,
+}
+
+pub(crate) async fn execute_file_download(
+    job_id: uuid::Uuid,
+    path: &str,
+    max_bytes: u64,
+    output_tx: Option<mpsc::Sender<CommandOutput>>,
+) -> Result<Vec<CommandOutput>> {
+    validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let max_bytes = max_bytes.clamp(1, 1024 * 1024 * 1024);
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("failed to stat download source {path}"))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("file download source is a symlink");
+    }
+    if metadata.is_file() {
+        return execute_regular_file_download(job_id, path, metadata.len(), max_bytes, output_tx)
+            .await;
+    }
+    if metadata.is_dir() {
+        return execute_directory_download(job_id, path, max_bytes, output_tx).await;
+    }
+    anyhow::bail!("file download source is not a regular file or directory");
+}
+
+async fn execute_regular_file_download(
+    job_id: uuid::Uuid,
+    path: &str,
+    size_bytes: u64,
+    max_bytes: u64,
+    output_tx: Option<mpsc::Sender<CommandOutput>>,
+) -> Result<Vec<CommandOutput>> {
+    if size_bytes > max_bytes {
+        anyhow::bail!("file download source exceeds limit: {size_bytes} > {max_bytes} bytes");
+    }
+    let filename = download_filename(path, false);
+    if let Some(sender) = output_tx {
+        let summary = stream_file_payload(job_id, path, sender).await?;
+        return file_download_status(
+            job_id,
+            path,
+            "file",
+            &filename,
+            "application/octet-stream",
+            summary.size_bytes,
+            &summary.sha256_hex,
+            false,
+            summary.chunk_count,
+            None,
+        );
+    }
+
+    let data = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("failed to read download source {path}"))?;
+    let mut outputs = chunked_output(job_id, OutputStream::Stdout, &data);
+    outputs.push(file_download_status_output(
+        job_id,
+        path,
+        "file",
+        &filename,
+        "application/octet-stream",
+        data.len() as u64,
+        &payload_hash(&data),
+        false,
+        data.chunks(COMMAND_OUTPUT_CHUNK_BYTES).count() as u64,
+        None,
+    )?);
+    Ok(outputs)
+}
+
+async fn execute_directory_download(
+    job_id: uuid::Uuid,
+    path: &str,
+    max_bytes: u64,
+    output_tx: Option<mpsc::Sender<CommandOutput>>,
+) -> Result<Vec<CommandOutput>> {
+    let source = PathBuf::from(path);
+    let artifact =
+        tokio::task::spawn_blocking(move || build_directory_download_artifact(&source, max_bytes))
+            .await
+            .context("file download archive worker failed")??;
+    let DirectoryDownloadArtifact { archive, manifest } = artifact;
+    let filename = download_filename(path, true);
+    if let Some(sender) = output_tx {
+        let summary = stream_buffered_payload_output(
+            job_id,
+            OutputStream::Stdout,
+            &archive,
+            sender,
+            "file download output receiver dropped",
+        )
+        .await?;
+        return file_download_status(
+            job_id,
+            path,
+            "directory",
+            &filename,
+            "application/x-tar",
+            summary.size_bytes,
+            &summary.sha256_hex,
+            true,
+            summary.chunk_count,
+            Some(&manifest),
+        );
+    }
+
+    let mut outputs = chunked_output(job_id, OutputStream::Stdout, &archive);
+    outputs.push(file_download_status_output(
+        job_id,
+        path,
+        "directory",
+        &filename,
+        "application/x-tar",
+        archive.len() as u64,
+        &payload_hash(&archive),
+        true,
+        archive.chunks(COMMAND_OUTPUT_CHUNK_BYTES).count() as u64,
+        Some(&manifest),
+    )?);
+    Ok(outputs)
+}
+
+async fn stream_file_payload(
+    job_id: uuid::Uuid,
+    path: &str,
+    output_tx: mpsc::Sender<CommandOutput>,
+) -> Result<crate::file_pull::StreamedPayloadSummary> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open download source {path}"))?;
+    let mut buffer = vec![0_u8; COMMAND_OUTPUT_CHUNK_BYTES];
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0_u64;
+    let mut chunk_count = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read download source {path}"))?;
+        if read == 0 {
+            break;
+        }
+        size_bytes += read as u64;
+        chunk_count += 1;
+        hasher.update(&buffer[..read]);
+        output_tx
+            .send(CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: buffer[..read].to_vec(),
+                exit_code: None,
+                done: false,
+            })
+            .await
+            .context("file download output receiver dropped")?;
+    }
+    Ok(crate::file_pull::StreamedPayloadSummary {
+        size_bytes,
+        sha256_hex: hex::encode(hasher.finalize()),
+        chunk_bytes: COMMAND_OUTPUT_CHUNK_BYTES,
+        chunk_count,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_download_status(
+    job_id: uuid::Uuid,
+    path: &str,
+    source_kind: &'static str,
+    filename: &str,
+    content_type: &'static str,
+    size_bytes: u64,
+    sha256_hex: &str,
+    archive: bool,
+    chunk_count: u64,
+    manifest: Option<&FileDownloadManifestSummary>,
+) -> Result<Vec<CommandOutput>> {
+    Ok(vec![file_download_status_output(
+        job_id,
+        path,
+        source_kind,
+        filename,
+        content_type,
+        size_bytes,
+        sha256_hex,
+        archive,
+        chunk_count,
+        manifest,
+    )?])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn file_download_status_output(
+    job_id: uuid::Uuid,
+    path: &str,
+    source_kind: &'static str,
+    filename: &str,
+    content_type: &'static str,
+    size_bytes: u64,
+    sha256_hex: &str,
+    archive: bool,
+    chunk_count: u64,
+    manifest: Option<&FileDownloadManifestSummary>,
+) -> Result<CommandOutput> {
+    let mut status = serde_json::json!({
+        "type": "file_download",
+        "path": path,
+        "source_kind": source_kind,
+        "filename": filename,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "sha256_hex": sha256_hex,
+        "archive": archive,
+        "chunk_bytes": COMMAND_OUTPUT_CHUNK_BYTES,
+        "chunk_count": chunk_count,
+    });
+    if let Some(manifest) = manifest {
+        status["hierarchy_sha256_hex"] = serde_json::json!(manifest.hierarchy_sha256_hex);
+        status["content_manifest_sha256_hex"] =
+            serde_json::json!(manifest.content_manifest_sha256_hex);
+        status["manifest_entries"] = serde_json::json!(manifest.entries);
+        status["manifest_entry_count"] = serde_json::json!(
+            manifest.file_count
+                + manifest.directory_count
+                + manifest.symlink_count
+                + manifest.other_count
+        );
+        status["manifest_emitted_entry_count"] = serde_json::json!(manifest.entries.len());
+        status["manifest_truncated"] = serde_json::json!(manifest.truncated);
+        status["file_count"] = serde_json::json!(manifest.file_count);
+        status["directory_count"] = serde_json::json!(manifest.directory_count);
+        status["symlink_count"] = serde_json::json!(manifest.symlink_count);
+        status["other_count"] = serde_json::json!(manifest.other_count);
+        status["total_file_bytes"] = serde_json::json!(manifest.total_file_bytes);
+    }
+    Ok(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code: Some(0),
+        done: true,
+    })
+}
+
+fn build_directory_download_artifact(
+    source: &Path,
+    max_bytes: u64,
+) -> Result<DirectoryDownloadArtifact> {
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("failed to stat download source {}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("file download archive source is not a directory");
+    }
+    let manifest = build_directory_manifest(source, max_bytes)?;
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let name = source
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| OsStr::new("root"));
+        builder
+            .append_dir_all(name, source)
+            .with_context(|| format!("failed to archive directory {}", source.display()))?;
+        builder.finish().context("failed to finish tar archive")?;
+    }
+    if archive.len() as u64 > max_bytes {
+        anyhow::bail!("tar archive exceeds limit: {} > {max_bytes}", archive.len());
+    }
+    Ok(DirectoryDownloadArtifact { archive, manifest })
+}
+
+fn build_directory_manifest(source: &Path, max_bytes: u64) -> Result<FileDownloadManifestSummary> {
+    let mut builder = FileDownloadManifestBuilder::new();
+    collect_manifest_entries(source, source, max_bytes, &mut builder)?;
+    Ok(builder.finish())
+}
+
+impl FileDownloadManifestBuilder {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            hierarchy_hasher: Sha256::new(),
+            content_hasher: Sha256::new(),
+            file_count: 0,
+            directory_count: 0,
+            symlink_count: 0,
+            other_count: 0,
+            total_file_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn push_entry(&mut self, entry: FileDownloadManifestEntry) {
+        hash_manifest_hierarchy_entry(&mut self.hierarchy_hasher, &entry);
+        hash_manifest_content_entry(&mut self.content_hasher, &entry);
+        if self.entries.len() < FILE_DOWNLOAD_MANIFEST_ENTRY_LIMIT {
+            self.entries.push(entry);
+        } else {
+            self.truncated = true;
+        }
+    }
+
+    fn finish(self) -> FileDownloadManifestSummary {
+        FileDownloadManifestSummary {
+            entries: self.entries,
+            hierarchy_sha256_hex: hex::encode(self.hierarchy_hasher.finalize()),
+            content_manifest_sha256_hex: hex::encode(self.content_hasher.finalize()),
+            file_count: self.file_count,
+            directory_count: self.directory_count,
+            symlink_count: self.symlink_count,
+            other_count: self.other_count,
+            total_file_bytes: self.total_file_bytes,
+            truncated: self.truncated,
+        }
+    }
+}
+
+fn collect_manifest_entries(
+    root: &Path,
+    current: &Path,
+    max_bytes: u64,
+    builder: &mut FileDownloadManifestBuilder,
+) -> Result<()> {
+    let mut entries = std::fs::read_dir(current)
+        .with_context(|| format!("failed to read {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let relative_path = manifest_relative_path(root, &path);
+        if metadata.file_type().is_symlink() {
+            builder.symlink_count = builder.symlink_count.saturating_add(1);
+            let symlink_target = std::fs::read_link(&path)
+                .ok()
+                .map(|target| target.to_string_lossy().into_owned());
+            builder.push_entry(FileDownloadManifestEntry {
+                path: relative_path,
+                kind: "symlink",
+                size_bytes: None,
+                sha256_hex: None,
+                symlink_target,
+            });
+            continue;
+        }
+        if metadata.is_dir() {
+            builder.directory_count = builder.directory_count.saturating_add(1);
+            builder.push_entry(FileDownloadManifestEntry {
+                path: relative_path,
+                kind: "directory",
+                size_bytes: None,
+                sha256_hex: None,
+                symlink_target: None,
+            });
+            collect_manifest_entries(root, &path, max_bytes, builder)?;
+            continue;
+        }
+        if metadata.is_file() {
+            builder.file_count = builder.file_count.saturating_add(1);
+            builder.total_file_bytes = builder.total_file_bytes.saturating_add(metadata.len());
+            if builder.total_file_bytes > max_bytes {
+                anyhow::bail!(
+                    "download source exceeds limit: {} > {max_bytes} bytes",
+                    builder.total_file_bytes
+                );
+            }
+            builder.push_entry(FileDownloadManifestEntry {
+                path: relative_path,
+                kind: "file",
+                size_bytes: Some(metadata.len()),
+                sha256_hex: Some(hash_sync_file(&path)?),
+                symlink_target: None,
+            });
+            continue;
+        }
+        builder.other_count = builder.other_count.saturating_add(1);
+        builder.push_entry(FileDownloadManifestEntry {
+            path: relative_path,
+            kind: "other",
+            size_bytes: None,
+            sha256_hex: None,
+            symlink_target: None,
+        });
+    }
+    Ok(())
+}
+
+fn manifest_relative_path(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let value = relative
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if value.is_empty() {
+        ".".to_string()
+    } else {
+        value
+    }
+}
+
+fn hash_manifest_hierarchy_entry(hasher: &mut Sha256, entry: &FileDownloadManifestEntry) {
+    hash_manifest_field(hasher, &entry.path);
+    hash_manifest_field(hasher, entry.kind);
+    hash_manifest_field(hasher, entry.symlink_target.as_deref().unwrap_or(""));
+    hasher.update([0xff]);
+}
+
+fn hash_manifest_content_entry(hasher: &mut Sha256, entry: &FileDownloadManifestEntry) {
+    hash_manifest_hierarchy_entry(hasher, entry);
+    hash_manifest_field(
+        hasher,
+        &entry
+            .size_bytes
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    );
+    hash_manifest_field(hasher, entry.sha256_hex.as_deref().unwrap_or(""));
+    hasher.update([0xfe]);
+}
+
+fn hash_manifest_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.as_bytes());
+    hasher.update([0]);
+}
+
+fn hash_sync_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open download source {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read download source {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn download_filename(path: &str, archive: bool) -> String {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("root");
+    if archive {
+        format!("{name}.tar")
+    } else {
+        name.to_string()
+    }
 }
 
 pub(crate) async fn execute_file_transfer_download_start(

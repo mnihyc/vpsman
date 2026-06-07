@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Ban, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
+import { ProofVaultBox } from "../components/ProofVaultBox";
 import { clearProofVault, hasProofVault } from "../vault";
 import { CrudPager } from "../components/CrudPager";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -18,6 +19,7 @@ import type {
   EnrollmentTokenView,
   KeyLifecycleReportView,
 } from "../typesAccess";
+import type { ProofMaterial } from "../proof";
 import {
   clientDisplayNameFromMap,
   clientLifecycleNameMap,
@@ -55,8 +57,10 @@ type AccessPanelProps = {
   keyLifecycleReport: KeyLifecycleReportView | null;
   operatorSessions: OperatorSessionRecord[];
   operators: OperatorView[];
+  proofMaterial: ProofMaterial | null;
   proofRotations: AuthProofRotationHistoryRecord[];
   sessionVaultAvailable: boolean;
+  setProofMaterial: (material: ProofMaterial | null) => void;
   wsState: string;
 };
 
@@ -96,8 +100,10 @@ export function AccessPanel({
   keyLifecycleReport,
   operatorSessions,
   operators,
+  proofMaterial,
   proofRotations,
   sessionVaultAvailable,
+  setProofMaterial,
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -135,7 +141,7 @@ export function AccessPanel({
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const sessionState = apiToken ? "Bearer session active" : "No bearer session";
-  const vaultState = vaultAvailable ? "Encrypted proof vault present" : "No proof vault";
+  const vaultState = proofMaterial ? "Proof unlocked" : vaultAvailable ? "Encrypted proof vault present" : "No proof vault";
   const tokenStorageState = apiToken ? (sessionVaultAvailable ? "encrypted vault" : "memory only") : "none";
   const canManageOperators = operator?.role === "admin";
   const canCreateOperator =
@@ -163,6 +169,7 @@ export function AccessPanel({
   function clearVault() {
     clearProofVault();
     setVaultAvailable(false);
+    setProofMaterial(null);
   }
 
   async function createOperator(event: FormEvent<HTMLFormElement>) {
@@ -380,6 +387,21 @@ export function AccessPanel({
             <small>{proofRotations[0]?.rotation_generation ?? "latest generation not recorded"}</small>
           </div>
         </div>
+      </div>
+
+      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
+        <div className="sectionHeader">
+          <div>
+            <h2>Proof unlock</h2>
+            <span>{proofMaterial ? "Unlocked in browser memory" : vaultAvailable ? "Encrypted vault locked" : "Manual proof entry"}</span>
+          </div>
+        </div>
+        <ProofVaultBox
+          lastPayloadHash={null}
+          onProofMaterialChange={setProofMaterial}
+          onVaultAvailabilityChange={setVaultAvailable}
+          proofMaterial={proofMaterial}
+        />
       </div>
 
       <div className="fleetPanel" hidden={activeSubpage !== "Server"}>

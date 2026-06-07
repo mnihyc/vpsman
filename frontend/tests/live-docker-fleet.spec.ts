@@ -211,7 +211,7 @@ async function verifyDesktopSubpages(page: Page) {
     ["Jobs", "History", "Job history"],
     ["Jobs", "Dispatch", "Dispatch command"],
     ["Jobs", "Updates", "Agent update releases"],
-    ["Jobs", "File transfers", "File transfer sessions"],
+    ["Jobs", "Transfer history", "File transfer sessions"],
     ["Jobs", "Terminal sessions", "Terminal sessions"],
     ["Jobs", "Processes", "Process supervisor inventory"],
     ["Jobs", "Approvals", "No privileged approvals"],

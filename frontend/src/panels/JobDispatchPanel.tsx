@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
+import { waitForBulkJobTargets, type BulkJobProgress } from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { ProofVaultBox } from "../components/ProofVaultBox";
 import { readFilePushPayload, sha256Hex } from "../fileTransfer";
 import { buildEnvelopesForOperation, deriveSuperKeyHex, parseCommandArgv, type ProofMaterial } from "../proof";
@@ -31,24 +33,23 @@ import type {
   CommandTemplateRecord,
   CreateJobRequest,
   CreateJobResponse,
+  FileExistingPolicy,
   JobHistoryRecord,
   JobOutputRecord,
+  JobTargetRecord,
   JobTargetSelection,
   UpsertCommandTemplateRequest,
-  TagView,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
 import type { TerminalSessionRecord } from "../typesTerminal";
 import { runPanelAction, shortId } from "../utils";
 import { DispatchOptions, JobTargetSelector } from "./JobDispatchControls";
 import { JobOperationEditor, OperationModeTabs } from "./jobs/JobOperationControls";
-import {
-  resolveAgentsById,
-  TargetImpactPreview,
-  targetImpactModeForDispatch,
-} from "./TargetImpactPreview";
+import { agentsMatchingExpression, parseSearchExpression } from "../searchExpression";
+import { TargetImpactPreview, targetImpactModeForDispatch } from "./TargetImpactPreview";
 
 const DEFAULT_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
+const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
 
 export type TerminalComposerAction = {
   action: TerminalAction;
@@ -70,6 +71,32 @@ function shellQuoteArg(value: string): string {
     return value;
   }
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function readLocalString(key: string): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  try {
+    return window.localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalString(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (value.trim()) {
+      window.localStorage.setItem(key, value);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Browser-local selector persistence must never block dispatch.
+  }
 }
 
 async function loadUploadSourceArtifactFile(
@@ -105,9 +132,13 @@ export function JobDispatchPanel({
   onDownloadOutputArtifact,
   onLoadJob,
   onLoadOutputs,
+  onLoadTargets,
+  onOpenJobDetails,
+  onOpenProofUnlock,
   onResolveTargets,
   onUpsertCommandTemplate,
-  tags,
+  proofMaterial,
+  setProofMaterial,
 }: {
   agents: AgentView[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
@@ -118,9 +149,13 @@ export function JobDispatchPanel({
   onDownloadOutputArtifact: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenProofUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
-  tags: TagView[];
+  proofMaterial: ProofMaterial | null;
+  setProofMaterial: (material: ProofMaterial | null) => void;
 }) {
   const [mode, setMode] = useState<DispatchMode>("shell");
   const [commandText, setCommandText] = useState("");
@@ -152,6 +187,7 @@ export function JobDispatchPanel({
   const [fileTransferDownloadSink, setFileTransferDownloadSink] = useState<BrowserDownloadSinkMode>("browser-download");
   const [fileTransferChunkSize, setFileTransferChunkSize] = useState(65536);
   const [fileTransferRateLimit, setFileTransferRateLimit] = useState(0);
+  const [fileTransferExistingPolicy, setFileTransferExistingPolicy] = useState<FileExistingPolicy>("skip");
   const [fileTransferMultiTargetPolicy, setFileTransferMultiTargetPolicy] =
     useState<BrowserTransferMultiTargetPolicy>("same-offset");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -183,22 +219,24 @@ export function JobDispatchPanel({
   const [supervisorCwd, setSupervisorCwd] = useState("");
   const [supervisorEnv, setSupervisorEnv] = useState("");
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
-  const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [tagMode, setTagMode] = useState<"any" | "all">("any");
+  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(JOB_SELECTOR_STORAGE_KEY));
   const [timeoutSecs, setTimeoutSecs] = useState(30);
   const [proofTtlSecs, setProofTtlSecs] = useState(300);
   const [destructive, setDestructive] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
-  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(null);
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
+  const [dispatchProgress, setDispatchProgress] = useState<BulkJobProgress | null>(null);
+  const [lastDispatchProgress, setLastDispatchProgress] = useState<BulkJobProgress | null>(null);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [transferProgress, setTransferProgress] = useState<ResumableUploadProgress | ResumableDownloadProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
+  const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
+  const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
 
   useEffect(() => {
     if (!terminalComposerAction) {
@@ -222,11 +260,59 @@ export function JobDispatchPanel({
     setTerminalInputSeq((session.last_input_seq ?? 0) + 1);
     setTerminalInputText("");
     setTerminalCloseReason(session.close_reason ?? "operator");
-    setSelectedClients([session.client_id]);
-    setSelectedTags([]);
+    setSelectorExpression(`id:${session.client_id}`);
     setPreview(null);
     setActionError(null);
   }, [terminalComposerAction]);
+
+  useEffect(() => {
+    writeLocalString(JOB_SELECTOR_STORAGE_KEY, selectorExpression);
+  }, [selectorExpression]);
+
+  useEffect(() => {
+    if (!selectorExpression.trim()) {
+      setSelectorVerification("neutral");
+      setSelectorVerificationMessage(null);
+      setPreview(null);
+      return;
+    }
+    if (selectorParse.error) {
+      setSelectorVerification("invalid");
+      setSelectorVerificationMessage("Invalid");
+      setPreview(null);
+      return;
+    }
+    let canceled = false;
+    setSelectorVerification("checking");
+    setSelectorVerificationMessage("Checking");
+    const timeout = window.setTimeout(() => {
+      void onResolveTargets({
+        selector_expression: selectorExpression.trim(),
+        destructive,
+        confirmed,
+      })
+        .then((response) => {
+          if (canceled) {
+            return;
+          }
+          setPreview(response);
+          setSelectorVerification("valid");
+          setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
+        })
+        .catch(() => {
+          if (canceled) {
+            return;
+          }
+          setPreview(null);
+          setSelectorVerification("invalid");
+          setSelectorVerificationMessage("Invalid");
+        });
+    }, 300);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [agents.length, confirmed, destructive, onResolveTargets, selectorExpression, selectorParse.error]);
 
   const parsedArgv = useMemo(() => {
     try {
@@ -289,27 +375,66 @@ export function JobDispatchPanel({
                                 : mode === "backup"
                                   ? backupReady && confirmed
                                   : true;
-  const selectedTargetCount = selectedClients.length + selectedTags.length;
+  const expressionTargets = useMemo(
+    () => (selectorParse.error ? [] : agentsMatchingExpression(agents, selectorExpression)),
+    [agents, selectorExpression, selectorParse.error],
+  );
+  const selectedTargetCount = expressionTargets.length;
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
-  const impactTargets = preview?.targets ?? resolveAgentsById(agents, selectedClients);
+  const impactTargets = preview?.targets ?? expressionTargets;
   const minCommandProtocolVersion = commandMinProtocolVersion(mode);
+  const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
+  const confirmationTargets = preview?.targets ?? expressionTargets;
+  const confirmationConnectedTargets = confirmationTargets.filter((target) => target.status === "connected").length;
+  const confirmationUnavailableTargets = Math.max(0, confirmationTargets.length - confirmationConnectedTargets);
+  const dispatchConfirmationItems = [
+    { label: "Operation", value: operationCommandLabel(mode, commandText) },
+    { label: "Selector", value: selectorExpression.trim() || "-" },
+    {
+      label: "Targets",
+      value:
+        confirmationUnavailableTargets > 0
+          ? `${confirmationTargets.length} resolved (${confirmationConnectedTargets} connected, ${confirmationUnavailableTargets} unavailable)`
+          : `${confirmationTargets.length} resolved`,
+    },
+    { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
+    { label: "Proof TTL", value: `${clampInteger(proofTtlSecs, 15, 3600)}s` },
+    {
+      label: "Mode",
+      value: destructive ? "Destructive" : forceUnprivileged ? "Forced best effort" : "Standard",
+    },
+    ...(mode.startsWith("agent_update") ? [{ label: "Canary", value: clampInteger(updateCanaryCount, 0, 10000) || "none" }] : []),
+  ];
   const status =
     actionError ??
-    (lastJob
-      ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} accepted`
+    (visibleDispatchProgress
+      ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
+      : lastJob
+        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
       : preview
         ? `${preview.target_count} resolved targets`
         : proofMaterial
-          ? "Proof unlocked"
-          : "Proof locked");
+          ? "Ready"
+          : "Locked");
 
   function lockProof() {
     setProofMaterial(null);
     setActionError(null);
   }
 
+  function clearExecutionResults() {
+    setDispatchProgress(null);
+    setLastDispatchProgress(null);
+    setLastJob(null);
+    setTransferProgress(null);
+  }
+
   async function previewTargets() {
+    if (selectorParse.error) {
+      setActionError(selectorParse.error);
+      return;
+    }
     await runPanelAction(setPending, setActionError, async () => {
       setPreview(await onResolveTargets(targetSelection()));
     });
@@ -322,7 +447,11 @@ export function JobDispatchPanel({
       setActionError("Proof is locked");
       return;
     }
-    if (selectedTargetCount === 0) {
+    if (selectorParse.error) {
+      setActionError(selectorParse.error);
+      return;
+    }
+    if (!selectorExpression.trim() || selectedTargetCount === 0) {
       setActionError("Select at least one VPS or tag target");
       return;
     }
@@ -330,7 +459,8 @@ export function JobDispatchPanel({
       setActionError("Complete the selected operation before dispatching");
       return;
     }
-    setDispatchPromptOpen(true);
+    blurActiveElement();
+    window.setTimeout(() => setDispatchPromptOpen(true), 140);
   }
 
   function applyCommandTemplate(templateId: string) {
@@ -480,11 +610,11 @@ export function JobDispatchPanel({
 
   async function dispatchJobNow() {
     setDispatchPromptOpen(false);
+    clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!proofMaterial) {
         throw new Error("Proof is locked");
       }
-      setTransferProgress(null);
       if (mode === "file_transfer_upload") {
         const resolved = await onResolveTargets(targetSelection());
         setPreview(resolved);
@@ -509,6 +639,7 @@ export function JobDispatchPanel({
           loadOutputs: onLoadOutputs,
           modeText: filePushMode,
           multiTargetPolicy: fileTransferMultiTargetPolicy,
+          existingPolicy: fileTransferExistingPolicy,
           path: filePushPath,
           proofMaterial,
           proofTtlSecs,
@@ -525,6 +656,7 @@ export function JobDispatchPanel({
         });
         setLastJob(commitJob);
         setLastPayloadHash(null);
+        await trackDispatchProgress(commitJob, resolved.targets);
         return;
       }
       if (mode === "file_transfer_download") {
@@ -559,6 +691,7 @@ export function JobDispatchPanel({
         });
         setLastJob(startJob);
         setLastPayloadHash(null);
+        await trackDispatchProgress(startJob, resolved.targets);
         return;
       }
       const filePushPayload = mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
@@ -635,9 +768,7 @@ export function JobDispatchPanel({
         superSaltHex: proofMaterial.superSaltHex,
       });
       const nextJob = await onCreateJob({
-        clients: selectedClients,
-        tags: selectedTags,
-        tag_mode: tagMode,
+        selector_expression: selectorExpression.trim(),
         destructive,
         confirmed,
         command: operationCommandLabel(mode, commandText),
@@ -658,14 +789,37 @@ export function JobDispatchPanel({
       });
       setLastJob(nextJob);
       setLastPayloadHash(built.payloadHashHex);
+      await trackDispatchProgress(nextJob, resolved.targets);
     });
+  }
+
+  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[]) {
+    setLastDispatchProgress(null);
+    setDispatchProgress({
+      accepted: Math.min(job.accepted_targets, targets.length),
+      completed: 0,
+      doing: Math.min(job.accepted_targets, targets.length),
+      expected: targets.length,
+      failed: 0,
+      jobId: job.job_id,
+      retrieved: 0,
+      unavailable: targets.filter((target) => target.status !== "connected").length,
+    });
+    try {
+      const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+        acceptedTargets: job.accepted_targets,
+        onProgress: setDispatchProgress,
+        targets,
+      });
+      setLastDispatchProgress(result.progress);
+    } finally {
+      setDispatchProgress(null);
+    }
   }
 
   function targetSelection(): JobTargetSelection {
     return {
-      clients: selectedClients,
-      tags: selectedTags,
-      tag_mode: tagMode,
+      selector_expression: selectorExpression.trim(),
       destructive,
       confirmed,
     };
@@ -769,6 +923,7 @@ export function JobDispatchPanel({
           fileTransferDownloadSink={fileTransferDownloadSink}
           fileTransferDownloadName={fileTransferDownloadName}
           fileTransferChunkSize={fileTransferChunkSize}
+          fileTransferExistingPolicy={fileTransferExistingPolicy}
           fileTransferMultiTargetPolicy={fileTransferMultiTargetPolicy}
           fileTransferSourceArtifactId={fileTransferSourceArtifactId}
           fileTransferSources={fileTransferSources}
@@ -806,6 +961,7 @@ export function JobDispatchPanel({
           setFileTransferDownloadSink={setFileTransferDownloadSink}
           setFileTransferDownloadName={setFileTransferDownloadName}
           setFileTransferChunkSize={setFileTransferChunkSize}
+          setFileTransferExistingPolicy={setFileTransferExistingPolicy}
           setFileTransferMultiTargetPolicy={setFileTransferMultiTargetPolicy}
           setFileTransferRateLimit={setFileTransferRateLimit}
           setFileTransferResumeToken={setFileTransferResumeToken}
@@ -857,13 +1013,13 @@ export function JobDispatchPanel({
         />
         <JobTargetSelector
           agents={agents}
-          selectedClients={selectedClients}
-          selectedTags={selectedTags}
-          setSelectedClients={setSelectedClients}
-          setSelectedTags={setSelectedTags}
-          setTagMode={setTagMode}
-          tagMode={tagMode}
-          tags={tags}
+          selectorExpression={selectorExpression}
+          setSelectorExpression={(value) => {
+            setSelectorExpression(value);
+            setPreview(null);
+          }}
+          verification={selectorVerification}
+          verificationMessage={selectorVerificationMessage}
         />
         <TargetImpactPreview
           forceUnprivileged={supportsForceUnprivileged ? forceUnprivileged : false}
@@ -897,12 +1053,8 @@ export function JobDispatchPanel({
 
         <ConfirmationPrompt
           confirmLabel="Dispatch job"
-          detail="Submitting this job sends signed privileged work to the selected VPS targets. Review the scope before the control plane accepts it."
-          items={[
-            { label: "Operation", value: operationCommandLabel(mode, commandText) },
-            { label: "Targets", value: `${selectedClients.length} VPS / ${selectedTags.length} tags` },
-            { label: "Mode", value: destructive ? "Destructive" : forceUnprivileged ? "Forced best effort" : "Standard" },
-          ]}
+          detail={`${operationCommandLabel(mode, commandText)} on ${vpsCountLabel(confirmationTargets.length)}.`}
+          items={dispatchConfirmationItems}
           onCancel={() => setDispatchPromptOpen(false)}
           onConfirm={() => void dispatchJobNow()}
           open={dispatchPromptOpen}
@@ -910,6 +1062,15 @@ export function JobDispatchPanel({
           title="Confirm job dispatch"
           tone={destructive ? "danger" : "normal"}
         />
+
+        {visibleDispatchProgress && (
+          <ExecutionResultPanel
+            loading={dispatchProgress !== null}
+            onClearResults={clearExecutionResults}
+            onOpenJobDetails={onOpenJobDetails}
+            progress={visibleDispatchProgress}
+          />
+        )}
 
         <div className="dispatchActions">
           <button
@@ -951,7 +1112,23 @@ export function JobDispatchPanel({
         )}
       </form>
 
-      <ProofVaultBox lastPayloadHash={lastPayloadHash} onProofMaterialChange={setProofMaterial} proofMaterial={proofMaterial} />
+      <ProofVaultBox
+        lastPayloadHash={lastPayloadHash}
+        onOpenUnlock={onOpenProofUnlock}
+        onProofMaterialChange={setProofMaterial}
+        proofMaterial={proofMaterial}
+      />
     </section>
   );
+}
+
+function vpsCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function blurActiveElement() {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+    document.activeElement.blur();
+  }
 }

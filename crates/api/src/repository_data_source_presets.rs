@@ -568,9 +568,7 @@ impl Repository {
 
         let targets = self
             .resolve_bulk_targets(&BulkResolveRequest {
-                clients: request.clients.clone(),
-                tags: request.tags.clone(),
-                tag_mode: request.tag_mode.clone(),
+                selector_expression: request.selector_expression.clone(),
                 destructive: false,
                 confirmed: true,
             })

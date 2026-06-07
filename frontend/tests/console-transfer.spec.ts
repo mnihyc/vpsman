@@ -1,7 +1,7 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -26,6 +26,11 @@ async function dispatchWithPrompt(composer: Locator) {
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
 
+async function unlockDispatchProof(page: Page) {
+  await unlockProofFromTop(page);
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+}
+
 test("orchestrates browser resumable upload with ACK progress", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "browser resumable upload flow is covered in the desktop job composer");
 
@@ -34,9 +39,7 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
 
   const composer = page.locator(".commandComposer");
   await expect(composer.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
-  await composer.getByLabel("Super password").fill("local-super-password");
-  await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(composer.getByRole("button", { name: "Use proof" }));
+  await unlockDispatchProof(page);
   await activate(composer.getByRole("button", { name: "Resumable upload" }));
   await composer.getByLabel("Resumable upload source").setInputFiles({
     name: "payload.bin",
@@ -46,9 +49,10 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   await composer.getByLabel("Resumable upload path").fill("/tmp/browser-upload.bin");
   await composer.getByLabel("Resumable upload mode").fill("0600");
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");
+  await expect(composer.getByLabel("Resumable upload existing-file policy")).toHaveValue("skip");
   await expect(composer.getByLabel("Resumable upload multi-target policy")).toHaveValue("same-offset");
   await composer.getByLabel("Resumable upload multi-target policy").selectOption("independent-offsets");
-  await checkControl(composer.getByLabel("edge-sfo-01"));
+  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 
@@ -73,16 +77,16 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   expect(JSON.stringify(transferRequests)).not.toContain("local-super-password");
   expect(JSON.stringify(transferRequests)).not.toContain("resumable browser upload payload");
   expect(transferRequests[0]).toMatchObject({
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "file_transfer_start",
     operation: {
       mode: 0o600,
+      existing_policy: "skip",
       path: "/tmp/browser-upload.bin",
       resume_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       size_bytes: 32,
       type: "file_transfer_start",
     },
-    tags: [],
   });
   expect((transferRequests[1].operation as { offset: number }).offset).toBe(0);
   expect((transferRequests[2].operation as { offset: number }).offset).toBe(8);
@@ -97,16 +101,14 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await composer.getByLabel("Super password").fill("local-super-password");
-  await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(composer.getByRole("button", { name: "Use proof" }));
+  await unlockDispatchProof(page);
   await activate(composer.getByRole("button", { name: "Resumable upload" }));
   await composer.getByLabel("Resumable upload producer").selectOption("source-artifact");
   await composer.getByLabel("Resumable upload source artifact").selectOption("62626262-2222-4333-8444-555555555555");
   await composer.getByLabel("Resumable upload path").fill("/tmp/artifact-upload.bin");
   await composer.getByLabel("Resumable upload mode").fill("0644");
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");
-  await checkControl(composer.getByLabel("edge-sfo-01"));
+  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 
@@ -127,7 +129,7 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   expect(JSON.stringify(transferRequests)).not.toContain("local-super-password");
   expect(JSON.stringify(transferRequests)).not.toContain("stored source artifact");
   expect(transferRequests[0]).toMatchObject({
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "file_transfer_start",
     operation: {
       path: "/tmp/artifact-upload.bin",
@@ -148,14 +150,12 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await composer.getByLabel("Super password").fill("local-super-password");
-  await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(composer.getByRole("button", { name: "Use proof" }));
+  await unlockDispatchProof(page);
   await activate(composer.getByRole("button", { name: "Resumable download" }));
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("browser-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
-  await checkControl(composer.getByLabel("edge-sfo-01"));
+  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await checkControl(composer.getByLabel("Confirmed"));
 
   await activate(composer.getByRole("button", { name: "Dispatch" }));
@@ -189,14 +189,13 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   expect(JSON.stringify(transferRequests)).not.toContain("local-super-password");
   expect(JSON.stringify(transferRequests)).not.toContain("resumable browser download payload");
   expect(transferRequests[0]).toMatchObject({
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "file_transfer_download_start",
     operation: {
       path: "/tmp/browser-download.bin",
       resume_token_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       type: "file_transfer_download_start",
     },
-    tags: [],
   });
   expect((transferRequests[1].operation as { offset: number }).offset).toBe(0);
   expect((transferRequests[2].operation as { offset: number }).offset).toBe(8);
@@ -244,15 +243,13 @@ test("streams browser resumable download through writable file handle", async ({
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await composer.getByLabel("Super password").fill("local-super-password");
-  await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(composer.getByRole("button", { name: "Use proof" }));
+  await unlockDispatchProof(page);
   await activate(composer.getByRole("button", { name: "Resumable download" }));
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("streamed-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
   await composer.getByLabel("Resumable download save method").selectOption("stream-to-file");
-  await checkControl(composer.getByLabel("edge-sfo-01"));
+  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 

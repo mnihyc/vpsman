@@ -114,8 +114,7 @@ pub(crate) struct BackupPolicyView {
     pub(crate) schedule_id: Uuid,
     pub(crate) name: String,
     pub(crate) enabled: bool,
-    pub(crate) clients: Vec<String>,
-    pub(crate) tags: Vec<String>,
+    pub(crate) selector_expression: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) recipient_public_key_hex: Option<String>,
@@ -145,12 +144,11 @@ pub(crate) struct BackupPolicyMetadata {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) name: String,
     #[serde(default)]
-    pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
+    pub(crate) selector_expression: String,
     #[serde(default)]
     pub(crate) paths: Vec<String>,
     #[serde(default)]

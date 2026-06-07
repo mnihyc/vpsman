@@ -6,10 +6,7 @@ use vpsman_common::JobCommand;
 fn terminal_job_commands_use_operation_payload_and_type() {
     let session_id = Uuid::new_v4();
     let mut request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "ignored".to_string(),
@@ -100,10 +97,7 @@ fn terminal_job_commands_use_operation_payload_and_type() {
 #[test]
 fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
     let mut request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),

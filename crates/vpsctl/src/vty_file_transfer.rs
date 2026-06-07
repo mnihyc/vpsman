@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    validate_file_transfer_download_session, validate_file_transfer_session,
+    validate_file_transfer_download_session, validate_file_transfer_session, FileExistingPolicy,
     FILE_TRANSFER_CHUNK_BYTES, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
 };
 
@@ -30,6 +30,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
     let mut resume_token = None;
     let mut chunk_size_bytes = FILE_TRANSFER_CHUNK_BYTES as u32;
     let mut rate_limit_kbps = 0_u32;
+    let mut existing_policy = FileExistingPolicy::Replace;
     let mut poll_interval_ms = 250_u64;
     let mut max_polls = 1200_u32;
     let mut multi_target_policy = FileTransferMultiTargetPolicy::SameOffset;
@@ -172,6 +173,15 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                 )? as u32;
                 index += 1;
             }
+            "--existing-policy" => {
+                existing_policy = parse_existing_policy(tokens.get(index + 1).copied())?;
+                index += 2;
+            }
+            value if value.starts_with("--existing-policy=") => {
+                existing_policy =
+                    parse_existing_policy(Some(value.trim_start_matches("--existing-policy=")))?;
+                index += 1;
+            }
             "--poll-interval-ms" => {
                 poll_interval_ms = parse_bounded_u64(
                     "--poll-interval-ms",
@@ -263,6 +273,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
         resume_token,
         chunk_size_bytes,
         rate_limit_kbps,
+        existing_policy,
         poll_interval_ms,
         max_polls,
         multi_target_policy,
@@ -527,16 +538,29 @@ fn validation_resume_token_hash(resume_token: Option<&str>) -> String {
 
 fn parse_mode(value: Option<&str>) -> Result<u32> {
     let value = value.context("--mode requires a value")?.trim();
-    let (radix, digits) = if let Some(rest) = value.strip_prefix("0o") {
-        (8, rest)
-    } else if value.starts_with('0') {
-        (8, value)
-    } else {
-        (10, value)
-    };
-    let mode = u32::from_str_radix(digits, radix).context("--mode is not a valid number")?;
+    let digits = value.strip_prefix("0o").unwrap_or(value);
+    anyhow::ensure!(
+        !digits.is_empty()
+            && digits.len() <= 4
+            && digits
+                .chars()
+                .all(|character| matches!(character, '0'..='7')),
+        "--mode must be an octal value between 0000 and 0777"
+    );
+    let mode = u32::from_str_radix(digits, 8).context("--mode is not a valid octal number")?;
     vpsman_common::validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(mode)
+}
+
+fn parse_existing_policy(value: Option<&str>) -> Result<FileExistingPolicy> {
+    match value
+        .context("--existing-policy requires skip or replace")?
+        .trim()
+    {
+        "skip" => Ok(FileExistingPolicy::Skip),
+        "replace" => Ok(FileExistingPolicy::Replace),
+        other => anyhow::bail!("--existing-policy must be skip or replace, got {other}"),
+    }
 }
 
 fn parse_uuid(label: &str, value: Option<&str>) -> Result<Uuid> {
@@ -573,6 +597,8 @@ mod tests {
             "4096",
             "--rate-limit-kbps",
             "1000",
+            "--existing-policy",
+            "skip",
             "--multi-target-policy",
             "independent-offsets",
             "--session-id",
@@ -592,6 +618,7 @@ mod tests {
         assert_eq!(request.mode, 0o600);
         assert_eq!(request.chunk_size_bytes, 4096);
         assert_eq!(request.rate_limit_kbps, 1000);
+        assert_eq!(request.existing_policy, FileExistingPolicy::Skip);
         assert_eq!(
             request.multi_target_policy,
             FileTransferMultiTargetPolicy::IndependentOffsets
@@ -620,6 +647,7 @@ mod tests {
             }
         );
         assert_eq!(request.path, "/tmp/remote.bin");
+        assert_eq!(request.existing_policy, FileExistingPolicy::Replace);
         assert!(request.clients.is_empty());
         assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);

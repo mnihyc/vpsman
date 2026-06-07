@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
+import { SearchExpressionInput } from "./SearchExpressionInput";
+import { filterBySearchExpression } from "../searchExpression";
 
 export type CrudSearchField<T> = {
   label: string;
@@ -51,30 +53,26 @@ export function CrudPager<T>({
   const [query, setQuery] = useState(initialPreferences.query ?? "");
   const [field, setField] = useState(initialPreferences.field ?? defaultField);
   const [page, setPage] = useState(initialPreferences.page ?? 1);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputRef = useRef<HTMLElement | null>(null);
   const [activePageSize, setActivePageSize] = useState(() =>
     sizeOptions.includes(initialPreferences.pageSize ?? pageSize) ? (initialPreferences.pageSize ?? pageSize) : pageSize,
   );
   const fallbackField =
     defaultField === "__all" || fields.some((candidate) => candidate.label === defaultField) ? defaultField : "__all";
   const effectiveField = field === "__all" || fields.some((candidate) => candidate.label === field) ? field : fallbackField;
-  const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredItems = useMemo(() => {
-    if (!normalizedQuery) {
-      return items;
-    }
     const activeFields = effectiveField === "__all" ? fields : fields.filter((candidate) => candidate.label === effectiveField);
-    return items.filter((item) =>
-      activeFields.some((candidate) => String(candidate.value(item) ?? "").toLocaleLowerCase().includes(normalizedQuery)),
-    );
-  }, [effectiveField, fields, items, normalizedQuery]);
+    return filterBySearchExpression(items, query, (item) => ({
+      all: activeFields.map((candidate) => String(candidate.value(item) ?? "")),
+    })).items;
+  }, [effectiveField, fields, items, query]);
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / activePageSize));
   const currentPage = Math.min(page, pageCount);
   const pagedItems = filteredItems.slice((currentPage - 1) * activePageSize, currentPage * activePageSize);
 
   useEffect(() => {
     setPage(1);
-  }, [activePageSize, field, normalizedQuery]);
+  }, [activePageSize, field, query]);
 
   useEffect(() => {
     if (page > pageCount) {
@@ -114,7 +112,12 @@ export function CrudPager<T>({
       searchInputRef.current?.focus();
       return;
     }
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+    if (
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLSelectElement ||
+      (event.target instanceof HTMLElement &&
+        (event.target.isContentEditable || Boolean(event.target.closest(".searchExpressionInput"))))
+    ) {
       return;
     }
     if (event.key === "ArrowLeft" || event.key === "PageUp") {
@@ -149,8 +152,7 @@ export function CrudPager<T>({
             Page {state.currentPage} / {state.pageCount}
           </span>
         </div>
-        <label className="crudSearch">
-          <Search size={15} />
+        <div className="crudSearch">
           <select aria-label={`${title} search field`} value={effectiveField} onChange={(event) => setField(event.target.value)}>
             <option value="__all">All fields</option>
             {fields.map((candidate) => (
@@ -159,15 +161,15 @@ export function CrudPager<T>({
               </option>
             ))}
           </select>
-          <input
-            aria-label={`${title} search`}
-            onChange={(event) => setQuery(event.target.value)}
+          <SearchExpressionInput
+            ariaLabel={`${title} search`}
+            className="compact"
+            inputRef={searchInputRef}
+            onChange={setQuery}
             placeholder="Search"
-            ref={searchInputRef}
-            type="search"
             value={query}
           />
-        </label>
+        </div>
         <div className="crudPageActions">
           <label className="crudPageSize">
             <span>Rows</span>

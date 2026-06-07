@@ -1,8 +1,12 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { waitForBulkJobTargets, type BulkJobProgress } from "../../bulkJobProgress";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { ProofVaultBox } from "../../components/ProofVaultBox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { selectorExpressionForClientIds } from "../../searchExpression";
 import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
 import {
   buildNetworkApplyOperation,
@@ -16,6 +20,7 @@ import type {
   AgentView,
   CreateJobRequest,
   CreateJobResponse,
+  JobTargetRecord,
   TunnelConfigBackend,
   TunnelEndpointSide,
   TunnelPlanRecord,
@@ -27,10 +32,20 @@ import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 export function TopologyApplyControls({
   agents,
   onCreateJob,
+  onLoadTargets,
+  onOpenJobDetails,
+  onOpenProofUnlock,
+  proofMaterial,
+  setProofMaterial,
   tunnelPlans,
 }: {
   agents: AgentView[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenProofUnlock: () => void;
+  proofMaterial: ProofMaterial | null;
+  setProofMaterial: (material: ProofMaterial | null) => void;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -46,12 +61,13 @@ export function TopologyApplyControls({
   const [speedRateLimitKbps, setSpeedRateLimitKbps] = useState(100_000);
   const [speedPort, setSpeedPort] = useState(5201);
   const [speedConnectTimeoutMs, setSpeedConnectTimeoutMs] = useState(5000);
-  const [confirmed, setConfirmed] = useState(false);
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
-  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(null);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [lastAction, setLastAction] = useState<NetworkAction>("apply");
+  const [pendingAction, setPendingAction] = useState<NetworkAction | null>(null);
+  const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
+  const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
@@ -62,45 +78,90 @@ export function TopologyApplyControls({
     [selectedPlan, side],
   );
   const mutationTargets = resolveAgentsById(agents, endpoint ? [endpoint.localClientId] : []);
+  const visibleJobProgress = jobProgress ?? lastJobProgress;
   const status =
     actionError ??
-    (lastJob
-      ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} accepted`
+    (visibleJobProgress
+      ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
+      : lastJob
+        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
       : proofMaterial
-        ? "Proof unlocked"
-        : "Proof locked");
+        ? "Ready"
+        : "Locked");
+  const pendingActionTargetIds = pendingAction && endpoint ? targetClientIdsForAction(pendingAction, endpoint) : [];
+  const pendingActionTargets = resolveAgentsById(agents, pendingActionTargetIds);
+  const pendingConnectedTargets = pendingActionTargets.filter((target) => target.status === "connected").length;
+  const pendingUnavailableTargets = Math.max(0, pendingActionTargets.length - pendingConnectedTargets);
+  const pendingSelector = pendingActionTargetIds.length > 0 ? selectorExpressionForClientIds(pendingActionTargetIds) : "-";
+  const pendingConfirmationItems = pendingAction
+    ? [
+        { label: "Operation", value: actionLabel(pendingAction) },
+        { label: "Selector", value: pendingSelector },
+        {
+          label: "Targets",
+          value:
+            pendingUnavailableTargets > 0
+              ? `${pendingActionTargets.length} resolved (${pendingConnectedTargets} connected, ${pendingUnavailableTargets} unavailable)`
+              : `${pendingActionTargets.length} resolved`,
+        },
+        { label: "Plan", value: selectedPlan?.name ?? "-" },
+        { label: "Endpoint", value: side },
+        ...(pendingAction === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
+        { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
+        { label: "Proof TTL", value: `${clampInteger(proofTtlSecs, 15, 3600)}s` },
+        ...(isMutation(pendingAction) ? [{ label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" }] : []),
+      ]
+    : [];
 
-  async function submitApply(event: FormEvent<HTMLFormElement>) {
+  function submitApply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await submitNetworkChange("apply");
+    openNetworkPrompt("apply");
   }
 
-  async function submitRollback() {
-    await submitNetworkChange("rollback");
+  function submitRollback() {
+    openNetworkPrompt("rollback");
   }
 
-  async function submitStatus() {
-    await submitNetworkChange("status");
+  function submitStatus() {
+    openNetworkPrompt("status");
   }
 
-  async function submitProbe() {
-    await submitNetworkChange("probe");
+  function submitProbe() {
+    openNetworkPrompt("probe");
   }
 
-  async function submitSpeedTest() {
-    await submitNetworkChange("speed_test");
+  function submitSpeedTest() {
+    openNetworkPrompt("speed_test");
+  }
+
+  function openNetworkPrompt(mode: NetworkAction) {
+    setActionError(null);
+    if (!selectedPlan || !endpoint) {
+      setActionError("Select a tunnel plan");
+      return;
+    }
+    if (!proofMaterial) {
+      setActionError("Proof is locked");
+      return;
+    }
+    setPendingAction(mode);
+  }
+
+  function clearExecutionResults() {
+    setJobProgress(null);
+    setLastJobProgress(null);
+    setLastJob(null);
   }
 
   async function submitNetworkChange(mode: NetworkAction) {
+    setPendingAction(null);
+    clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!selectedPlan || !endpoint) {
         throw new Error("Select a tunnel plan");
       }
       if (!proofMaterial) {
         throw new Error("Proof is locked");
-      }
-      if (isMutation(mode) && !confirmed) {
-        throw new Error("Network change requires confirmation");
       }
       const boundedProbeCount = clampInteger(probeCount, 1, 20);
       const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
@@ -140,7 +201,7 @@ export function TopologyApplyControls({
       });
       const job = await onCreateJob({
         argv: [],
-        clients: targetClientIds,
+        selector_expression: selectorExpressionForClientIds(targetClientIds),
         command: commandName(mode),
         confirmed: isMutation(mode),
         destructive: isMutation(mode),
@@ -149,13 +210,37 @@ export function TopologyApplyControls({
         operation: builtOperation.operation,
         force_unprivileged: isMutation(mode) ? forceUnprivileged : false,
         privileged: true,
-        tags: [],
         timeout_secs: clampInteger(timeoutSecs, 1, 3600),
       });
       setLastPayloadHash(builtProof.payloadHashHex);
       setLastJob(job);
       setLastAction(mode);
+      await trackNetworkProgress(job, resolveAgentsById(agents, targetClientIds));
     });
+  }
+
+  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[]) {
+    setLastJobProgress(null);
+    setJobProgress({
+      accepted: Math.min(job.accepted_targets, targets.length),
+      completed: 0,
+      doing: Math.min(job.accepted_targets, targets.length),
+      expected: targets.length,
+      failed: 0,
+      jobId: job.job_id,
+      retrieved: 0,
+      unavailable: targets.filter((target) => target.status !== "connected").length,
+    });
+    try {
+      const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+        acceptedTargets: job.accepted_targets,
+        onProgress: setJobProgress,
+        targets,
+      });
+      setLastJobProgress(result.progress);
+    } finally {
+      setJobProgress(null);
+    }
   }
 
   return (
@@ -332,15 +417,6 @@ export function TopologyApplyControls({
         />
         <label className="checkLine">
           <input
-            aria-label="Confirm network apply"
-            checked={confirmed}
-            onChange={(event) => setConfirmed(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Confirm network apply</span>
-        </label>
-        <label className="checkLine">
-          <input
             aria-label="Force unprivileged network best effort"
             checked={forceUnprivileged}
             onChange={(event) => setForceUnprivileged(event.target.checked)}
@@ -348,10 +424,33 @@ export function TopologyApplyControls({
           />
           <span>Force unprivileged best effort</span>
         </label>
+        <ConfirmationPrompt
+          confirmLabel={pendingAction ? actionConfirmLabel(pendingAction) : "Run"}
+          detail={
+            pendingAction
+              ? `${actionLabel(pendingAction)} ${selectedPlan?.name ?? "selected plan"} on ${vpsCountLabel(pendingActionTargets.length)}.`
+              : ""
+          }
+          items={pendingConfirmationItems}
+          onCancel={() => setPendingAction(null)}
+          onConfirm={() => pendingAction && void submitNetworkChange(pendingAction)}
+          open={pendingAction !== null}
+          pending={pending}
+          title={pendingAction ? `Confirm ${actionLabel(pendingAction).toLowerCase()}` : "Confirm network action"}
+          tone={pendingAction && isMutation(pendingAction) ? "danger" : "normal"}
+        />
+        {visibleJobProgress && (
+          <ExecutionResultPanel
+            loading={jobProgress !== null}
+            onClearResults={clearExecutionResults}
+            onOpenJobDetails={onOpenJobDetails}
+            progress={visibleJobProgress}
+          />
+        )}
         <div className="dispatchActions">
           <button
             className="primaryAction"
-            disabled={pending || !selectedPlan || !endpoint || !proofMaterial || !confirmed}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
             type="submit"
           >
             <Play size={17} />
@@ -359,7 +458,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || !selectedPlan || !endpoint || !proofMaterial || !confirmed}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
             onClick={submitRollback}
             type="button"
           >
@@ -368,7 +467,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
             onClick={submitStatus}
             type="button"
           >
@@ -377,7 +476,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
             onClick={submitProbe}
             type="button"
           >
@@ -386,7 +485,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
             onClick={submitSpeedTest}
             type="button"
           >
@@ -395,7 +494,12 @@ export function TopologyApplyControls({
           </button>
         </div>
       </form>
-      <ProofVaultBox lastPayloadHash={lastPayloadHash} onProofMaterialChange={setProofMaterial} proofMaterial={proofMaterial} />
+      <ProofVaultBox
+        lastPayloadHash={lastPayloadHash}
+        onOpenUnlock={onOpenProofUnlock}
+        onProofMaterialChange={setProofMaterial}
+        proofMaterial={proofMaterial}
+      />
     </section>
   );
 }
@@ -434,10 +538,37 @@ function actionLabel(mode: NetworkAction) {
   return "Status";
 }
 
+function actionConfirmLabel(mode: NetworkAction): string {
+  if (mode === "apply") {
+    return "Apply side";
+  }
+  if (mode === "rollback") {
+    return "Rollback side";
+  }
+  if (mode === "probe") {
+    return "Probe latency";
+  }
+  if (mode === "speed_test") {
+    return "Run speed test";
+  }
+  return "Inspect side";
+}
+
 function isMutation(mode: NetworkAction) {
   return mode === "apply" || mode === "rollback";
 }
 
+function targetClientIdsForAction(
+  mode: NetworkAction,
+  endpoint: { localClientId: string; peerClientId: string },
+): string[] {
+  return mode === "speed_test" ? [endpoint.localClientId, endpoint.peerClientId] : [endpoint.localClientId];
+}
+
 function backendLabel(backend: TunnelConfigBackend) {
   return networkBackendPresetLabel(backend);
+}
+
+function vpsCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
 }

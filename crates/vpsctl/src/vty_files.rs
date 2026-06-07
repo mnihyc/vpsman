@@ -3,8 +3,8 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash,
-    validate_absolute_file_path, validate_file_mode, JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES,
-    MAX_INLINE_FILE_PUSH_BYTES,
+    validate_absolute_file_path, validate_file_mode, FileExistingPolicy, FileOwnershipPolicy,
+    JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 use crate::vty_jobs::VtyJobSelection;
@@ -167,6 +167,12 @@ fn build_file_push_operation(
                 size_bytes: data.len() as u64,
                 sha256_hex: data_hash,
                 data_base64: encode_inline_file_payload(data)?,
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
         ))
     } else {
@@ -178,6 +184,12 @@ fn build_file_push_operation(
                 size_bytes: data.len() as u64,
                 sha256_hex: data_hash,
                 chunks: encode_chunked_file_payload(data)?,
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
         ))
     }
@@ -197,14 +209,16 @@ fn parse_timeout(value: Option<&str>) -> Result<u64> {
 
 fn parse_mode(value: Option<&str>) -> Result<u32> {
     let value = value.context("--mode requires a value")?.trim();
-    let (radix, digits) = if let Some(rest) = value.strip_prefix("0o") {
-        (8, rest)
-    } else if value.starts_with('0') {
-        (8, value)
-    } else {
-        (10, value)
-    };
-    let mode = u32::from_str_radix(digits, radix).context("--mode is not a valid number")?;
+    let digits = value.strip_prefix("0o").unwrap_or(value);
+    anyhow::ensure!(
+        !digits.is_empty()
+            && digits.len() <= 4
+            && digits
+                .chars()
+                .all(|character| matches!(character, '0'..='7')),
+        "--mode must be an octal value between 0000 and 0777"
+    );
+    let mode = u32::from_str_radix(digits, 8).context("--mode is not a valid octal number")?;
     validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(mode)
 }

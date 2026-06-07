@@ -42,8 +42,7 @@ async fn schedule_create_lists_durable_selector_without_plaintext_proof_material
             argv: vec!["/usr/bin/uptime".to_string()],
             pty: false,
         },
-        clients: Vec::new(),
-        tags: vec!["edge".to_string()],
+        selector_expression: "tag:edge".to_string(),
         interval_secs: 3600,
         start_at_unix: Some(unix_now()),
         enabled: true,
@@ -60,7 +59,7 @@ async fn schedule_create_lists_durable_selector_without_plaintext_proof_material
 
     assert_eq!(schedule.name, "nightly-uptime");
     assert_eq!(schedule.command_type, "shell_argv");
-    assert_eq!(schedule.tags, vec!["edge"]);
+    assert_eq!(schedule.selector_expression, "tag:edge");
     assert_eq!(schedule.catch_up_policy, "run_all_limited");
     assert_eq!(schedule.catch_up_limit, 3);
     assert_eq!(schedule.retry_delay_secs, 120);
@@ -82,8 +81,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
             argv: vec!["/bin/true".to_string()],
             pty: false,
         },
-        clients: Vec::new(),
-        tags: Vec::new(),
+        selector_expression: "".to_string(),
         interval_secs: 60,
         start_at_unix: None,
         enabled: true,
@@ -97,7 +95,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.tags.push("edge".to_string());
+    request.selector_expression = "tag:edge".to_string();
     request.interval_secs = 0;
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,

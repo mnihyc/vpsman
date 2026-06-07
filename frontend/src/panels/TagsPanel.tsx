@@ -1,6 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { ShieldCheck } from "lucide-react";
+import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { parseSearchExpression } from "../searchExpression";
 import type {
   AgentView,
   AssignDataSourcePresetRequest,
@@ -22,9 +24,38 @@ import type {
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
 } from "../types";
-import { formatVpsName, runPanelAction, toggleValue } from "../utils";
+import { formatVpsName, runPanelAction } from "../utils";
 import { CrudPager } from "../components/CrudPager";
 import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
+import type { ProofMaterial } from "../proof";
+
+const TAG_TARGET_SELECTOR_STORAGE_KEY = "vpsman.tagsTargeting.selectorExpression";
+
+function readLocalString(key: string): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  try {
+    return window.localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalString(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (value.trim()) {
+      window.localStorage.setItem(key, value);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Browser-local targeting persistence must not block tag management.
+  }
+}
 
 export function TagsPanel({
   activeSubpage,
@@ -38,11 +69,14 @@ export function TagsPanel({
   onCreateDataSourcePreset,
   onCreateTag,
   onDiffDataSourcePreset,
+  onOpenProofUnlock,
   onRefresh,
   onRenderDataSourceHotConfig,
   onResolveBulk,
   onTestDataSourcePreset,
   onUpdateDataSourcePreset,
+  proofMaterial,
+  setProofMaterial,
   dataSourceAssignments,
   dataSourcePresets,
   dataSourceStatus,
@@ -62,21 +96,25 @@ export function TagsPanel({
   onCreateDataSourcePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
   onCreateTag: (name: string) => Promise<void>;
   onDiffDataSourcePreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
+  onOpenProofUnlock: () => void;
   onRefresh: () => void;
   onRenderDataSourceHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
-  onResolveBulk: (tagNames: string[], destructive: boolean, tagMode: "any" | "all") => Promise<BulkResolveResponse>;
+  onResolveBulk: (selectorExpression: string, destructive: boolean, confirmed?: boolean) => Promise<BulkResolveResponse>;
   onTestDataSourcePreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdateDataSourcePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
+  proofMaterial: ProofMaterial | null;
+  setProofMaterial: (material: ProofMaterial | null) => void;
   tags: TagView[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [tagName, setTagName] = useState("");
   const [targetClient, setTargetClient] = useState("");
   const [targetTag, setTargetTag] = useState("");
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [tagMode, setTagMode] = useState<"any" | "all">("any");
+  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(TAG_TARGET_SELECTOR_STORAGE_KEY));
   const [destructive, setDestructive] = useState(false);
   const [bulkPreview, setBulkPreview] = useState<BulkResolveResponse | null>(null);
+  const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
+  const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const tagSubpage = ["registry", "targeting", "presets", "status"].includes(activeSubpage)
@@ -102,10 +140,61 @@ export function TagsPanel({
   }
 
   async function previewBulk() {
+    const parsed = parseSearchExpression(selectorExpression);
+    if (parsed.error) {
+      setActionError(parsed.error);
+      return;
+    }
     await runPanelAction(setPending, setActionError, async () => {
-      setBulkPreview(await onResolveBulk(selectedTags, destructive, tagMode));
+      setBulkPreview(await onResolveBulk(selectorExpression.trim(), destructive));
     });
   }
+
+  useEffect(() => {
+    writeLocalString(TAG_TARGET_SELECTOR_STORAGE_KEY, selectorExpression);
+  }, [selectorExpression]);
+
+  useEffect(() => {
+    if (!selectorExpression.trim()) {
+      setSelectorVerification("neutral");
+      setSelectorVerificationMessage(null);
+      setBulkPreview(null);
+      return;
+    }
+    const parsed = parseSearchExpression(selectorExpression);
+    if (parsed.error) {
+      setSelectorVerification("invalid");
+      setSelectorVerificationMessage("Invalid");
+      setBulkPreview(null);
+      return;
+    }
+    let canceled = false;
+    setSelectorVerification("checking");
+    setSelectorVerificationMessage("Checking");
+    const timeout = window.setTimeout(() => {
+      void onResolveBulk(selectorExpression.trim(), destructive)
+        .then((response) => {
+          if (canceled) {
+            return;
+          }
+          setBulkPreview(response);
+          setSelectorVerification("valid");
+          setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
+        })
+        .catch(() => {
+          if (canceled) {
+            return;
+          }
+          setBulkPreview(null);
+          setSelectorVerification("invalid");
+          setSelectorVerificationMessage("Invalid");
+        });
+    }, 300);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [agents.length, destructive, onResolveBulk, selectorExpression]);
 
   const status = actionError ?? error ?? (loading ? "Refreshing tag state" : "Live tag targets");
 
@@ -188,11 +277,13 @@ export function TagsPanel({
           onCreateJob={onCreateJob}
           onCreatePreset={onCreateDataSourcePreset}
           onDiffPreset={onDiffDataSourcePreset}
+          onOpenProofUnlock={onOpenProofUnlock}
           onRenderHotConfig={onRenderDataSourceHotConfig}
           onTestPreset={onTestDataSourcePreset}
           onUpdatePreset={onUpdateDataSourcePreset}
+          proofMaterial={proofMaterial}
           presets={dataSourcePresets}
-          tags={tags}
+          setProofMaterial={setProofMaterial}
         />
       )}
 
@@ -229,34 +320,27 @@ export function TagsPanel({
 
         <div className="compactForm">
           <strong>Bulk preview</strong>
-          <div className="chipList">
-            {tags.map((tag) => (
-              <label className="checkChip" key={tag.name}>
-                <input
-                  checked={selectedTags.includes(tag.name)}
-                  onChange={() => setSelectedTags(toggleValue(selectedTags, tag.name))}
-                  type="checkbox"
-                />
-                <span>{tag.name}</span>
-              </label>
-            ))}
-          </div>
+          <SearchExpressionInput
+            agents={agents}
+            ariaLabel="Tag targeting selector expression"
+            className="compact"
+            onChange={(value) => {
+              setSelectorExpression(value);
+              setBulkPreview(null);
+            }}
+            placeholder="provider:* && country:US"
+            showMatchCount
+            value={selectorExpression}
+            verification={selectorVerification}
+            verificationMessage={selectorVerificationMessage}
+          />
           <label className="checkLine">
             <input checked={destructive} onChange={(event) => setDestructive(event.target.checked)} type="checkbox" />
             <span>Destructive operation</span>
           </label>
-          <div className="targetModeControls" role="group" aria-label="Bulk tag match mode">
-            <span>Tags</span>
-            <button className={tagMode === "any" ? "selected" : ""} onClick={() => setTagMode("any")} type="button">
-              Any
-            </button>
-            <button className={tagMode === "all" ? "selected" : ""} onClick={() => setTagMode("all")} type="button">
-              All
-            </button>
-          </div>
           <button
             className="wideAction"
-            disabled={pending || selectedTags.length === 0}
+            disabled={pending || !selectorExpression.trim() || selectorVerification === "invalid"}
             onClick={previewBulk}
             type="button"
           >

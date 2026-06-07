@@ -1074,7 +1074,6 @@ const schedules = [
   {
     catch_up_limit: 1,
     catch_up_policy: "run_once",
-    clients: ["agent-sfo-01"],
     command_type: "shell",
     created_at: "2026-05-31T09:00:00Z",
     enabled: true,
@@ -1088,7 +1087,7 @@ const schedules = [
     next_run_at: "2026-05-31T11:00:00Z",
     operation: { argv: ["uptime"], pty: false, type: "shell" },
     retry_delay_secs: 300,
-    tags: ["provider:alpha"],
+    selector_expression: "id:agent-sfo-01 || provider:alpha",
   },
 ];
 
@@ -1606,6 +1605,7 @@ export async function installConsoleApiMock(page: Page) {
         fleetAlertNotificationChannels: [] as unknown[],
         fleetAlertPolicies: [] as unknown[],
         fleetAlertStates: [] as unknown[],
+        fileBrowserJobs: [] as unknown[],
         fileTransferHandoffs: [] as unknown[],
         fileTransferSourceUploads: [] as unknown[],
         historyRetentionPolicies: [] as unknown[],
@@ -1624,6 +1624,7 @@ export async function installConsoleApiMock(page: Page) {
         configurable: true,
         value: requests,
       });
+      const createdJobTargets = new Map<string, string[]>();
       const jsonResponse = (body: unknown, status = 200) =>
         Promise.resolve(
           new Response(JSON.stringify(body), {
@@ -1664,25 +1665,179 @@ export async function installConsoleApiMock(page: Page) {
         }
         return btoa(binary);
       };
-      const resolveBulkTargets = (body: unknown) => {
-        const request = body as { clients?: string[]; tags?: string[] } | null;
-        const selected = new Map<string, (typeof agentsFixture)[number]>();
-        const selectedClients = new Set(request?.clients ?? []);
-        const selectedTags = new Set(request?.tags ?? []);
-        for (const agent of visibleAgents()) {
-          if (
-            selectedClients.has(agent.id) ||
-            agent.tags.some((tag) => selectedTags.has(tag))
-          ) {
-            selected.set(agent.id, agent);
+      const valueMatches = (value: string, pattern: string, contains: boolean) => {
+        const normalizedValue = value.toLocaleLowerCase();
+        const normalizedPattern = pattern.toLocaleLowerCase();
+        if (normalizedPattern.includes("*") || normalizedPattern.includes("?")) {
+          const regex = new RegExp(
+            `^${normalizedPattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`,
+          );
+          return regex.test(normalizedValue);
+        }
+        return contains
+          ? normalizedValue.includes(normalizedPattern)
+          : normalizedValue === normalizedPattern;
+      };
+      type SelectorToken = { kind: "and" | "left" | "or" | "right" } | { kind: "term"; raw: string };
+      type SelectorExpr =
+        | { type: "term"; raw: string }
+        | { type: "and"; left: SelectorExpr; right: SelectorExpr }
+        | { type: "or"; left: SelectorExpr; right: SelectorExpr };
+      const tokenizeSelectorExpression = (expression: string): SelectorToken[] => {
+        const tokens: SelectorToken[] = [];
+        let index = 0;
+        while (index < expression.length) {
+          const char = expression[index];
+          if (/\s/.test(char)) {
+            index += 1;
+            continue;
+          }
+          if (char === "(" || char === ")") {
+            tokens.push({ kind: char === "(" ? "left" : "right" });
+            index += 1;
+            continue;
+          }
+          if (char === "&" || char === "|") {
+            if (expression[index + 1] !== char) {
+              throw new Error("Use && or || for boolean operators");
+            }
+            tokens.push({ kind: char === "&" ? "and" : "or" });
+            index += 2;
+            continue;
+          }
+          const start = index;
+          while (index < expression.length && !/[\s()&|]/.test(expression[index])) {
+            index += 1;
+          }
+          const raw = expression.slice(start, index);
+          const lower = raw.toLocaleLowerCase();
+          if (lower === "and" || lower === "or") {
+            tokens.push({ kind: lower === "and" ? "and" : "or" });
+          } else {
+            tokens.push({ kind: "term", raw });
           }
         }
-        const targets = [...selected.values()].sort((left, right) =>
-          left.id.localeCompare(right.id),
-        );
-        return targets.length > 0 ? targets : visibleAgents().slice(0, 1);
+        return tokens;
+      };
+      const parseSelectorExpression = (expression: string): SelectorExpr | null => {
+        const tokens = tokenizeSelectorExpression(expression);
+        if (tokens.length === 0) {
+          return null;
+        }
+        let position = 0;
+        const peek = () => tokens[position];
+        const consume = () => tokens[position++];
+        const startsPrimary = () => {
+          const token = peek();
+          return token?.kind === "term" || token?.kind === "left";
+        };
+        const parsePrimary = (): SelectorExpr => {
+          const token = consume();
+          if (!token) {
+            throw new Error("Expression is incomplete");
+          }
+          if (token.kind === "term") {
+            return { type: "term", raw: token.raw };
+          }
+          if (token.kind === "left") {
+            const nested = parseOr();
+            if (consume()?.kind !== "right") {
+              throw new Error("Missing closing parenthesis");
+            }
+            return nested;
+          }
+          throw new Error("Operator is missing an operand");
+        };
+        const parseAnd = (): SelectorExpr => {
+          let current = parsePrimary();
+          while (peek()?.kind === "and" || startsPrimary()) {
+            if (peek()?.kind === "and") {
+              consume();
+            }
+            current = { type: "and", left: current, right: parsePrimary() };
+          }
+          return current;
+        };
+        const parseOr = (): SelectorExpr => {
+          let current = parseAnd();
+          while (peek()?.kind === "or") {
+            consume();
+            current = { type: "or", left: current, right: parseAnd() };
+          }
+          return current;
+        };
+        const parsed = parseOr();
+        if (position < tokens.length) {
+          throw new Error("Unexpected token after expression");
+        }
+        return parsed;
+      };
+      const termMatchesAgent = (agent: (typeof agentsFixture)[number], term: string) => {
+        const separator = term.indexOf(":");
+        if (separator > 0) {
+          const namespace = term.slice(0, separator).toLocaleLowerCase();
+          const value = term.slice(separator + 1);
+          if (!value) {
+            return false;
+          }
+          if (namespace === "id") {
+            return valueMatches(agent.id, value, false);
+          }
+          if (namespace === "name") {
+            return valueMatches(agent.display_name, value, false);
+          }
+          if (namespace === "tag") {
+            return agent.tags.some((tag) => valueMatches(tag, value, false));
+          }
+          if (namespace === "provider") {
+            return agent.tags.some((tag) => valueMatches(tag, `provider:${value}`, false));
+          }
+          if (namespace === "country" || namespace === "region") {
+            return agent.tags.some((tag) => valueMatches(tag, `country:${value}`, false));
+          }
+          if (namespace === "status") {
+            return valueMatches(agent.status, value, false);
+          }
+          return false;
+        }
+        return valueMatches(agent.id, term, true) || valueMatches(agent.display_name, term, true);
+      };
+      const evaluateSelectorExpression = (agent: (typeof agentsFixture)[number], expression: SelectorExpr | null): boolean => {
+        if (!expression) {
+          return true;
+        }
+        if (expression.type === "and") {
+          return evaluateSelectorExpression(agent, expression.left) && evaluateSelectorExpression(agent, expression.right);
+        }
+        if (expression.type === "or") {
+          return evaluateSelectorExpression(agent, expression.left) || evaluateSelectorExpression(agent, expression.right);
+        }
+        return termMatchesAgent(agent, expression.raw);
+      };
+      const expressionMatchesAgent = (agent: (typeof agentsFixture)[number], expression: string) =>
+        evaluateSelectorExpression(agent, parseSelectorExpression(expression));
+      const resolveBulkTargets = (body: unknown) => {
+        const request = body as { selector_expression?: string } | null;
+        const expression = request?.selector_expression?.trim() ?? "";
+        if (!expression) {
+          return [];
+        }
+        return visibleAgents()
+          .filter((agent) => expressionMatchesAgent(agent, expression))
+          .sort((left, right) => left.id.localeCompare(right.id));
       };
       const jobTargetsFor = (jobId: string) => {
+        const createdTargets = createdJobTargets.get(jobId);
+        if (createdTargets) {
+          return createdTargets.map((clientId) => ({
+            client_id: clientId,
+            completed_at: "2026-05-31T10:09:00Z",
+            exit_code: 0,
+            job_id: jobId,
+            started_at: "2026-05-31T10:08:55Z",
+            status: "completed",
+          }));
+        }
         const job =
           (jobsFixture as Array<{ id: string; status: string; target_count: number; completed_at: string | null }>).find(
             (candidate) => candidate.id === jobId,
@@ -2154,16 +2309,19 @@ export async function installConsoleApiMock(page: Page) {
         ) {
           const body = await readJsonBody(input, init);
           requests.dataSourcePresetAssignments.push(body);
-          const request = body as { preset_id?: string };
+          const request = body as { preset_id?: string; selector_expression?: string };
           const preset =
             dataSourcePresetsFixture.find(
               (record: { id: string }) => record.id === request.preset_id,
             ) ?? dataSourcePresetsFixture[0];
+          const targetCount = request.selector_expression
+            ? visibleAgents().filter((agent) => expressionMatchesAgent(agent, request.selector_expression ?? "")).length
+            : 0;
           return jsonResponse({
             assignments: dataSourceAssignmentsFixture,
             confirmation_required: false,
             preset,
-            target_count: 1,
+            target_count: targetCount,
           });
         }
         if (pathname === "/api/v1/jobs" && method === "GET") {
@@ -2482,7 +2640,6 @@ export async function installConsoleApiMock(page: Page) {
           const request = body as {
             catch_up_limit?: number;
             catch_up_policy?: string;
-            clients?: string[];
             command_type?: string;
             enabled?: boolean;
             interval_secs?: number;
@@ -2490,12 +2647,11 @@ export async function installConsoleApiMock(page: Page) {
             name?: string;
             operation?: Record<string, unknown>;
             retry_delay_secs?: number;
-            tags?: string[];
+            selector_expression?: string;
           };
           return jsonResponse({
             catch_up_limit: request.catch_up_limit ?? 1,
             catch_up_policy: request.catch_up_policy ?? "run_once",
-            clients: request.clients ?? [],
             command_type: request.command_type ?? "shell",
             created_at: "2026-06-02T10:04:00Z",
             enabled: request.enabled ?? true,
@@ -2513,7 +2669,7 @@ export async function installConsoleApiMock(page: Page) {
               type: "shell",
             },
             retry_delay_secs: request.retry_delay_secs ?? 300,
-            tags: request.tags ?? [],
+            selector_expression: request.selector_expression ?? "id:*",
           });
         }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
@@ -2744,9 +2900,13 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/jobs" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.jobs.push(body);
+          const targets = resolveBulkTargets(body);
+          const acceptedTargetIds = targets.filter((agent) => agent.status === "connected").map((agent) => agent.id);
+          const jobId = "11111111-2222-4333-8444-555555555555";
+          createdJobTargets.set(jobId, acceptedTargetIds);
           return jsonResponse({
-            accepted_targets: 1,
-            job_id: "11111111-2222-4333-8444-555555555555",
+            accepted_targets: acceptedTargetIds.length,
+            job_id: jobId,
             status: "accepted",
           });
         }

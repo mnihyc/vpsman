@@ -11,6 +11,11 @@ import {
   type ProofMaterial,
 } from "../proof";
 import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+  selectorExpressionForClientIds,
+} from "../searchExpression";
+import {
   DEFAULT_BACKUP_SELECTED_PATHS,
   DEFAULT_RESTORE_SELECTED_PATHS,
 } from "../presets/backupPathPresets";
@@ -99,7 +104,10 @@ type BackupsPanelProps = {
     artifactFile: File,
     confirmed: boolean,
   ) => Promise<BackupArtifactRecord>;
+  onOpenProofUnlock: () => void;
   onRefresh: () => Promise<void>;
+  proofMaterial: ProofMaterial | null;
+  setProofMaterial: (material: ProofMaterial | null) => void;
 };
 
 type RestoreRunInput = {
@@ -155,9 +163,12 @@ export function BackupsPanel({
   onLoadJobOutputs,
   onPrepareBackupArtifactRestore,
   onPruneBackupPolicies,
+  onOpenProofUnlock,
   onUploadBackupArtifact,
   onUploadBackupArtifactChunked,
   onRefresh,
+  proofMaterial,
+  setProofMaterial,
 }: BackupsPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState("");
@@ -166,9 +177,6 @@ export function BackupsPanel({
   const [note, setNote] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [proofTtlSecs, setProofTtlSecs] = useState(300);
-  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(
-    null,
-  );
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState("nightly-backup");
   const [policyTargetsText, setPolicyTargetsText] = useState(
@@ -253,9 +261,16 @@ export function BackupsPanel({
     () => parseBackupPaths(policyPathsText),
     [policyPathsText],
   );
-  const policyTargets = useMemo(
-    () => parseTargetSelectors(policyTargetsText),
+  const policyTargetParse = useMemo(
+    () => parseSearchExpression(policyTargetsText),
     [policyTargetsText],
+  );
+  const policyTargetCount = useMemo(
+    () =>
+      policyTargetParse.error
+        ? 0
+        : agentsMatchingExpression(agents, policyTargetsText).length,
+    [agents, policyTargetParse.error, policyTargetsText],
   );
   const restorePaths = useMemo(
     () => parseBackupPaths(restorePathsText),
@@ -325,11 +340,11 @@ export function BackupsPanel({
       if (!policyIncludeConfig && policyPaths.length === 0) {
         throw new Error("Select config or at least one absolute path");
       }
-      if (
-        policyTargets.clients.length === 0 &&
-        policyTargets.tags.length === 0
-      ) {
-        throw new Error("Add at least one client or tag selector");
+      if (policyTargetParse.error) {
+        throw new Error(`Invalid target expression: ${policyTargetParse.error}`);
+      }
+      if (policyTargetCount === 0) {
+        throw new Error("Add at least one matching target selector");
       }
       const recipient = policyRecipientPublicKeyHex.trim().toLowerCase();
       if (recipient && !/^[0-9a-f]{64}$/.test(recipient)) {
@@ -340,8 +355,7 @@ export function BackupsPanel({
       }
       const policy = await onCreateBackupPolicy({
         name: policyName.trim(),
-        clients: policyTargets.clients,
-        tags: policyTargets.tags,
+        selector_expression: policyTargetsText.trim(),
         paths: policyPaths,
         include_config: policyIncludeConfig,
         recipient_public_key_hex: recipient || null,
@@ -645,8 +659,7 @@ export function BackupsPanel({
       superSaltHex: proofMaterial.superSaltHex,
     });
     const nextJob = await onCreateJob({
-      clients: [input.targetClientId],
-      tags: [],
+      selector_expression: selectorExpressionForClientIds([input.targetClientId]),
       destructive: !input.dryRun,
       confirmed: true,
       command: "restore",
@@ -720,8 +733,7 @@ export function BackupsPanel({
         superSaltHex: proofMaterial.superSaltHex,
       });
       const nextJob = await onCreateJob({
-        clients: [targetClientId],
-        tags: [],
+        selector_expression: selectorExpressionForClientIds([targetClientId]),
         destructive: true,
         confirmed: true,
         command: "restore_rollback",
@@ -867,10 +879,14 @@ export function BackupsPanel({
                   recipientPublicKeyHex={policyRecipientPublicKeyHex}
                   retentionDays={policyRetentionDays}
                   rotationGeneration={policyRotationGeneration}
-                  targetCount={
-                    policyTargets.clients.length + policyTargets.tags.length
+                  targetCount={policyTargetCount}
+                  targetExpressionMessage={
+                    policyTargetParse.error ??
+                    `${policyTargetCount}/${agents.length}`
                   }
+                  targetExpressionValid={!policyTargetParse.error}
                   targetsText={policyTargetsText}
+                  agents={agents}
                 />
                 <BackupPolicyPruneForm
                   confirmed={policyPruneConfirmed}
@@ -1011,6 +1027,7 @@ export function BackupsPanel({
                 />
                 <ProofVaultBox
                   lastPayloadHash={lastPayloadHash}
+                  onOpenUnlock={onOpenProofUnlock}
                   onProofMaterialChange={setProofMaterial}
                   proofMaterial={proofMaterial}
                 />
@@ -1042,6 +1059,7 @@ export function BackupsPanel({
                 />
                 <ProofVaultBox
                   lastPayloadHash={lastPayloadHash}
+                  onOpenUnlock={onOpenProofUnlock}
                   onProofMaterialChange={setProofMaterial}
                   proofMaterial={proofMaterial}
                 />
@@ -1075,30 +1093,6 @@ function parseBackupPaths(value: string): string[] {
         .filter((path) => path.length > 0 && path.startsWith("/")),
     ),
   );
-}
-
-function parseTargetSelectors(value: string): {
-  clients: string[];
-  tags: string[];
-} {
-  const result = { clients: [] as string[], tags: [] as string[] };
-  for (const token of value
-    .split(/[\s,]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)) {
-    if (token.startsWith("tag:")) {
-      const target = token.slice("tag:".length).trim();
-      if (!target) {
-        continue;
-      }
-      result.tags.push(target);
-    } else {
-      result.tags.push(token);
-    }
-  }
-  result.clients = Array.from(new Set(result.clients)).sort();
-  result.tags = Array.from(new Set(result.tags)).sort();
-  return result;
 }
 
 function policyPruneStatus(result: BackupPolicyPruneResponse): string {

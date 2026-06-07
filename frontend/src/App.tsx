@@ -13,6 +13,7 @@ import { TopologyPanel } from "./panels/TopologyPanel";
 import { PreferencesPanel } from "./panels/PreferencesPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
+import type { ProofMaterial } from "./proof";
 import { defaultSubpages, normalizeSubpage } from "./constants";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
@@ -28,6 +29,8 @@ export function App() {
   const [activeView, setActiveView] = useState<ActiveView>("Dashboard");
   const [activeSubpages, setActiveSubpages] = useState<Record<ActiveView, string>>({ ...defaultSubpages });
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(null);
+  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(null);
   const dashboard = useDashboardData(activeView);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = dashboard.operator?.preferences ?? DEFAULT_OPERATOR_PREFERENCES;
@@ -91,6 +94,19 @@ export function App() {
     selectView(target.view, target.subpage);
   }
 
+  function openJobDetails(jobId: string) {
+    setPendingJobDetailId(jobId);
+    selectView("Jobs", "history");
+  }
+
+  function openProofUnlock() {
+    selectView("Access", "proof");
+  }
+
+  function lockProof() {
+    setProofMaterial(null);
+  }
+
   return (
     <PanelDisplayProvider
       value={{
@@ -106,6 +122,7 @@ export function App() {
       activeSavedFleetViewId={fleetViews.activeSavedViewId}
       activeSubpage={activeSubpage}
       activeView={activeView}
+      agents={dashboard.agents}
       apiToken={dashboard.apiToken}
       connectedRatio={connectedRatio}
       draftSavedFleetViewName={fleetViews.draftSavedViewName}
@@ -118,12 +135,14 @@ export function App() {
       onClearSession={dashboard.clearSession}
       onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
       onFleetQueryChange={fleetViews.setFleetQuery}
-      onOpenAccessControls={() => selectView("Access", "proof")}
+      onLockProof={lockProof}
+      onOpenAccessControls={openProofUnlock}
       onSaveFleetView={fleetViews.saveFleetView}
       onSelectSubpage={selectSubpage}
       onSelectView={selectView}
       onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
       operatorPreferencesReady={dashboard.operator !== null}
+      proofUnlocked={proofMaterial !== null}
       savedFleetViews={fleetViews.savedViews}
       summary={dashboard.summary}
     >
@@ -193,11 +212,14 @@ export function App() {
               onCreateDataSourcePreset={dashboard.createDataSourcePreset}
               onCreateTag={dashboard.createTag}
               onDiffDataSourcePreset={dashboard.diffDataSourcePreset}
+              onOpenProofUnlock={openProofUnlock}
               onRefresh={dashboard.loadTagInventory}
               onRenderDataSourceHotConfig={dashboard.renderDataSourceHotConfig}
               onResolveBulk={dashboard.resolveBulkPreview}
               onTestDataSourcePreset={dashboard.testDataSourcePreset}
               onUpdateDataSourcePreset={dashboard.updateDataSourcePreset}
+              proofMaterial={proofMaterial}
+              setProofMaterial={setProofMaterial}
               tags={dashboard.tags}
             />
           )}
@@ -226,6 +248,7 @@ export function App() {
               onUpdateAgentUpdateRolloutControl={dashboard.updateAgentUpdateRolloutControl}
               onUploadAgentUpdateArtifact={dashboard.uploadAgentUpdateArtifact}
               onDispatchScheduledJob={dashboard.dispatchScheduledJob}
+              onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
               onDownloadOutputArtifact={dashboard.downloadJobOutputArtifact}
               onDownloadFileTransferSource={dashboard.downloadFileTransferSource}
               onSaveFileTransferHandoff={dashboard.saveFileTransferHandoff}
@@ -234,13 +257,18 @@ export function App() {
               onLoadOutputComparison={dashboard.loadJobOutputComparison}
               onLoadTargets={dashboard.loadJobTargets}
               onLoadTerminalReplay={dashboard.loadTerminalReplay}
+              onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}
               onRefresh={dashboard.loadJobs}
               onResolveTargets={dashboard.resolveJobTargets}
+              onSelectSubpage={selectSubpage}
               onUploadFileTransferSource={dashboard.uploadFileTransferSource}
               onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
+              pendingSelectedJobId={pendingJobDetailId}
+              proofMaterial={proofMaterial}
               processSupervisorInventory={dashboard.processSupervisorInventory}
+              setProofMaterial={setProofMaterial}
+              onOpenProofUnlock={openProofUnlock}
               terminalSessions={dashboard.terminalSessions}
-              tags={dashboard.tags}
             />
           )}
           {activeView === "Schedules" && (
@@ -252,7 +280,6 @@ export function App() {
               onCreateSchedule={dashboard.createSchedule}
               onRefresh={dashboard.loadSchedules}
               schedules={dashboard.schedules}
-              tags={dashboard.tags}
             />
           )}
           {activeView === "Topology" && (
@@ -274,9 +301,14 @@ export function App() {
               onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
               onLoadTopologyGraph={dashboard.loadTopologyGraph}
               onLoadOutputs={dashboard.loadJobOutputs}
+              onLoadTargets={dashboard.loadJobTargets}
+              onOpenJobDetails={openJobDetails}
+              onOpenProofUnlock={openProofUnlock}
               onPromoteTelemetryTunnel={dashboard.promoteTelemetryTunnel}
               onPromoteTunnelPlanToAdapter={dashboard.promoteTunnelPlanToAdapter}
               onRefresh={dashboard.loadTunnelPlans}
+              proofMaterial={proofMaterial}
+              setProofMaterial={setProofMaterial}
               topologyGraph={dashboard.topologyGraph}
               telemetryTunnels={dashboard.telemetryTunnels}
               tunnelPlans={dashboard.tunnelPlans}
@@ -318,7 +350,10 @@ export function App() {
               onLoadJobOutputs={dashboard.loadJobOutputs}
               onPrepareBackupArtifactRestore={dashboard.prepareBackupArtifactRestore}
               onPruneBackupPolicies={dashboard.pruneBackupPolicies}
+              onOpenProofUnlock={openProofUnlock}
               onRefresh={dashboard.loadBackups}
+              proofMaterial={proofMaterial}
+              setProofMaterial={setProofMaterial}
               onUploadBackupArtifact={dashboard.uploadBackupArtifact}
               onUploadBackupArtifactChunked={dashboard.uploadBackupArtifactChunked}
             />
@@ -341,6 +376,7 @@ export function App() {
               onRevokeOperatorSession={dashboard.revokeOperatorSession}
               onSetupTotp={dashboard.setupTotp}
               operator={dashboard.operator}
+              proofMaterial={proofMaterial}
               clientKeyRevocations={dashboard.clientKeyRevocations}
               enrollmentTokens={dashboard.enrollmentTokens}
               keyLifecycleReport={dashboard.keyLifecycleReport}
@@ -348,6 +384,7 @@ export function App() {
               operators={dashboard.operators}
               proofRotations={dashboard.proofRotations}
               sessionVaultAvailable={dashboard.authVaultAvailable}
+              setProofMaterial={setProofMaterial}
               wsState={dashboard.wsState}
             />
           )}

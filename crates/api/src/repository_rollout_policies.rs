@@ -317,36 +317,28 @@ fn policy_channel_matches(
 
 fn tag_scope_matches(
     scope_value: &str,
-    request: &CreateJobRequest,
+    _request: &CreateJobRequest,
     resolved_agents: &[AgentView],
 ) -> bool {
-    request
-        .tags
-        .iter()
-        .any(|tag| tag.eq_ignore_ascii_case(scope_value))
-        || resolved_agents.iter().any(|agent| {
-            agent
-                .tags
-                .iter()
-                .any(|tag| tag.eq_ignore_ascii_case(scope_value))
-        })
+    resolved_agents.iter().any(|agent| {
+        agent
+            .tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case(scope_value))
+    })
 }
 
 fn provider_scope_matches(
     scope_value: &str,
-    request: &CreateJobRequest,
+    _request: &CreateJobRequest,
     resolved_agents: &[AgentView],
 ) -> bool {
-    request
-        .tags
-        .iter()
-        .any(|tag| tag_matches_namespace_value(tag, "provider", scope_value))
-        || resolved_agents.iter().any(|agent| {
-            agent
-                .tags
-                .iter()
-                .any(|tag| tag_matches_namespace_value(tag, "provider", scope_value))
-        })
+    resolved_agents.iter().any(|agent| {
+        agent
+            .tags
+            .iter()
+            .any(|tag| tag_matches_namespace_value(tag, "provider", scope_value))
+    })
 }
 
 fn tag_matches_namespace_value(tag: &str, namespace: &str, value: &str) -> bool {

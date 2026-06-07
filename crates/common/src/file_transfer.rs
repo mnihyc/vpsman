@@ -74,6 +74,12 @@ pub fn validate_absolute_file_path(path: &str) -> Result<(), FileTransferValidat
     if !path.starts_with('/') {
         return Err(FileTransferValidationError::PathMustBeAbsolute);
     }
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(FileTransferValidationError::InvalidPath);
+    }
     Ok(())
 }
 
@@ -343,6 +349,13 @@ mod tests {
             validate_absolute_file_path("").unwrap_err(),
             FileTransferValidationError::PathRequired
         );
+        for path in ["/tmp/.", "/tmp/..", "/tmp/../etc/passwd"] {
+            assert_eq!(
+                validate_absolute_file_path(path).unwrap_err(),
+                FileTransferValidationError::InvalidPath,
+                "{path}"
+            );
+        }
     }
 
     #[test]

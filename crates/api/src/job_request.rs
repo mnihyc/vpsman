@@ -34,19 +34,9 @@ const MAX_RESTORE_PATHS: usize = 64;
 const MAX_RESTORE_ROLLBACK_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl CreateJobRequest {
-    pub(crate) fn all_requested_clients(&self) -> Vec<String> {
-        let mut clients = self.targets.clone();
-        clients.extend(self.clients.iter().cloned());
-        clients.sort();
-        clients.dedup();
-        clients
-    }
-
     pub(crate) fn target_selection(&self) -> BulkResolveRequest {
         BulkResolveRequest {
-            clients: self.all_requested_clients(),
-            tags: self.tags.clone(),
-            tag_mode: self.tag_mode.clone(),
+            selector_expression: self.selector_expression.trim().to_string(),
             destructive: self.destructive,
             confirmed: self.confirmed,
         }
@@ -170,7 +160,19 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
         | JobCommand::FileTransferCommit { .. }
         | JobCommand::FileTransferAbort { .. }
         | JobCommand::FileTransferDownloadStart { .. }
-        | JobCommand::FileTransferDownloadChunk { .. } => {
+        | JobCommand::FileTransferDownloadChunk { .. }
+        | JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::FileDownload { .. }
+        | JobCommand::FileArchiveTar { .. } => {
             unreachable!("file command labels are handled by job_files")
         }
         JobCommand::HotConfig { .. } => "hot_config",
@@ -268,7 +270,19 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         | JobCommand::FileTransferCommit { .. }
         | JobCommand::FileTransferAbort { .. }
         | JobCommand::FileTransferDownloadStart { .. }
-        | JobCommand::FileTransferDownloadChunk { .. } => {
+        | JobCommand::FileTransferDownloadChunk { .. }
+        | JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::FileDownload { .. }
+        | JobCommand::FileArchiveTar { .. } => {
             unreachable!("file commands are validated by job_files")
         }
         JobCommand::UserSessions => Ok(()),
@@ -450,19 +464,19 @@ fn validate_restore_rollback_operation(
                 "restore_rollback_archive_path_invalid",
             ));
         }
-        validate_file_path(&file.destination_path)?;
         if path_contains_dot_segment(&file.destination_path) {
             return Err(ApiError::bad_request(
                 "restore_rollback_destination_path_invalid",
             ));
         }
+        validate_file_path(&file.destination_path)?;
         if let Some(rollback_path) = &file.rollback_path {
-            validate_file_path(rollback_path)?;
             if path_contains_dot_segment(rollback_path) {
                 return Err(ApiError::bad_request(
                     "restore_rollback_snapshot_path_invalid",
                 ));
             }
+            validate_file_path(rollback_path)?;
         }
         if file.restored_size_bytes > MAX_RESTORE_ROLLBACK_FILE_BYTES {
             return Err(ApiError::bad_request("restore_rollback_size_invalid"));
@@ -544,16 +558,16 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
         return Err(ApiError::bad_request("restore_path_limit_exceeded"));
     }
     for path in paths {
-        validate_file_path(path)?;
         if path_contains_dot_segment(path) {
             return Err(ApiError::bad_request("restore_path_invalid"));
         }
+        validate_file_path(path)?;
     }
     if let Some(destination_root) = destination_root {
-        validate_file_path(destination_root)?;
         if path_contains_dot_segment(destination_root) {
             return Err(ApiError::bad_request("restore_destination_root_invalid"));
         }
+        validate_file_path(destination_root)?;
     }
     if include_config && destination_root.is_none() {
         return Err(ApiError::bad_request(
@@ -567,10 +581,10 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
         return Err(ApiError::bad_request("restore_archive_source_ambiguous"));
     }
     if let Some(archive_path) = archive_path {
-        validate_file_path(archive_path)?;
         if path_contains_dot_segment(archive_path) {
             return Err(ApiError::bad_request("restore_archive_path_invalid"));
         }
+        validate_file_path(archive_path)?;
         if let Some(archive_size_bytes) = archive_size_bytes {
             if archive_size_bytes == 0 {
                 return Err(ApiError::bad_request("restore_archive_size_invalid"));

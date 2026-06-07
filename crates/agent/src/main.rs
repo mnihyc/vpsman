@@ -7,6 +7,7 @@ mod discovery;
 mod executor;
 #[cfg(test)]
 mod executor_tests;
+mod file_browser;
 mod file_download;
 mod file_pull;
 mod file_push;

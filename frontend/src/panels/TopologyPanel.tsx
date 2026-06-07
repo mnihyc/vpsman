@@ -10,6 +10,7 @@ import type {
   CreateTunnelPlanRequest,
   JobHistoryRecord,
   JobOutputRecord,
+  JobTargetRecord,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
@@ -22,6 +23,7 @@ import type {
   TunnelPlanRecord,
 } from "../types";
 import type { PromoteTunnelPlanToAdapterRequest } from "../typesTopology";
+import type { ProofMaterial } from "../proof";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
@@ -62,9 +64,14 @@ export function TopologyPanel({
   onLoadOspfUpdatePlans,
   onLoadTopologyGraph,
   onLoadOutputs,
+  onLoadTargets,
+  onOpenJobDetails,
+  onOpenProofUnlock,
   onPromoteTelemetryTunnel,
   onPromoteTunnelPlanToAdapter,
   onRefresh,
+  proofMaterial,
+  setProofMaterial,
   telemetryTunnels,
   topologyGraph,
   tunnelPlans,
@@ -87,9 +94,14 @@ export function TopologyPanel({
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadTopologyGraph: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenProofUnlock: () => void;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
   onPromoteTunnelPlanToAdapter: (request: PromoteTunnelPlanToAdapterRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
+  proofMaterial: ProofMaterial | null;
+  setProofMaterial: (material: ProofMaterial | null) => void;
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
@@ -518,6 +530,11 @@ export function TopologyPanel({
         <TopologyApplyControls
           agents={agents}
           onCreateJob={onCreateJob}
+          onLoadTargets={onLoadTargets}
+          onOpenJobDetails={onOpenJobDetails}
+          onOpenProofUnlock={onOpenProofUnlock}
+          proofMaterial={proofMaterial}
+          setProofMaterial={setProofMaterial}
           tunnelPlans={tunnelPlans}
         />
       )}
@@ -525,7 +542,12 @@ export function TopologyPanel({
         <TopologyOspfUpdateControls
           agents={agents}
           onCreateJob={onCreateJob}
+          onLoadTargets={onLoadTargets}
+          onOpenJobDetails={onOpenJobDetails}
+          onOpenProofUnlock={onOpenProofUnlock}
           ospfUpdatePlans={ospfUpdatePlans}
+          proofMaterial={proofMaterial}
+          setProofMaterial={setProofMaterial}
           tunnelPlans={tunnelPlans}
         />
       )}

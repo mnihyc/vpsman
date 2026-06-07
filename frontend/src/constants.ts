@@ -77,8 +77,10 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   Jobs: [
     { id: "history", label: "History", description: "Command requests, targets, output, and cancellation" },
     { id: "dispatch", label: "Dispatch", description: "Compose proof-gated commands and terminal actions" },
+    { id: "files", label: "Files", description: "Browse, edit, upload, download, and manage one VPS filesystem" },
+    { id: "multi_files", label: "Multi files", description: "Bulk file actions by selector expression and policy" },
     { id: "updates", label: "Updates", description: "Agent releases, rollout policies, and rollout state" },
-    { id: "transfers", label: "File transfers", description: "Source artifacts, handoffs, and transfer sessions" },
+    { id: "transfers", label: "Transfer history", description: "Source artifacts, handoffs, and resumable transfer sessions" },
     { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
     { id: "processes", label: "Processes", description: "Process supervisor inventory" },
     { id: "approvals", label: "Approvals", description: "Scheduled privileged approvals and proof vault" },

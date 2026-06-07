@@ -105,8 +105,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
 fn backup_policy_validation_requires_targets_retention_and_confirmation() {
     let mut request = CreateBackupPolicyRequest {
         name: "nightly".to_string(),
-        clients: Vec::new(),
-        tags: vec!["edge".to_string()],
+        selector_expression: "tag:edge".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         recipient_public_key_hex: Some("a".repeat(64)),
@@ -249,10 +248,7 @@ fn backup_job_command_validates_executable_scope() {
 #[tokio::test]
 async fn backup_job_dispatch_requires_confirmation() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "backup".to_string(),
@@ -306,10 +302,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         recipient_public_key_hex: None,
     };
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "backup".to_string(),
@@ -407,10 +400,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[33_u8; 32])));
     let job_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "backup".to_string(),
@@ -601,8 +591,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let recipient_public_key_hex = "b".repeat(64);
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
-        clients: vec!["client-a".to_string()],
-        tags: vec!["edge".to_string()],
+        selector_expression: "id:client-a || tag:edge".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         recipient_public_key_hex: Some(recipient_public_key_hex.clone()),
@@ -631,8 +620,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
 
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(view.name, "nightly-edge");
-    assert_eq!(view.clients, vec!["client-a"]);
-    assert_eq!(view.tags, vec!["edge"]);
+    assert_eq!(view.selector_expression, "id:client-a || tag:edge");
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
     assert_eq!(
@@ -673,8 +661,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
         HeaderMap::new(),
         Json(CreateBackupPolicyRequest {
             name: "nightly-prune".to_string(),
-            clients: vec!["client-a".to_string()],
-            tags: Vec::new(),
+            selector_expression: "id:client-a".to_string(),
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
             recipient_public_key_hex: None,

@@ -64,9 +64,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
         .unwrap();
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: Vec::new(),
-            tags: vec!["provider:provider-a".to_string(), "country:US".to_string()],
-            tag_mode: None,
+            selector_expression: "provider:provider-a || country:US".to_string(),
             destructive: true,
             confirmed: false,
         })
@@ -79,13 +77,8 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 
     let explicit_tag_selector = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: Vec::new(),
-            tags: vec![
-                "tag:provider:provider-a".to_string(),
-                "provider:provider-a".to_string(),
-                "country:US".to_string(),
-            ],
-            tag_mode: Some("all".to_string()),
+            selector_expression: "tag:provider:provider-a && provider:provider-a && country:US"
+                .to_string(),
             destructive: false,
             confirmed: false,
         })
@@ -96,9 +89,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 
     let inner_any = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: Vec::new(),
-            tags: vec!["id:client-a".to_string()],
-            tag_mode: None,
+            selector_expression: "id:client-a".to_string(),
             destructive: false,
             confirmed: false,
         })
@@ -109,13 +100,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 
     let inner_all = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: Vec::new(),
-            tags: vec![
-                "name:client-a".to_string(),
-                "provider:provider-a".to_string(),
-                "country:US".to_string(),
-            ],
-            tag_mode: Some("all".to_string()),
+            selector_expression: "name:client-a && provider:provider-a && country:US".to_string(),
             destructive: false,
             confirmed: false,
         })
@@ -126,9 +111,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 
     let mismatch = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: Vec::new(),
-            tags: vec!["id:client-a".to_string(), "country:DE".to_string()],
-            tag_mode: Some("all".to_string()),
+            selector_expression: "id:client-a && country:DE".to_string(),
             destructive: false,
             confirmed: false,
         })
@@ -208,9 +191,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
 
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: vec!["client-delete".to_string()],
-            tags: vec!["provider:alpha".to_string()],
-            tag_mode: None,
+            selector_expression: "id:client-delete || provider:alpha".to_string(),
             destructive: false,
             confirmed: true,
         })
@@ -483,14 +464,7 @@ async fn rejected_job_records_frozen_target_results() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
-        targets: vec![
-            "client-a".to_string(),
-            "client-a".to_string(),
-            "missing-client".to_string(),
-        ],
-        clients: Vec::new(),
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a || id:client-a || id:missing-client".to_string(),
         destructive: false,
         confirmed: false,
         command: "uptime".to_string(),
@@ -560,10 +534,7 @@ async fn rejected_job_freezes_tag_targets() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: Vec::new(),
-        tags: vec!["provider:provider-a".to_string(), "bgp".to_string()],
-        tag_mode: None,
+        selector_expression: "provider:provider-a || tag:bgp".to_string(),
         destructive: true,
         confirmed: true,
         command: "uptime".to_string(),
@@ -615,10 +586,7 @@ fn server_signs_proof_bearing_envelope_for_resolved_target() {
         unix_now() + 300,
     );
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "true".to_string(),
@@ -660,10 +628,7 @@ fn server_signs_proof_bearing_envelope_for_resolved_target() {
 #[test]
 fn file_pull_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -691,10 +656,7 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
 #[test]
 fn shell_pty_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "ignored".to_string(),
@@ -727,10 +689,7 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
 #[test]
 fn file_pull_job_command_requires_absolute_path() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -753,12 +712,83 @@ fn file_pull_job_command_requires_absolute_path() {
 }
 
 #[test]
+fn file_browser_job_commands_use_operation_payload_and_type() {
+    let request = CreateJobRequest {
+        selector_expression: "id:client-a".to_string(),
+        destructive: false,
+        confirmed: true,
+        command: String::new(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::FileListDir {
+            path: "/var/log".to_string(),
+            offset: 0,
+            limit: 250,
+            show_hidden: false,
+        }),
+        timeout_secs: Some(5),
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+        idempotency_key: None,
+        reconnect_policy: None,
+        envelope: None,
+        envelopes: HashMap::new(),
+    };
+
+    assert_eq!(request.command_type_label(), "file_list_dir");
+    match request.job_command().unwrap() {
+        JobCommand::FileListDir { path, limit, .. } => {
+            assert_eq!(path, "/var/log");
+            assert_eq!(limit, 250);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn file_browser_job_commands_validate_paths_and_limits() {
+    let mut request = CreateJobRequest {
+        selector_expression: "id:client-a".to_string(),
+        destructive: false,
+        confirmed: true,
+        command: String::new(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::FileListDir {
+            path: "var/log".to_string(),
+            offset: 0,
+            limit: 250,
+            show_hidden: false,
+        }),
+        timeout_secs: Some(5),
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+        idempotency_key: None,
+        reconnect_policy: None,
+        envelope: None,
+        envelopes: HashMap::new(),
+    };
+    assert_eq!(
+        request.job_command().unwrap_err().code,
+        "file_path_must_be_absolute"
+    );
+
+    request.operation = Some(JobCommand::FileListDir {
+        path: "/var/log".to_string(),
+        offset: 0,
+        limit: 0,
+        show_hidden: false,
+    });
+    assert_eq!(
+        request.job_command().unwrap_err().code,
+        "file_list_limit_out_of_range"
+    );
+}
+
+#[test]
 fn shell_script_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -786,10 +816,7 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
 #[test]
 fn shell_script_job_command_rejects_empty_and_control_payloads() {
     let mut request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -820,10 +847,7 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
 #[test]
 fn user_sessions_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -849,10 +873,7 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
 #[test]
 fn process_list_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -878,10 +899,7 @@ fn process_list_job_command_uses_operation_payload_and_type() {
 #[test]
 fn process_list_job_command_bounds_limit() {
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -916,10 +934,7 @@ async fn dispatching_job_records_and_updates_target_results() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "true".to_string(),
@@ -1019,11 +1034,17 @@ async fn dispatching_job_records_and_updates_target_results() {
 async fn job_output_comparison_groups_execution_summaries_by_status_and_output() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
+    let target_clients = vec![
+        "client-a".to_string(),
+        "client-b".to_string(),
+        "client-c".to_string(),
+        "client-d".to_string(),
+    ];
     let request = test_job_request(&["client-a", "client-b", "client-c", "client-d"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &request.clients)
+        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
         .await
         .unwrap();
 
@@ -1090,11 +1111,12 @@ async fn job_output_comparison_groups_execution_summaries_by_status_and_output()
 async fn job_output_comparison_text_mode_normalizes_line_endings_and_trailing_space() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
+    let target_clients = vec!["client-a".to_string(), "client-b".to_string()];
     let request = test_job_request(&["client-a", "client-b"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &request.clients)
+        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
         .await
         .unwrap();
 
@@ -1132,15 +1154,20 @@ async fn job_output_comparison_text_mode_normalizes_line_endings_and_trailing_sp
 async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
+    let target_clients = vec![
+        "client-a".to_string(),
+        "client-b".to_string(),
+        "client-c".to_string(),
+    ];
     let request = test_job_request(&["client-a", "client-b", "client-c"]);
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &request.clients)
+        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
         .await
         .unwrap();
 
-    for client_id in &request.clients {
+    for client_id in &target_clients {
         let outputs = vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
@@ -1215,10 +1242,7 @@ fn test_operator() -> AuthContext {
 
 fn test_job_request(clients: &[&str]) -> CreateJobRequest {
     CreateJobRequest {
-        targets: Vec::new(),
-        clients: clients.iter().map(|client| (*client).to_string()).collect(),
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: test_selector_expression_for_clients(clients),
         destructive: false,
         confirmed: false,
         command: "true".to_string(),

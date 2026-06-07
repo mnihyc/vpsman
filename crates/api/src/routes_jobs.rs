@@ -25,6 +25,9 @@ use crate::{
     },
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::JobOutputPersistConfig,
+    selector_expression::{
+        id_selector_expression, or_selector_expression, parse_selector_expression,
+    },
     state::AppState,
 };
 
@@ -140,6 +143,7 @@ pub(crate) async fn create_job_with_operator(
     request: CreateJobRequest,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
     validate_job_reconnect_metadata(&request)?;
+    validate_selector_expression(&request.selector_expression)?;
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
@@ -155,6 +159,15 @@ pub(crate) async fn create_job_with_operator(
             | JobCommand::AuthProofKeyRotate { .. }
             | JobCommand::AgentUpdateCheck { .. } => {
                 return Err(ApiError::conflict("config_update_confirmation_required"));
+            }
+            JobCommand::FileWriteText { .. }
+            | JobCommand::FileMkdir { .. }
+            | JobCommand::FileRename { .. }
+            | JobCommand::FileDelete { .. }
+            | JobCommand::FileChmod { .. }
+            | JobCommand::FileChown { .. }
+            | JobCommand::FileCopy { .. } => {
+                return Err(ApiError::conflict("file_operation_confirmation_required"));
             }
             _ => {}
         }
@@ -448,9 +461,12 @@ pub(crate) async fn dispatch_scheduled_job(
     let scheduled_agents = state
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: scheduled.targets.clone(),
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: or_selector_expression(
+                scheduled
+                    .targets
+                    .iter()
+                    .map(|client_id| id_selector_expression(client_id)),
+            ),
             destructive: false,
             confirmed: true,
         })
@@ -1039,11 +1055,9 @@ async fn reject_job(
         .await?;
     let status = "rejected_authorization_required".to_string();
     warn!(
-        targets = request.targets.len(),
-        clients = request.clients.len(),
-        tags = request.tags.len(),
+        selector_expression = %request.selector_expression,
         privileged = request.privileged,
-        has_legacy_envelope = request.envelope.is_some(),
+        has_envelope = request.envelope.is_some(),
         envelope_count = request.envelopes.len(),
         command_hash,
         reason,
@@ -1062,6 +1076,15 @@ async fn reject_job(
             status,
         }),
     ))
+}
+
+fn validate_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
+    if selector_expression.trim().is_empty() {
+        return Err(ApiError::bad_request("selector_expression_required"));
+    }
+    parse_selector_expression(selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+    Ok(())
 }
 
 #[derive(Debug)]

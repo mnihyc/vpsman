@@ -633,13 +633,12 @@ pub(crate) struct TelemetryTunnelQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateScheduleRequest {
     pub(crate) name: String,
     pub(crate) operation: JobCommand,
     #[serde(default)]
-    pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
+    pub(crate) selector_expression: String,
     pub(crate) interval_secs: u64,
     pub(crate) start_at_unix: Option<u64>,
     #[serde(default = "default_schedule_enabled")]
@@ -674,8 +673,7 @@ pub(crate) struct ScheduleView {
     pub(crate) enabled: bool,
     pub(crate) command_type: String,
     pub(crate) operation: JobCommand,
-    pub(crate) clients: Vec<String>,
-    pub(crate) tags: Vec<String>,
+    pub(crate) selector_expression: String,
     pub(crate) interval_secs: i64,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
@@ -735,13 +733,10 @@ pub(crate) struct UpdateAgentAliasRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BulkResolveRequest {
     #[serde(default)]
-    pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
-    #[serde(default)]
-    pub(crate) tag_mode: Option<String>,
+    pub(crate) selector_expression: String,
     #[serde(default)]
     pub(crate) destructive: bool,
     #[serde(default)]
@@ -808,15 +803,10 @@ pub(crate) enum WsEvent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateJobRequest {
     #[serde(default)]
-    pub(crate) targets: Vec<String>,
-    #[serde(default)]
-    pub(crate) clients: Vec<String>,
-    #[serde(default)]
-    pub(crate) tags: Vec<String>,
-    #[serde(default)]
-    pub(crate) tag_mode: Option<String>,
+    pub(crate) selector_expression: String,
     #[serde(default)]
     pub(crate) destructive: bool,
     #[serde(default)]

@@ -2,8 +2,14 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
 import { CrudPager } from "../components/CrudPager";
 import { ProofVaultBox } from "../components/ProofVaultBox";
+import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildEnvelopesForOperation, type ProofMaterial } from "../proof";
+import {
+  agentsMatchingExpression,
+  parseSearchExpression,
+  selectorExpressionForClientIds,
+} from "../searchExpression";
 import type {
   AgentView,
   AssignDataSourcePresetRequest,
@@ -22,7 +28,6 @@ import type {
   DataSourceStatusRecord,
   JobOperation,
   JsonValue,
-  TagView,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
 } from "../types";
@@ -32,7 +37,6 @@ import {
   runPanelAction,
   shortId,
   statusClass,
-  toggleValue,
 } from "../utils";
 
 const DATA_SOURCE_DOMAINS = [
@@ -55,6 +59,7 @@ const DATA_SOURCE_DOMAINS = [
 ];
 
 const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
+const DATA_SOURCE_SELECTOR_STORAGE_KEY = "vpsman.dataSources.assignmentSelectorExpression";
 
 export function DataSourcePresetPanel({
   activeSubpage,
@@ -66,11 +71,13 @@ export function DataSourcePresetPanel({
   onCreateJob,
   onCreatePreset,
   onDiffPreset,
+  onOpenProofUnlock,
   onRenderHotConfig,
   onTestPreset,
   onUpdatePreset,
+  proofMaterial,
   presets,
-  tags,
+  setProofMaterial,
 }: {
   activeSubpage: "presets" | "status";
   agents: AgentView[];
@@ -81,11 +88,13 @@ export function DataSourcePresetPanel({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreatePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
   onDiffPreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
+  onOpenProofUnlock: () => void;
   onRenderHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
   onTestPreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdatePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
+  proofMaterial: ProofMaterial | null;
   presets: DataSourcePresetRecord[];
-  tags: TagView[];
+  setProofMaterial: (material: ProofMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [createDomain, setCreateDomain] = useState(DATA_SOURCE_DOMAINS[1]);
@@ -96,14 +105,13 @@ export function DataSourcePresetPanel({
   const [definitionText, setDefinitionText] = useState(DEFAULT_DEFINITION);
   const [assignDomain, setAssignDomain] = useState(DATA_SOURCE_DOMAINS[1]);
   const [assignPresetId, setAssignPresetId] = useState("");
-  const [selectedClients, setSelectedClients] = useState<string[]>([]);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [assignTagMode, setAssignTagMode] = useState<"any" | "all">("any");
+  const [assignmentSelectorExpression, setAssignmentSelectorExpression] = useState(() =>
+    readLocalString(DATA_SOURCE_SELECTOR_STORAGE_KEY, ""),
+  );
   const [confirmed, setConfirmed] = useState(false);
   const [renderClientId, setRenderClientId] = useState("");
   const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
   const [applyConfirmed, setApplyConfirmed] = useState(false);
-  const [applyProofMaterial, setApplyProofMaterial] = useState<ProofMaterial | null>(null);
   const [applyProofTtlSecs, setApplyProofTtlSecs] = useState(300);
   const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(30);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
@@ -137,7 +145,17 @@ export function DataSourcePresetPanel({
     () => presets.find((preset) => preset.id === effectiveLifecyclePresetId) ?? null,
     [effectiveLifecyclePresetId, presets],
   );
-  const assignmentTargetCount = selectedClients.length + selectedTags.length;
+  const assignmentSelectorParse = useMemo(
+    () => parseSearchExpression(assignmentSelectorExpression),
+    [assignmentSelectorExpression],
+  );
+  const assignmentTargetCount = useMemo(
+    () =>
+      assignmentSelectorParse.error
+        ? 0
+        : agentsMatchingExpression(agents, assignmentSelectorExpression).length,
+    [agents, assignmentSelectorExpression, assignmentSelectorParse.error],
+  );
   const lifecycleStatus =
     lastUpdate?.confirmation_required
       ? `${lastUpdate.affected_client_count} VPSs inherit this preset; confirmation required`
@@ -173,6 +191,10 @@ export function DataSourcePresetPanel({
     setLastUpdate(null);
   }, [lifecyclePreset?.id]);
 
+  useEffect(() => {
+    writeLocalString(DATA_SOURCE_SELECTOR_STORAGE_KEY, assignmentSelectorExpression);
+  }, [assignmentSelectorExpression]);
+
   async function submitCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runPanelAction(setPending, setActionError, async () => {
@@ -193,13 +215,17 @@ export function DataSourcePresetPanel({
   async function submitAssignment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runPanelAction(setPending, setActionError, async () => {
+      if (assignmentSelectorParse.error) {
+        throw new Error(`Invalid target expression: ${assignmentSelectorParse.error}`);
+      }
+      if (assignmentTargetCount === 0) {
+        throw new Error("Add at least one matching VPS target");
+      }
       const response = await onAssignPreset({
-        clients: selectedClients,
         confirmed,
         domain: assignDomain,
         preset_id: effectivePresetId,
-        tags: selectedTags,
-        tag_mode: assignTagMode,
+        selector_expression: assignmentSelectorExpression.trim(),
       });
       setLastAssignment(response);
       if (!response.confirmation_required) {
@@ -224,8 +250,8 @@ export function DataSourcePresetPanel({
       if (!applyConfirmed) {
         throw new Error("Confirm before applying a persistent data-source patch");
       }
-      if (!applyProofMaterial) {
-        throw new Error("Unlock local proof before applying a data-source patch");
+      if (!proofMaterial) {
+        throw new Error("Unlock proof before applying a data-source patch");
       }
       const rendered =
         renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : await onRenderHotConfig(renderClientId);
@@ -234,13 +260,13 @@ export function DataSourcePresetPanel({
         clientIds: [renderClientId],
         operation,
         proofTtlSecs: clampInteger(applyProofTtlSecs, 15, 3600),
-        superPassword: applyProofMaterial.superPassword,
-        superSaltHex: applyProofMaterial.superSaltHex,
+        superPassword: proofMaterial.superPassword,
+        superSaltHex: proofMaterial.superSaltHex,
       });
       const response = await onCreateJob({
         argv: [],
         canary_count: null,
-        clients: [renderClientId],
+        selector_expression: selectorExpressionForClientIds([renderClientId]),
         command: "data_source_config_patch",
         confirmed: true,
         destructive: false,
@@ -249,7 +275,6 @@ export function DataSourcePresetPanel({
         force_unprivileged: false,
         operation,
         privileged: true,
-        tags: [],
         timeout_secs: clampInteger(applyTimeoutSecs, 1, 3600),
       });
       setRenderedHotConfig(rendered);
@@ -412,42 +437,49 @@ export function DataSourcePresetPanel({
               ))}
             </select>
           </div>
-          <div className="chipList presetTargetList">
-            {agents.map((agent) => (
-              <label className="checkChip" key={agent.id}>
-                <input
-                  checked={selectedClients.includes(agent.id)}
-                  onChange={() => setSelectedClients(toggleValue(selectedClients, agent.id))}
-                  type="checkbox"
-                />
-                <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
-              </label>
-            ))}
-            {tags.map((tag) => (
-              <label className="checkChip" key={tag.name}>
-                <input
-                  checked={selectedTags.includes(tag.name)}
-                  onChange={() => setSelectedTags(toggleValue(selectedTags, tag.name))}
-                  type="checkbox"
-                />
-                <span>{tag.name}</span>
-              </label>
-            ))}
+          <div className="targetSelector presetTargetSelector">
+            <div className="targetSelectorHeader">
+              <strong>Targets</strong>
+              <span>
+                {assignmentSelectorParse.error ??
+                  `${assignmentTargetCount}/${agents.length} matching VPSs`}
+              </span>
+            </div>
+            <SearchExpressionInput
+              agents={agents}
+              ariaLabel="Data-source assignment target expression"
+              className="targetExpressionBar"
+              onChange={setAssignmentSelectorExpression}
+              placeholder="id:edge-a || provider:alpha && country:us"
+              showMatchCount
+              value={assignmentSelectorExpression}
+              verification={
+                assignmentSelectorParse.error
+                  ? "invalid"
+                  : assignmentSelectorExpression.trim()
+                    ? "valid"
+                    : "neutral"
+              }
+              verificationMessage={
+                assignmentSelectorParse.error ??
+                `${assignmentTargetCount}/${agents.length}`
+              }
+            />
           </div>
           <label className="checkLine">
             <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
             <span>Confirm multi-VPS assignment</span>
           </label>
-          <div className="targetModeControls" role="group" aria-label="Preset assignment tag match mode">
-            <span>Tags</span>
-            <button className={assignTagMode === "any" ? "selected" : ""} onClick={() => setAssignTagMode("any")} type="button">
-              Any
-            </button>
-            <button className={assignTagMode === "all" ? "selected" : ""} onClick={() => setAssignTagMode("all")} type="button">
-              All
-            </button>
-          </div>
-          <button className="secondaryAction" disabled={pending || !effectivePresetId || assignmentTargetCount === 0} type="submit">
+          <button
+            className="secondaryAction"
+            disabled={
+              pending ||
+              !effectivePresetId ||
+              assignmentTargetCount === 0 ||
+              Boolean(assignmentSelectorParse.error)
+            }
+            type="submit"
+          >
             Assign preset
           </button>
         </form>
@@ -499,8 +531,10 @@ export function DataSourcePresetPanel({
           <ProofVaultBox
             labelPrefix="Data-source"
             lastPayloadHash={lastApplyPayloadHash}
-            onProofMaterialChange={setApplyProofMaterial}
-            proofMaterial={applyProofMaterial}
+            onOpenUnlock={onOpenProofUnlock}
+            onProofMaterialChange={setProofMaterial}
+            proofMaterial={proofMaterial}
+            unlockRedirectLabel="Unlock data-source proof"
           />
           <label className="checkLine">
             <input checked={applyConfirmed} onChange={(event) => setApplyConfirmed(event.target.checked)} type="checkbox" />
@@ -508,7 +542,7 @@ export function DataSourcePresetPanel({
           </label>
           <button
             className="secondaryAction"
-            disabled={pending || !renderClientId || !applyConfirmed || !applyProofMaterial}
+            disabled={pending || !renderClientId || !applyConfirmed || !proofMaterial}
             onClick={applyRenderedHotConfig}
             type="button"
           >
@@ -909,4 +943,22 @@ function clampInteger(value: number, min: number, max: number): number {
     return min;
   }
   return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+function readLocalString(key: string, fallback: string): string {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  return window.localStorage.getItem(key) ?? fallback;
+}
+
+function writeLocalString(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (value.trim()) {
+    window.localStorage.setItem(key, value);
+  } else {
+    window.localStorage.removeItem(key);
+  }
 }

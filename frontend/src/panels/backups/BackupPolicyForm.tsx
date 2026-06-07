@@ -1,8 +1,11 @@
 import type { FormEvent } from "react";
 import { CalendarClock, Save } from "lucide-react";
+import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import { BACKUP_PATH_PLACEHOLDER } from "../../presets/backupPathPresets";
+import type { AgentView } from "../../types";
 
 type BackupPolicyFormProps = {
+  agents: AgentView[];
   includeConfig: boolean;
   intervalSecs: number;
   keepLast: number;
@@ -28,10 +31,13 @@ type BackupPolicyFormProps = {
   retentionDays: number;
   rotationGeneration: string;
   targetCount: number;
+  targetExpressionMessage: string;
+  targetExpressionValid: boolean;
   targetsText: string;
 };
 
 export function BackupPolicyForm({
+  agents,
   includeConfig,
   intervalSecs,
   keepLast,
@@ -57,29 +63,38 @@ export function BackupPolicyForm({
   retentionDays,
   rotationGeneration,
   targetCount,
+  targetExpressionMessage,
+  targetExpressionValid,
   targetsText,
 }: BackupPolicyFormProps) {
   return (
     <>
       <div className="sectionHeader compact">
         <h2>Backup policy</h2>
-        <span>{targetCount} target selector{targetCount === 1 ? "" : "s"}</span>
+        <span>{targetCount} matching VPS{targetCount === 1 ? "" : "s"}</span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
           <span>Name</span>
           <input aria-label="Backup policy name" onChange={(event) => onNameChange(event.target.value)} value={name} />
         </label>
-        <label>
-          <span>Targets</span>
-          <textarea
-            aria-label="Backup policy target selectors"
-            onChange={(event) => onTargetsTextChange(event.target.value)}
-            placeholder="id:edge-01, name:edge-a, provider:alpha, country:us, tag:backup-critical"
-            rows={3}
+        <div className="targetSelector">
+          <div className="targetSelectorHeader">
+            <strong>Targets</strong>
+            <span>{targetExpressionMessage}</span>
+          </div>
+          <SearchExpressionInput
+            agents={agents}
+            ariaLabel="Backup policy target expression"
+            className="targetExpressionBar"
+            onChange={onTargetsTextChange}
+            placeholder="id:edge-01 || provider:alpha && country:us"
+            showMatchCount
             value={targetsText}
+            verification={targetExpressionValid ? "valid" : "invalid"}
+            verificationMessage={targetExpressionMessage}
           />
-        </label>
+        </div>
         <label>
           <span>Selected paths</span>
           <textarea
@@ -160,7 +175,7 @@ export function BackupPolicyForm({
           <span>{includeConfig ? "config" : "no config"}</span>
           <span>{pathsCount} path{pathsCount === 1 ? "" : "s"}</span>
         </div>
-        <button className="primaryAction" disabled={pending || !name.trim() || targetCount === 0} type="submit">
+        <button className="primaryAction" disabled={pending || !name.trim() || targetCount === 0 || !targetExpressionValid} type="submit">
           <Save size={17} />
           Save policy
         </button>

@@ -292,6 +292,8 @@ pub(crate) enum Command {
         chunk_size_bytes: u32,
         #[arg(long, default_value_t = 0)]
         rate_limit_kbps: u32,
+        #[arg(long, default_value = "replace")]
+        existing_policy: String,
         #[arg(long, default_value_t = 250)]
         poll_interval_ms: u64,
         #[arg(long, default_value_t = 1200)]

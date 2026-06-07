@@ -7,15 +7,16 @@ import {
   Command,
   FolderKanban,
   KeyRound,
+  LockKeyhole,
   RadioTower,
-  Search,
   ShieldCheck,
   Trash2,
   X,
 } from "lucide-react";
 import { Metric } from "./Metric";
+import { SearchExpressionInput } from "./SearchExpressionInput";
 import { navSections, subpageDescription, subpageLabel, viewSubpages } from "../constants";
-import type { ActiveView, FleetSummary } from "../types";
+import type { ActiveView, AgentView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
 import { usePanelDisplaySettings } from "../panelDisplay";
 
@@ -25,6 +26,7 @@ type ConsoleShellProps = {
   activeSavedFleetViewId: string | null;
   activeSubpage: string;
   activeView: ActiveView;
+  agents: AgentView[];
   apiToken: string;
   children: ReactNode;
   connectedRatio: string;
@@ -39,11 +41,13 @@ type ConsoleShellProps = {
   onDeleteSavedFleetView: () => void;
   onFleetQueryChange: (query: string) => void;
   onOpenAccessControls: () => void;
+  onLockProof: () => void;
   onSaveFleetView: () => void;
   onSelectSubpage: (subpage: string) => void;
   onSelectView: (view: ActiveView) => void;
   onSavedFleetViewNameChange: (name: string) => void;
   operatorPreferencesReady: boolean;
+  proofUnlocked: boolean;
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
 };
@@ -52,6 +56,7 @@ export function ConsoleShell({
   activeSavedFleetViewId,
   activeSubpage,
   activeView,
+  agents,
   apiToken,
   children,
   connectedRatio,
@@ -65,12 +70,14 @@ export function ConsoleShell({
   onClearSession,
   onDeleteSavedFleetView,
   onFleetQueryChange,
+  onLockProof,
   onOpenAccessControls,
   onSaveFleetView,
   onSelectSubpage,
   onSelectView,
   onSavedFleetViewNameChange,
   operatorPreferencesReady,
+  proofUnlocked,
   savedFleetViews,
   summary,
 }: ConsoleShellProps) {
@@ -194,17 +201,16 @@ export function ConsoleShell({
               </small>
             </span>
           </button>
-          <div className="search">
-            <Search size={18} />
-            <input
-              aria-label="Search fleet"
-              id="fleet-search"
-              name="fleet-search"
-              onChange={(event) => onFleetQueryChange(event.target.value)}
-              placeholder="Search VPS, tag, provider, job"
-              value={fleetQuery}
-            />
-          </div>
+          <SearchExpressionInput
+            agents={agents}
+            ariaLabel="Search fleet"
+            className="search"
+            inputId="fleet-search"
+            onChange={onFleetQueryChange}
+            placeholder="Search VPS, tag, provider, job"
+            showMatchCount
+            value={fleetQuery}
+          />
           <div className="topbarActions">
             <div className="savedViewControls" aria-label="Saved fleet views">
               <select
@@ -275,15 +281,28 @@ export function ConsoleShell({
                 <span>Session</span>
               </button>
             )}
-            <button
-              aria-label="Open access controls"
-              className="primaryAction"
-              onClick={onOpenAccessControls}
-              type="button"
-            >
-              <ShieldCheck size={18} />
-              <span>Unlock</span>
-            </button>
+            {proofUnlocked ? (
+              <button
+                aria-label="Lock proof"
+                className="secondaryAction"
+                onClick={onLockProof}
+                title="Lock proof in browser memory"
+                type="button"
+              >
+                <LockKeyhole size={18} />
+                <span>Lock</span>
+              </button>
+            ) : (
+              <button
+                aria-label="Open proof unlock"
+                className="primaryAction"
+                onClick={onOpenAccessControls}
+                type="button"
+              >
+                <ShieldCheck size={18} />
+                <span>Unlock</span>
+              </button>
+            )}
           </div>
         </header>
 

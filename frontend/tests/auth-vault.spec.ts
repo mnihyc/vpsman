@@ -85,7 +85,6 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
           countries: [],
           group_by_options: [{ description: "All labels", label: "Labels", value: "labels" }],
           providers: [],
-          tags: [],
           windows: [{ label: "24 hours", seconds: 86400, value: "24h" }],
         },
         drilldowns: [{ label: "Open fleet instances", query: null, subpage: "instances", view: "Fleet" }],

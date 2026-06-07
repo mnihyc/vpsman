@@ -60,9 +60,7 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
             &AssignDataSourcePresetRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
                 preset_id: vnstat.id,
-                clients: vec!["client-a".to_string(), "client-b".to_string()],
-                tags: Vec::new(),
-                tag_mode: None,
+                selector_expression: "id:client-a || id:client-b".to_string(),
                 confirmed: false,
             },
             &operator,
@@ -79,15 +77,10 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
     let assigned = repo
         .assign_data_source_preset(
             &AssignDataSourcePresetRequest {
+                domain: "runtime_traffic_accounting_source".to_string(),
+                preset_id: vnstat.id,
+                selector_expression: "id:client-a || id:client-b".to_string(),
                 confirmed: true,
-                ..AssignDataSourcePresetRequest {
-                    domain: "runtime_traffic_accounting_source".to_string(),
-                    preset_id: vnstat.id,
-                    clients: vec!["client-a".to_string(), "client-b".to_string()],
-                    tags: Vec::new(),
-                    tag_mode: None,
-                    confirmed: false,
-                }
             },
             &operator,
         )
@@ -218,9 +211,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
             &AssignDataSourcePresetRequest {
                 domain: domain.to_string(),
                 preset_id: preset.id,
-                clients: vec!["edge-a".to_string()],
-                tags: Vec::new(),
-                tag_mode: None,
+                selector_expression: "id:edge-a".to_string(),
                 confirmed: false,
             },
             &operator,
@@ -299,9 +290,7 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
         &AssignDataSourcePresetRequest {
             domain: "runtime_traffic_accounting_source".to_string(),
             preset_id: preset.id,
-            clients: vec!["client-a".to_string(), "client-b".to_string()],
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: "id:client-a || id:client-b".to_string(),
             confirmed: true,
         },
         &operator,
@@ -464,9 +453,7 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
             &AssignDataSourcePresetRequest {
                 domain: "process_inventory_source".to_string(),
                 preset_id: preset.id,
-                clients: vec!["client-b".to_string()],
-                tags: Vec::new(),
-                tag_mode: None,
+                selector_expression: "id:client-b".to_string(),
                 confirmed: true,
             },
             &operator,
@@ -482,9 +469,7 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
             &AssignDataSourcePresetRequest {
                 domain: "process_inventory_source".to_string(),
                 preset_id: preset.id,
-                clients: vec!["client-a".to_string()],
-                tags: Vec::new(),
-                tag_mode: None,
+                selector_expression: "id:client-a".to_string(),
                 confirmed: false,
             },
             &operator,
@@ -610,9 +595,7 @@ async fn data_source_hot_config_renders_selected_presets() {
             &AssignDataSourcePresetRequest {
                 domain: domain.to_string(),
                 preset_id,
-                clients: vec!["edge-a".to_string()],
-                tags: Vec::new(),
-                tag_mode: None,
+                selector_expression: "id:edge-a".to_string(),
                 confirmed: false,
             },
             &operator,
@@ -834,9 +817,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
         &AssignDataSourcePresetRequest {
             domain: "runtime_traffic_accounting_source".to_string(),
             preset_id: vnstat.id,
-            clients: vec!["edge-a".to_string()],
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: "id:edge-a".to_string(),
             confirmed: false,
         },
         &operator,

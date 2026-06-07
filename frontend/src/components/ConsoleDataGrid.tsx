@@ -39,8 +39,9 @@ import {
   ChevronRight as ChevronRightIcon,
   Columns3,
   GripVertical,
-  Search,
 } from "lucide-react";
+import { SearchExpressionInput } from "./SearchExpressionInput";
+import { filterBySearchExpression, type SearchFields } from "../searchExpression";
 
 export type ConsoleDataGridColumn<T> = {
   align?: "end" | "start";
@@ -65,6 +66,7 @@ type ConsoleDataGridPreferences = {
   columnOrder?: string[];
   columnSizing?: ColumnSizingState;
   columnVisibility?: VisibilityState;
+  globalFilter?: string;
   pageSize?: number;
   sorting?: SortingState;
 };
@@ -109,28 +111,17 @@ export function ConsoleDataGrid<T>({
     preferences.columnOrder ?? [],
   );
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
-  const [globalFilter, setGlobalFilter] = useState("");
-  const [pageSize, setPageSize] = useState(
-    preferences.pageSize ?? defaultPageSize,
-  );
+  const [globalFilter, setGlobalFilter] = useState(preferences.globalFilter ?? "");
+  const [pageSize, setPageSize] = useState(preferences.pageSize ?? defaultPageSize);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
-  const normalizedFilter = globalFilter.trim().toLocaleLowerCase();
   const filteredRows = useMemo(() => {
-    if (!normalizedFilter) {
-      return rows;
-    }
-    return rows.filter((row) =>
-      columns.some((column) => {
-        const value = column.searchValue?.(row) ?? column.sortValue?.(row);
-        return String(value ?? "")
-          .toLocaleLowerCase()
-          .includes(normalizedFilter);
-      }),
-    );
-  }, [columns, normalizedFilter, rows]);
+    return filterBySearchExpression(rows, globalFilter, (row): SearchFields => ({
+      all: columns.map((column) => String(column.searchValue?.(row) ?? column.sortValue?.(row) ?? "")),
+    })).items;
+  }, [columns, globalFilter, rows]);
   const tableColumns = useMemo<ColumnDef<T>[]>(
     () => [
       {
@@ -278,6 +269,7 @@ export function ConsoleDataGrid<T>({
       columnOrder: effectiveColumnOrder,
       columnSizing,
       columnVisibility,
+      globalFilter,
       pageSize,
       sorting,
     });
@@ -286,6 +278,7 @@ export function ConsoleDataGrid<T>({
     columnSizing,
     columnVisibility,
     effectiveColumnOrder,
+    globalFilter,
     pageSize,
     sorting,
     storageKey,
@@ -334,16 +327,13 @@ export function ConsoleDataGrid<T>({
           </span>
           <span>{selectedRows.length} selected</span>
         </div>
-        <label className="gridSearch">
-          <Search size={15} />
-          <input
-            aria-label={`${title} search`}
-            onChange={(event) => setGlobalFilter(event.target.value)}
-            placeholder={searchPlaceholder}
-            type="search"
-            value={globalFilter}
-          />
-        </label>
+        <SearchExpressionInput
+          ariaLabel={`${title} search`}
+          className="gridSearch compact"
+          onChange={setGlobalFilter}
+          placeholder={searchPlaceholder}
+          value={globalFilter}
+        />
         <div className="gridToolbarActions">
           {actions.length > 0 && (
             <DropdownMenu.Root>

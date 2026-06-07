@@ -218,10 +218,7 @@ async fn agent_update_rollout_policy_defaults_match_provider_channel_and_record_
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["edge-a".to_string(), "edge-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:edge-a || id:edge-b".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -310,10 +307,7 @@ async fn agent_update_dispatch_records_rollout_without_sensitive_artifact_url() 
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -398,10 +392,7 @@ async fn agent_update_rollout_control_updates_pause_gate_and_audits() {
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -533,10 +524,7 @@ async fn agent_update_rollback_delegation_records_and_claims_timeout_targets_onl
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -663,10 +651,7 @@ async fn agent_update_activation_delegation_claims_recommended_completed_targets
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string(), "client-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a || id:client-b".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -804,10 +789,7 @@ async fn agent_update_delegated_proof_expiry_updates_rollout_read_model() {
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -980,10 +962,7 @@ async fn agent_update_heartbeat_marks_rollout_after_restart() {
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -1070,10 +1049,7 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -1118,10 +1094,7 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
     };
     let activation_hash = payload_hash(&encode_json(&activation_operation).unwrap());
     let activation_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update_activate".to_string(),
@@ -1200,10 +1173,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -1248,10 +1218,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     };
     let activation_hash = payload_hash(&encode_json(&activation_operation).unwrap());
     let activation_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update_activate".to_string(),
@@ -1297,10 +1264,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
     };
     let rollback_hash = payload_hash(&encode_json(&rollback_operation).unwrap());
     let rollback_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update_rollback".to_string(),
@@ -1391,10 +1355,7 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
     };
     let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
     let update_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -1439,10 +1400,7 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
     };
     let activation_hash = payload_hash(&encode_json(&activation_operation).unwrap());
     let activation_request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update_activate".to_string(),
@@ -1528,10 +1486,7 @@ async fn agent_update_heartbeat_does_not_upgrade_failed_rollout_target() {
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-a".to_string(),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),

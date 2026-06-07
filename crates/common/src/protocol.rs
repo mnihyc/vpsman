@@ -284,7 +284,7 @@ pub struct JobCancelRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobCommand {
     Shell {
         argv: Vec<String>,
@@ -373,6 +373,18 @@ pub enum JobCommand {
         size_bytes: u64,
         sha256_hex: String,
         data_base64: String,
+        #[serde(default, skip_serializing_if = "FileExistingPolicy::is_default")]
+        existing_policy: FileExistingPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gid: Option<u32>,
+        #[serde(default, skip_serializing_if = "FileOwnershipPolicy::is_default")]
+        ownership_policy: FileOwnershipPolicy,
     },
     FilePushChunked {
         path: String,
@@ -380,6 +392,18 @@ pub enum JobCommand {
         size_bytes: u64,
         sha256_hex: String,
         chunks: Vec<FilePushChunk>,
+        #[serde(default, skip_serializing_if = "FileExistingPolicy::is_default")]
+        existing_policy: FileExistingPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gid: Option<u32>,
+        #[serde(default, skip_serializing_if = "FileOwnershipPolicy::is_default")]
+        ownership_policy: FileOwnershipPolicy,
     },
     FileTransferStart {
         session_id: Uuid,
@@ -390,6 +414,8 @@ pub enum JobCommand {
         chunk_size_bytes: u32,
         #[serde(default)]
         rate_limit_kbps: u32,
+        #[serde(default, skip_serializing_if = "FileExistingPolicy::is_default")]
+        existing_policy: FileExistingPolicy,
         resume_token_hash: String,
     },
     FileTransferChunk {
@@ -418,6 +444,104 @@ pub enum JobCommand {
         offset: u64,
         max_bytes: u32,
         resume_token_hash: String,
+    },
+    FileStat {
+        path: String,
+    },
+    FileListDir {
+        path: String,
+        #[serde(default)]
+        offset: u32,
+        #[serde(default = "default_file_list_limit")]
+        limit: u32,
+        #[serde(default)]
+        show_hidden: bool,
+    },
+    FileReadText {
+        path: String,
+        #[serde(default = "default_file_read_max_bytes")]
+        max_bytes: u64,
+    },
+    FileWriteText {
+        path: String,
+        mode: u32,
+        size_bytes: u64,
+        sha256_hex: String,
+        content_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256_hex: Option<String>,
+        #[serde(default)]
+        create: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileMkdir {
+        path: String,
+        mode: u32,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileRename {
+        path: String,
+        new_path: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileDelete {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileChmod {
+        path: String,
+        mode: u32,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileChown {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gid: Option<u32>,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default, skip_serializing_if = "FileOwnershipPolicy::is_default")]
+        ownership_policy: FileOwnershipPolicy,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileCopy {
+        path: String,
+        new_path: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default)]
+        policy: FileActionPolicy,
+    },
+    FileDownload {
+        path: String,
+        #[serde(default = "default_file_download_max_bytes")]
+        max_bytes: u64,
+    },
+    FileArchiveTar {
+        path: String,
+        #[serde(default = "default_file_archive_max_bytes")]
+        max_bytes: u64,
     },
     UserSessions,
     ProcessList {
@@ -511,6 +635,59 @@ pub enum JobCommand {
         port: u16,
         connect_timeout_ms: u16,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileActionPolicy {
+    #[default]
+    Fail,
+    Ensure,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileExistingPolicy {
+    #[default]
+    Skip,
+    Replace,
+}
+
+impl FileExistingPolicy {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOwnershipPolicy {
+    #[default]
+    Fail,
+    Ignore,
+}
+
+impl FileOwnershipPolicy {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+fn default_file_list_limit() -> u32 {
+    250
+}
+
+fn default_file_read_max_bytes() -> u64 {
+    1024 * 1024
+}
+
+fn default_file_archive_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_file_download_max_bytes() -> u64 {
+    64 * 1024 * 1024
 }
 
 fn default_agent_update_check_activate() -> bool {

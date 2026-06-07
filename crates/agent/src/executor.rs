@@ -17,7 +17,11 @@ use crate::{
         run_pty_with_bounded_output, run_pty_with_streaming_output, ChildCleanupPolicy,
         ChildOutputSink, ChildRunResult,
     },
-    file_download::{execute_file_transfer_download_chunk, execute_file_transfer_download_start},
+    file_browser::execute_file_browser_command,
+    file_download::{
+        execute_file_download, execute_file_transfer_download_chunk,
+        execute_file_transfer_download_start,
+    },
     file_pull::execute_file_pull_with_timeout,
     file_push::{
         execute_file_push, execute_file_push_chunked, execute_file_transfer_abort,
@@ -143,9 +147,28 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
             size_bytes,
             sha256_hex,
             data_base64,
+            existing_policy,
+            owner,
+            group,
+            uid,
+            gid,
+            ownership_policy,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            execute_file_push(job_id, path, *mode, *size_bytes, sha256_hex, data_base64),
+            execute_file_push(
+                job_id,
+                path,
+                *mode,
+                *size_bytes,
+                sha256_hex,
+                data_base64,
+                *existing_policy,
+                owner.as_deref(),
+                group.as_deref(),
+                *uid,
+                *gid,
+                *ownership_policy,
+            ),
         )
         .await
         .context("file push timed out")?,
@@ -155,9 +178,28 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
             size_bytes,
             sha256_hex,
             chunks,
+            existing_policy,
+            owner,
+            group,
+            uid,
+            gid,
+            ownership_policy,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            execute_file_push_chunked(job_id, path, *mode, *size_bytes, sha256_hex, chunks),
+            execute_file_push_chunked(
+                job_id,
+                path,
+                *mode,
+                *size_bytes,
+                sha256_hex,
+                chunks,
+                *existing_policy,
+                owner.as_deref(),
+                group.as_deref(),
+                *uid,
+                *gid,
+                *ownership_policy,
+            ),
         )
         .await
         .context("chunked file push timed out")?,
@@ -169,6 +211,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
             sha256_hex,
             chunk_size_bytes,
             rate_limit_kbps,
+            existing_policy,
             resume_token_hash,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
@@ -181,6 +224,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
                 sha256_hex,
                 *chunk_size_bytes,
                 *rate_limit_kbps,
+                *existing_policy,
                 resume_token_hash,
             ),
         )
@@ -251,6 +295,25 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
         )
         .await
         .context("file transfer download chunk timed out")?,
+        JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::FileArchiveTar { .. } => {
+            execute_file_browser_command(job_id, command, timeout_secs).await
+        }
+        JobCommand::FileDownload { path, max_bytes } => time::timeout(
+            Duration::from_secs(timeout_secs.max(1)),
+            execute_file_download(job_id, path, *max_bytes, output_tx),
+        )
+        .await
+        .context("file download timed out")?,
         JobCommand::UserSessions => execute_user_sessions(config, job_id, timeout_secs).await,
         JobCommand::ProcessList { limit } => {
             execute_process_list(config, job_id, *limit, timeout_secs).await

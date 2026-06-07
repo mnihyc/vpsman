@@ -20,11 +20,16 @@
 
 .commandComposer .segmented {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
 }
 
 .commandComposer .segmented button {
+  height: auto;
+  min-height: 38px;
   min-width: 0;
+  line-height: 1.2;
+  padding: 5px 8px;
+  white-space: normal;
 }
 
 .dispatchForm,
@@ -256,6 +261,910 @@
 .inlineCheck {
   align-content: end;
   min-height: 64px;
+}
+
+.fileBrowserPanel,
+.multiFilePanel {
+  overflow: visible;
+}
+
+.fileBrowserHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fileBrowserHeaderActions .searchExpressionInput {
+  width: min(520px, 42vw);
+  min-width: 260px;
+}
+
+.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]),
+.fileBrowserPanel select,
+.multiFilePanel input:not([type="checkbox"]):not([type="file"]),
+.multiFilePanel select,
+.multiFilePanel textarea {
+  box-sizing: border-box;
+  min-height: 36px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  padding: 7px 10px;
+}
+
+.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):focus,
+.fileBrowserPanel select:focus,
+.multiFilePanel input:not([type="checkbox"]):not([type="file"]):focus,
+.multiFilePanel select:focus,
+.multiFilePanel textarea:focus {
+  border-color: #1a73e8;
+  box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
+  outline: 0;
+}
+
+.fileBrowserPanel input[type="checkbox"],
+.multiFilePanel input[type="checkbox"] {
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #1a73e8;
+}
+
+.fileBrowserPanel input[type="file"],
+.multiFilePanel input[type="file"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px dashed #c7d0dd;
+  border-radius: 6px;
+  background: #f8fafd;
+  color: #3c4043;
+  font: inherit;
+  font-size: 12px;
+  padding: 7px;
+}
+
+.fileBrowserPanel input[type="file"]::file-selector-button,
+.multiFilePanel input[type="file"]::file-selector-button {
+  margin-right: 8px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #3c4043;
+  font: inherit;
+  padding: 5px 8px;
+}
+
+.fileBrowserPanel .secondaryAction,
+.fileBrowserPanel .primaryAction,
+.fileBrowserPanel .dangerAction,
+.multiFilePanel .secondaryAction,
+.multiFilePanel .primaryAction,
+.multiFilePanel .dangerAction {
+  min-width: 0;
+  gap: 7px;
+  justify-content: center;
+  padding: 7px 11px;
+}
+
+.fileBrowserProofRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #eef1f6;
+  background: #f8fafd;
+}
+
+.fileBrowserProofRow label,
+.filePathBar label,
+.fileActionStack label,
+.fileEditorActions label,
+.multiFileComposer label {
+  align-content: start;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fileBrowserProofRow label span,
+.filePathBar label span,
+.fileActionStack label span,
+.fileEditorActions label span,
+.multiFileComposer label span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.filePathBar {
+  display: grid;
+  grid-template-columns: 34px auto minmax(220px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.pathRefreshAction {
+  min-width: 92px;
+}
+
+.filePathBar input,
+.fileActionStack input,
+.fileActionStack select,
+.fileEditorActions input,
+.multiFileComposer input,
+.multiFileComposer select,
+.multiFileComposer textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.tightCheck {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+}
+
+.fileBrowserWorkspace {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(460px, 1fr) minmax(300px, 330px);
+  min-height: 640px;
+}
+
+.fileTreePane,
+.fileDetailsPane {
+  min-width: 0;
+  border-right: 1px solid #eef1f6;
+  background: #fff;
+}
+
+.fileDetailsPane {
+  border-right: 0;
+  border-left: 1px solid #eef1f6;
+}
+
+.fileTreeToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.fileTree {
+  max-height: 590px;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.fileTreeRow {
+  display: grid;
+  grid-template-columns: 18px 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  border: 0;
+  background: transparent;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.fileTreeRow:hover,
+.fileTreeRow.selected {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.fileTreeRow span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileTreeRow small {
+  color: #5f6368;
+  font-size: 11px;
+  padding-right: 8px;
+}
+
+.fileTreeExpander {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+.fileEditorPane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  background: #fff;
+}
+
+.fileEditorToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.fileEditorToolbar > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.fileEditorToolbar strong,
+.fileEditorToolbar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileEditorToolbar span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.fileEditorActions {
+  display: grid;
+  grid-template-columns: 84px auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.codeMirrorShell {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.codeMirrorShell .cm-editor {
+  height: 100%;
+  min-height: 590px;
+  font-size: 13px;
+}
+
+.codeMirrorShell .cm-scroller {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.fileActionStack {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+}
+
+.fileDetailsToolbar {
+  display: grid;
+  grid-template-columns: repeat(7, 30px);
+  gap: 6px;
+  align-items: center;
+}
+
+.fileDetailsToolbar .iconButton {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.fileDetailsToolbar .dangerIconButton {
+  color: #b3261e;
+}
+
+.fileCommandPopover {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid #b9c7dc;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 11px;
+  box-shadow: 0 10px 24px rgba(60, 64, 67, 0.16);
+}
+
+.fileCommandHeader {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border-bottom: 1px solid #eef1f6;
+  padding-bottom: 8px;
+}
+
+.fileCommandHeader strong {
+  color: #202124;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.fileCommandHeader span {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f6368;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileActionStack h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.fileActionStack > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f6368;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileActionGrid,
+.multiFileGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px;
+}
+
+.fileActionGroup {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px;
+}
+
+.fileActionGroup .fileActionGrid {
+  grid-template-columns: minmax(82px, 0.45fr) minmax(0, 1fr);
+}
+
+.fileActionGroupHeader {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.fileActionGroupHeader strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.fileActionGroupHeader span {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f6368;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileActionGroup .secondaryAction span,
+.fileActionGroup .dangerAction span {
+  white-space: nowrap;
+}
+
+.actionCheck {
+  min-height: 34px;
+}
+
+.fileCommandPopover .inlineCheck,
+.multiFileComposer .inlineCheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.fileCommandPopover .inlineCheck span,
+.multiFileComposer .inlineCheck span {
+  color: #3c4043;
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: none;
+}
+
+.fileMetadataList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.fileMetadataList div {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #eef1f6;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.fileMetadataList dt {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.fileMetadataList dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #202124;
+  font-size: 12px;
+}
+
+.contextMenuContent {
+  z-index: 60;
+  min-width: 160px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(60, 64, 67, 0.18);
+  padding: 5px;
+}
+
+.contextMenuItem {
+  border-radius: 6px;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 13px;
+  outline: 0;
+  padding: 7px 9px;
+}
+
+.contextMenuItem:hover,
+.contextMenuItem[data-highlighted] {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.contextMenuItem.danger {
+  color: #b3261e;
+}
+
+.multiFileLayout {
+  display: grid;
+  grid-template-columns: minmax(340px, 400px) minmax(560px, 1fr);
+  gap: 0;
+  align-items: start;
+}
+
+.multiFileComposer {
+  display: grid;
+  align-self: start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-right: 1px solid #eef1f6;
+}
+
+.multiFilePrimaryActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.advancedFileActions {
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 9px 10px;
+}
+
+.advancedFileActions[open] {
+  display: grid;
+  gap: 9px;
+}
+
+.advancedFileActions:not([open]) > :not(summary) {
+  display: none;
+}
+
+.advancedFileActions summary {
+  cursor: pointer;
+  color: #3c4043;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.bulkTransferGrid {
+  display: grid;
+  align-items: end;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.bulkTransferGrid .wideField {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.compactNote {
+  padding: 8px 10px;
+}
+
+.multiFileGrid > label:only-child {
+  grid-column: 1 / -1;
+}
+
+.bulkSummaryPane {
+  min-width: 0;
+}
+
+.bulkSummaryPane > .sectionSubheader {
+  padding: 13px 14px 9px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.bulkProgressStrip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #eef1f6;
+  background: #f8fafd;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.bulkProgressStrip strong {
+  color: #174ea6;
+  font-size: 12px;
+}
+
+.executionResultPanel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 14px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-left: 4px solid #1a73e8;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 11px 12px;
+}
+
+.dispatchForm > .executionResultPanel {
+  margin: 0;
+}
+
+.executionResultHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.executionResultHeader > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.executionResultActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.executionResultHeader strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.executionResultHeader span,
+.executionResultPanel p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.executionResultPanel p {
+  margin: 0;
+}
+
+.executionResultStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 7px;
+}
+
+.executionResultStats span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 7px;
+  background: #fff;
+  padding: 7px 8px;
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.executionResultStats strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #202124;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.bulkDownloadComparison {
+  display: grid;
+  gap: 9px;
+  margin: 12px 14px 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 10px;
+}
+
+.bulkDownloadComparison.same {
+  border-color: #cde8d5;
+  background: #f7fcf8;
+}
+
+.bulkDownloadComparison.contentDiscrepancy {
+  border-color: #f6d7a7;
+  background: #fffbf2;
+}
+
+.bulkDownloadComparison.hierarchyDiscrepancy {
+  border-color: #f4b7b2;
+  background: #fff8f7;
+}
+
+.bulkDownloadComparisonHeader {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bulkDownloadComparisonHeader strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.bulkDownloadComparisonHeader span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.bulkComparisonRows {
+  display: grid;
+  gap: 8px;
+}
+
+.bulkComparisonRow {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid rgba(223, 227, 235, 0.8);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 8px;
+}
+
+.bulkComparisonRowTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bulkComparisonRowTitle strong,
+.bulkComparisonRowTitle span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkComparisonRowTitle strong {
+  color: #202124;
+  font-size: 12px;
+}
+
+.bulkComparisonRowTitle span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.bulkComparisonVariants {
+  display: grid;
+  gap: 6px;
+}
+
+.bulkComparisonVariant {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bulkComparisonVariantLabel {
+  min-width: 0;
+  overflow: hidden;
+  color: #3c4043;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkComparisonClients {
+  margin-top: 0;
+}
+
+.bulkSummaryList {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.bulkSummaryList details {
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px 10px;
+}
+
+.bulkSummaryList summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.bulkSummaryList summary strong,
+.bulkSummaryList summary span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkSummaryClients {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.bulkSummaryClients span {
+  flex: 0 1 auto;
+  max-width: min(22ch, 100%);
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: #3c4043;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkSummaryList .bulkSummaryClients {
+  max-height: 152px;
+  overflow: auto;
+  padding-right: 2px;
+  padding-bottom: 2px;
+}
+
+.bulkSummaryDetail {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.bulkEvidenceBox {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fbfcff;
+  padding: 8px 10px;
+}
+
+.bulkEvidenceBox > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.bulkEvidenceBox span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.bulkEvidenceBox strong {
+  overflow: hidden;
+  color: #202124;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkSummaryPreview {
+  max-height: 150px;
+  overflow: auto;
+  margin: 9px 0 0;
+  border: 1px solid #eef1f6;
+  border-radius: 6px;
+  background: #f8fafd;
+  color: #202124;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 9px 10px;
+  white-space: pre-wrap;
+}
+
+.bulkEvidencePreview .bulkSummaryPreview {
+  margin-top: 4px;
+}
+
+@media (max-width: 1100px) {
+  .fileBrowserWorkspace,
+  .multiFileLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .bulkTransferGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .fileTreePane,
+  .fileDetailsPane,
+  .multiFileComposer {
+    border-right: 0;
+    border-left: 0;
+    border-bottom: 1px solid #eef1f6;
+  }
+}
+
+.rotate180 {
+  transform: rotate(180deg);
 }
 
 .topologyPreview {
@@ -681,6 +1590,13 @@
 
 .proofManager {
   border-top: 1px solid #dfe3eb;
+}
+
+.compactProofManager {
+  display: flex;
+  justify-content: flex-start;
+  border-top: 0;
+  padding: 0;
 }
 
 .proofStatus {

@@ -668,8 +668,7 @@ export type ScheduleRecord = {
   enabled: boolean;
   command_type: string;
   operation: JobOperation;
-  clients: string[];
-  tags: string[];
+  selector_expression: string;
   interval_secs: number;
   catch_up_policy: string;
   catch_up_limit: number;
@@ -1279,7 +1278,20 @@ export type JobOperation =
   | { type: "agent_update_rollback"; rollback_sha256_hex?: string }
   | { type: "agent_update_check"; version_url?: string; activate?: boolean; restart_agent?: boolean }
   | { type: "auth_proof_key_rotate"; new_proof_key_hex: string; rotation_generation?: string }
-  | { type: "file_push"; path: string; mode: number; size_bytes: number; sha256_hex: string; data_base64: string }
+  | {
+      type: "file_push";
+      path: string;
+      mode: number;
+      size_bytes: number;
+      sha256_hex: string;
+      data_base64: string;
+      existing_policy?: FileExistingPolicy;
+      owner?: string | null;
+      group?: string | null;
+      uid?: number | null;
+      gid?: number | null;
+      ownership_policy?: FileOwnershipPolicy;
+    }
   | {
       type: "file_push_chunked";
       path: string;
@@ -1287,6 +1299,12 @@ export type JobOperation =
       size_bytes: number;
       sha256_hex: string;
       chunks: Array<{ offset: number; size_bytes: number; sha256_hex: string; data_base64: string }>;
+      existing_policy?: FileExistingPolicy;
+      owner?: string | null;
+      group?: string | null;
+      uid?: number | null;
+      gid?: number | null;
+      ownership_policy?: FileOwnershipPolicy;
     }
   | {
       type: "file_transfer_start";
@@ -1297,6 +1315,7 @@ export type JobOperation =
       sha256_hex: string;
       chunk_size_bytes: number;
       rate_limit_kbps: number;
+      existing_policy?: FileExistingPolicy;
       resume_token_hash: string;
     }
   | {
@@ -1323,6 +1342,38 @@ export type JobOperation =
       max_bytes: number;
       resume_token_hash: string;
     }
+  | { type: "file_stat"; path: string }
+  | { type: "file_list_dir"; path: string; offset?: number; limit?: number; show_hidden?: boolean }
+  | { type: "file_read_text"; path: string; max_bytes?: number }
+  | {
+      type: "file_write_text";
+      path: string;
+      mode: number;
+      size_bytes: number;
+      sha256_hex: string;
+      content_base64: string;
+      expected_sha256_hex?: string | null;
+      create?: boolean;
+      policy?: FileActionPolicy;
+    }
+  | { type: "file_mkdir"; path: string; mode: number; recursive?: boolean; policy?: FileActionPolicy }
+  | { type: "file_rename"; path: string; new_path: string; overwrite?: boolean; policy?: FileActionPolicy }
+  | { type: "file_delete"; path: string; recursive?: boolean; policy?: FileActionPolicy }
+  | { type: "file_chmod"; path: string; mode: number; recursive?: boolean; policy?: FileActionPolicy }
+  | {
+      type: "file_chown";
+      path: string;
+      owner?: string | null;
+      group?: string | null;
+      uid?: number | null;
+      gid?: number | null;
+      recursive?: boolean;
+      ownership_policy?: FileOwnershipPolicy;
+      policy?: FileActionPolicy;
+    }
+  | { type: "file_copy"; path: string; new_path: string; overwrite?: boolean; recursive?: boolean; policy?: FileActionPolicy }
+  | { type: "file_download"; path: string; max_bytes?: number }
+  | { type: "file_archive_tar"; path: string; max_bytes?: number }
   | { type: "user_sessions" }
   | { type: "process_list"; limit: number }
   | {
@@ -1413,11 +1464,12 @@ export type JobOperation =
       restored_files: RestoreRollbackFile[];
     };
 
+export type FileActionPolicy = "fail" | "ensure" | "ignore";
+export type FileExistingPolicy = "skip" | "replace";
+export type FileOwnershipPolicy = "fail" | "ignore";
+
 export type CreateJobRequest = {
-  targets?: string[];
-  clients: string[];
-  tags: string[];
-  tag_mode?: "any" | "all" | string | null;
+  selector_expression: string;
   destructive: boolean;
   confirmed: boolean;
   command: string;
@@ -1464,8 +1516,7 @@ export type DispatchScheduledJobRequest = {
 export type CreateScheduleRequest = {
   name: string;
   operation: JobOperation;
-  clients: string[];
-  tags: string[];
+  selector_expression: string;
   interval_secs: number;
   start_at_unix: number | null;
   enabled: boolean;
@@ -1479,8 +1530,7 @@ export type BackupPolicyRecord = {
   schedule_id: string;
   name: string;
   enabled: boolean;
-  clients: string[];
-  tags: string[];
+  selector_expression: string;
   paths: string[];
   include_config: boolean;
   recipient_public_key_hex: string | null;
@@ -1502,8 +1552,7 @@ export type BackupPolicyRecord = {
 
 export type CreateBackupPolicyRequest = {
   name: string;
-  clients: string[];
-  tags: string[];
+  selector_expression: string;
   paths: string[];
   include_config: boolean;
   recipient_public_key_hex?: string | null;
@@ -1688,9 +1737,7 @@ export type CreateMigrationLinkRequest = {
 };
 
 export type JobTargetSelection = {
-  clients: string[];
-  tags: string[];
-  tag_mode?: "any" | "all" | string | null;
+  selector_expression: string;
   destructive: boolean;
   confirmed: boolean;
 };
@@ -1883,9 +1930,7 @@ export type UpdateDataSourcePresetResponse = {
 export type AssignDataSourcePresetRequest = {
   domain: string;
   preset_id: string;
-  clients: string[];
-  tags: string[];
-  tag_mode?: "any" | "all" | string | null;
+  selector_expression: string;
   confirmed: boolean;
 };
 

@@ -10,7 +10,8 @@ import {
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
 import { buildEnvelopesForOperation, type ProofMaterial } from "./proof";
-import type { CreateJobRequest, CreateJobResponse, JobHistoryRecord, JobOutputRecord, JobOperation } from "./types";
+import { selectorExpressionForClientIds } from "./searchExpression";
+import type { CreateJobRequest, CreateJobResponse, FileExistingPolicy, JobHistoryRecord, JobOutputRecord, JobOperation } from "./types";
 
 export const MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 export const MAX_RESUMABLE_FILE_PUSH_BYTES = 1024 * 1024 * 1024;
@@ -42,6 +43,7 @@ export type ResumableUploadRequest = {
   loadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   modeText: string;
   multiTargetPolicy?: BrowserTransferMultiTargetPolicy;
+  existingPolicy?: FileExistingPolicy;
   path: string;
   proofMaterial: ProofMaterial;
   proofTtlSecs: number;
@@ -119,15 +121,14 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
   if (!request.file) {
     throw new Error("Resumable upload source is required");
   }
-  if (!request.path.startsWith("/")) {
-    throw new Error("Resumable upload path must be absolute");
-  }
+  const remotePath = normalizeTransferAbsolutePath(request.path, "Resumable upload path");
   if (request.file.size > MAX_RESUMABLE_FILE_PUSH_BYTES) {
     throw new Error(`Resumable upload exceeds ${MAX_RESUMABLE_FILE_PUSH_BYTES} bytes`);
   }
   const chunkSizeBytes = clampInteger(request.chunkSizeBytes, 1, FILE_TRANSFER_CHUNK_BYTES);
   const rateLimitKbps = clampInteger(request.rateLimitKbps, 0, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS);
   const multiTargetPolicy = request.multiTargetPolicy ?? "same-offset";
+  const existingPolicy = request.existingPolicy ?? "skip";
   const sessionId = request.sessionId?.trim() || crypto.randomUUID();
   const resumeToken = request.resumeToken?.trim() || randomHex(32);
   const mode = parseFileMode(request.modeText);
@@ -149,12 +150,13 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
   const start = await submitTransferStep(request, "file_transfer_start", {
     type: "file_transfer_start",
     session_id: sessionId,
-    path: request.path,
+    path: remotePath,
     mode,
     size_bytes: sizeBytes,
     sha256_hex: sha256HexValue,
     chunk_size_bytes: chunkSizeBytes,
     rate_limit_kbps: rateLimitKbps,
+    existing_policy: existingPolicy,
     resume_token_hash: resumeTokenHash,
   });
   const startStatuses = await waitForTransferStatus(
@@ -167,9 +169,25 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
   );
   let targetOffsets = targetOffsetsFromStatuses(startStatuses, sizeBytes);
   ensureTargetOffsetsForClients(targetOffsets, request.clientIds, "upload start");
+  const activeClientIds = activeClientIdsFromStatuses(startStatuses);
+  const activeStartStatuses = startStatuses.filter((status) => activeClientIds.includes(status.clientId));
+  if (activeClientIds.length === 0) {
+    ensureAllTargetsAtOffset(targetOffsets, sizeBytes, "upload start");
+    request.onProgress({
+      event: "committed",
+      jobId: start.job_id,
+      multiTargetPolicy,
+      nextOffset: sizeBytes,
+      resumeToken,
+      sessionId,
+      sizeBytes,
+      targetOffsets,
+    });
+    return start;
+  }
 
   if (multiTargetPolicy === "same-offset") {
-    let nextOffset = uniformNextOffset(startStatuses, sizeBytes);
+    let nextOffset = uniformNextOffset(activeStartStatuses, sizeBytes);
     request.onProgress({
       event: "started",
       jobId: start.job_id,
@@ -195,20 +213,20 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
         },
         resume_token_hash: resumeTokenHash,
       };
-      const chunkJob = await submitTransferStep(request, "file_transfer_chunk", operation);
+      const chunkJob = await submitTransferStep(request, "file_transfer_chunk", operation, activeClientIds);
       const chunkStatuses = await waitForTransferStatus(
         request,
         chunkJob.job_id,
         sessionId,
         "file_transfer_chunk_ack",
         chunkJob.accepted_targets,
-        request.clientIds,
+        activeClientIds,
       );
       const acknowledgedOffset = uniformNextOffset(chunkStatuses, sizeBytes);
       if (acknowledgedOffset <= nextOffset) {
         throw new Error(`Resumable upload made no progress at offset ${nextOffset}`);
       }
-      targetOffsets = targetOffsetsFromStatuses(chunkStatuses, sizeBytes);
+      targetOffsets = { ...targetOffsets, ...targetOffsetsFromStatuses(chunkStatuses, sizeBytes) };
       ensureTargetOffsetsForClients(targetOffsets, request.clientIds, "upload chunk");
       nextOffset = acknowledgedOffset;
       request.onProgress({
@@ -227,17 +245,17 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
       type: "file_transfer_commit",
       session_id: sessionId,
       resume_token_hash: resumeTokenHash,
-    });
+    }, activeClientIds);
     const commitStatuses = await waitForTransferStatus(
       request,
       commit.job_id,
       sessionId,
       "file_transfer_commit",
       commit.accepted_targets,
-      request.clientIds,
+      activeClientIds,
     );
     const committedOffset = uniformNextOffset(commitStatuses, sizeBytes);
-    targetOffsets = targetOffsetsFromStatuses(commitStatuses, sizeBytes);
+    targetOffsets = { ...targetOffsets, ...targetOffsetsFromStatuses(commitStatuses, sizeBytes) };
     ensureTargetOffsetsForClients(targetOffsets, request.clientIds, "upload commit");
     ensureAllTargetsAtOffset(targetOffsets, sizeBytes, "upload commit");
     if (committedOffset !== sizeBytes) {
@@ -317,16 +335,16 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
     type: "file_transfer_commit",
     session_id: sessionId,
     resume_token_hash: resumeTokenHash,
-  });
+  }, activeClientIds);
   const commitStatuses = await waitForTransferStatus(
     request,
     commit.job_id,
     sessionId,
     "file_transfer_commit",
     commit.accepted_targets,
-    request.clientIds,
+    activeClientIds,
   );
-  targetOffsets = targetOffsetsFromStatuses(commitStatuses, sizeBytes);
+  targetOffsets = { ...targetOffsets, ...targetOffsetsFromStatuses(commitStatuses, sizeBytes) };
   ensureTargetOffsetsForClients(targetOffsets, request.clientIds, "upload commit");
   ensureAllTargetsAtOffset(targetOffsets, sizeBytes, "upload commit");
   request.onProgress({
@@ -350,9 +368,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
   if (!request.confirmed) {
     throw new Error("Resumable download requires confirmation");
   }
-  if (!request.path.startsWith("/")) {
-    throw new Error("Resumable download path must be absolute");
-  }
+  const remotePath = normalizeTransferAbsolutePath(request.path, "Resumable download path");
   if (request.clientIds.length !== 1) {
     throw new Error(`Resumable download requires exactly one resolved target; got ${request.clientIds.length}`);
   }
@@ -368,7 +384,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
   const start = await submitTransferStep(request, "file_transfer_download_start", {
     type: "file_transfer_download_start",
     session_id: sessionId,
-    path: request.path,
+    path: remotePath,
     chunk_size_bytes: chunkSizeBytes,
     rate_limit_kbps: rateLimitKbps,
     resume_token_hash: resumeTokenHash,
@@ -387,7 +403,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
     throw new Error(`Stream-to-file download exceeds ${MAX_BROWSER_STREAMING_RESUMABLE_DOWNLOAD_BYTES} bytes`);
   }
   const fileSha256Hex = statusStringExtra(startStatuses[0].payload, "sha256_hex");
-  const sink = await openDownloadSink(downloadSinkMode, downloadFileName(request.downloadName, request.path), sizeBytes);
+  const sink = await openDownloadSink(downloadSinkMode, downloadFileName(request.downloadName, remotePath), sizeBytes);
   let nextOffset = uniformNextOffset(startStatuses, sizeBytes);
   request.onProgress({
     event: "started",
@@ -469,8 +485,7 @@ async function submitTransferStep(
   });
   return request.createJob({
     argv: [],
-    clients: targetClientIds,
-    tags: [],
+    selector_expression: selectorExpressionForClientIds(targetClientIds),
     destructive: false,
     confirmed: request.confirmed,
     command,
@@ -577,6 +592,14 @@ function targetOffsetsFromStatuses(statuses: TransferClientStatus[], sizeBytes: 
   return targetOffsets;
 }
 
+function activeClientIdsFromStatuses(statuses: TransferClientStatus[]): string[] {
+  return statuses.filter((status) => !transferStatusSkipped(status.payload)).map((status) => status.clientId);
+}
+
+function transferStatusSkipped(status: TransferStatusPayload): boolean {
+  return status.extra?.skipped === true;
+}
+
 function ensureTargetOffsetsForClients(targetOffsets: Record<string, number>, clientIds: string[], label: string) {
   const missing = clientIds.filter((clientId) => targetOffsets[clientId] == null);
   if (missing.length > 0) {
@@ -621,6 +644,24 @@ function clampInteger(value: number, min: number, max: number): number {
     return min;
   }
   return Math.trunc(Math.min(Math.max(value, min), max));
+}
+
+function normalizeTransferAbsolutePath(path: string, label: string): string {
+  const trimmed = path.trim();
+  if (!trimmed.startsWith("/")) {
+    throw new Error(`${label} must be absolute`);
+  }
+  const parts: string[] = [];
+  for (const part of trimmed.split("/")) {
+    if (!part) {
+      continue;
+    }
+    if (part === "." || part === "..") {
+      throw new Error(`${label} must not contain . or .. segments`);
+    }
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
 }
 
 function isTerminalJobStatus(status: string): boolean {

@@ -91,9 +91,11 @@ export function parseFileMode(value: string): number {
   if (!trimmed) {
     throw new Error("File mode is required");
   }
-  const radix = trimmed.startsWith("0") ? 8 : 10;
   const digits = trimmed.startsWith("0o") ? trimmed.slice(2) : trimmed;
-  const mode = Number.parseInt(digits, radix);
+  if (!/^[0-7]{1,4}$/.test(digits)) {
+    throw new Error("File mode must be an octal value between 0000 and 0777");
+  }
+  const mode = Number.parseInt(digits, 8);
   if (!Number.isInteger(mode) || mode < 0 || mode > 0o777) {
     throw new Error("File mode must be between 0000 and 0777");
   }

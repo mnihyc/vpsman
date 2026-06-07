@@ -23,9 +23,7 @@ fn compare_schedule(left: &ScheduleView, right: &ScheduleView, sort: Option<&str
         "enabled" | "state" => left.enabled.cmp(&right.enabled),
         "interval_secs" | "interval" => left.interval_secs.cmp(&right.interval_secs),
         "command_type" | "operation" => left.command_type.cmp(&right.command_type),
-        "targets" => {
-            (left.clients.len() + left.tags.len()).cmp(&(right.clients.len() + right.tags.len()))
-        }
+        "targets" => left.selector_expression.cmp(&right.selector_expression),
         "failures" | "failure_count" => left.failure_count.cmp(&right.failure_count),
         "name" => left.name.cmp(&right.name),
         _ => compare_text_or_number(&left.next_run_at, &right.next_run_at),
@@ -50,13 +48,9 @@ fn schedule_matches_search(schedule: &ScheduleView, needle: &str) -> bool {
             .map(|value| value.to_ascii_lowercase().contains(needle))
             .unwrap_or(false)
         || schedule
-            .clients
-            .iter()
-            .any(|client| client.to_ascii_lowercase().contains(needle))
-        || schedule
-            .tags
-            .iter()
-            .any(|tag| tag.to_ascii_lowercase().contains(needle))
+            .selector_expression
+            .to_ascii_lowercase()
+            .contains(needle)
 }
 
 fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -70,12 +64,8 @@ fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
         (Some("interval_secs" | "interval"), false) => "interval_secs ASC, id ASC",
         (Some("name"), true) => "name DESC, id DESC",
         (Some("name"), false) => "name ASC, id ASC",
-        (Some("targets"), true) => {
-            "cardinality(target_clients) + cardinality(target_tags) DESC, id DESC"
-        }
-        (Some("targets"), false) => {
-            "cardinality(target_clients) + cardinality(target_tags) ASC, id ASC"
-        }
+        (Some("targets"), true) => "selector_expression DESC, id DESC",
+        (Some("targets"), false) => "selector_expression ASC, id ASC",
         (Some("failures" | "failure_count"), true) => "failure_count DESC, id DESC",
         (Some("failures" | "failure_count"), false) => "failure_count ASC, id ASC",
         (_, true) => "next_run_at DESC, id DESC",
@@ -150,8 +140,7 @@ impl Repository {
                         name,
                         enabled,
                         operation,
-                        target_clients,
-                        target_tags,
+                        selector_expression,
                         interval_secs,
                         catch_up_policy,
                         catch_up_limit,
@@ -168,8 +157,7 @@ impl Repository {
                         OR id::text ILIKE $3 ESCAPE '\'
                         OR name ILIKE $3 ESCAPE '\'
                         OR operation::text ILIKE $3 ESCAPE '\'
-                        OR array_to_string(target_clients, ' ') ILIKE $3 ESCAPE '\'
-                        OR array_to_string(target_tags, ' ') ILIKE $3 ESCAPE '\'
+                        OR selector_expression ILIKE $3 ESCAPE '\'
                         OR catch_up_policy ILIKE $3 ESCAPE '\'
                         OR last_error ILIKE $3 ESCAPE '\'
                     )
@@ -192,8 +180,7 @@ impl Repository {
                             name: row.try_get("name")?,
                             enabled: row.try_get("enabled")?,
                             operation: operation.0,
-                            clients: row.try_get("target_clients")?,
-                            tags: row.try_get("target_tags")?,
+                            selector_expression: row.try_get("selector_expression")?,
                             interval_secs: row.try_get("interval_secs")?,
                             catch_up_policy: row.try_get("catch_up_policy")?,
                             catch_up_limit: row.try_get("catch_up_limit")?,
@@ -229,8 +216,7 @@ impl Repository {
                     name: request.name,
                     enabled: request.enabled,
                     operation: request.operation,
-                    clients: request.clients,
-                    tags: request.tags,
+                    selector_expression: request.selector_expression,
                     interval_secs: request.interval_secs as i64,
                     catch_up_policy: request.catch_up_policy,
                     catch_up_limit: request.catch_up_limit,
@@ -260,8 +246,7 @@ impl Repository {
                     metadata: serde_json::json!({
                         "name": &schedule.name,
                         "operation_type": &schedule.command_type,
-                        "clients": &schedule.clients,
-                        "tags": &schedule.tags,
+                        "selector_expression": &schedule.selector_expression,
                         "interval_secs": schedule.interval_secs,
                         "catch_up_policy": &schedule.catch_up_policy,
                         "catch_up_limit": schedule.catch_up_limit,
@@ -284,8 +269,7 @@ impl Repository {
                         name,
                         enabled,
                         operation,
-                        target_clients,
-                        target_tags,
+                        selector_expression,
                         interval_secs,
                         catch_up_policy,
                         catch_up_limit,
@@ -293,13 +277,12 @@ impl Repository {
                         max_failures,
                         next_run_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, to_timestamp($13))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, to_timestamp($12))
                     ON CONFLICT (name) DO UPDATE SET
                         actor_id = EXCLUDED.actor_id,
                         enabled = EXCLUDED.enabled,
                         operation = EXCLUDED.operation,
-                        target_clients = EXCLUDED.target_clients,
-                        target_tags = EXCLUDED.target_tags,
+                        selector_expression = EXCLUDED.selector_expression,
                         interval_secs = EXCLUDED.interval_secs,
                         catch_up_policy = EXCLUDED.catch_up_policy,
                         catch_up_limit = EXCLUDED.catch_up_limit,
@@ -314,8 +297,7 @@ impl Repository {
                         name,
                         enabled,
                         operation,
-                        target_clients,
-                        target_tags,
+                        selector_expression,
                         interval_secs,
                         catch_up_policy,
                         catch_up_limit,
@@ -333,8 +315,7 @@ impl Repository {
                 .bind(&request.name)
                 .bind(request.enabled)
                 .bind(SqlJson(request.operation.clone()))
-                .bind(&request.clients)
-                .bind(&request.tags)
+                .bind(request.selector_expression.trim())
                 .bind(request.interval_secs as i64)
                 .bind(&request.catch_up_policy)
                 .bind(request.catch_up_limit)
@@ -349,8 +330,7 @@ impl Repository {
                     name: row.try_get("name")?,
                     enabled: row.try_get("enabled")?,
                     operation: operation.0,
-                    clients: row.try_get("target_clients")?,
-                    tags: row.try_get("target_tags")?,
+                    selector_expression: row.try_get("selector_expression")?,
                     interval_secs: row.try_get("interval_secs")?,
                     catch_up_policy: row.try_get("catch_up_policy")?,
                     catch_up_limit: row.try_get("catch_up_limit")?,
@@ -377,8 +357,7 @@ impl Repository {
                 .bind(serde_json::json!({
                     "name": &schedule.name,
                     "operation_type": &schedule.command_type,
-                    "clients": &schedule.clients,
-                    "tags": &schedule.tags,
+                    "selector_expression": &schedule.selector_expression,
                     "interval_secs": schedule.interval_secs,
                     "catch_up_policy": &schedule.catch_up_policy,
                     "catch_up_limit": schedule.catch_up_limit,
@@ -401,8 +380,7 @@ struct ScheduleRowParts {
     name: String,
     enabled: bool,
     operation: vpsman_common::JobCommand,
-    clients: Vec<String>,
-    tags: Vec<String>,
+    selector_expression: String,
     interval_secs: i64,
     catch_up_policy: String,
     catch_up_limit: i32,
@@ -423,8 +401,7 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> ScheduleView {
         enabled: parts.enabled,
         command_type,
         operation: parts.operation,
-        clients: parts.clients,
-        tags: parts.tags,
+        selector_expression: parts.selector_expression,
         interval_secs: parts.interval_secs,
         catch_up_policy: parts.catch_up_policy,
         catch_up_limit: parts.catch_up_limit,

@@ -12,6 +12,7 @@ use crate::{
     model::{
         BulkResolveRequest, CreateRestorePlanRequest, ListQuery, RestorePlanStatus, RestorePlanView,
     },
+    selector_expression::id_selector_expression,
     state::AppState,
 };
 
@@ -108,9 +109,15 @@ pub(crate) fn validate_create_restore_plan(
         return Err(ApiError::bad_request("restore_path_limit_exceeded"));
     }
     for path in &request.paths {
+        if path_contains_dot_segment(path) {
+            return Err(ApiError::bad_request("restore_path_invalid"));
+        }
         validate_file_path(path)?;
     }
     if let Some(destination_root) = &request.destination_root {
+        if path_contains_dot_segment(destination_root) {
+            return Err(ApiError::bad_request("restore_destination_root_invalid"));
+        }
         validate_file_path(destination_root)?;
     }
     if request
@@ -126,6 +133,11 @@ pub(crate) fn validate_create_restore_plan(
     Ok(())
 }
 
+fn path_contains_dot_segment(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
 async fn ensure_single_restore_target(
     state: &AppState,
     request: &CreateRestorePlanRequest,
@@ -133,9 +145,7 @@ async fn ensure_single_restore_target(
     let resolved = state
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
-            clients: vec![request.target_client_id.clone()],
-            tags: Vec::new(),
-            tag_mode: None,
+            selector_expression: id_selector_expression(&request.target_client_id),
             destructive: false,
             confirmed: true,
         })

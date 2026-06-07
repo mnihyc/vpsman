@@ -534,10 +534,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
     let plan = test_plan();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["right-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:right-b".to_string(),
         destructive: true,
         confirmed: true,
         command: "network_apply".to_string(),
@@ -606,10 +603,7 @@ async fn network_apply_degrades_unprivileged_target_without_gateway() {
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["left-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:left-a".to_string(),
         destructive: true,
         confirmed: true,
         command: "network_apply".to_string(),
@@ -658,10 +652,7 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["right-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:right-b".to_string(),
         destructive: true,
         confirmed: true,
         command: "network_rollback".to_string(),
@@ -710,10 +701,7 @@ async fn network_status_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["right-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:right-b".to_string(),
         destructive: false,
         confirmed: false,
         command: "network_status".to_string(),
@@ -762,10 +750,7 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["right-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:right-b".to_string(),
         destructive: false,
         confirmed: false,
         command: "network_probe".to_string(),
@@ -816,10 +801,7 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
     }
 
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["left-a".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:left-a".to_string(),
         destructive: false,
         confirmed: false,
         command: "network_speed_test".to_string(),

@@ -1,67 +1,36 @@
-import type { Dispatch, SetStateAction } from "react";
-import { Server, Tag } from "lucide-react";
-import { usePanelDisplaySettings } from "../panelDisplay";
-import type { AgentView, TagView } from "../types";
-import { formatVpsName, toggleValue } from "../utils";
-
-type SetValue<T> = Dispatch<SetStateAction<T>>;
+import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import type { AgentView } from "../types";
 
 export function JobTargetSelector({
   agents,
-  selectedClients,
-  selectedTags,
-  setSelectedClients,
-  setSelectedTags,
-  setTagMode,
-  tagMode,
-  tags,
+  selectorExpression,
+  setSelectorExpression,
+  verification,
+  verificationMessage,
 }: {
   agents: AgentView[];
-  selectedClients: string[];
-  selectedTags: string[];
-  setSelectedClients: SetValue<string[]>;
-  setSelectedTags: SetValue<string[]>;
-  setTagMode: (value: "any" | "all") => void;
-  tagMode: "any" | "all";
-  tags: TagView[];
+  selectorExpression: string;
+  setSelectorExpression: (value: string) => void;
+  verification: "checking" | "invalid" | "neutral" | "valid";
+  verificationMessage: string | null;
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <div className="targetSelector">
-      <strong>Targets</strong>
-      <div className="chipList">
-        {agents.map((agent) => (
-          <label className="checkChip" key={agent.id}>
-            <input
-              checked={selectedClients.includes(agent.id)}
-              onChange={() => setSelectedClients((values) => toggleValue(values, agent.id))}
-              type="checkbox"
-            />
-            <Server size={14} />
-            <span>{formatVpsName(agent, vpsNameDisplayMode)}</span>
-          </label>
-        ))}
-        {tags.map((tag) => (
-          <label className="checkChip" key={tag.name}>
-            <input
-              checked={selectedTags.includes(tag.name)}
-              onChange={() => setSelectedTags((values) => toggleValue(values, tag.name))}
-              type="checkbox"
-            />
-            <Tag size={14} />
-            <span>{tag.name}</span>
-          </label>
-        ))}
+      <div className="targetSelectorHeader">
+        <strong>Targets</strong>
+        <span>{verificationMessage ?? "Select VPSs by id, tag, provider, country, or status"}</span>
       </div>
-      <div className="targetModeControls" role="group" aria-label="Tag match mode">
-        <span>Tags</span>
-        <button className={tagMode === "any" ? "selected" : ""} onClick={() => setTagMode("any")} type="button">
-          Any
-        </button>
-        <button className={tagMode === "all" ? "selected" : ""} onClick={() => setTagMode("all")} type="button">
-          All
-        </button>
-      </div>
+      <SearchExpressionInput
+        agents={agents}
+        ariaLabel="Bulk target selector expression"
+        className="targetExpressionBar"
+        onChange={setSelectorExpression}
+        placeholder="id:edge-* || (provider:alpha && country:US)"
+        showMatchCount
+        value={selectorExpression}
+        verification={verification}
+        verificationMessage={verificationMessage}
+      />
     </div>
   );
 }

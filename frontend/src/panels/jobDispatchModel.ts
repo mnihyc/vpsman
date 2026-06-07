@@ -123,6 +123,8 @@ export function buildOperation(
       mode: parseFileMode(filePushMode),
       size_bytes: filePushPayload.sizeBytes,
       sha256_hex: filePushPayload.sha256Hex,
+      existing_policy: "replace" as const,
+      ownership_policy: "fail" as const,
     };
     if (filePushPayload.chunks) {
       return {

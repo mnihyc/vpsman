@@ -7,7 +7,7 @@ import {
   sha256Hex,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -30,6 +30,17 @@ async function dispatchWithPrompt(composer: Locator) {
   await activate(composer.getByRole("button", { name: "Dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+}
+
+async function confirmVisiblePrompt(page: import("@playwright/test").Page, label: string) {
+  const prompt = page.locator(".confirmationPrompt").last();
+  await expect(prompt).toBeVisible();
+  await activate(prompt.getByRole("button", { name: label }));
+}
+
+async function unlockProofFor(page: import("@playwright/test").Page, view: string, subpage: string) {
+  await unlockProofFromTop(page);
+  await openConsoleSubpage(page, view, subpage);
 }
 
 async function openFleetFromDashboard(page: import("@playwright/test").Page) {
@@ -95,7 +106,9 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
   }
 
   await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
-  await expect(page.getByPlaceholder("Search VPS, tag, provider, job")).toBeVisible();
+  if (testInfo.project.name.includes("desktop")) {
+    await expect(page.getByRole("searchbox", { name: "Search fleet" })).toBeVisible();
+  }
   const fleetGrid = page.getByLabel("VPS instance records data grid");
   const edgeRow = fleetGrid.locator(".gridBody [role=row]", { hasText: "edge-sfo-01" }).first();
   await expect(edgeRow).toBeVisible();
@@ -306,13 +319,13 @@ test("manages data-source preset assignments from the tags view", async ({ page 
   await expect(activeSourcesSearch).toBeVisible();
   await expect(panel.getByText(/\d+ of \d+ sources/)).toBeVisible();
   await expect(panel.getByText(/Page 1 \/ \d+/).first()).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection").getByText("shared:vnstat-json")).toBeVisible();
+  await expect(panel.locator(".sourceStatusSection .historyRow").filter({ hasText: "shared:vnstat-json" })).toBeVisible();
   await expect(panel.locator(".sourceStatusSection").getByText("vnstat", { exact: true })).toBeVisible();
   await expect(panel.locator(".sourceStatusSection").getByText("no server store, 2 artifacts")).toBeVisible();
   await expect(panel.locator(".sourceStatusSection").getByText("no server store, 1 releases, 1 external")).toBeVisible();
   await activeSourcesSearchField.selectOption("Preset");
   await activeSourcesSearch.fill("shared:vnstat-json");
-  await expect(panel.locator(".sourceStatusSection").getByText("shared:vnstat-json")).toBeVisible();
+  await expect(panel.locator(".sourceStatusSection .historyRow").filter({ hasText: "shared:vnstat-json" })).toBeVisible();
   await activeSourcesSearch.fill("");
 
   await openConsoleSubpage(page, "Tags", "Data-source presets");
@@ -331,7 +344,10 @@ test("manages data-source preset assignments from the tags view", async ({ page 
   await presetRegistrySearch.fill("");
   await presetPanel.getByLabel("Assignment domain").selectOption("runtime_traffic_accounting_source");
   await presetPanel.getByLabel("Preset", { exact: true }).selectOption("11111111-1111-4111-8111-111111111111");
-  await checkControl(presetPanel.getByLabel("edge", { exact: true }));
+  await presetPanel
+    .getByRole("searchbox", { name: "Data-source assignment target expression" })
+    .fill("(provider:alpha && country:US) || id:agent-fra-02");
+  await expect(presetPanel.getByText("2/3 matching VPSs")).toBeVisible();
   await activate(presetPanel.getByRole("button", { name: "Assign preset" }));
 
   const request = await page.evaluate(() => {
@@ -344,7 +360,7 @@ test("manages data-source preset assignments from the tags view", async ({ page 
     confirmed: false,
     domain: "runtime_traffic_accounting_source",
     preset_id: "11111111-1111-4111-8111-111111111111",
-    tags: ["edge"],
+    selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
   });
 });
 
@@ -352,7 +368,7 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   test.skip(testInfo.project.name.includes("mobile"), "dense access administration is covered in the desktop console layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Open access controls" }));
+  await activate(page.getByRole("button", { name: "Open proof unlock" }));
   await activate(page.getByRole("tab", { name: "VPS clients" }));
 
   await expect(page.getByRole("heading", { name: "Enrollment tokens" })).toBeVisible();
@@ -580,18 +596,31 @@ test("generates local proof envelopes before dispatching a privileged job", asyn
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   await expect(page.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
-  await page.getByLabel("Super password").fill("local-super-password");
-  await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use proof" }));
-  await expect(page.getByText("Proof unlocked").first()).toBeVisible();
+  await unlockProofFor(page, "Jobs", "Dispatch");
+  const topbar = page.locator(".topbar");
+  await expect(topbar.getByRole("button", { name: "Lock proof" })).toBeVisible();
+  await activate(topbar.getByRole("button", { name: "Lock proof" }));
+  await expect(topbar.getByRole("button", { name: "Open proof unlock" })).toBeVisible();
+  await expect(page.locator(".commandComposer").getByLabel("Super password")).toHaveCount(0);
+  await expect(page.locator(".commandComposer").getByRole("button", { name: "Unlock" })).toBeVisible();
+  await unlockProofFor(page, "Jobs", "Dispatch");
 
   await page.getByLabel("Command argv").fill("/usr/bin/uptime");
-  await checkControl(page.getByLabel("edge-sfo-01"));
+  const targetExpression = page.getByLabel("Bulk target selector expression");
+  await targetExpression.fill("name:s");
+  await expect(page.getByRole("option", { name: "name:edge-sfo-01" })).toBeVisible();
+  await targetExpression.fill("");
+  await page.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await activate(page.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("1 resolved targets")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
 
-  await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
+  const resultPanel = page.getByLabel("Execution result");
+  await expect(resultPanel).toBeVisible();
+  await expect(resultPanel.getByText(/completed on 1 VPS/)).toBeVisible();
+  await activate(page.getByRole("button", { name: "Open job details" }));
+  await expect(page.getByRole("heading", { level: 1, name: "Job history" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Target results" })).toBeVisible();
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -599,7 +628,7 @@ test("generates local proof envelopes before dispatching a privileged job", asyn
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     argv: ["/usr/bin/uptime"],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "/usr/bin/uptime",
     envelope: null,
     operation: { argv: ["/usr/bin/uptime"], pty: false, type: "shell" },
@@ -616,18 +645,16 @@ test("dispatches terminal session control operations with local proof", async ({
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await composer.getByLabel("Super password").fill("local-super-password");
-  await composer.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(composer.getByRole("button", { name: "Use proof" }));
+  await unlockProofFor(page, "Jobs", "Dispatch");
   await activate(composer.getByRole("button", { name: "Terminal" }));
   await composer.getByLabel("Terminal argv").fill("/bin/sh -l");
   await composer.getByLabel("Terminal cwd").fill("/root");
   await composer.getByLabel("Terminal columns").fill("100");
   await composer.getByLabel("Terminal rows").fill("30");
-  await checkControl(composer.getByLabel("edge-sfo-01"));
+  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await dispatchWithPrompt(composer);
 
-  await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
+  await expect(page.getByLabel("Execution result").getByText(/completed on 1 VPS/)).toBeVisible();
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> } })
       .__vpsmanTestRequests.jobs;
@@ -635,7 +662,7 @@ test("dispatches terminal session control operations with local proof", async ({
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "terminal_session",
     operation: {
       argv: ["/bin/sh", "-l"],
@@ -657,13 +684,11 @@ test("previews degraded update targets and sends explicit force override", async
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
-  await page.getByLabel("Super password").fill("local-super-password");
-  await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use proof" }));
+  await unlockProofFor(page, "Jobs", "Dispatch");
   await activate(page.getByRole("button", { name: "Update", exact: true }));
   await page.getByLabel("Agent update artifact URL").fill("https://updates.example/vpsman-agent");
   await page.getByLabel("Agent update SHA-256").fill("a".repeat(64));
-  await checkControl(page.locator(".commandComposer").getByLabel("backup-nyc-03"));
+  await page.locator(".commandComposer").getByLabel("Bulk target selector expression").fill("id:agent-nyc-03");
   await checkControl(page.locator(".commandComposer").getByLabel("Confirmed"));
   await activate(page.getByRole("button", { name: "Preview" }));
 
@@ -675,7 +700,7 @@ test("previews degraded update targets and sends explicit force override", async
   await checkControl(page.getByLabel("Force unprivileged job best effort"));
   await expect(impact.getByText("Forced best effort")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
-  await expect(page.getByText(/Job 11111111 accepted; 1 accepted/)).toBeVisible();
+  await expect(page.getByText(/1 unavailable/)).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -691,7 +716,7 @@ test("previews degraded update targets and sends explicit force override", async
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
-    clients: ["agent-nyc-03"],
+    selector_expression: "id:agent-nyc-03",
     command: "agent_update",
     force_unprivileged: true,
     operation: {
@@ -841,10 +866,8 @@ test("prepares backup artifacts server-side before dispatching executable restor
   await openConsoleSubpage(page, "Backups", "Restore");
 
   await expect(page.getByRole("heading", { name: "Restore operations" })).toBeVisible();
-  await page.getByLabel("Super password").fill("local-super-password");
-  await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use proof" }));
-  await expect(page.getByText("Proof unlocked").first()).toBeVisible();
+  await unlockProofFor(page, "Backups", "Restore");
+  await expect(page.locator(".topbar").getByRole("button", { name: "Lock proof" })).toBeVisible();
 
   await page.getByLabel("Restore source backup request").selectOption(backupId);
   await page.getByLabel("Restore target client").selectOption("agent-fra-02");
@@ -905,7 +928,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     argv: [],
-    clients: ["agent-fra-02"],
+    selector_expression: "id:agent-fra-02",
     command: "restore",
     confirmed: true,
     destructive: true,
@@ -982,7 +1005,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
   expect(JSON.stringify(rollbackRequest)).not.toContain("local-super-password");
   expect(rollbackRequest).toMatchObject({
     argv: [],
-    clients: ["agent-fra-02"],
+    selector_expression: "id:agent-fra-02",
     command: "restore_rollback",
     confirmed: true,
     destructive: true,
@@ -1038,18 +1061,16 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await openConsoleSubpage(page, "Topology", "Apply / rollback");
 
   await expect(page.getByRole("heading", { name: "Network apply" })).toBeVisible();
-  await page.getByLabel("Super password").fill("local-super-password");
-  await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use proof" }));
-  await expect(page.getByText("Proof unlocked").first()).toBeVisible();
+  await unlockProofFor(page, "Topology", "Apply / rollback");
+  await expect(page.locator(".topbar").getByRole("button", { name: "Lock proof" })).toBeVisible();
 
   await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network apply endpoint side").selectOption("left");
   await page.getByLabel("Network apply timeout seconds").fill("90");
-  await checkControl(page.getByLabel("Confirm network apply"));
   await activate(page.getByRole("button", { name: "Apply side" }));
+  await confirmVisiblePrompt(page, "Apply side");
 
-  await expect(page.getByText(/Apply job 11111111 accepted/)).toBeVisible();
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
   const request = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1057,7 +1078,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "network_apply",
     confirmed: true,
     destructive: true,
@@ -1104,7 +1125,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(envelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
 
   await activate(page.getByRole("button", { name: "Rollback side" }));
-  await expect(page.getByText(/Rollback job 11111111 accepted/)).toBeVisible();
+  await confirmVisiblePrompt(page, "Rollback side");
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
   const rollbackRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1112,7 +1134,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(rollbackRequest)).not.toContain("local-super-password");
   expect(rollbackRequest).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "network_rollback",
     confirmed: true,
     destructive: true,
@@ -1134,7 +1156,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(rollbackEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
 
   await activate(page.getByRole("button", { name: "Inspect side" }));
-  await expect(page.getByText(/Status job 11111111 accepted/)).toBeVisible();
+  await confirmVisiblePrompt(page, "Inspect side");
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
   const statusRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1142,7 +1165,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(statusRequest)).not.toContain("local-super-password");
   expect(statusRequest).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "network_status",
     confirmed: false,
     destructive: false,
@@ -1166,7 +1189,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network probe count").fill("4");
   await page.getByLabel("Network probe interval milliseconds").fill("700");
   await activate(page.getByRole("button", { name: "Probe latency" }));
-  await expect(page.getByText(/Probe job 11111111 accepted/)).toBeVisible();
+  await confirmVisiblePrompt(page, "Probe latency");
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
   const probeRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1174,7 +1198,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(probeRequest)).not.toContain("local-super-password");
   expect(probeRequest).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "network_probe",
     confirmed: false,
     destructive: false,
@@ -1205,7 +1229,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network speed test TCP port").fill("55201");
   await page.getByLabel("Network speed test connect timeout milliseconds").fill("2500");
   await activate(page.getByRole("button", { name: "Test speed" }));
-  await expect(page.getByText(/Speed test job 11111111 accepted/)).toBeVisible();
+  await confirmVisiblePrompt(page, "Run speed test");
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 2 VPSs/)).toBeVisible();
   const speedRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1213,7 +1238,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(speedRequest)).not.toContain("local-super-password");
   expect(speedRequest).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01", "agent-fra-02"],
+    selector_expression: "id:agent-sfo-01 || id:agent-fra-02",
     command: "network_speed_test",
     confirmed: false,
     destructive: false,
@@ -1255,15 +1280,13 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
 
   await openConsoleSubpage(page, "Topology", "OSPF");
   await expect(page.getByRole("heading", { name: "OSPF cost apply" })).toBeVisible();
-  await page.getByLabel("OSPF proof secret").fill("local-super-password");
-  await page.getByLabel("OSPF proof salt").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use OSPF proof" }));
+  await unlockProofFor(page, "Topology", "OSPF");
   await page.getByLabel("OSPF update plan").selectOption(ospfUpdatePlans[0].plan_id);
   await page.getByLabel("OSPF update endpoint side").selectOption("left");
   await page.getByLabel("OSPF update timeout seconds").fill("45");
-  await checkControl(page.getByLabel("Confirm OSPF cost update"));
   await activate(page.getByRole("button", { name: "Apply cost" }));
-  await expect(page.getByText(/OSPF update job 11111111 accepted/)).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply cost");
+  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
   const ospfRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
     return requests.jobs.at(-1);
@@ -1275,7 +1298,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(JSON.stringify(ospfRequest)).not.toContain("local-super-password");
   expect(ospfRequest).toMatchObject({
     argv: [],
-    clients: ["agent-sfo-01"],
+    selector_expression: "id:agent-sfo-01",
     command: "network_ospf_cost_update",
     confirmed: true,
     destructive: true,
@@ -1311,4 +1334,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     sha256Hex(new TextEncoder().encode(JSON.stringify(ospfOperation))),
   );
   expect(ospfEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  await expect(page.getByLabel("Execution result").last()).toBeVisible();
+  await activate(page.getByRole("button", { name: "Open job details" }).last());
+  await expect(page.getByRole("heading", { level: 1, name: "Job history" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Target results" })).toBeVisible();
 });

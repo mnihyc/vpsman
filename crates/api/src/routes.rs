@@ -59,8 +59,8 @@ use crate::{
         update_data_source_preset,
     },
     routes_job_history::{
-        compare_job_outputs, download_job_output_artifact, get_job, list_audit_logs,
-        list_auth_proof_rotations, list_job_outputs, list_job_targets, list_jobs,
+        compare_job_outputs, download_file_download_bundle, download_job_output_artifact, get_job,
+        list_audit_logs, list_auth_proof_rotations, list_job_outputs, list_job_targets, list_jobs,
         list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
@@ -273,6 +273,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route("/api/v1/jobs/{job_id}/outputs", get(list_job_outputs))
+        .route(
+            "/api/v1/jobs/{job_id}/outputs/download-bundle",
+            get(download_file_download_bundle),
+        )
         .route(
             "/api/v1/jobs/{job_id}/output-comparison",
             get(compare_job_outputs),

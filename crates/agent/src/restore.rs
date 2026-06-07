@@ -622,6 +622,12 @@ async fn rollback_one_restore(item: &AppliedRestore) -> Result<()> {
 }
 
 fn validate_safe_absolute_path(path: &str) -> Result<()> {
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        anyhow::bail!("restore path contains unsafe path segment");
+    }
     validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if Path::new(path).components().any(|component| {
         matches!(

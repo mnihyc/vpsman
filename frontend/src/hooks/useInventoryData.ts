@@ -146,13 +146,11 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const resolveBulkPreview = useCallback(
-    async (tagNames: string[], destructive: boolean, tagMode: "any" | "all" = "any") =>
+    async (selectorExpression: string, destructive: boolean, confirmed = false) =>
       apiPost<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, {
-        clients: [],
-        tags: tagNames,
-        tag_mode: tagMode,
+        selector_expression: selectorExpression,
         destructive,
-        confirmed: false,
+        confirmed,
       }),
     [apiToken],
   );

@@ -80,7 +80,7 @@ export function MigrationLinkForm({
     },
     {
       label: "Proof",
-      detail: proofReady ? "Super-password proof unlocked" : "Unlock proof before running the restore",
+      detail: proofReady ? "Ready" : "Unlock proof before running the restore",
       ready: proofReady,
       required: true,
     },

@@ -15,6 +15,11 @@
     grid-template-columns: 72px minmax(0, 1fr);
   }
 
+  .sidebar {
+    padding: 14px 8px;
+    width: 72px;
+  }
+
   .brand span,
   .navSectionTitle,
   .navItem span,

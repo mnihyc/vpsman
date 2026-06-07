@@ -1,9 +1,19 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path as FsPath, PathBuf},
+};
+
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use futures_util::stream;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{
@@ -17,6 +27,28 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
+
+const FILE_DOWNLOAD_BUNDLE_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_FILE_DOWNLOAD_BUNDLE_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FileDownloadBundleQuery {
+    pub(crate) clients: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileDownloadStatus {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    sha256_hex: Option<String>,
+}
 
 pub(crate) async fn list_jobs(
     State(state): State<AppState>,
@@ -71,6 +103,328 @@ pub(crate) async fn list_job_outputs(
 ) -> Result<Json<Vec<JobOutputView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
     Ok(Json(state.repo.list_job_outputs(job_id).await?))
+}
+
+pub(crate) async fn download_file_download_bundle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<Uuid>,
+    Query(query): Query<FileDownloadBundleQuery>,
+) -> Result<Response<Body>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let requested_clients = parse_client_filter(query.clients.as_deref());
+    let outputs = state.repo.list_job_outputs(job_id).await?;
+    let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
+    for output in outputs {
+        if requested_clients
+            .as_ref()
+            .is_some_and(|clients| !clients.contains(&output.client_id))
+        {
+            continue;
+        }
+        by_client
+            .entry(output.client_id.clone())
+            .or_default()
+            .push(output);
+    }
+
+    let mut entries = Vec::new();
+    for (client_id, mut outputs) in by_client {
+        outputs.sort_by_key(|output| output.seq);
+        let Some(status) = latest_file_download_status(&outputs) else {
+            continue;
+        };
+        let payload = spool_file_download_payload(&state, &outputs).await?;
+        validate_spooled_file_download_payload(&status, &payload)?;
+        entries.push(SpooledFileDownloadBundleEntry {
+            client_id,
+            status,
+            payload,
+        });
+    }
+    if entries.is_empty() {
+        return Err(ApiError::not_found("file_download_outputs_not_found"));
+    }
+
+    let archive_temp = TempDownloadFile::new("vpsman-file-download-bundle", "tar");
+    let archive_path = archive_temp.path().to_path_buf();
+    let archive_size = tokio::task::spawn_blocking(move || {
+        write_file_download_bundle_archive(&archive_path, entries)
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?
+    .map_err(ApiError::from)?;
+
+    let body = streaming_temp_file_body(archive_temp).await?;
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-tar"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"file-download-bundle-{job_id}.tar\""
+        ))
+        .map_err(|_| ApiError::conflict("file_download_bundle_filename_invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&archive_size.to_string())
+            .map_err(|_| ApiError::conflict("file_download_bundle_integrity_mismatch"))?,
+    );
+    response.headers_mut().insert(
+        "x-vpsman-artifact-delivery",
+        HeaderValue::from_static("spooled-filesystem"),
+    );
+    Ok(response)
+}
+
+struct TempDownloadFile {
+    path: PathBuf,
+}
+
+impl TempDownloadFile {
+    fn new(prefix: &str, extension: &str) -> Self {
+        Self {
+            path: std::env::temp_dir().join(format!("{prefix}-{}.{}", Uuid::new_v4(), extension)),
+        }
+    }
+
+    fn path(&self) -> &FsPath {
+        &self.path
+    }
+}
+
+impl Drop for TempDownloadFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+struct SpooledFileDownloadPayload {
+    temp: TempDownloadFile,
+    size_bytes: u64,
+    sha256_hex: String,
+}
+
+struct SpooledFileDownloadBundleEntry {
+    client_id: String,
+    status: FileDownloadStatus,
+    payload: SpooledFileDownloadPayload,
+}
+
+async fn spool_file_download_payload(
+    state: &AppState,
+    outputs: &[JobOutputView],
+) -> Result<SpooledFileDownloadPayload, ApiError> {
+    let temp = TempDownloadFile::new("vpsman-file-download-entry", "bin");
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp.path())
+        .await
+        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0_u64;
+    for output in outputs.iter().filter(|output| output.stream == "stdout") {
+        let bytes = materialize_output_bytes(state, output).await?;
+        size_bytes = size_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| ApiError::bad_request("file_download_bundle_entry_too_large"))?;
+        if size_bytes > MAX_FILE_DOWNLOAD_BUNDLE_ENTRY_BYTES {
+            return Err(ApiError::bad_request(
+                "file_download_bundle_entry_too_large",
+            ));
+        }
+        hasher.update(&bytes);
+        file.write_all(&bytes)
+            .await
+            .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    }
+    file.flush()
+        .await
+        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    drop(file);
+    Ok(SpooledFileDownloadPayload {
+        temp,
+        size_bytes,
+        sha256_hex: hex::encode(hasher.finalize()),
+    })
+}
+
+fn validate_spooled_file_download_payload(
+    status: &FileDownloadStatus,
+    payload: &SpooledFileDownloadPayload,
+) -> Result<(), ApiError> {
+    let expected_size = status
+        .size_bytes
+        .ok_or_else(|| ApiError::conflict("file_download_status_incomplete"))?;
+    if expected_size != payload.size_bytes {
+        return Err(ApiError::conflict(
+            "file_download_output_integrity_mismatch",
+        ));
+    }
+    let expected_sha256 = status
+        .sha256_hex
+        .as_deref()
+        .ok_or_else(|| ApiError::conflict("file_download_status_incomplete"))?
+        .to_ascii_lowercase();
+    if expected_sha256.len() != 64
+        || !expected_sha256
+            .chars()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(ApiError::conflict("file_download_status_invalid"));
+    }
+    if expected_sha256 != payload.sha256_hex {
+        return Err(ApiError::conflict(
+            "file_download_output_integrity_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn write_file_download_bundle_archive(
+    archive_path: &FsPath,
+    entries: Vec<SpooledFileDownloadBundleEntry>,
+) -> anyhow::Result<u64> {
+    let archive_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(archive_path)?;
+    let mut builder = tar::Builder::new(archive_file);
+    for entry in entries {
+        append_file_download_bundle_entry(&mut builder, &entry)?;
+    }
+    builder.finish()?;
+    let archive_file = builder.into_inner()?;
+    archive_file.sync_data()?;
+    Ok(archive_file.metadata()?.len())
+}
+
+fn append_file_download_bundle_entry(
+    builder: &mut tar::Builder<std::fs::File>,
+    entry: &SpooledFileDownloadBundleEntry,
+) -> anyhow::Result<()> {
+    let filename = entry.status.filename.as_deref().unwrap_or("download.bin");
+    let entry_name = format!(
+        "{}/{}",
+        safe_tar_component(&entry.client_id),
+        safe_tar_component(filename)
+    );
+    let mut payload_file = std::fs::File::open(entry.payload.temp.path())?;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(entry.payload.size_bytes);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append_data(&mut header, entry_name, &mut payload_file)?;
+    Ok(())
+}
+
+async fn streaming_temp_file_body(temp: TempDownloadFile) -> Result<Body, ApiError> {
+    let file = tokio::fs::File::open(temp.path())
+        .await
+        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    let stream = stream::try_unfold(
+        (
+            file,
+            vec![0_u8; FILE_DOWNLOAD_BUNDLE_STREAM_CHUNK_BYTES],
+            temp,
+        ),
+        |(mut file, mut buffer, temp)| async move {
+            let read = file.read(&mut buffer).await?;
+            if read == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            let bytes = Bytes::copy_from_slice(&buffer[..read]);
+            Ok(Some((bytes, (file, buffer, temp))))
+        },
+    );
+    Ok(Body::from_stream(stream))
+}
+
+fn parse_client_filter(value: Option<&str>) -> Option<BTreeSet<String>> {
+    let clients = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    if clients.is_empty() {
+        None
+    } else {
+        Some(clients)
+    }
+}
+
+fn latest_file_download_status(outputs: &[JobOutputView]) -> Option<FileDownloadStatus> {
+    outputs
+        .iter()
+        .rev()
+        .filter(|output| output.stream == "status")
+        .filter_map(|output| BASE64.decode(&output.data_base64).ok())
+        .filter_map(|data| serde_json::from_slice::<FileDownloadStatus>(&data).ok())
+        .find(|status| {
+            status.kind == "file_download"
+                && status
+                    .status
+                    .as_deref()
+                    .map(|value| value == "completed")
+                    .unwrap_or(true)
+        })
+}
+
+async fn materialize_output_bytes(
+    state: &AppState,
+    output: &JobOutputView,
+) -> Result<Vec<u8>, ApiError> {
+    if output.storage == "object_store" {
+        let store = state
+            .backup_object_store
+            .as_ref()
+            .ok_or_else(|| ApiError::not_found("job_output_artifact_not_available"))?;
+        let object_key = output
+            .artifact_object_key
+            .as_deref()
+            .ok_or_else(|| ApiError::not_found("job_output_artifact_not_found"))?;
+        let bytes = store.get(object_key).await?;
+        if let Some(expected_hash) = output.artifact_sha256_hex.as_deref() {
+            if vpsman_common::payload_hash(&bytes) != expected_hash {
+                return Err(ApiError::conflict("job_output_artifact_integrity_mismatch"));
+            }
+        }
+        if let Some(expected_size) = output.artifact_size_bytes {
+            if bytes.len() as i64 != expected_size {
+                return Err(ApiError::conflict("job_output_artifact_integrity_mismatch"));
+            }
+        }
+        return Ok(bytes);
+    }
+    BASE64
+        .decode(&output.data_base64)
+        .map_err(|_| ApiError::conflict("job_output_data_invalid"))
+}
+
+fn safe_tar_component(value: &str) -> String {
+    let sanitized = value
+        .trim_matches('/')
+        .replace("..", "_")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '=' | '@')
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "download".to_string()
+    } else {
+        sanitized
+    }
 }
 
 pub(crate) async fn compare_job_outputs(

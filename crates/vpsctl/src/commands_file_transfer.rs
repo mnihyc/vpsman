@@ -14,7 +14,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, validate_file_transfer_session, FilePushChunk, JobCommand,
+    payload_hash, validate_file_transfer_session, FileExistingPolicy, FilePushChunk, JobCommand,
     FILE_TRANSFER_CHUNK_BYTES, MAX_FILE_TRANSFER_RESUME_TOKEN_BYTES, MAX_RESUMABLE_FILE_PUSH_BYTES,
 };
 
@@ -39,6 +39,7 @@ pub(crate) struct FileTransferUploadPlan {
     pub(crate) resume_token: Option<String>,
     pub(crate) chunk_size_bytes: u32,
     pub(crate) rate_limit_kbps: u32,
+    pub(crate) existing_policy: FileExistingPolicy,
     pub(crate) poll_interval_ms: u64,
     pub(crate) max_polls: u32,
     pub(crate) multi_target_policy: FileTransferMultiTargetPolicy,
@@ -168,6 +169,7 @@ pub(crate) fn file_transfer_upload(
     resume_token: Option<String>,
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
+    existing_policy: FileExistingPolicy,
     poll_interval_ms: u64,
     max_polls: u32,
     multi_target_policy: FileTransferMultiTargetPolicy,
@@ -187,6 +189,7 @@ pub(crate) fn file_transfer_upload(
         resume_token,
         chunk_size_bytes,
         rate_limit_kbps,
+        existing_policy,
         poll_interval_ms,
         max_polls,
         multi_target_policy,
@@ -262,6 +265,7 @@ pub(crate) fn execute_file_transfer_upload(
             "sha256_hex": &sha256_hex,
             "chunk_size_bytes": plan.chunk_size_bytes,
             "rate_limit_kbps": plan.rate_limit_kbps,
+            "existing_policy": file_existing_policy_label(plan.existing_policy),
             "multi_target_policy": plan.multi_target_policy.as_str(),
             "targets": &target_ids,
             "resume_token_generated": generated_resume_token,
@@ -290,6 +294,7 @@ pub(crate) fn execute_file_transfer_upload(
             sha256_hex: sha256_hex.clone(),
             chunk_size_bytes: plan.chunk_size_bytes,
             rate_limit_kbps: plan.rate_limit_kbps,
+            existing_policy: plan.existing_policy,
             resume_token_hash: resume_token_hash.clone(),
         },
     )?;
@@ -304,10 +309,15 @@ pub(crate) fn execute_file_transfer_upload(
         plan.max_polls,
     )?;
     let mut target_offsets = target_offsets_from_statuses(&start_statuses, size_bytes)?;
+    let active_target_ids = active_transfer_targets(&start_statuses);
     let next_offset = match plan.multi_target_policy {
-        FileTransferMultiTargetPolicy::SameOffset => {
-            Some(uniform_next_offset(&start_statuses, size_bytes)?)
+        FileTransferMultiTargetPolicy::SameOffset if active_target_ids.is_empty() => {
+            Some(size_bytes)
         }
+        FileTransferMultiTargetPolicy::SameOffset => Some(uniform_next_offset(
+            &active_statuses(&start_statuses),
+            size_bytes,
+        )?),
         FileTransferMultiTargetPolicy::IndependentOffsets => None,
     };
     push_event(
@@ -325,12 +335,27 @@ pub(crate) fn execute_file_transfer_upload(
 
     match plan.multi_target_policy {
         FileTransferMultiTargetPolicy::SameOffset => {
+            let active_submit = TransferSubmitContext {
+                api_url,
+                token,
+                target_ids: &active_target_ids,
+                password,
+                salt_hex,
+                proof_ttl_secs: plan.proof_ttl_secs,
+                timeout_secs: plan.timeout_secs,
+                confirmed: plan.confirmed,
+            };
             let mut offset = next_offset.expect("same-offset start offset");
             while offset < size_bytes {
                 let chunk = prepared_source.read_chunk(offset, plan.chunk_size_bytes)?;
                 let chunk_len = chunk.len() as u64;
-                let chunk_job =
-                    submit_upload_chunk(&submit, session_id, offset, &chunk, &resume_token_hash)?;
+                let chunk_job = submit_upload_chunk(
+                    &active_submit,
+                    session_id,
+                    offset,
+                    &chunk,
+                    &resume_token_hash,
+                )?;
                 let chunk_statuses = wait_for_transfer_status(
                     api_url,
                     token,
@@ -346,7 +371,7 @@ pub(crate) fn execute_file_transfer_upload(
                     acknowledged_offset > offset,
                     "file transfer chunk acknowledged no progress at offset {offset}"
                 );
-                target_offsets = target_offsets_from_statuses(&chunk_statuses, size_bytes)?;
+                target_offsets.extend(target_offsets_from_statuses(&chunk_statuses, size_bytes)?);
                 push_event(
                     &mut events,
                     serde_json::json!({
@@ -358,7 +383,7 @@ pub(crate) fn execute_file_transfer_upload(
                         "next_offset": acknowledged_offset,
                         "target_offsets": &target_offsets,
                         "multi_target_policy": plan.multi_target_policy.as_str(),
-                        "targets": &target_ids,
+                        "targets": &active_target_ids,
                         "size_bytes": size_bytes,
                     }),
                 )?;
@@ -425,38 +450,59 @@ pub(crate) fn execute_file_transfer_upload(
         }
     }
 
-    let commit = submit_transfer_step(
-        &submit,
-        "file_transfer_commit",
-        &JobCommand::FileTransferCommit {
-            session_id,
-            resume_token_hash,
-        },
-    )?;
-    let commit_statuses = wait_for_transfer_status(
-        api_url,
-        token,
-        commit.job_id,
-        session_id,
-        "file_transfer_commit",
-        commit.accepted_targets,
-        plan.poll_interval_ms,
-        plan.max_polls,
-    )?;
-    let committed_offsets = target_offsets_from_statuses(&commit_statuses, size_bytes)?;
+    let (complete_job_id, complete_accepted_targets, committed_offsets) =
+        if active_target_ids.is_empty() {
+            (start.job_id, start.accepted_targets, target_offsets.clone())
+        } else {
+            let commit_submit = TransferSubmitContext {
+                api_url,
+                token,
+                target_ids: &active_target_ids,
+                password,
+                salt_hex,
+                proof_ttl_secs: plan.proof_ttl_secs,
+                timeout_secs: plan.timeout_secs,
+                confirmed: plan.confirmed,
+            };
+            let commit = submit_transfer_step(
+                &commit_submit,
+                "file_transfer_commit",
+                &JobCommand::FileTransferCommit {
+                    session_id,
+                    resume_token_hash,
+                },
+            )?;
+            let commit_statuses = wait_for_transfer_status(
+                api_url,
+                token,
+                commit.job_id,
+                session_id,
+                "file_transfer_commit",
+                commit.accepted_targets,
+                plan.poll_interval_ms,
+                plan.max_polls,
+            )?;
+            target_offsets.extend(target_offsets_from_statuses(&commit_statuses, size_bytes)?);
+            (
+                commit.job_id,
+                commit.accepted_targets,
+                target_offsets.clone(),
+            )
+        };
     ensure_all_targets_at_offset(&committed_offsets, size_bytes, "file transfer commit")?;
     push_event(
         &mut events,
         serde_json::json!({
             "event": "file_transfer_upload_complete",
-            "job_id": commit.job_id,
+            "job_id": complete_job_id,
             "session_id": session_id,
             "path": &plan.path,
             "size_bytes": size_bytes,
             "sha256_hex": &sha256_hex,
             "target_offsets": &committed_offsets,
+            "active_targets": &active_target_ids,
             "multi_target_policy": plan.multi_target_policy.as_str(),
-            "accepted_targets": commit.accepted_targets,
+            "accepted_targets": complete_accepted_targets,
         }),
     )?;
     Ok(events)
@@ -673,6 +719,37 @@ fn target_offsets_from_statuses(
         offsets.insert(status.client_id.clone(), offset);
     }
     Ok(offsets)
+}
+
+fn active_transfer_targets(statuses: &[TransferClientStatus]) -> Vec<String> {
+    statuses
+        .iter()
+        .filter(|status| !transfer_status_skipped(&status.payload))
+        .map(|status| status.client_id.clone())
+        .collect()
+}
+
+fn active_statuses(statuses: &[TransferClientStatus]) -> Vec<TransferClientStatus> {
+    statuses
+        .iter()
+        .filter(|status| !transfer_status_skipped(&status.payload))
+        .cloned()
+        .collect()
+}
+
+fn transfer_status_skipped(status: &TransferStatusPayload) -> bool {
+    status
+        .extra
+        .get("skipped")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn file_existing_policy_label(policy: FileExistingPolicy) -> &'static str {
+    match policy {
+        FileExistingPolicy::Skip => "skip",
+        FileExistingPolicy::Replace => "replace",
+    }
 }
 
 fn targets_grouped_by_offset(
@@ -951,6 +1028,42 @@ mod tests {
         assert_eq!(offsets["edge-a"], 64);
         assert_eq!(offsets["edge-b"], 32);
         assert!(ensure_all_targets_at_offset(&offsets, 128, "test commit").is_err());
+    }
+
+    #[test]
+    fn skipped_existing_upload_targets_are_not_active_commit_targets() {
+        let session_id = Uuid::new_v4();
+        let statuses = vec![
+            TransferClientStatus {
+                client_id: "edge-a".to_string(),
+                payload: TransferStatusPayload {
+                    status_type: "file_transfer_start".to_string(),
+                    session_id,
+                    next_offset: 128,
+                    size_bytes: Some(128),
+                    extra: serde_json::json!({
+                        "skipped": true,
+                        "reason": "destination_exists",
+                    }),
+                },
+            },
+            TransferClientStatus {
+                client_id: "edge-b".to_string(),
+                payload: TransferStatusPayload {
+                    status_type: "file_transfer_start".to_string(),
+                    session_id,
+                    next_offset: 0,
+                    size_bytes: Some(128),
+                    extra: serde_json::Value::Null,
+                },
+            },
+        ];
+
+        assert_eq!(active_transfer_targets(&statuses), vec!["edge-b"]);
+        assert_eq!(active_statuses(&statuses).len(), 1);
+        let offsets = target_offsets_from_statuses(&statuses, 128).unwrap();
+        assert_eq!(offsets["edge-a"], 128);
+        assert_eq!(offsets["edge-b"], 0);
     }
 
     #[test]

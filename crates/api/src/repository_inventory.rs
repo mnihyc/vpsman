@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
 use crate::model::*;
 use crate::repository::Repository;
+use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
 use crate::unix_now;
 
 impl Repository {
@@ -475,8 +476,16 @@ impl Repository {
         &self,
         request: &BulkResolveRequest,
     ) -> Result<BulkResolveResponse> {
-        let tag_mode = normalize_bulk_tag_mode(request.tag_mode.as_deref());
-        let selectors = bulk_tag_selectors(&request.tags);
+        let Some(expression) = parse_selector_expression(&request.selector_expression)
+            .map_err(|error| anyhow!("invalid selector expression: {error}"))?
+        else {
+            return Ok(BulkResolveResponse {
+                target_count: 0,
+                targets: Vec::new(),
+                destructive: request.destructive,
+                confirmation_required: request.destructive && !request.confirmed,
+            });
+        };
         let mut targets = match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await;
@@ -485,8 +494,7 @@ impl Repository {
                     .iter()
                     .filter(|agent| {
                         !hidden.contains(&agent.id)
-                            && (request.clients.iter().any(|client| client == &agent.id)
-                                || agent_matches_bulk_selectors(agent, &selectors, tag_mode))
+                            && agent_matches_selector_expression(agent, &expression)
                     })
                     .cloned()
                     .collect::<Vec<_>>()
@@ -506,51 +514,11 @@ impl Repository {
                     FROM clients c
                     LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
-                    WHERE
-                        c.hidden_at IS NULL
-                        AND (
-                            c.id = ANY($1)
-                            OR (
-                                $6 = 'any'
-                                AND $5 > 0
-                                AND (
-                                    c.id = ANY($2)
-                                    OR c.display_name = ANY($3)
-                                    OR EXISTS (
-                                        SELECT 1
-                                        FROM client_tags matching_ct
-                                        JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
-                                        WHERE matching_ct.client_id = c.id
-                                          AND matching_tag.name = ANY($4)
-                                    )
-                                )
-                            )
-                            OR (
-                                $6 = 'all'
-                                AND $5 > 0
-                                AND (
-                                    (CASE WHEN c.id = ANY($2) THEN 1 ELSE 0 END)
-                                    + (CASE WHEN c.display_name = ANY($3) THEN 1 ELSE 0 END)
-                                    + (
-                                        SELECT COUNT(DISTINCT matching_tag.name)::INT
-                                        FROM client_tags matching_ct
-                                        JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
-                                        WHERE matching_ct.client_id = c.id
-                                          AND matching_tag.name = ANY($4)
-                                    )
-                                ) = $5
-                            )
-                        )
+                    WHERE c.hidden_at IS NULL
                     GROUP BY c.id, c.display_name, c.status, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
-                .bind(&request.clients)
-                .bind(&selectors.ids)
-                .bind(&selectors.names)
-                .bind(&selectors.tags)
-                .bind(selectors.selector_count)
-                .bind(tag_mode)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -568,6 +536,9 @@ impl Repository {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|agent| agent_matches_selector_expression(agent, &expression))
+                    .collect()
             }
         };
         targets.sort_by(|left, right| left.id.cmp(&right.id));
@@ -639,92 +610,4 @@ impl Repository {
             }
         }
     }
-}
-
-fn normalize_bulk_tag_mode(value: Option<&str>) -> &'static str {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("all") | Some("and") => "all",
-        _ => "any",
-    }
-}
-
-#[derive(Debug, Default)]
-struct BulkTagSelectors {
-    ids: Vec<String>,
-    names: Vec<String>,
-    tags: Vec<String>,
-    selector_count: i32,
-}
-
-fn bulk_tag_selectors(tags: &[String]) -> BulkTagSelectors {
-    let mut selectors = BulkTagSelectors::default();
-    let mut seen = HashSet::new();
-    for raw in tags {
-        let selector = raw.trim();
-        if selector.is_empty() {
-            continue;
-        }
-        if let Some(client_id) = selector.strip_prefix("id:") {
-            push_bulk_selector(&mut selectors, &mut seen, "id", client_id);
-        } else if let Some(display_name) = selector.strip_prefix("name:") {
-            push_bulk_selector(&mut selectors, &mut seen, "name", display_name);
-        } else if let Some(tag) = selector.strip_prefix("tag:") {
-            push_bulk_selector(&mut selectors, &mut seen, "tag", tag);
-        } else {
-            push_bulk_selector(&mut selectors, &mut seen, "tag", selector);
-        }
-    }
-    selectors
-}
-
-fn push_bulk_selector(
-    selectors: &mut BulkTagSelectors,
-    seen: &mut HashSet<String>,
-    kind: &str,
-    value: &str,
-) {
-    let value = value.trim();
-    if value.is_empty() {
-        return;
-    }
-    let key = format!("{kind}\0{value}");
-    if !seen.insert(key) {
-        return;
-    }
-    match kind {
-        "id" => selectors.ids.push(value.to_string()),
-        "name" => selectors.names.push(value.to_string()),
-        _ => selectors.tags.push(value.to_string()),
-    }
-    selectors.selector_count += 1;
-}
-
-fn agent_matches_bulk_selectors(
-    agent: &AgentView,
-    selectors: &BulkTagSelectors,
-    tag_mode: &str,
-) -> bool {
-    if selectors.selector_count == 0 {
-        return false;
-    }
-    if tag_mode == "all" {
-        return selectors.ids.iter().all(|id| &agent.id == id)
-            && selectors
-                .names
-                .iter()
-                .all(|name| &agent.display_name == name)
-            && selectors
-                .tags
-                .iter()
-                .all(|tag| agent.tags.iter().any(|agent_tag| agent_tag == tag));
-    }
-    selectors.ids.iter().any(|id| &agent.id == id)
-        || selectors
-            .names
-            .iter()
-            .any(|name| &agent.display_name == name)
-        || selectors
-            .tags
-            .iter()
-            .any(|tag| agent.tags.iter().any(|agent_tag| agent_tag == tag))
 }

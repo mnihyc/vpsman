@@ -664,8 +664,7 @@ impl Repository {
             .map(|agent| agent.id)
             .collect::<Vec<_>>();
         let metadata = json!({
-            "requested_targets": request.all_requested_clients(),
-            "requested_tags": &request.tags,
+            "selector_expression": request.selector_expression,
             "resolved_targets": &resolved_targets,
             "destructive": request.destructive,
             "confirmed": request.confirmed,
@@ -817,8 +816,7 @@ impl Repository {
     ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
         let metadata = json!({
-            "requested_targets": request.all_requested_clients(),
-            "requested_tags": &request.tags,
+            "selector_expression": request.selector_expression,
             "resolved_targets": resolved_targets,
             "destructive": request.destructive,
             "confirmed": request.confirmed,

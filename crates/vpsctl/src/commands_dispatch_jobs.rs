@@ -1,4 +1,5 @@
 use anyhow::Result;
+use vpsman_common::FileExistingPolicy;
 
 use crate::{
     cli::Command, commands::CommandContext, commands_config, commands_file_transfer,
@@ -346,11 +347,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             resume_token,
             chunk_size_bytes,
             rate_limit_kbps,
+            existing_policy,
             poll_interval_ms,
             max_polls,
             multi_target_policy,
         } => {
             let mode = commands_files::parse_file_mode(&mode)?;
+            let existing_policy = parse_file_existing_policy(&existing_policy)?;
             let multi_target_policy =
                 commands_file_transfer::FileTransferMultiTargetPolicy::parse(&multi_target_policy)?;
             let source = match (source, source_artifact_id) {
@@ -381,6 +384,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 resume_token,
                 chunk_size_bytes,
                 rate_limit_kbps,
+                existing_policy,
                 poll_interval_ms,
                 max_polls,
                 multi_target_policy,
@@ -1062,5 +1066,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             Ok(None)
         }
         other => Ok(Some(other)),
+    }
+}
+
+fn parse_file_existing_policy(value: &str) -> Result<FileExistingPolicy> {
+    match value.trim() {
+        "skip" => Ok(FileExistingPolicy::Skip),
+        "replace" => Ok(FileExistingPolicy::Replace),
+        other => anyhow::bail!("file existing policy must be skip or replace, got {other}"),
     }
 }

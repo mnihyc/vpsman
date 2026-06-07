@@ -59,8 +59,7 @@ impl Repository {
                     .recipient_public_key_hex
                     .map(|value| value.to_ascii_lowercase()),
             },
-            clients: request.clients,
-            tags: request.tags,
+            selector_expression: request.selector_expression,
             interval_secs: request.interval_secs,
             start_at_unix: request.start_at_unix,
             enabled: request.enabled,
@@ -387,8 +386,7 @@ impl Repository {
         };
         let audit_metadata = serde_json::json!({
             "name": &schedule.name,
-            "clients": &schedule.clients,
-            "tags": &schedule.tags,
+            "selector_expression": &schedule.selector_expression,
             "interval_secs": schedule.interval_secs,
             "retention_days": metadata.retention_days,
             "keep_last": metadata.keep_last,
@@ -552,8 +550,7 @@ fn backup_policy_view(
         schedule_id: schedule.id,
         name: schedule.name,
         enabled: schedule.enabled,
-        clients: schedule.clients,
-        tags: schedule.tags,
+        selector_expression: schedule.selector_expression,
         paths,
         include_config,
         recipient_public_key_hex,

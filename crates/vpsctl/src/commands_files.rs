@@ -3,8 +3,8 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash,
-    validate_absolute_file_path, validate_file_mode, JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES,
-    MAX_INLINE_FILE_PUSH_BYTES,
+    validate_absolute_file_path, validate_file_mode, FileExistingPolicy, FileOwnershipPolicy,
+    JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
@@ -90,6 +90,12 @@ pub(crate) fn file_push(
                 size_bytes: data.len() as u64,
                 sha256_hex: data_hash,
                 data_base64: encode_inline_file_payload(&data)?,
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
         )
     } else {
@@ -101,6 +107,12 @@ pub(crate) fn file_push(
                 size_bytes: data.len() as u64,
                 sha256_hex: data_hash,
                 chunks: encode_chunked_file_payload(&data)?,
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
         )
     };
@@ -127,14 +139,16 @@ pub(crate) fn file_push(
 pub(crate) fn parse_file_mode(value: &str) -> Result<u32> {
     let trimmed = value.trim();
     anyhow::ensure!(!trimmed.is_empty(), "file mode is empty");
-    let (radix, digits) = if let Some(rest) = trimmed.strip_prefix("0o") {
-        (8, rest)
-    } else if trimmed.starts_with('0') {
-        (8, trimmed)
-    } else {
-        (10, trimmed)
-    };
-    let mode = u32::from_str_radix(digits, radix).context("file mode is not a valid number")?;
+    let digits = trimmed.strip_prefix("0o").unwrap_or(trimmed);
+    anyhow::ensure!(
+        !digits.is_empty()
+            && digits.len() <= 4
+            && digits
+                .chars()
+                .all(|character| matches!(character, '0'..='7')),
+        "file mode must be an octal value between 0000 and 0777"
+    );
+    let mode = u32::from_str_radix(digits, 8).context("file mode is not a valid octal number")?;
     validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(mode)
 }
@@ -147,8 +161,10 @@ mod tests {
     fn parses_file_modes_as_octal_when_prefixed() {
         assert_eq!(parse_file_mode("0644").unwrap(), 0o644);
         assert_eq!(parse_file_mode("0o600").unwrap(), 0o600);
-        assert_eq!(parse_file_mode("420").unwrap(), 420);
+        assert_eq!(parse_file_mode("644").unwrap(), 0o644);
+        assert_eq!(parse_file_mode("420").unwrap(), 0o420);
         assert!(parse_file_mode("1000").is_err());
+        assert!(parse_file_mode("888").is_err());
         assert!(parse_file_mode("not-a-mode").is_err());
     }
 }

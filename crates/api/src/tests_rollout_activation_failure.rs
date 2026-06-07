@@ -44,10 +44,7 @@ fn proof_envelope(client_id: &str, command_hash: &str, ttl_secs: u64) -> Command
 
 fn agent_update_request(operation: JobCommand, clients: Vec<String>) -> CreateJobRequest {
     CreateJobRequest {
-        targets: Vec::new(),
-        clients,
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: test_selector_expression_for_clients(&clients),
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),

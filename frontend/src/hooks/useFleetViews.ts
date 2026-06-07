@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AgentView } from "../types";
+import { agentSearchFields, filterBySearchExpression } from "../searchExpression";
 
 const FLEET_VIEW_STORAGE_KEY = "vpsman.fleetViews";
 
@@ -103,55 +104,7 @@ export function useFleetViews(agents: AgentView[]) {
 }
 
 function filterAgents(agents: AgentView[], query: string): AgentView[] {
-  const terms = query
-    .trim()
-    .toLowerCase()
-    .split(/[\s,]+/)
-    .filter(Boolean);
-  if (terms.length === 0) {
-    return agents;
-  }
-  return agents.filter((agent) => {
-    return terms.every((term) => agentMatchesTerm(agent, term));
-  });
-}
-
-function agentMatchesTerm(agent: AgentView, term: string): boolean {
-  const [kind, value] = splitFilterTerm(term);
-  if (kind === "tag") {
-    return matchesAny(agent.tags, value);
-  }
-  if (kind === "provider") {
-    return matchesAny(agent.tags, `provider:${value}`);
-  }
-  if (kind === "country" || kind === "region") {
-    return matchesAny(agent.tags, `country:${value}`);
-  }
-  if (kind === "status") {
-    return agent.status.toLowerCase().includes(value);
-  }
-  const haystack = [
-    agent.id,
-    agent.display_name,
-    agent.status,
-    agent.capabilities.privilege_mode,
-    ...agent.tags,
-  ]
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(term);
-}
-
-function splitFilterTerm(term: string): [string | null, string] {
-  const separator = term.indexOf(":");
-  if (separator <= 0 || separator === term.length - 1) {
-    return [null, term];
-  }
-  return [term.slice(0, separator), term.slice(separator + 1)];
-}
-
-function matchesAny(values: string[], term: string): boolean {
-  return values.some((value) => value.toLowerCase().includes(term));
+  return filterBySearchExpression(agents, query, agentSearchFields).items;
 }
 
 function defaultFleetViewName(query: string, existingCount: number): string {

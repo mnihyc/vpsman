@@ -379,6 +379,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadCurrentOperator: access.loadCurrentOperator,
     downloadFileTransferHandoff: jobs.downloadFileTransferHandoff,
     downloadFileTransferSource: jobs.downloadFileTransferSource,
+    downloadFileDownloadBundle: jobs.downloadFileDownloadBundle,
     downloadJobOutputArtifact: jobs.downloadJobOutputArtifact,
     saveFileTransferHandoff: jobs.saveFileTransferHandoff,
     loadJob: jobs.loadJob,

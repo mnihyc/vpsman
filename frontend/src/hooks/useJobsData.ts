@@ -207,6 +207,29 @@ export function useJobsData(
     [apiToken, onUnauthorized],
   );
 
+  const downloadFileDownloadBundle = useCallback(
+    async (jobId: string, clientIds: string[]) => {
+      try {
+        const params = new URLSearchParams();
+        if (clientIds.length > 0) {
+          params.set("clients", clientIds.join(","));
+        }
+        const suffix = params.toString();
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/download-bundle${suffix ? `?${suffix}` : ""}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
   const loadJobOutputComparison = useCallback(
     async (jobId: string, mode: JobOutputCompareMode) => {
       try {
@@ -551,6 +574,7 @@ export function useJobsData(
     downloadFileTransferSource,
     saveFileTransferHandoff,
     loadJobOutputs,
+    downloadFileDownloadBundle,
     loadJobOutputComparison,
     loadJobTargets,
     loadJobs,

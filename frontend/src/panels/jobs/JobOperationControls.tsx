@@ -12,6 +12,7 @@ import {
   MAX_BROWSER_RESUMABLE_UPLOAD_BYTES,
 } from "../../resumableFileTransfer";
 import type { BrowserDownloadSinkMode, BrowserTransferMultiTargetPolicy } from "../../resumableFileTransfer";
+import type { FileExistingPolicy } from "../../types";
 import type { FileTransferSourceArtifactRecord } from "../../typesFileTransfer";
 import type { DispatchMode, SupervisorAction, TerminalAction } from "../jobDispatchModel";
 import { TerminalOperationControls } from "./TerminalOperationControls";
@@ -95,6 +96,7 @@ export function JobOperationEditor({
   fileTransferDownloadSink,
   fileTransferDownloadName,
   fileTransferChunkSize,
+  fileTransferExistingPolicy,
   fileTransferMultiTargetPolicy,
   fileTransferRateLimit,
   fileTransferResumeToken,
@@ -132,6 +134,7 @@ export function JobOperationEditor({
   setFileTransferDownloadSink,
   setFileTransferDownloadName,
   setFileTransferChunkSize,
+  setFileTransferExistingPolicy,
   setFileTransferMultiTargetPolicy,
   setFileTransferRateLimit,
   setFileTransferResumeToken,
@@ -201,6 +204,7 @@ export function JobOperationEditor({
   fileTransferDownloadSink: BrowserDownloadSinkMode;
   fileTransferDownloadName: string;
   fileTransferChunkSize: number;
+  fileTransferExistingPolicy: FileExistingPolicy;
   fileTransferMultiTargetPolicy: BrowserTransferMultiTargetPolicy;
   fileTransferRateLimit: number;
   fileTransferResumeToken: string;
@@ -238,6 +242,7 @@ export function JobOperationEditor({
   setFileTransferDownloadSink: (value: BrowserDownloadSinkMode) => void;
   setFileTransferDownloadName: (value: string) => void;
   setFileTransferChunkSize: (value: number) => void;
+  setFileTransferExistingPolicy: (value: FileExistingPolicy) => void;
   setFileTransferMultiTargetPolicy: (value: BrowserTransferMultiTargetPolicy) => void;
   setFileTransferRateLimit: (value: number) => void;
   setFileTransferResumeToken: (value: string) => void;
@@ -485,6 +490,17 @@ export function JobOperationEditor({
             type="number"
             value={fileTransferRateLimit}
           />
+        </label>
+        <label>
+          <span>Existing file</span>
+          <select
+            aria-label="Resumable upload existing-file policy"
+            onChange={(event) => setFileTransferExistingPolicy(event.target.value as FileExistingPolicy)}
+            value={fileTransferExistingPolicy}
+          >
+            <option value="skip">Skip</option>
+            <option value="replace">Replace</option>
+          </select>
         </label>
         <label>
           <span>Policy</span>

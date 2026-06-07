@@ -9,6 +9,7 @@ use crate::{
     error::ApiError,
     job_request::validate_job_command,
     model::{CreateScheduleRequest, ListQuery, ScheduleView},
+    selector_expression::parse_selector_expression,
     state::AppState,
 };
 
@@ -46,9 +47,11 @@ pub(crate) fn validate_schedule_request(request: &CreateScheduleRequest) -> Resu
     if request.interval_secs == 0 || request.interval_secs > 31_536_000 {
         return Err(ApiError::bad_request("schedule_interval_out_of_range"));
     }
-    if request.clients.is_empty() && request.tags.is_empty() {
+    if request.selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request("schedule_targets_required"));
     }
+    parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     if !matches!(
         request.catch_up_policy.as_str(),
         "skip_missed" | "run_once" | "run_all_limited"

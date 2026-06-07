@@ -720,18 +720,7 @@ function backupScopeLabel(backup: BackupRequestRecord): string {
 }
 
 function policyTargetLabel(policy: BackupPolicyRecord): string {
-  const parts = [];
-  if (policy.clients.length > 0) {
-    parts.push(
-      `${policy.clients.length} client${policy.clients.length === 1 ? "" : "s"}`,
-    );
-  }
-  if (policy.tags.length > 0) {
-    parts.push(
-      `${policy.tags.length} tag${policy.tags.length === 1 ? "" : "s"}`,
-    );
-  }
-  return parts.length > 0 ? parts.join(" + ") : "none";
+  return policy.selector_expression || "none";
 }
 
 function policyScopeLabel(policy: BackupPolicyRecord): string {

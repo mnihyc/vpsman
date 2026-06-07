@@ -5,15 +5,15 @@ mod tests {
     };
     use crate::telemetry::unix_now;
     use ed25519_dalek::SigningKey;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{io::Cursor, os::unix::fs::PermissionsExt};
     use tokio::sync::mpsc;
     use vpsman_common::{
         derive_super_key, encode_json, payload_hash, random_nonce, sign_command_envelope,
         sign_privilege_proof, AgentAuthConfig, AgentConfig, AgentExecutionConfig,
         AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
         AgentExecutionPtyPolicy, AgentProcessInventorySource, AgentUserSessionsSource,
-        CommandEnvelope, FilePushChunk, JobCommand, JobRequest, OutputStream, PrivilegeReplayCache,
-        RuntimeTunnelCommand,
+        CommandEnvelope, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk, JobCommand,
+        JobRequest, OutputStream, PrivilegeReplayCache, RuntimeTunnelCommand,
     };
 
     fn test_config(signing_key: &SigningKey, proof_key: &[u8; 32]) -> AgentConfig {
@@ -749,6 +749,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_file_download_regular_file_returns_bytes_and_status() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-download-file-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("download.txt");
+        let data = b"download me";
+        tokio::fs::write(&path, data).await.unwrap();
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileDownload {
+                path: path.to_string_lossy().to_string(),
+                max_bytes: 1024,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stdout_bytes(&outputs), data);
+        let status = status_payload(&outputs);
+        assert_eq!(status["type"], "file_download");
+        assert_eq!(status["source_kind"], "file");
+        assert_eq!(status["filename"], "download.txt");
+        assert_eq!(status["content_type"], "application/octet-stream");
+        assert_eq!(status["size_bytes"], data.len());
+        assert_eq!(status["sha256_hex"], payload_hash(data));
+        assert_eq!(status["archive"], false);
+        assert!(status.get("hierarchy_sha256_hex").is_none());
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_download_directory_returns_tar_archive() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-download-dir-{job_id}"));
+        tokio::fs::create_dir_all(dir.join("nested")).await.unwrap();
+        tokio::fs::write(dir.join("nested/app.conf"), b"listen=443\n")
+            .await
+            .unwrap();
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileDownload {
+                path: dir.to_string_lossy().to_string(),
+                max_bytes: 1024 * 1024,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        let status = status_payload(&outputs);
+        assert_eq!(status["type"], "file_download");
+        assert_eq!(status["source_kind"], "directory");
+        assert_eq!(status["content_type"], "application/x-tar");
+        assert_eq!(status["archive"], true);
+        assert_eq!(status["file_count"], 1);
+        assert_eq!(status["directory_count"], 1);
+        assert_eq!(status["manifest_truncated"], false);
+        assert_eq!(status["manifest_entry_count"], 2);
+        assert!(status["hierarchy_sha256_hex"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        assert!(status["content_manifest_sha256_hex"]
+            .as_str()
+            .is_some_and(|value| value.len() == 64));
+        let manifest_entries = status["manifest_entries"].as_array().unwrap();
+        assert!(manifest_entries
+            .iter()
+            .any(|entry| { entry["path"] == "nested" && entry["kind"] == "directory" }));
+        assert!(manifest_entries.iter().any(|entry| {
+            entry["path"] == "nested/app.conf"
+                && entry["kind"] == "file"
+                && entry["sha256_hex"] == payload_hash(b"listen=443\n")
+        }));
+        let archive_bytes = stdout_bytes(&outputs);
+        let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|name| name.ends_with("nested/app.conf")));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn execute_file_push_writes_hash_verified_payload_atomically() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-file-push-{job_id}"));
@@ -763,6 +853,12 @@ mod tests {
                 size_bytes: data.len() as u64,
                 sha256_hex: payload_hash(data),
                 data_base64: vpsman_common::encode_inline_file_payload(data).unwrap(),
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
             5,
         )
@@ -789,6 +885,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_file_push_can_refuse_existing_destination() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-push-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("pushed.txt");
+        tokio::fs::write(&path, b"original").await.unwrap();
+        let data = b"replacement";
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FilePush {
+                path: path.to_string_lossy().to_string(),
+                mode: 0o640,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                data_base64: vpsman_common::encode_inline_file_payload(data).unwrap(),
+                existing_policy: FileExistingPolicy::Skip,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"original");
+        let status = outputs.iter().find(|output| output.done).unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(status["type"], "file_push");
+        assert_eq!(status["status"], "skipped");
+        assert_eq!(status["reason"], "destination_exists");
+        assert_eq!(status["overwrite_policy"], "skip");
+        assert_eq!(status["ownership_status"], "unchanged");
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_push_missing_owner_fail_policy_fails_before_placement() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-push-owner-fail-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("pushed.txt");
+        let data = b"owned contents";
+
+        let error = execute_job_command(
+            job_id,
+            &JobCommand::FilePush {
+                path: path.to_string_lossy().to_string(),
+                mode: 0o600,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                data_base64: vpsman_common::encode_inline_file_payload(data).unwrap(),
+                existing_policy: FileExistingPolicy::Replace,
+                owner: Some(format!("missing-vpsman-user-{job_id}")),
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
+            },
+            5,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing owner/group"));
+        assert!(!path.exists());
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_push_missing_owner_ignore_policy_uploads_without_chown() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir =
+            std::env::temp_dir().join(format!("vpsman-agent-file-push-owner-ignore-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("pushed.txt");
+        let data = b"owned contents";
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FilePush {
+                path: path.to_string_lossy().to_string(),
+                mode: 0o600,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                data_base64: vpsman_common::encode_inline_file_payload(data).unwrap(),
+                existing_policy: FileExistingPolicy::Replace,
+                owner: Some(format!("missing-vpsman-user-{job_id}")),
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Ignore,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), data);
+        let status = status_payload(&outputs);
+        assert_eq!(status["status"], "completed");
+        assert_eq!(status["ownership_status"], "skipped");
+        assert_eq!(status["ownership_reason"], "missing_owner_or_group");
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn execute_chunked_file_push_validates_chunks_and_writes_atomically() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-file-push-{job_id}"));
@@ -803,6 +1009,12 @@ mod tests {
                 size_bytes: data.len() as u64,
                 sha256_hex: payload_hash(&data),
                 chunks: vpsman_common::encode_chunked_file_payload(&data).unwrap(),
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
             5,
         )
@@ -849,6 +1061,7 @@ mod tests {
                 sha256_hex: payload_hash(data),
                 chunk_size_bytes: 16,
                 rate_limit_kbps: 0,
+                existing_policy: FileExistingPolicy::Replace,
                 resume_token_hash: token_hash.clone(),
             },
             5,
@@ -896,6 +1109,7 @@ mod tests {
                 sha256_hex: payload_hash(data),
                 chunk_size_bytes: 16,
                 rate_limit_kbps: 0,
+                existing_policy: FileExistingPolicy::Replace,
                 resume_token_hash: token_hash.clone(),
             },
             5,
@@ -945,6 +1159,102 @@ mod tests {
                 & 0o777,
             0o640
         );
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_resumable_file_transfer_skip_policy_does_not_replace_existing_file() {
+        let session_id = uuid::Uuid::new_v4();
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-resume-skip-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("existing.bin");
+        tokio::fs::write(&path, b"keep").await.unwrap();
+        let data = b"replacement";
+        let token_hash = payload_hash(b"resume-token");
+
+        let start_outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferStart {
+                session_id,
+                path: path.to_string_lossy().to_string(),
+                mode: 0o640,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                chunk_size_bytes: 16,
+                rate_limit_kbps: 0,
+                existing_policy: FileExistingPolicy::Skip,
+                resume_token_hash: token_hash.clone(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let status = status_payload(&start_outputs);
+        assert_eq!(status["type"], "file_transfer_start");
+        assert_eq!(status["next_offset"], data.len() as u64);
+        assert_eq!(status["extra"]["skipped"], true);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"keep");
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_resumable_file_transfer_skip_policy_refuses_commit_race() {
+        let session_id = uuid::Uuid::new_v4();
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-resume-race-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("race.bin");
+        let data = b"replacement";
+        let token_hash = payload_hash(b"resume-token");
+
+        let start_outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferStart {
+                session_id,
+                path: path.to_string_lossy().to_string(),
+                mode: 0o640,
+                size_bytes: data.len() as u64,
+                sha256_hex: payload_hash(data),
+                chunk_size_bytes: 16,
+                rate_limit_kbps: 0,
+                existing_policy: FileExistingPolicy::Skip,
+                resume_token_hash: token_hash.clone(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        assert_transfer_next_offset(&start_outputs, "file_transfer_start", 0);
+
+        let chunk_outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferChunk {
+                session_id,
+                offset: 0,
+                chunk: transfer_chunk(0, data),
+                resume_token_hash: token_hash.clone(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        assert_transfer_next_offset(&chunk_outputs, "file_transfer_chunk_ack", data.len() as u64);
+        tokio::fs::write(&path, b"raced").await.unwrap();
+
+        let commit_result = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferCommit {
+                session_id,
+                resume_token_hash: token_hash,
+            },
+            5,
+        )
+        .await;
+        assert!(commit_result.unwrap_err().to_string().contains("move file"));
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"raced");
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
@@ -1034,6 +1344,12 @@ mod tests {
                 size_bytes: 4,
                 sha256_hex: "00".repeat(32),
                 data_base64: vpsman_common::encode_inline_file_payload(b"data").unwrap(),
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
             },
             5,
         )

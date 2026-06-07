@@ -12,6 +12,7 @@ import {
   buildEnvelopesForPayloadHash,
   type ProofMaterial,
 } from "../proof";
+import { selectorExpressionForClientIds } from "../searchExpression";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentView,
@@ -39,7 +40,6 @@ import type {
   JobTargetRecord,
   JobTargetSelection,
   ProcessSupervisorInventoryRecord,
-  TagView,
   UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
   WsJobOutputEvent,
@@ -71,7 +71,9 @@ import {
 } from "./JobDispatchPanel";
 import { AgentUpdateReleasesPanel } from "./jobs/AgentUpdateReleasesPanel";
 import { AgentUpdateRolloutsPanel } from "./jobs/AgentUpdateRolloutsPanel";
+import { FileBrowserPanel } from "./jobs/FileBrowserPanel";
 import { FileTransferSessionsPanel } from "./jobs/FileTransferSessionsPanel";
+import { MultiFileActionsPanel } from "./jobs/MultiFileActionsPanel";
 import { ProcessSupervisorInventoryPanel } from "./jobs/ProcessSupervisorInventoryPanel";
 import { TerminalSessionsPanel } from "./jobs/TerminalSessionsPanel";
 
@@ -152,6 +154,7 @@ export function JobHistoryPanel({
   onDispatchScheduledJob,
   onDelegateAgentUpdateActivation,
   onDelegateAgentUpdateRollback,
+  onDownloadFileBundle,
   onDownloadOutputArtifact,
   onDownloadFileTransferSource,
   onLoadJob,
@@ -159,15 +162,20 @@ export function JobHistoryPanel({
   onLoadOutputComparison,
   onLoadTerminalReplay,
   onLoadTargets,
+  onOpenProofUnlock,
   onRefresh,
   onResolveTargets,
   onSaveFileTransferHandoff,
+  onSelectSubpage,
+  onSelectedJobDetailsOpened,
   onUpdateAgentUpdateRolloutControl,
   onUploadFileTransferSource,
   onUpsertCommandTemplate,
+  pendingSelectedJobId,
+  proofMaterial,
   processSupervisorInventory,
+  setProofMaterial,
   terminalSessions,
-  tags,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -217,6 +225,7 @@ export function JobHistoryPanel({
     clientId: string,
     seq: number,
   ) => Promise<Blob>;
+  onDownloadFileBundle: (jobId: string, clientIds: string[]) => Promise<Blob>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
@@ -230,10 +239,12 @@ export function JobHistoryPanel({
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenProofUnlock: () => void;
   onRefresh: () => void;
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
+  onSelectedJobDetailsOpened?: (jobId: string) => void;
   onUpdateAgentUpdateRolloutControl: (
     rolloutId: string,
     request: AgentUpdateRolloutControlRequest,
@@ -247,15 +258,18 @@ export function JobHistoryPanel({
       mode: ArtifactDownloadMode;
     },
   ) => Promise<void>;
+  onSelectSubpage?: (subpage: string) => void;
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
   ) => Promise<FileTransferSourceArtifactRecord>;
   onUpsertCommandTemplate: (
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
+  pendingSelectedJobId?: string | null;
+  proofMaterial: ProofMaterial | null;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
+  setProofMaterial: (material: ProofMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
-  tags: TagView[];
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -275,9 +289,6 @@ export function JobHistoryPanel({
   const [targetsLoading, setTargetsLoading] = useState(false);
   const [outputsLoading, setOutputsLoading] = useState(false);
   const [comparisonLoading, setComparisonLoading] = useState(false);
-  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(
-    null,
-  );
   const [proofTtlSecs, setProofTtlSecs] = useState(300);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalPending, setApprovalPending] = useState(false);
@@ -298,9 +309,12 @@ export function JobHistoryPanel({
   const [rolloutActionId, setRolloutActionId] = useState<string | null>(null);
   const [terminalComposerAction, setTerminalComposerAction] =
     useState<TerminalComposerAction | null>(null);
+  const [multiFileInitialPath, setMultiFileInitialPath] = useState("/");
   const jobSubpage = [
     "history",
     "dispatch",
+    "files",
+    "multi_files",
     "updates",
     "transfers",
     "terminal",
@@ -381,6 +395,19 @@ export function JobHistoryPanel({
     },
     [comparisonMode, onLoadOutputComparison, onLoadOutputs, onLoadTargets],
   );
+
+  function openSubmittedJobDetails(jobId: string) {
+    onSelectSubpage?.("history");
+    void openTargets(jobId);
+  }
+
+  useEffect(() => {
+    if (!pendingSelectedJobId) {
+      return;
+    }
+    onSelectSubpage?.("history");
+    void openTargets(pendingSelectedJobId).finally(() => onSelectedJobDetailsOpened?.(pendingSelectedJobId));
+  }, [onSelectSubpage, onSelectedJobDetailsOpened, openTargets, pendingSelectedJobId]);
 
   const jobColumns = useMemo<ConsoleDataGridColumn<JobHistoryRecord>[]>(
     () => [
@@ -676,8 +703,7 @@ export function JobHistoryPanel({
         });
         setLastApprovalHash(built.payloadHashHex);
         await onCreateJob({
-          clients: clientIds,
-          tags: [],
+          selector_expression: selectorExpressionForClientIds(clientIds),
           destructive: false,
           confirmed: true,
           command: "agent_update_activate",
@@ -731,8 +757,7 @@ export function JobHistoryPanel({
         });
         setLastApprovalHash(built.payloadHashHex);
         await onCreateJob({
-          clients: clientIds,
-          tags: [],
+          selector_expression: selectorExpressionForClientIds(clientIds),
           destructive: false,
           confirmed: true,
           command: "agent_update_rollback",
@@ -875,9 +900,46 @@ export function JobHistoryPanel({
           onDownloadOutputArtifact={onDownloadOutputArtifact}
           onLoadJob={onLoadJob}
           onLoadOutputs={onLoadOutputs}
+          onLoadTargets={onLoadTargets}
+          onOpenJobDetails={openSubmittedJobDetails}
+          onOpenProofUnlock={onOpenProofUnlock}
           onResolveTargets={onResolveTargets}
           onUpsertCommandTemplate={onUpsertCommandTemplate}
-          tags={tags}
+          proofMaterial={proofMaterial}
+          setProofMaterial={setProofMaterial}
+        />
+      )}
+      {jobSubpage === "files" && (
+        <FileBrowserPanel
+          agents={agents}
+          loading={loading}
+          onCreateJob={onCreateJob}
+          onLoadOutputs={onLoadOutputs}
+          onOpenMultiFiles={(path) => {
+            setMultiFileInitialPath(path);
+            onSelectSubpage?.("multi_files");
+          }}
+          onOpenProofUnlock={onOpenProofUnlock}
+          proofMaterial={proofMaterial}
+          proofTtlSecs={proofTtlSecs}
+          setProofMaterial={setProofMaterial}
+        />
+      )}
+      {jobSubpage === "multi_files" && (
+        <MultiFileActionsPanel
+          agents={agents}
+          initialPath={multiFileInitialPath}
+          loading={loading}
+          onCreateJob={onCreateJob}
+          onDownloadFileBundle={onDownloadFileBundle}
+          onLoadOutputs={onLoadOutputs}
+          onLoadTargets={onLoadTargets}
+          onOpenJobDetails={openSubmittedJobDetails}
+          onOpenProofUnlock={onOpenProofUnlock}
+          onResolveTargets={onResolveTargets}
+          proofMaterial={proofMaterial}
+          proofTtlSecs={proofTtlSecs}
+          setProofMaterial={setProofMaterial}
         />
       )}
       {jobSubpage === "updates" && (
@@ -965,9 +1027,13 @@ export function JobHistoryPanel({
             onDownloadOutputArtifact={onDownloadOutputArtifact}
             onLoadJob={onLoadJob}
             onLoadOutputs={onLoadOutputs}
+            onLoadTargets={onLoadTargets}
+            onOpenJobDetails={openSubmittedJobDetails}
+            onOpenProofUnlock={onOpenProofUnlock}
             onResolveTargets={onResolveTargets}
             onUpsertCommandTemplate={onUpsertCommandTemplate}
-            tags={tags}
+            proofMaterial={proofMaterial}
+            setProofMaterial={setProofMaterial}
           />
         </div>
       )}
@@ -1458,8 +1524,10 @@ export function JobHistoryPanel({
                 labelPrefix="Approval"
                 lastPayloadHash={lastApprovalHash}
                 lockProofLabel="Lock approval proof"
+                onOpenUnlock={onOpenProofUnlock}
                 onProofMaterialChange={setProofMaterial}
                 proofMaterial={proofMaterial}
+                unlockRedirectLabel="Unlock approval proof"
                 unlockLabel="Unlock approval proof"
                 useProofLabel="Use approval proof"
               />

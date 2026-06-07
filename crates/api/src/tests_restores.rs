@@ -339,10 +339,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        targets: Vec::new(),
-        clients: vec!["client-b".to_string()],
-        tags: Vec::new(),
-        tag_mode: None,
+        selector_expression: "id:client-b".to_string(),
         destructive: true,
         confirmed: true,
         command: "restore_rollback".to_string(),

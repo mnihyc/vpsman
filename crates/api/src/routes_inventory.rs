@@ -20,6 +20,7 @@ use crate::{
         TelemetryTunnelView, TestDataSourcePresetRequest, UpdateAgentAliasRequest,
         UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse, WsEvent,
     },
+    selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
 };
@@ -440,21 +441,13 @@ fn validate_assign_data_source_preset(
     request: &AssignDataSourcePresetRequest,
 ) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
-    if request.clients.is_empty() && request.tags.is_empty() {
+    if request.selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request(
             "data_source_assignment_targets_required",
         ));
     }
-    for client_id in &request.clients {
-        if client_id.is_empty() || client_id.len() > 128 {
-            return Err(ApiError::bad_request("invalid_client_id"));
-        }
-    }
-    for tag in &request.tags {
-        if tag.is_empty() || tag.len() > 128 {
-            return Err(ApiError::bad_request("invalid_tag_name"));
-        }
-    }
+    parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     Ok(())
 }
 
@@ -589,7 +582,17 @@ pub(crate) async fn resolve_bulk_targets(
     Json(request): Json<BulkResolveRequest>,
 ) -> Result<Json<BulkResolveResponse>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    validate_bulk_selector_expression(&request.selector_expression)?;
     Ok(Json(state.repo.resolve_bulk_targets(&request).await?))
+}
+
+fn validate_bulk_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
+    if selector_expression.trim().is_empty() {
+        return Err(ApiError::bad_request("selector_expression_required"));
+    }
+    parse_selector_expression(selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+    Ok(())
 }
 
 fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), ApiError> {
