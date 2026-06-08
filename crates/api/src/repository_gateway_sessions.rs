@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use sqlx::Row;
 use vpsman_common::GatewaySessionLifecycleIngest;
 
@@ -24,33 +25,45 @@ impl Repository {
                     return Ok(());
                 }
                 upsert_memory_gateway_session(memory, event, "active", None).await;
-                set_memory_agent_status(
+                if let Some(from_status) = set_memory_agent_status(
                     memory,
                     &event.client_id,
                     "online",
                     event.remote_ip.as_deref(),
                     false,
                 )
-                .await;
+                .await
+                {
+                    self.record_client_status_webhook_event(
+                        &event.client_id,
+                        Some(&from_status),
+                        "online",
+                        "gateway_session_started",
+                        gateway_status_metadata(event),
+                    )
+                    .await?;
+                }
                 Ok(())
             }
             Self::Postgres(pool) => {
+                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
+                    .await?;
                 let mut tx = pool.begin().await?;
-                let visible: bool = sqlx::query_scalar(
+                let prior_status: Option<String> = sqlx::query_scalar(
                     r#"
-                    SELECT EXISTS (
-                        SELECT 1 FROM clients
-                        WHERE id = $1 AND hidden_at IS NULL
-                    )
+                    SELECT status
+                    FROM clients
+                    WHERE id = $1 AND hidden_at IS NULL
+                    FOR UPDATE
                     "#,
                 )
                 .bind(&event.client_id)
-                .fetch_one(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if !visible {
+                let Some(prior_status) = prior_status else {
                     tx.commit().await?;
                     return Ok(());
-                }
+                };
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
@@ -88,6 +101,17 @@ impl Repository {
                 .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
+                if prior_status != "stale" && prior_status != "online" {
+                    crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                        &mut tx,
+                        &event.client_id,
+                        Some(&prior_status),
+                        "online",
+                        "gateway_session_started",
+                        gateway_status_metadata(event),
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 Ok(())
             }
@@ -104,19 +128,42 @@ impl Repository {
                 if !memory_has_active_other_session(memory, &event.client_id, event.session_id)
                     .await
                 {
-                    set_memory_agent_status(
+                    if let Some(from_status) = set_memory_agent_status(
                         memory,
                         &event.client_id,
                         "offline",
                         event.remote_ip.as_deref(),
                         false,
                     )
-                    .await;
+                    .await
+                    {
+                        self.record_client_status_webhook_event(
+                            &event.client_id,
+                            Some(&from_status),
+                            "offline",
+                            "gateway_session_ended",
+                            gateway_status_metadata(event),
+                        )
+                        .await?;
+                    }
                 }
                 Ok(())
             }
             Self::Postgres(pool) => {
+                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
+                    .await?;
                 let mut tx = pool.begin().await?;
+                let prior_status: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT status
+                    FROM clients
+                    WHERE id = $1 AND hidden_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&event.client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
@@ -138,7 +185,7 @@ impl Repository {
                 .bind(&event.reason)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query(
+                let update = sqlx::query(
                     r#"
                     UPDATE clients
                     SET
@@ -162,6 +209,21 @@ impl Repository {
                 .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
+                if update.rows_affected() > 0 {
+                    if let Some(prior_status) = prior_status.as_deref() {
+                        if prior_status != "stale" && prior_status != "offline" {
+                            crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                                &mut tx,
+                                &event.client_id,
+                                Some(prior_status),
+                                "offline",
+                                "gateway_session_ended",
+                                gateway_status_metadata(event),
+                            )
+                            .await?;
+                        }
+                    }
+                }
                 tx.commit().await?;
                 Ok(())
             }
@@ -285,10 +347,11 @@ async fn set_memory_agent_status(
     status: &str,
     remote_ip: Option<&str>,
     override_stale: bool,
-) {
+) -> Option<String> {
     if memory.hidden_clients.read().await.contains(client_id) {
-        return;
+        return None;
     }
+    let mut changed_from = None;
     if let Some(agent) = memory
         .agents
         .write()
@@ -296,7 +359,8 @@ async fn set_memory_agent_status(
         .iter_mut()
         .find(|agent| agent.id == client_id)
     {
-        if override_stale || agent.status != "stale" {
+        if (override_stale || agent.status != "stale") && agent.status != status {
+            changed_from = Some(agent.status.clone());
             agent.status = status.to_string();
         }
         if agent.registration_ip.is_none() {
@@ -307,6 +371,16 @@ async fn set_memory_agent_status(
         }
         agent.last_seen_at = Some(unix_now().to_string());
     }
+    changed_from
+}
+
+fn gateway_status_metadata(event: &GatewaySessionLifecycleIngest) -> serde_json::Value {
+    serde_json::json!({
+        "gateway_id": &event.gateway_id,
+        "session_id": event.session_id,
+        "remote_ip": &event.remote_ip,
+        "reason": &event.reason,
+    })
 }
 
 #[cfg(test)]

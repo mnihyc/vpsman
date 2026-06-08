@@ -36,10 +36,10 @@ export function TagsPanel({
   agents: AgentView[];
   error: string | null;
   loading: boolean;
-  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
@@ -127,7 +127,7 @@ function TagRegistry({
   tags,
 }: {
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -137,6 +137,7 @@ function TagRegistry({
 }) {
   const [tagName, setTagName] = useState("");
   const [deleteCandidate, setDeleteCandidate] = useState<TagView | null>(null);
+  const [deletePreview, setDeletePreview] = useState<TagMutationResponse | null>(null);
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -156,14 +157,23 @@ function TagRegistry({
     });
   }
 
+  async function previewDelete(candidate: TagView) {
+    await runAction(async () => {
+      setDeleteCandidate(candidate);
+      setDeletePreview(await onDeleteTag(candidate.name, false, null));
+    });
+  }
+
   async function deleteSelected() {
     const candidate = deleteCandidate;
+    const preview = deletePreview;
     setDeleteCandidate(null);
+    setDeletePreview(null);
     if (!candidate) {
       return;
     }
     await runAction(async () => {
-      const targetIds = candidate.clients.map((client) => client.id);
+      const targetIds = (preview?.affected ?? candidate.clients).map((client) => client.id);
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
@@ -219,7 +229,7 @@ function TagRegistry({
                 </span>
                 <span>{tag.clients.length}</span>
                 <span>
-                  <button className="secondaryAction compactAction dangerAction" disabled={pending} onClick={() => setDeleteCandidate(tag)} type="button">
+                  <button className="secondaryAction compactAction dangerAction" disabled={pending} onClick={() => void previewDelete(tag)} type="button">
                     <Trash2 size={13} />
                     <span>Delete</span>
                   </button>
@@ -234,9 +244,13 @@ function TagRegistry({
         detail="Delete this tag and all assignments."
         items={[
           { label: "Tag", value: deleteCandidate?.name ?? "-" },
-          { label: "Assignments", value: String(deleteCandidate?.clients.length ?? 0) },
+          { label: "Assignments", value: String(deletePreview?.target_count ?? deleteCandidate?.clients.length ?? 0) },
+          { label: "Schedules", value: <ScheduleImpactTable impacts={deletePreview?.schedule_impacts ?? []} /> },
         ]}
-        onCancel={() => setDeleteCandidate(null)}
+        onCancel={() => {
+          setDeleteCandidate(null);
+          setDeletePreview(null);
+        }}
         onConfirm={() => void deleteSelected()}
         open={deleteCandidate !== null}
         pending={pending}
@@ -258,7 +272,7 @@ function TagAssignments({
   tags,
 }: {
   agents: AgentView[];
-  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   pending: boolean;
@@ -285,16 +299,7 @@ function TagAssignments({
         null,
         [agent.id],
       );
-      await onAssignTag(agent.id, tag, privilegeAssertion);
-      setLastMutation({
-        action: "add",
-        affected: [agent],
-        changed_count: 1,
-        confirmation_required: false,
-        skipped_count: 0,
-        tag,
-        target_count: 1,
-      });
+      setLastMutation(await onAssignTag(agent.id, tag, privilegeAssertion));
       setTagByAgent((current) => ({ ...current, [agent.id]: "" }));
     });
   }
@@ -396,7 +401,7 @@ function BulkTagPanel({
 }: {
   agents: AgentView[];
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   pending: boolean;
@@ -408,7 +413,7 @@ function BulkTagPanel({
   const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(TAG_BULK_SELECTOR_STORAGE_KEY));
   const [action, setAction] = useState<"add" | "remove" | "delete">("add");
   const [tag, setTag] = useState("");
-  const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
+  const [preview, setPreview] = useState<TagMutationResponse | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
 
@@ -416,10 +421,22 @@ function BulkTagPanel({
 
   async function previewTargets() {
     await runAction(async () => {
-      if (selectorParse.error) {
+      if (action !== "delete" && selectorParse.error) {
         throw new Error(selectorParse.error);
       }
-      setPreview(await onResolveBulk(selectorExpression.trim()));
+      if (action === "delete") {
+        setPreview(await onDeleteTag(tag.trim(), false, null));
+        return;
+      }
+      setPreview(
+        await onBulkMutateTags({
+          action,
+          confirmed: false,
+          privilege_assertion: null,
+          selector_expression: selectorExpression.trim(),
+          tag: tag.trim(),
+        }),
+      );
     });
   }
 
@@ -431,7 +448,7 @@ function BulkTagPanel({
         throw new Error("Privilege unlock is required before bulk tag mutation");
       }
       if (action === "delete") {
-        const targetIds = tags.find((item) => item.name === tag.trim())?.clients.map((client) => client.id) ?? [];
+        const targetIds = (preview?.affected ?? tags.find((item) => item.name === tag.trim())?.clients ?? []).map((client) => client.id);
         const privilegeAssertion = await dbPrivilegeAssertion(
           privilegeMaterial,
           onOpenPrivilegeUnlock,
@@ -443,7 +460,7 @@ function BulkTagPanel({
         setLastMutation(await onDeleteTag(tag.trim(), true, privilegeAssertion));
         return;
       }
-      const targetIds = preview?.targets.map((agent) => agent.id) ?? [];
+      const targetIds = preview?.affected.map((agent) => agent.id) ?? [];
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
@@ -468,12 +485,28 @@ function BulkTagPanel({
     <div className="configApplyGrid">
       <div className="compactForm">
         <strong>Bulk mutation</strong>
-        <select aria-label="Bulk tag action" onChange={(event) => setAction(event.target.value as "add" | "remove" | "delete")} value={action}>
+        <select
+          aria-label="Bulk tag action"
+          onChange={(event) => {
+            setAction(event.target.value as "add" | "remove" | "delete");
+            setPreview(null);
+          }}
+          value={action}
+        >
           <option value="add">Add tag by selector</option>
           <option value="remove">Remove tag by selector</option>
           <option value="delete">Delete tag globally</option>
         </select>
-        <input aria-label="Bulk tag" list="bulk-tag-options" onChange={(event) => setTag(event.target.value)} placeholder="tag" value={tag} />
+        <input
+          aria-label="Bulk tag"
+          list="bulk-tag-options"
+          onChange={(event) => {
+            setTag(event.target.value);
+            setPreview(null);
+          }}
+          placeholder="tag"
+          value={tag}
+        />
         <datalist id="bulk-tag-options">
           {tags.map((item) => (
             <option key={item.name} value={item.name} />
@@ -495,10 +528,15 @@ function BulkTagPanel({
               verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
               verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
             />
-            <button className="secondaryAction" disabled={pending || !selectorExpression.trim()} onClick={previewTargets} type="button">
-              Preview targets
+            <button className="secondaryAction" disabled={pending || !tag.trim() || !selectorExpression.trim()} onClick={previewTargets} type="button">
+              Preview mutation
             </button>
           </>
+        )}
+        {action === "delete" && (
+          <button className="secondaryAction" disabled={pending || !tag.trim()} onClick={previewTargets} type="button">
+            Preview mutation
+          </button>
         )}
         <div className="privilegeGateBox">
           <ShieldCheck size={16} />
@@ -511,7 +549,7 @@ function BulkTagPanel({
         </div>
         <button
           className="primaryAction"
-          disabled={pending || !privilegeMaterial || !tag.trim() || (action !== "delete" && (!preview?.target_count || Boolean(selectorParse.error)))}
+          disabled={pending || !privilegeMaterial || !tag.trim() || !preview || (action !== "delete" && Boolean(selectorParse.error))}
           onClick={() => setConfirmOpen(true)}
           type="button"
         >
@@ -520,12 +558,11 @@ function BulkTagPanel({
         </button>
       </div>
       <div className="targetChipList bulkTagPreview">
-        {(preview?.targets ?? []).slice(0, 48).map((agent) => (
+        {(preview?.affected ?? []).map((agent) => (
           <span className="targetChip" key={agent.id} title={agent.id}>
             {agent.display_name}
           </span>
         ))}
-        {preview && preview.target_count > 48 && <span className="targetChip mutedChip">+{preview.target_count - 48} more</span>}
       </div>
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"
@@ -534,7 +571,9 @@ function BulkTagPanel({
           { label: "Action", value: action },
           { label: "Tag", value: tag || "-" },
           { label: "Selector", value: action === "delete" ? "all assignments" : selectorExpression || "-" },
-          { label: "Targets", value: action === "delete" ? String(tags.find((item) => item.name === tag)?.clients.length ?? 0) : String(preview?.target_count ?? 0) },
+          { label: "Targets", value: String(preview?.target_count ?? 0) },
+          { label: "Changed", value: String(preview?.changed_count ?? 0) },
+          { label: "Schedules", value: <ScheduleImpactTable impacts={preview?.schedule_impacts ?? []} /> },
         ]}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={() => void submitMutation()}
@@ -543,6 +582,54 @@ function BulkTagPanel({
         title="Confirm tag mutation"
       />
     </div>
+  );
+}
+
+function ScheduleImpactTable({ impacts }: { impacts: TagMutationResponse["schedule_impacts"] }) {
+  if (impacts.length === 0) {
+    return <span>No enabled schedule targets change</span>;
+  }
+  return (
+    <div className="tagScheduleImpactTable">
+      <div className="tagScheduleImpactRow heading">
+        <span>Schedule</span>
+        <span>Command</span>
+        <span>Targets</span>
+        <span>Summary</span>
+        <span>Added</span>
+        <span>Removed</span>
+      </div>
+      {impacts.map((impact) => (
+        <div className="tagScheduleImpactRow" key={impact.schedule_id}>
+          <span className="historyPrimary">
+            <strong>{impact.name}</strong>
+            <small>{impact.selector_expression}</small>
+          </span>
+          <span>{impact.command_type}</span>
+          <span>
+            {impact.before_target_count} -&gt; {impact.after_target_count}
+          </span>
+          <span>{impact.summary}</span>
+          <VpsChipList agents={impact.added_targets} />
+          <VpsChipList agents={impact.removed_targets} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VpsChipList({ agents }: { agents: AgentView[] }) {
+  if (agents.length === 0) {
+    return <span className="mutedText">-</span>;
+  }
+  return (
+    <span className="targetChipList impactTargetChips">
+      {agents.map((agent) => (
+        <span className="targetChip" key={agent.id} title={agent.id}>
+          {agent.display_name}
+        </span>
+      ))}
+    </span>
   );
 }
 

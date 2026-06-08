@@ -6,20 +6,26 @@ use clap::Parser;
 use croner::Cron;
 use ed25519_dalek::SigningKey;
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Row};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions},
+    types::Json as SqlJson,
+    PgPool, Row,
+};
 use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use vpsman_common::{
-    job_command_protocol_version, payload_hash, sign_command_envelope, CommandEnvelope,
-    CommandOutput, GatewayCommandDispatch, GatewayCommandDispatchResult, JobCommand, JobRequest,
-    OutputStream, MAX_COMMAND_SIGNATURE_AGE_SECS,
+    expression_matches, job_command_protocol_version, parse_expression, payload_hash,
+    sign_command_envelope, CommandEnvelope, CommandOutput, ExpressionContext,
+    GatewayCommandDispatch, GatewayCommandDispatchResult, JobCommand, JobRequest, OutputStream,
+    VpsMetadata, MAX_COMMAND_SIGNATURE_AGE_SECS,
 };
 
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
 mod rollout_automation;
+mod webhook_rules;
 mod worker_leases;
 
 use alert_notifications::{
@@ -30,6 +36,10 @@ use backup_policy_retention::{
     BackupPolicyRetentionPruneRun,
 };
 use rollout_automation::process_rollout_automation;
+use webhook_rules::{
+    ensure_event_partitions, insert_webhook_event_in_tx, process_webhook_rules,
+    WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
+};
 use worker_leases::acquire_worker_lease;
 
 #[derive(Debug, Parser)]
@@ -87,6 +97,36 @@ struct Args {
         default_value_t = 5
     )]
     notification_webhook_timeout_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_DELIVERY_LIMIT",
+        default_value_t = 25
+    )]
+    webhook_rule_delivery_limit: i64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_MATERIALIZE_LIMIT",
+        default_value_t = 100
+    )]
+    webhook_rule_materialize_limit: i64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_DAYS",
+        default_value_t = 90
+    )]
+    webhook_rule_retention_days: i64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_PRUNE_LIMIT",
+        default_value_t = 1000
+    )]
+    webhook_rule_retention_prune_limit: i64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_TIMEOUT_SECS",
+        default_value_t = 5
+    )]
+    webhook_rule_timeout_secs: u64,
     #[arg(
         long,
         env = "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_ENABLED",
@@ -175,6 +215,13 @@ async fn main() -> Result<()> {
         args.notification_retention_prune_limit,
         args.notification_webhook_timeout_secs,
     );
+    let webhook_rule_config = WebhookRuleWorkerConfig::new(
+        args.webhook_rule_delivery_limit,
+        args.webhook_rule_materialize_limit,
+        args.webhook_rule_retention_days,
+        args.webhook_rule_retention_prune_limit,
+        args.webhook_rule_timeout_secs,
+    );
     let backup_policy_prune_config = BackupPolicyRetentionPruneConfig::new(
         args.backup_policy_prune_enabled,
         args.backup_policy_prune_limit,
@@ -206,6 +253,13 @@ async fn main() -> Result<()> {
             args.worker_lease_secs,
         )
         .await?;
+        let webhook_rules = process_webhook_rules_if_leader(
+            &pool,
+            webhook_rule_config,
+            &worker_id,
+            args.worker_lease_secs,
+        )
+        .await?;
         let rollout_automation = process_rollout_automation(
             &pool,
             args.rollout_reconcile_limit,
@@ -227,6 +281,11 @@ async fn main() -> Result<()> {
             alert_notification_delivered = alert_notifications.delivered,
             alert_notification_failed = alert_notifications.failed,
             alert_notification_pruned = alert_notifications.pruned,
+            webhook_rule_materialized = webhook_rules.materialized,
+            webhook_rule_processed = webhook_rules.processed,
+            webhook_rule_delivered = webhook_rules.delivered,
+            webhook_rule_failed = webhook_rules.failed,
+            webhook_rule_pruned = webhook_rules.pruned,
             expired_rollout_heartbeats = rollout_automation.expired_heartbeats,
             reconciled_rollouts = rollout_automation.reconciled_rollouts,
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
@@ -238,8 +297,47 @@ async fn main() -> Result<()> {
     }
 
     let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
+    let mut webhook_listener = match connect_webhook_listener(postgres_url).await {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            warn!(%error, "failed to start webhook event listener; polling fallback remains active");
+            None
+        }
+    };
     loop {
-        ticker.tick().await;
+        let mut webhook_listener_failed = false;
+        if let Some(listener) = webhook_listener.as_mut() {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                notification = listener.recv() => {
+                    match notification {
+                        Ok(notification) => {
+                            debug!(
+                                channel = notification.channel(),
+                                payload = notification.payload(),
+                                "webhook event notification woke worker"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(%error, "webhook event listener failed; returning to polling fallback");
+                            webhook_listener_failed = true;
+                        }
+                    }
+                }
+            }
+            if webhook_listener_failed {
+                webhook_listener = None;
+            }
+        } else {
+            ticker.tick().await;
+            match connect_webhook_listener(postgres_url).await {
+                Ok(listener) => {
+                    info!("webhook event listener reconnected");
+                    webhook_listener = Some(listener);
+                }
+                Err(error) => debug!(%error, "webhook event listener reconnect failed"),
+            }
+        }
         match process_due_schedules_if_leader(
             &pool,
             25,
@@ -276,6 +374,28 @@ async fn main() -> Result<()> {
                 }
             }
             Err(error) => warn!(%error, "failed to process fleet alert notifications"),
+        }
+        match process_webhook_rules_if_leader(
+            &pool,
+            webhook_rule_config,
+            &worker_id,
+            args.worker_lease_secs,
+        )
+        .await
+        {
+            Ok(run) => {
+                if run.materialized > 0 || run.processed > 0 || run.pruned > 0 {
+                    info!(
+                        materialized = run.materialized,
+                        processed = run.processed,
+                        delivered = run.delivered,
+                        failed = run.failed,
+                        pruned = run.pruned,
+                        "processed webhook rules"
+                    );
+                }
+            }
+            Err(error) => warn!(%error, "failed to process webhook rules"),
         }
         match process_rollout_automation(
             &pool,
@@ -341,6 +461,33 @@ async fn connect_postgres(postgres_url: &str, migrations_dir: &std::path::Path) 
     Ok(pool)
 }
 
+async fn connect_webhook_listener(postgres_url: &str) -> Result<PgListener> {
+    let mut listener = PgListener::connect(postgres_url)
+        .await
+        .context("failed to connect PostgreSQL webhook listener")?;
+    listener
+        .listen("webhook_events")
+        .await
+        .context("failed to listen for webhook_events notifications")?;
+    Ok(listener)
+}
+
+async fn process_webhook_rules_if_leader(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+    worker_id: &str,
+    lease_secs: i32,
+) -> Result<WebhookRuleWorkerRun> {
+    if !acquire_worker_lease(pool, "webhook_rules", worker_id, lease_secs).await? {
+        debug!(
+            worker_id,
+            "skipped webhook rules because another worker holds the lease"
+        );
+        return Ok(WebhookRuleWorkerRun::default());
+    }
+    process_webhook_rules(pool, config).await
+}
+
 async fn process_alert_notifications_if_leader(
     pool: &PgPool,
     config: AlertNotificationWorkerConfig,
@@ -399,6 +546,7 @@ async fn process_due_schedules(
     limit: i64,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
+    ensure_event_partitions(pool).await?;
     let mut tx = pool.begin().await?;
     let due_count: i64 = sqlx::query_scalar(
         r#"
@@ -548,8 +696,11 @@ struct DueSchedule {
 struct ScheduledDispatch {
     job_id: Uuid,
     schedule_id: Uuid,
+    schedule_name: String,
+    selector_expression: String,
     actor_id: Option<Uuid>,
     operation: JobCommand,
+    command_type: String,
     command_hash: String,
     targets: Vec<String>,
 }
@@ -607,6 +758,16 @@ struct ScheduledTargetOutcome {
     outputs: Vec<CommandOutput>,
 }
 
+struct ScheduleDueWebhookEvent<'a> {
+    schedule: &'a DueSchedule,
+    job_id: Uuid,
+    command_type: &'a str,
+    job_status: &'a str,
+    targets: &'a [String],
+    run_index: i64,
+    run_count: i64,
+}
+
 async fn materialize_due_schedule(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
@@ -629,6 +790,10 @@ async fn materialize_due_schedule(
     } else {
         "dispatching"
     };
+    let command_type = format!(
+        "scheduled_{}",
+        scheduled_command_type_label(&operation, operation_type)
+    );
     sqlx::query(
         r#"
         INSERT INTO jobs (
@@ -641,10 +806,7 @@ async fn materialize_due_schedule(
     )
     .bind(job_id)
     .bind(schedule.actor_id)
-    .bind(format!(
-        "scheduled_{}",
-        scheduled_command_type_label(&operation, operation_type)
-    ))
+    .bind(&command_type)
     .bind(status)
     .bind(targets.len() as i32)
     .bind(&command_hash)
@@ -702,14 +864,32 @@ async fn materialize_due_schedule(
     }))
     .execute(&mut **tx)
     .await?;
+
+    record_schedule_due_webhook_event(
+        tx,
+        ScheduleDueWebhookEvent {
+            schedule,
+            job_id,
+            command_type: &command_type,
+            job_status: status,
+            targets: &targets,
+            run_index,
+            run_count,
+        },
+    )
+    .await?;
+
     if targets.is_empty() {
         Ok(None)
     } else {
         Ok(Some(ScheduledDispatch {
             job_id,
             schedule_id: schedule.id,
+            schedule_name: schedule.name.clone(),
+            selector_expression: schedule.selector_expression.clone(),
             actor_id: schedule.actor_id,
             operation,
+            command_type,
             command_hash,
             targets,
         }))
@@ -1084,8 +1264,141 @@ async fn record_scheduled_dispatch_outcomes(
     .bind(job_status)
     .execute(&mut *tx)
     .await?;
+    record_schedule_dispatched_webhook_event(&mut tx, dispatch, &outcomes, job_status).await?;
     tx.commit().await?;
     Ok(())
+}
+
+async fn record_schedule_due_webhook_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: ScheduleDueWebhookEvent<'_>,
+) -> Result<()> {
+    let schedule = input.schedule;
+    let event_id = format!("schedule:{}:job:{}:due", schedule.id, input.job_id);
+    let predicates = schedule_job_predicates(
+        schedule,
+        "schedule.due",
+        input.command_type,
+        input.job_status,
+    );
+    insert_webhook_event_in_tx(
+        tx,
+        "schedule.due",
+        &event_id,
+        &predicates,
+        input.targets,
+        serde_json::json!({
+            "event": {
+                "kind": "schedule.due",
+                "id": event_id,
+                "predicates": &predicates,
+            },
+            "schedule": {
+                "id": schedule.id,
+                "name": &schedule.name,
+                "command_type": input.command_type,
+                "selector_expression": &schedule.selector_expression,
+                "catch_up_policy": &schedule.catch_up_policy,
+                "catch_up_run_index": input.run_index + 1,
+                "catch_up_run_count": input.run_count,
+                "target_ids": input.targets,
+            },
+            "job": {
+                "id": input.job_id,
+                "status": input.job_status,
+                "type": input.command_type,
+                "source_schedule_id": schedule.id,
+                "target_count": input.targets.len(),
+            },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn record_schedule_dispatched_webhook_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch: &ScheduledDispatch,
+    outcomes: &[ScheduledTargetOutcome],
+    job_status: &str,
+) -> Result<()> {
+    let event_id = format!(
+        "schedule:{}:job:{}:dispatched",
+        dispatch.schedule_id, dispatch.job_id
+    );
+    let mut predicates = vec![
+        "schedule.dispatched".to_string(),
+        format!("schedule.id:{}", dispatch.schedule_id),
+        format!("schedule.name:{}", dispatch.schedule_name),
+        format!("job.status:{job_status}"),
+        format!("job.status.become_{job_status}"),
+        format!("job.type:{}", dispatch.command_type),
+    ];
+    for outcome in outcomes {
+        predicates.push(format!("job.target.status:{}", outcome.status));
+    }
+    predicates.sort();
+    predicates.dedup();
+    insert_webhook_event_in_tx(
+        tx,
+        "schedule.dispatched",
+        &event_id,
+        &predicates,
+        &dispatch.targets,
+        serde_json::json!({
+            "event": {
+                "kind": "schedule.dispatched",
+                "id": event_id,
+                "predicates": &predicates,
+            },
+            "schedule": {
+                "id": dispatch.schedule_id,
+                "name": &dispatch.schedule_name,
+                "command_type": &dispatch.command_type,
+                "selector_expression": &dispatch.selector_expression,
+                "target_ids": &dispatch.targets,
+            },
+            "job": {
+                "id": dispatch.job_id,
+                "status": job_status,
+                "type": &dispatch.command_type,
+                "source_schedule_id": dispatch.schedule_id,
+                "target_count": dispatch.targets.len(),
+                "targets": outcomes
+                    .iter()
+                    .map(|outcome| serde_json::json!({
+                        "client_id": &outcome.client_id,
+                        "status": &outcome.status,
+                        "accepted": outcome.accepted,
+                        "exit_code": outcome.exit_code,
+                        "message": &outcome.message,
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+fn schedule_job_predicates(
+    schedule: &DueSchedule,
+    schedule_predicate: &str,
+    command_type: &str,
+    job_status: &str,
+) -> Vec<String> {
+    let mut predicates = vec![
+        schedule_predicate.to_string(),
+        format!("schedule.id:{}", schedule.id),
+        format!("schedule.name:{}", schedule.name),
+        "job.created".to_string(),
+        format!("job.status:{job_status}"),
+        format!("job.status.become_{job_status}"),
+        format!("job.type:{command_type}"),
+    ];
+    predicates.sort();
+    predicates.dedup();
+    predicates
 }
 
 fn stale_target_message(message: &str, reason: &str) -> String {
@@ -1283,6 +1596,7 @@ async fn advance_schedule_after_success(
 
 async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) -> Result<()> {
     let bounded_error = truncate_schedule_error(error);
+    let mut tx = pool.begin().await?;
     let row = sqlx::query(
         r#"
         UPDATE schedules
@@ -1308,19 +1622,23 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
             max_failures,
             retry_delay_secs,
             next_run_at::text AS next_run_at
-        "#,
+    "#,
     )
     .bind(schedule_id)
     .bind(&bounded_error)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
+        tx.commit().await?;
         return Ok(());
     };
     let actor_id: Option<Uuid> = row.try_get("actor_id")?;
     let failure_count: i32 = row.try_get("failure_count")?;
     let max_failures: i32 = row.try_get("max_failures")?;
     let enabled: bool = row.try_get("enabled")?;
+    let schedule_name: String = row.try_get("name")?;
+    let retry_delay_secs: i64 = row.try_get("retry_delay_secs")?;
+    let next_run_at: String = row.try_get("next_run_at")?;
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -1335,16 +1653,48 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
     .bind(format!("schedule:{schedule_id}"))
     .bind(serde_json::json!({
         "schedule_id": schedule_id,
-        "schedule_name": row.try_get::<String, _>("name")?,
+        "schedule_name": &schedule_name,
         "failure_count": failure_count,
         "max_failures": max_failures,
-        "retry_delay_secs": row.try_get::<i64, _>("retry_delay_secs")?,
-        "next_run_at": row.try_get::<String, _>("next_run_at")?,
+        "retry_delay_secs": retry_delay_secs,
+        "next_run_at": &next_run_at,
         "disabled": !enabled,
-        "error": bounded_error,
+        "error": &bounded_error,
     }))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    let event_id = format!("schedule:{schedule_id}:failed:{}", Uuid::new_v4());
+    let predicates = vec![
+        "schedule.failed".to_string(),
+        format!("schedule.id:{schedule_id}"),
+        format!("schedule.name:{schedule_name}"),
+    ];
+    insert_webhook_event_in_tx(
+        &mut tx,
+        "schedule.failed",
+        &event_id,
+        &predicates,
+        &[],
+        serde_json::json!({
+            "event": {
+                "kind": "schedule.failed",
+                "id": event_id,
+                "predicates": &predicates,
+            },
+            "schedule": {
+                "id": schedule_id,
+                "name": &schedule_name,
+                "failure_count": failure_count,
+                "max_failures": max_failures,
+                "retry_delay_secs": retry_delay_secs,
+                "next_run_at": &next_run_at,
+                "disabled": !enabled,
+                "error": &bounded_error,
+            },
+        }),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1415,7 +1765,7 @@ async fn resolve_schedule_targets(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
 ) -> Result<Vec<String>> {
-    let expression = parse_selector_expression(&schedule.selector_expression)
+    let expression = parse_expression(&schedule.selector_expression)
         .map_err(anyhow::Error::msg)?
         .context("schedule selector expression is empty")?;
     let rows = sqlx::query(
@@ -1424,12 +1774,18 @@ async fn resolve_schedule_targets(
             c.id,
             c.display_name,
             c.status,
+            c.registration_ip::text AS registration_ip,
+            c.last_ip::text AS last_ip,
+            c.last_seen_at::text AS last_seen_at,
+            c.internal_build_number,
+            c.stale_since::text AS stale_since,
+            c.stale_reason,
             COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), ARRAY[]::TEXT[]) AS tags
         FROM clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
         WHERE c.hidden_at IS NULL
-        GROUP BY c.id, c.display_name, c.status
+        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason
         ORDER BY c.id
         "#,
     )
@@ -1437,306 +1793,27 @@ async fn resolve_schedule_targets(
     .await?;
     let mut targets = Vec::new();
     for row in rows {
-        let client = SelectorClient {
-            id: row.try_get("id")?,
+        let id: String = row.try_get("id")?;
+        let context = ExpressionContext::for_vps(VpsMetadata {
+            id: id.clone(),
             display_name: row.try_get("display_name")?,
             status: row.try_get("status")?,
+            registration_ip: row.try_get("registration_ip")?,
+            last_ip: row.try_get("last_ip")?,
+            last_seen_at: row.try_get("last_seen_at")?,
+            internal_build_number: Some(
+                row.try_get::<i64, _>("internal_build_number")?.max(1) as u64
+            ),
+            stale_since: row.try_get("stale_since")?,
+            stale_reason: row.try_get("stale_reason")?,
             tags: row.try_get("tags")?,
-        };
-        if selector_client_matches(&client, &expression) {
-            targets.push(client.id);
+            extra: None,
+        });
+        if expression_matches(&context, &expression) {
+            targets.push(id);
         }
     }
     Ok(targets)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SelectorExpr {
-    Term(SelectorTerm),
-    And(Box<SelectorExpr>, Box<SelectorExpr>),
-    Or(Box<SelectorExpr>, Box<SelectorExpr>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SelectorTerm {
-    namespace: Option<String>,
-    value: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TokenKind {
-    And,
-    LeftParen,
-    Or,
-    RightParen,
-    Term(String),
-}
-
-#[derive(Clone, Debug)]
-struct SelectorClient {
-    id: String,
-    display_name: String,
-    status: String,
-    tags: Vec<String>,
-}
-
-fn parse_selector_expression(input: &str) -> Result<Option<SelectorExpr>, String> {
-    let tokens = tokenize_selector_expression(input)?;
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-    let mut parser = SelectorParser {
-        tokens,
-        position: 0,
-    };
-    let expression = parser.parse_or()?;
-    if parser.peek().is_some() {
-        return Err("unexpected token after expression".to_string());
-    }
-    Ok(Some(expression))
-}
-
-fn selector_client_matches(client: &SelectorClient, expression: &SelectorExpr) -> bool {
-    match expression {
-        SelectorExpr::Term(term) => selector_client_matches_term(client, term),
-        SelectorExpr::And(left, right) => {
-            selector_client_matches(client, left) && selector_client_matches(client, right)
-        }
-        SelectorExpr::Or(left, right) => {
-            selector_client_matches(client, left) || selector_client_matches(client, right)
-        }
-    }
-}
-
-fn tokenize_selector_expression(input: &str) -> Result<Vec<TokenKind>, String> {
-    let mut tokens = Vec::new();
-    let chars = input.char_indices().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        let (_, character) = chars[index];
-        if character.is_whitespace() {
-            index += 1;
-            continue;
-        }
-        if character == '(' {
-            tokens.push(TokenKind::LeftParen);
-            index += 1;
-            continue;
-        }
-        if character == ')' {
-            tokens.push(TokenKind::RightParen);
-            index += 1;
-            continue;
-        }
-        if character == '&' && chars.get(index + 1).is_some_and(|(_, next)| *next == '&') {
-            tokens.push(TokenKind::And);
-            index += 2;
-            continue;
-        }
-        if character == '|' && chars.get(index + 1).is_some_and(|(_, next)| *next == '|') {
-            tokens.push(TokenKind::Or);
-            index += 2;
-            continue;
-        }
-        if character == '&' || character == '|' {
-            return Err("use && or || for boolean operators".to_string());
-        }
-        let start = chars[index].0;
-        let mut end = input.len();
-        let mut cursor = index;
-        while cursor < chars.len() {
-            let (byte_index, current) = chars[cursor];
-            if current.is_whitespace() || matches!(current, '(' | ')' | '&' | '|') {
-                end = byte_index;
-                break;
-            }
-            cursor += 1;
-        }
-        let raw = input[start..end].trim();
-        if raw.is_empty() {
-            index = cursor;
-            continue;
-        }
-        tokens.push(match raw.to_ascii_lowercase().as_str() {
-            "and" => TokenKind::And,
-            "or" => TokenKind::Or,
-            _ => TokenKind::Term(raw.to_string()),
-        });
-        index = cursor;
-    }
-    Ok(tokens)
-}
-
-struct SelectorParser {
-    tokens: Vec<TokenKind>,
-    position: usize,
-}
-
-impl SelectorParser {
-    fn parse_or(&mut self) -> Result<SelectorExpr, String> {
-        let mut expression = self.parse_and()?;
-        while self.consume_or() {
-            let right = self.parse_and()?;
-            expression = SelectorExpr::Or(Box::new(expression), Box::new(right));
-        }
-        Ok(expression)
-    }
-
-    fn parse_and(&mut self) -> Result<SelectorExpr, String> {
-        let mut expression = self.parse_primary()?;
-        loop {
-            if self.consume_and() {
-                let right = self.parse_primary()?;
-                expression = SelectorExpr::And(Box::new(expression), Box::new(right));
-                continue;
-            }
-            if self.next_starts_primary() {
-                let right = self.parse_primary()?;
-                expression = SelectorExpr::And(Box::new(expression), Box::new(right));
-                continue;
-            }
-            break;
-        }
-        Ok(expression)
-    }
-
-    fn parse_primary(&mut self) -> Result<SelectorExpr, String> {
-        match self.advance() {
-            Some(TokenKind::Term(raw)) => parse_selector_term(raw).map(SelectorExpr::Term),
-            Some(TokenKind::LeftParen) => {
-                let expression = self.parse_or()?;
-                if !matches!(self.advance(), Some(TokenKind::RightParen)) {
-                    return Err("missing closing parenthesis".to_string());
-                }
-                Ok(expression)
-            }
-            Some(TokenKind::And | TokenKind::Or) => {
-                Err("operator is missing a left operand".to_string())
-            }
-            Some(TokenKind::RightParen) => Err("unexpected closing parenthesis".to_string()),
-            None => Err("expression is incomplete".to_string()),
-        }
-    }
-
-    fn consume_and(&mut self) -> bool {
-        if matches!(self.peek(), Some(TokenKind::And)) {
-            self.position += 1;
-            return true;
-        }
-        false
-    }
-
-    fn consume_or(&mut self) -> bool {
-        if matches!(self.peek(), Some(TokenKind::Or)) {
-            self.position += 1;
-            return true;
-        }
-        false
-    }
-
-    fn next_starts_primary(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(TokenKind::Term(_)) | Some(TokenKind::LeftParen)
-        )
-    }
-
-    fn advance(&mut self) -> Option<TokenKind> {
-        let token = self.tokens.get(self.position)?.clone();
-        self.position += 1;
-        Some(token)
-    }
-
-    fn peek(&self) -> Option<&TokenKind> {
-        self.tokens.get(self.position)
-    }
-}
-
-fn parse_selector_term(raw: String) -> Result<SelectorTerm, String> {
-    if let Some(separator) = raw.find(':') {
-        if separator == 0 {
-            return Err("selector namespace is empty".to_string());
-        }
-        if separator == raw.len() - 1 {
-            return Err("selector value is empty".to_string());
-        }
-        return Ok(SelectorTerm {
-            namespace: Some(raw[..separator].to_ascii_lowercase()),
-            value: raw[separator + 1..].to_string(),
-        });
-    }
-    Ok(SelectorTerm {
-        namespace: None,
-        value: raw,
-    })
-}
-
-fn selector_client_matches_term(client: &SelectorClient, term: &SelectorTerm) -> bool {
-    match term.namespace.as_deref() {
-        Some("id") => selector_value_matches(&client.id, &term.value, false),
-        Some("name") => selector_value_matches(&client.display_name, &term.value, false),
-        Some("tag") => client
-            .tags
-            .iter()
-            .any(|tag| selector_value_matches(tag, &term.value, false)),
-        Some("provider") => client
-            .tags
-            .iter()
-            .any(|tag| selector_value_matches(tag, &format!("provider:{}", term.value), false)),
-        Some("country") | Some("region") => client
-            .tags
-            .iter()
-            .any(|tag| selector_value_matches(tag, &format!("country:{}", term.value), false)),
-        Some("status") => selector_value_matches(&client.status, &term.value, false),
-        Some(_) => false,
-        None => {
-            selector_value_matches(&client.id, &term.value, true)
-                || selector_value_matches(&client.display_name, &term.value, true)
-        }
-    }
-}
-
-fn selector_value_matches(value: &str, pattern: &str, allow_contains: bool) -> bool {
-    let value = value.to_ascii_lowercase();
-    let pattern = pattern.to_ascii_lowercase();
-    if pattern.contains('*') || pattern.contains('?') {
-        selector_glob_matches(&value, &pattern)
-    } else if allow_contains {
-        value.contains(&pattern)
-    } else {
-        value == pattern
-    }
-}
-
-fn selector_glob_matches(value: &str, pattern: &str) -> bool {
-    let value = value.as_bytes();
-    let pattern = pattern.as_bytes();
-    let mut value_index = 0;
-    let mut pattern_index = 0;
-    let mut star_index: Option<usize> = None;
-    let mut star_value_index = 0;
-    while value_index < value.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
-        {
-            value_index += 1;
-            pattern_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star_index = Some(pattern_index);
-            pattern_index += 1;
-            star_value_index = value_index;
-        } else if let Some(star) = star_index {
-            pattern_index = star + 1;
-            star_value_index += 1;
-            value_index = star_value_index;
-        } else {
-            return false;
-        }
-    }
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-    pattern_index == pattern.len()
 }
 
 #[cfg(test)]
@@ -1815,15 +1892,16 @@ mod schedule_tests {
 
     #[test]
     fn schedule_selector_expression_matches_clients() {
-        let expression = parse_selector_expression("provider:alpha && (country:US || id:edge-b)")
+        let expression = parse_expression("provider:alpha && (country:US || id:edge-b)")
             .unwrap()
             .unwrap();
-        let client = SelectorClient {
+        let context = ExpressionContext::for_vps(VpsMetadata {
             id: "edge-a".to_string(),
             display_name: "edge-a".to_string(),
             status: "online".to_string(),
             tags: vec!["provider:alpha".to_string(), "country:US".to_string()],
-        };
-        assert!(selector_client_matches(&client, &expression));
+            ..VpsMetadata::default()
+        });
+        assert!(expression_matches(&context, &expression));
     }
 }

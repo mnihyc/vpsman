@@ -32,6 +32,7 @@ mod model_history;
 mod model_rollout_policies;
 mod model_terminal;
 mod model_topology;
+mod model_webhook_rules;
 mod object_store;
 mod privilege;
 mod repository;
@@ -72,6 +73,7 @@ mod repository_schedules;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
 mod repository_topology_graph;
+mod repository_webhook_rules;
 mod routes;
 mod routes_alerts;
 mod routes_auth;
@@ -94,11 +96,13 @@ mod routes_rollouts;
 mod routes_schedules;
 mod routes_terminal_sessions;
 mod routes_update_releases;
+mod routes_webhook_rules;
 mod routes_ws;
 mod security;
 mod selector_expression;
 mod state;
 mod util;
+mod webhook_rules;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -142,7 +146,6 @@ use repository_ingest::upsert_memory_agent;
 use routes_schedules::validate_schedule_request;
 #[cfg(test)]
 use security::{constant_time_eq, role_allows, validate_operator_role};
-#[cfg(test)]
 use uuid::Uuid;
 #[cfg(test)]
 use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
@@ -450,6 +453,27 @@ async fn main() -> Result<()> {
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
         require_registered_agent_updates: args.require_registered_agent_updates,
     };
+    state
+        .repo
+        .record_webhook_event(crate::model_webhook_rules::WebhookEventCandidate {
+            kind: "server.on_start".to_string(),
+            event_id: format!("server.on_start:{}:{}", unix_now(), Uuid::new_v4()),
+            event_predicates: vec!["server.on_start".to_string()],
+            subject_client_ids: Vec::new(),
+            payload: serde_json::json!({
+                "event": {
+                    "kind": "server.on_start",
+                },
+                "server": {
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "server_build_number": build_info::server_build_number(),
+                    "bind": args.bind.to_string(),
+                    "debug_internal_test_mode": args.debug_internal_test_mode,
+                },
+            }),
+            actor_id: None,
+        })
+        .await?;
     spawn_agent_update_rollout_reconciler(
         state.clone(),
         args.agent_update_heartbeat_timeout_secs,

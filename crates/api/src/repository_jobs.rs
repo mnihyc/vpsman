@@ -8,6 +8,7 @@ use vpsman_common::JobCommand;
 
 use crate::model::*;
 use crate::model_rollout_policies::ResolvedAgentUpdateRolloutPolicy;
+use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_rollouts::{
     insert_postgres_agent_update_rollout, record_memory_agent_update_rollout,
@@ -117,6 +118,43 @@ fn audit_log_order_by(sort: Option<&str>, descending: bool) -> &'static str {
         (_, true) => "created_at DESC, id DESC",
         (_, false) => "created_at ASC, id ASC",
     }
+}
+
+struct WebhookJobSummary {
+    actor_id: Option<Uuid>,
+    command_type: String,
+    privileged: bool,
+    status: String,
+    target_count: i32,
+    payload_hash: String,
+    source_schedule_id: Option<Uuid>,
+    targets: Vec<String>,
+}
+
+struct JobCreatedWebhookEvent<'a> {
+    job_id: Uuid,
+    command_type: &'a str,
+    status: &'a str,
+    privileged: bool,
+    command_hash: &'a str,
+    resolved_targets: &'a [String],
+    actor_id: Option<Uuid>,
+    source_schedule_id: Option<Uuid>,
+    operation: Option<&'a JobCommand>,
+}
+
+fn job_webhook_predicates(command_type: &str, status: &str, include_created: bool) -> Vec<String> {
+    let mut predicates = vec![
+        format!("job.status:{status}"),
+        format!("job.status.become_{status}"),
+        format!("job.type:{command_type}"),
+    ];
+    if include_created {
+        predicates.push("job.created".to_string());
+    }
+    predicates.sort();
+    predicates.dedup();
+    predicates
 }
 
 impl Repository {
@@ -682,6 +720,18 @@ impl Repository {
                 tx.commit().await?;
             }
         }
+        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+            job_id,
+            command_type: "api_job_request",
+            status: "rejected_authorization_required",
+            privileged: request.privileged,
+            command_hash,
+            resolved_targets: &resolved_targets,
+            actor_id: Some(operator.operator.id),
+            source_schedule_id: None,
+            operation: operation.as_ref(),
+        })
+        .await?;
         Ok(job_id)
     }
 
@@ -751,6 +801,7 @@ impl Repository {
         source_schedule_id: Option<Uuid>,
     ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
+        let command_type = request.command_type_label().to_string();
         let metadata = json!({
             "selector_expression": request.selector_expression,
             "resolved_targets": resolved_targets,
@@ -778,7 +829,7 @@ impl Repository {
                 memory.jobs.write().await.push(JobHistoryView {
                     id: job_id,
                     actor_id: Some(operator.operator.id),
-                    command_type: request.command_type_label().to_string(),
+                    command_type: command_type.clone(),
                     privileged: request.privileged,
                     status: "dispatching".to_string(),
                     target_count: resolved_targets.len() as i32,
@@ -866,7 +917,7 @@ impl Repository {
                 )
                 .bind(job_id)
                 .bind(operator.operator.id)
-                .bind(request.command_type_label())
+                .bind(&command_type)
                 .bind(request.privileged)
                 .bind("dispatching")
                 .bind(resolved_targets.len() as i32)
@@ -936,6 +987,18 @@ impl Repository {
                 tx.commit().await?;
             }
         }
+        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+            job_id,
+            command_type: &command_type,
+            status: "dispatching",
+            privileged: request.privileged,
+            command_hash,
+            resolved_targets,
+            actor_id: Some(operator.operator.id),
+            source_schedule_id,
+            operation: Some(&operation),
+        })
+        .await?;
         Ok(job_id)
     }
 
@@ -1184,6 +1247,8 @@ impl Repository {
                 }
             }
         }
+        self.record_job_target_webhook_event(job_id, client_id, outcome)
+            .await?;
         Ok(())
     }
 
@@ -1269,6 +1334,206 @@ impl Repository {
             self.record_tunnel_plan_execution(job_id, &operation, status)
                 .await?;
         }
+        self.record_job_status_webhook_event(job_id, status).await?;
         Ok(())
+    }
+
+    async fn record_job_created_webhook_event(
+        &self,
+        event: JobCreatedWebhookEvent<'_>,
+    ) -> Result<()> {
+        let event_id = format!("job:{}:created", event.job_id);
+        let predicates = job_webhook_predicates(event.command_type, event.status, true);
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "job.created".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: event.resolved_targets.to_vec(),
+            actor_id: event.actor_id,
+            payload: json!({
+                "event": {
+                    "kind": "job.created",
+                    "id": &event_id,
+                    "predicates": &predicates,
+                },
+                "job": {
+                    "id": event.job_id,
+                    "status": event.status,
+                    "type": event.command_type,
+                    "privileged": event.privileged,
+                    "payload_hash": event.command_hash,
+                    "source_schedule_id": event.source_schedule_id,
+                    "target_count": event.resolved_targets.len(),
+                    "target_ids": event.resolved_targets,
+                    "operation": event.operation
+                        .map(|value| json!(value))
+                        .unwrap_or(serde_json::Value::Null),
+                },
+            }),
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_job_target_webhook_event(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        outcome: &TargetDispatchOutcome,
+    ) -> Result<()> {
+        let Some(summary) = self.webhook_job_summary(job_id).await? else {
+            return Ok(());
+        };
+        let event_id = format!(
+            "job:{job_id}:target:{client_id}:status:{}:{}",
+            outcome.status,
+            Uuid::new_v4()
+        );
+        let mut predicates = job_webhook_predicates(&summary.command_type, &summary.status, false);
+        predicates.push(format!("job.target.status:{}", outcome.status));
+        predicates.sort();
+        predicates.dedup();
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "job.target.status".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: vec![client_id.to_string()],
+            actor_id: summary.actor_id,
+            payload: json!({
+                "event": {
+                    "kind": "job.target.status",
+                    "id": &event_id,
+                    "predicates": &predicates,
+                },
+                "job": {
+                    "id": job_id,
+                    "status": &summary.status,
+                    "type": &summary.command_type,
+                    "privileged": summary.privileged,
+                    "payload_hash": &summary.payload_hash,
+                    "source_schedule_id": summary.source_schedule_id,
+                    "target_count": summary.target_count,
+                    "target_ids": &summary.targets,
+                    "target": {
+                        "client_id": client_id,
+                        "status": &outcome.status,
+                        "accepted": outcome.accepted,
+                        "exit_code": outcome.exit_code,
+                        "message": &outcome.message,
+                    },
+                },
+            }),
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_job_status_webhook_event(&self, job_id: Uuid, status: &str) -> Result<()> {
+        let Some(summary) = self.webhook_job_summary(job_id).await? else {
+            return Ok(());
+        };
+        let event_id = format!("job:{job_id}:status:{status}");
+        let predicates = job_webhook_predicates(&summary.command_type, status, false);
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "job.status".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: summary.targets.clone(),
+            actor_id: summary.actor_id,
+            payload: json!({
+                "event": {
+                    "kind": "job.status",
+                    "id": &event_id,
+                    "predicates": &predicates,
+                },
+                "job": {
+                    "id": job_id,
+                    "status": status,
+                    "type": &summary.command_type,
+                    "privileged": summary.privileged,
+                    "payload_hash": &summary.payload_hash,
+                    "source_schedule_id": summary.source_schedule_id,
+                    "target_count": summary.target_count,
+                    "target_ids": &summary.targets,
+                },
+            }),
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn webhook_job_summary(&self, job_id: Uuid) -> Result<Option<WebhookJobSummary>> {
+        match self {
+            Self::Memory(memory) => {
+                let Some(job) = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .find(|job| job.id == job_id)
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                let targets = memory
+                    .job_targets
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|target| target.job_id == job_id)
+                    .map(|target| target.client_id.clone())
+                    .collect::<Vec<_>>();
+                Ok(Some(WebhookJobSummary {
+                    actor_id: job.actor_id,
+                    command_type: job.command_type,
+                    privileged: job.privileged,
+                    status: job.status,
+                    target_count: job.target_count,
+                    payload_hash: job.payload_hash,
+                    source_schedule_id: None,
+                    targets,
+                }))
+            }
+            Self::Postgres(pool) => {
+                let Some(row) = sqlx::query(
+                    r#"
+                    SELECT
+                        job.actor_id,
+                        job.command_type,
+                        job.privileged,
+                        job.status,
+                        job.target_count,
+                        job.payload_hash,
+                        job.source_schedule_id,
+                        COALESCE(
+                            (
+                                SELECT array_agg(target.client_id ORDER BY target.client_id)
+                                FROM job_targets target
+                                WHERE target.job_id = job.id
+                            ),
+                            ARRAY[]::TEXT[]
+                        ) AS targets
+                    FROM jobs job
+                    WHERE job.id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(WebhookJobSummary {
+                    actor_id: row.try_get("actor_id")?,
+                    command_type: row.try_get("command_type")?,
+                    privileged: row.try_get("privileged")?,
+                    status: row.try_get("status")?,
+                    target_count: row.try_get("target_count")?,
+                    payload_hash: row.try_get("payload_hash")?,
+                    source_schedule_id: row.try_get("source_schedule_id")?,
+                    targets: row.try_get("targets")?,
+                }))
+            }
+        }
     }
 }

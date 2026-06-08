@@ -1,5 +1,6 @@
 import { Search, X } from "lucide-react";
 import {
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -51,6 +52,7 @@ export function SearchExpressionInput({
   verificationMessage,
 }: SearchExpressionInputProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [caretIndex, setCaretIndex] = useState(value.length);
@@ -74,9 +76,32 @@ export function SearchExpressionInput({
     setCaretOffset(editorRef.current, Math.min(caretIndex, editorTextLength(editorRef.current)));
   }, [caretIndex, displayTokens, focused, value]);
 
+  useEffect(() => {
+    if (!focused && !autocompleteOpen) {
+      return;
+    }
+    function handleDocumentPointerDown(event: PointerEvent) {
+      const container = containerRef.current;
+      if (!container || !event.target || container.contains(event.target as Node)) {
+        return;
+      }
+      setAutocompleteOpen(false);
+      setFocused(false);
+    }
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+    return () => document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+  }, [autocompleteOpen, focused]);
+
   function bindEditor(element: HTMLDivElement | null) {
     editorRef.current = element;
     assignRef(inputRef, element);
+  }
+
+  function prepareEditorForTyping() {
+    const editor = editorRef.current;
+    if (editor && cleanEditorText(editor.textContent ?? "") !== value) {
+      editor.textContent = value;
+    }
   }
 
   function commitEditorText() {
@@ -105,6 +130,7 @@ export function SearchExpressionInput({
       return;
     }
     if (event.key === "Escape") {
+      setAutocompleteOpen(false);
       setFocused(false);
       editorRef.current?.blur();
     }
@@ -136,6 +162,7 @@ export function SearchExpressionInput({
       className={`searchExpressionInput ${className} ${verification} ${focused ? "editing" : "previewing"} ${
         hasTokens ? "hasTokens" : "empty"
       }`.trim()}
+      ref={containerRef}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           event.preventDefault();
@@ -162,6 +189,7 @@ export function SearchExpressionInput({
           }
           onClick={handlePointerUpdate}
           onFocus={() => {
+            prepareEditorForTyping();
             setAutocompleteOpen(true);
             setFocused(true);
             if (editorRef.current) {
@@ -183,16 +211,18 @@ export function SearchExpressionInput({
           suppressContentEditableWarning
           tabIndex={0}
         >
-          {displayTokens.map((token, index) => (
-            <TokenFragment
-              agents={agents}
-              expression={value}
-              key={`${token.start}-${token.end}-${token.raw}`}
-              onChange={onChange}
-              token={token}
-              trailingSpace={index < displayTokens.length - 1}
-            />
-          ))}
+          {focused
+            ? value
+            : displayTokens.map((token, index) => (
+                <TokenFragment
+                  agents={agents}
+                  expression={value}
+                  key={`${token.start}-${token.end}-${token.raw}`}
+                  onChange={onChange}
+                  token={token}
+                  trailingSpace={index < displayTokens.length - 1}
+                />
+              ))}
         </div>
       </div>
       {(focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim() && (
@@ -257,7 +287,7 @@ function SearchExpressionTokenView({
     return <span className="searchExpressionOperator">{token.raw}</span>;
   }
   return (
-    <span className="searchExpressionChip" title={agents ? termMatchTitle(token, agents) : token.raw}>
+    <span className="searchExpressionChip" title={agents ? termMatchTitle(token, agents, expression) : token.raw}>
       <span>{token.raw}</span>
       <button
         aria-label={`Remove ${token.raw}`}

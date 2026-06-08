@@ -411,21 +411,94 @@
   max-width: min(100%, 360px);
 }
 
-.fleetPolicyGrid input,
-.fleetPolicyGrid select {
+.webhookRuleGrid .wideField,
+.webhookRuleGrid textarea {
+  grid-column: 1 / -1;
+}
+
+.webhookRuleGrid textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+
+.webhookTemplateEditor,
+.webhookCodeMirror {
   min-width: 0;
-  height: 34px;
+}
+
+.webhookCodeMirror {
+  min-height: 124px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.webhookRuleGrid .searchExpressionAutocomplete {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.webhookPreviewSplit {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(320px, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.webhookPreviewSplit > div {
+  min-width: 0;
+}
+
+.webhookPreviewSplit pre {
+  max-height: 260px;
+  margin: 6px 0 0;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #202124;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inlineToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: #3c4043;
+}
+
+.fleetPolicyGrid input,
+.fleetPolicyGrid select,
+.fleetPolicyGrid textarea {
+  min-width: 0;
   border: 1px solid #dfe3eb;
   border-radius: 6px;
-  padding: 0 9px;
   background: #fff;
   color: #202124;
 }
 
-.fleetPolicyGrid button {
+.fleetPolicyGrid input,
+.fleetPolicyGrid select {
   height: 34px;
+  padding: 0 9px;
+}
+
+.fleetPolicyGrid textarea {
+  padding: 8px 9px;
+}
+
+.fleetPolicyGrid button {
+  min-height: 34px;
+  height: auto;
   min-width: 0;
-  padding: 0 8px;
+  padding: 6px 8px;
+  line-height: 1.1;
 }
 
 .fleetPolicyRows {
@@ -677,6 +750,37 @@
 .configApplyGrid > .confirmationPrompt {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+.tagScheduleImpactTable {
+  display: grid;
+  gap: 6px;
+  min-width: min(100%, 760px);
+}
+
+.tagScheduleImpactRow {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 92px 72px minmax(110px, 0.8fr) minmax(130px, 1fr) minmax(130px, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.tagScheduleImpactRow.heading {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tagScheduleImpactRow > span {
+  min-width: 0;
+}
+
+.mutedText {
+  color: #5f6368;
 }
 
 .ruleCardGrid,

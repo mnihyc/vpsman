@@ -14,6 +14,15 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  WebhookDeliveryRotationRequest,
+  WebhookDeliveryRotationResponse,
+  WebhookRuleDeliveryRecord,
+  WebhookRuleDispatchRequest,
+  WebhookRuleDryRunRecord,
+  WebhookRuleDryRunRequest,
+  WebhookRuleProcessRequest,
+  WebhookRuleRecord,
+  WebhookRuleRequest,
   DeleteAgentRequest,
   DeleteAgentResponse,
   TelemetryNetworkRateRecord,
@@ -33,6 +42,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     FleetAlertNotificationChannelRecord[]
   >([]);
   const [fleetAlertNotifications, setFleetAlertNotifications] = useState<FleetAlertNotificationDeliveryRecord[]>([]);
+  const [webhookRules, setWebhookRules] = useState<WebhookRuleRecord[]>([]);
+  const [webhookRuleDeliveries, setWebhookRuleDeliveries] = useState<WebhookRuleDeliveryRecord[]>([]);
   const [telemetryRollups, setTelemetryRollups] = useState<TelemetryRollupRecord[]>([]);
   const [telemetryNetworkRates, setTelemetryNetworkRates] = useState<TelemetryNetworkRateRecord[]>([]);
   const [telemetryTunnels, setTelemetryTunnels] = useState<TelemetryTunnelRecord[]>([]);
@@ -50,6 +61,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiGet<FleetAlertPolicyRecord[]>(`/api/v1/fleet-alert-policies?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<FleetAlertNotificationChannelRecord[]>(`/api/v1/fleet-alert-notification-channels?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<FleetAlertNotificationDeliveryRecord[]>(`/api/v1/fleet-alert-notifications?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<WebhookRuleRecord[]>(`/api/v1/webhook-rules?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
+        apiGet<WebhookRuleDeliveryRecord[]>(`/api/v1/webhook-deliveries?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<TelemetryRollupRecord[]>(`/api/v1/telemetry/rollups?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<TelemetryNetworkRateRecord[]>(`/api/v1/telemetry/network-rates?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
         apiGet<TelemetryTunnelRecord[]>(`/api/v1/telemetry/tunnels?limit=${FLEET_DETAIL_LIMIT}`, apiToken),
@@ -72,9 +85,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlertPolicies(valueAt<FleetAlertPolicyRecord[]>(2, []));
       setFleetAlertNotificationChannels(valueAt<FleetAlertNotificationChannelRecord[]>(3, []));
       setFleetAlertNotifications(valueAt<FleetAlertNotificationDeliveryRecord[]>(4, []));
-      setTelemetryRollups(valueAt<TelemetryRollupRecord[]>(5, []));
-      setTelemetryNetworkRates(valueAt<TelemetryNetworkRateRecord[]>(6, []));
-      setTelemetryTunnels(valueAt<TelemetryTunnelRecord[]>(7, []));
+      setWebhookRules(valueAt<WebhookRuleRecord[]>(5, []));
+      setWebhookRuleDeliveries(valueAt<WebhookRuleDeliveryRecord[]>(6, []));
+      setTelemetryRollups(valueAt<TelemetryRollupRecord[]>(7, []));
+      setTelemetryNetworkRates(valueAt<TelemetryNetworkRateRecord[]>(8, []));
+      setTelemetryTunnels(valueAt<TelemetryTunnelRecord[]>(9, []));
       setApiError(
         optionalFailure?.status === "rejected"
           ? optionalFailure.reason instanceof Error
@@ -92,6 +107,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setFleetAlertPolicies([]);
         setFleetAlertNotificationChannels([]);
         setFleetAlertNotifications([]);
+        setWebhookRules([]);
+        setWebhookRuleDeliveries([]);
         setTelemetryRollups([]);
         setTelemetryNetworkRates([]);
         setTelemetryTunnels([]);
@@ -220,6 +237,71 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, loadFleet],
   );
 
+  const upsertWebhookRule = useCallback(
+    async (request: WebhookRuleRequest) => {
+      const rule = await apiPost<WebhookRuleRecord>("/api/v1/webhook-rules", apiToken, request);
+      setWebhookRules((current) => {
+        const withoutRule = current.filter((stored) => stored.id !== rule.id && stored.name !== rule.name);
+        return [rule, ...withoutRule].sort((left, right) => left.name.localeCompare(right.name));
+      });
+      void loadFleet();
+      return rule;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const dryRunWebhookRule = useCallback(
+    async (request: WebhookRuleDryRunRequest) =>
+      apiPost<WebhookRuleDryRunRecord>("/api/v1/webhook-rules/dry-run", apiToken, request),
+    [apiToken],
+  );
+
+  const dispatchWebhookRules = useCallback(
+    async (request: WebhookRuleDispatchRequest) => {
+      const deliveries = await apiPost<WebhookRuleDeliveryRecord[]>("/api/v1/webhook-rules/dispatch", apiToken, request);
+      if (!request.dry_run) {
+        setWebhookRuleDeliveries((current) => {
+          const seen = new Set(deliveries.map((delivery) => delivery.id));
+          return [...deliveries, ...current.filter((delivery) => !seen.has(delivery.id))].sort((left, right) =>
+            right.created_at.localeCompare(left.created_at),
+          );
+        });
+        await loadFleet();
+      }
+      return deliveries;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const processWebhookRuleDeliveries = useCallback(
+    async (request: WebhookRuleProcessRequest) => {
+      const deliveries = await apiPost<WebhookRuleDeliveryRecord[]>("/api/v1/webhook-deliveries/process", apiToken, request);
+      if (!request.dry_run) {
+        setWebhookRuleDeliveries((current) => {
+          const nextById = new Map(current.map((delivery) => [delivery.id, delivery]));
+          for (const delivery of deliveries) {
+            nextById.set(delivery.id, delivery);
+          }
+          return Array.from(nextById.values()).sort((left, right) => right.created_at.localeCompare(left.created_at));
+        });
+        await loadFleet();
+      }
+      return deliveries;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const rotateWebhookDeliveryHistory = useCallback(
+    async (request: WebhookDeliveryRotationRequest) => {
+      const response = await apiPost<WebhookDeliveryRotationResponse>("/api/v1/webhook-deliveries/rotate", apiToken, request);
+      if (request.confirmed) {
+        await loadFleet();
+      }
+      return response;
+    },
+    [apiToken, loadFleet],
+  );
+
   const clearFleet = useCallback(() => {
     setSummary(emptySummary);
     setAgents([]);
@@ -228,6 +310,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetAlertPolicies([]);
     setFleetAlertNotificationChannels([]);
     setFleetAlertNotifications([]);
+    setWebhookRules([]);
+    setWebhookRuleDeliveries([]);
     setTelemetryRollups([]);
     setTelemetryNetworkRates([]);
     setTelemetryTunnels([]);
@@ -242,6 +326,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlertPolicies,
     fleetAlertNotificationChannels,
     fleetAlertNotifications,
+    webhookRules,
+    webhookRuleDeliveries,
     deleteAgent,
     loadFleet,
     replaceFleetSnapshot,
@@ -254,6 +340,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     upsertFleetAlertNotificationChannel,
     dispatchFleetAlertNotifications,
     processFleetAlertNotifications,
+    upsertWebhookRule,
+    dryRunWebhookRule,
+    dispatchWebhookRules,
+    processWebhookRuleDeliveries,
+    rotateWebhookDeliveryHistory,
     updateFleetAlertState,
   };
 }

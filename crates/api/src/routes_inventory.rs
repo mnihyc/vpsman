@@ -440,33 +440,32 @@ pub(crate) async fn bulk_mutate_tags(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    if !request.confirmed {
-        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
-    }
     validate_persisted_tag_name(&request.tag)?;
     validate_bulk_selector_expression(&request.selector_expression)?;
-    let resolved_targets = state
-        .repo
-        .resolve_bulk_targets(&BulkResolveRequest {
-            selector_expression: request.selector_expression.clone(),
-        })
-        .await?
-        .targets
-        .into_iter()
-        .map(|agent| agent.id)
-        .collect::<Vec<_>>();
-    let action = match request.action {
-        crate::model::BulkTagMutationAction::Add => "tag.bulk_add",
-        crate::model::BulkTagMutationAction::Remove => "tag.bulk_remove",
-    };
-    let intent = DbPrivilegeIntent::new(
-        action,
-        &request.tag,
-        Some(&request.selector_expression),
-        &resolved_targets,
-        request.confirmed,
-    );
-    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    if request.confirmed {
+        let resolved_targets = state
+            .repo
+            .resolve_bulk_targets(&BulkResolveRequest {
+                selector_expression: request.selector_expression.clone(),
+            })
+            .await?
+            .targets
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
+        let action = match request.action {
+            crate::model::BulkTagMutationAction::Add => "tag.bulk_add",
+            crate::model::BulkTagMutationAction::Remove => "tag.bulk_remove",
+        };
+        let intent = DbPrivilegeIntent::new(
+            action,
+            &request.tag,
+            Some(&request.selector_expression),
+            &resolved_targets,
+            request.confirmed,
+        );
+        verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    }
     Ok(Json(state.repo.bulk_mutate_tags(&request).await?))
 }
 
@@ -479,25 +478,24 @@ pub(crate) async fn delete_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    if !request.confirmed {
-        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
-    }
     validate_persisted_tag_name(&tag)?;
-    let affected_targets = state
-        .repo
-        .list_tags()
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.name == tag)
-        .map(|tag| {
-            tag.clients
-                .into_iter()
-                .map(|client| client.id)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let intent = DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true);
-    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    if request.confirmed {
+        let affected_targets = state
+            .repo
+            .list_tags()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.name == tag)
+            .map(|tag| {
+                tag.clients
+                    .into_iter()
+                    .map(|client| client.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let intent = DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true);
+        verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    }
     Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
 }
 
@@ -739,21 +737,20 @@ pub(crate) async fn assign_agent_tag(
     headers: HeaderMap,
     Path(client_id): Path<String>,
     Json(request): Json<AssignTagRequest>,
-) -> Result<Json<TagView>, ApiError> {
+) -> Result<Json<TagMutationResponse>, ApiError> {
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    if !request.confirmed {
-        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
-    }
     validate_persisted_tag_name(&request.tag)?;
-    let targets = vec![client_id.clone()];
-    let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true);
-    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    if request.confirmed {
+        let targets = vec![client_id.clone()];
+        let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true);
+        verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    }
     Ok(Json(
         state
             .repo
-            .assign_agent_tag(&client_id, &request.tag)
+            .assign_agent_tag_mutation(&client_id, &request.tag, request.confirmed)
             .await?,
     ))
 }

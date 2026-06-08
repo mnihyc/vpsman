@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::{Postgres, Row, Transaction};
+use chrono::Utc;
+use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use tokio::sync::RwLock;
 use tracing::debug;
 use uuid::Uuid;
@@ -14,6 +15,7 @@ use crate::model::{
     AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
     TelemetryTunnelView,
 };
+use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::security::constant_time_eq;
 
@@ -97,6 +99,14 @@ impl Repository {
                             && !event.hello.agent_version.is_empty()
                             && prior_build != event.hello.internal_build_number
                         {
+                            let metadata = serde_json::json!({
+                                "from_status": "stale",
+                                "to_status": "online",
+                                "reason": "agent_reconnected_with_changed_internal_build",
+                                "stale_reason": stale_reason,
+                                "previous_internal_build_number": prior_build,
+                                "internal_build_number": event.hello.internal_build_number,
+                            });
                             memory
                                 .audits
                                 .write()
@@ -107,16 +117,17 @@ impl Repository {
                                     action: "agent.status_online".to_string(),
                                     target: format!("client:{}", event.hello.client_id),
                                     command_hash: None,
-                                    metadata: serde_json::json!({
-                                        "from_status": "stale",
-                                        "to_status": "online",
-                                        "reason": "agent_reconnected_with_changed_internal_build",
-                                        "stale_reason": stale_reason,
-                                        "previous_internal_build_number": prior_build,
-                                        "internal_build_number": event.hello.internal_build_number,
-                                    }),
+                                    metadata: metadata.clone(),
                                     created_at: crate::unix_now().to_string(),
                                 });
+                            self.record_client_status_webhook_event(
+                                &event.hello.client_id,
+                                Some("stale"),
+                                "online",
+                                "agent_reconnected_with_changed_internal_build",
+                                metadata,
+                            )
+                            .await?;
                         }
                     }
                 } else {
@@ -124,6 +135,8 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
+                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
+                    .await?;
                 let public_key = match event.noise_public_key_hex.as_deref() {
                     Some(value) => hex::decode(value).with_context(|| {
                         format!("invalid noise public key hex for {}", event.hello.client_id)
@@ -253,7 +266,7 @@ impl Repository {
     }
 
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<()> {
-        match self {
+        let record_result: Result<()> = match self {
             Self::Memory(memory) => {
                 if memory
                     .hidden_clients
@@ -347,7 +360,59 @@ impl Repository {
                 tx.commit().await?;
                 Ok(())
             }
+        };
+        record_result?;
+        self.record_telemetry_webhook_event(event).await?;
+        Ok(())
+    }
+
+    async fn record_telemetry_webhook_event(&self, event: &GatewayTelemetryIngest) -> Result<()> {
+        let metrics = &event.telemetry.metrics;
+        let mut predicates = vec!["telemetry.rollup".to_string()];
+        if !metrics.networks.is_empty() {
+            predicates.push("telemetry.network_rate".to_string());
         }
+        if !metrics.tunnels.is_empty() {
+            predicates.push("telemetry.tunnel".to_string());
+        }
+        predicates.sort();
+        predicates.dedup();
+        let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+        let event_id = format!(
+            "telemetry:{}:{}",
+            event.telemetry.client_id, metrics.observed_unix
+        );
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "telemetry.rollup".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: vec![event.telemetry.client_id.clone()],
+            actor_id: None,
+            payload: serde_json::json!({
+                "event": {
+                    "kind": "telemetry.rollup",
+                    "id": &event_id,
+                    "predicates": &predicates,
+                },
+                "telemetry": {
+                    "client_id": &event.telemetry.client_id,
+                    "gateway_id": &event.gateway_id,
+                    "observed_unix": metrics.observed_unix,
+                    "hostname": &metrics.hostname,
+                    "uptime_secs": metrics.uptime_secs,
+                    "disk_total_bytes": disk_total,
+                    "disk_available_bytes": disk_available,
+                    "network_rx_bytes": network_rx,
+                    "network_tx_bytes": network_tx,
+                    "network_count": metrics.networks.len(),
+                    "tunnel_count": metrics.tunnels.len(),
+                    "networks": &metrics.networks,
+                    "tunnels": &metrics.tunnels,
+                },
+            }),
+        })
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn mark_agent_stale(
@@ -365,6 +430,10 @@ impl Repository {
                         agent.status = "stale".to_string();
                         agent.stale_since = Some(crate::unix_now().to_string());
                         agent.stale_reason = Some(reason.to_string());
+                        let webhook_metadata = serde_json::json!({
+                            "reason": reason,
+                            "details": metadata,
+                        });
                         drop(agents);
                         memory
                             .audits
@@ -376,19 +445,29 @@ impl Repository {
                                 action: "agent.status_stale".to_string(),
                                 target: format!("client:{client_id}"),
                                 command_hash: None,
-                                metadata: serde_json::json!({
-                                    "from_status": from_status,
-                                    "to_status": "stale",
-                                    "reason": reason,
-                                    "details": metadata,
-                                }),
-                                created_at: crate::unix_now().to_string(),
-                            });
+                                    metadata: serde_json::json!({
+                                        "from_status": from_status,
+                                        "to_status": "stale",
+                                        "reason": reason,
+                                        "details": webhook_metadata.get("details").cloned().unwrap_or(serde_json::Value::Null),
+                                    }),
+                                    created_at: crate::unix_now().to_string(),
+                                });
+                        self.record_client_status_webhook_event(
+                            client_id,
+                            Some(&from_status),
+                            "stale",
+                            reason,
+                            webhook_metadata,
+                        )
+                        .await?;
                     }
                 }
                 Ok(())
             }
             Self::Postgres(pool) => {
+                crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
+                    .await?;
                 let mut tx = pool.begin().await?;
                 let prior = sqlx::query(
                     r#"
@@ -424,17 +503,18 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 if from_status != "stale" {
+                    let metadata = serde_json::json!({
+                        "reason": reason,
+                        "internal_build_number": internal_build_number,
+                        "details": metadata,
+                    });
                     record_client_status_transition_in_tx(
                         &mut tx,
                         client_id,
                         Some(&from_status),
                         "stale",
                         reason,
-                        serde_json::json!({
-                            "reason": reason,
-                            "internal_build_number": internal_build_number,
-                            "details": metadata,
-                        }),
+                        metadata,
                     )
                     .await?;
                 }
@@ -442,6 +522,47 @@ impl Repository {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) async fn record_client_status_webhook_event(
+        &self,
+        client_id: &str,
+        from_status: Option<&str>,
+        to_status: &str,
+        reason: &str,
+        metadata: serde_json::Value,
+    ) -> Result<()> {
+        let event_id = format!(
+            "vps.status_changed:{client_id}:{to_status}:{}",
+            Uuid::new_v4()
+        );
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "vps.status_changed".to_string(),
+            event_id,
+            event_predicates: vec![
+                format!("vps.status.{to_status}"),
+                format!("vps.status.become_{to_status}"),
+            ],
+            subject_client_ids: vec![client_id.to_string()],
+            payload: serde_json::json!({
+                "event": {
+                    "kind": "vps.status_changed",
+                    "from_status": from_status,
+                    "to_status": to_status,
+                    "reason": reason,
+                },
+                "vps_status": {
+                    "client_id": client_id,
+                    "from_status": from_status,
+                    "to_status": to_status,
+                    "reason": reason,
+                    "metadata": metadata,
+                }
+            }),
+            actor_id: None,
+        })
+        .await?;
+        Ok(())
     }
 }
 
@@ -947,6 +1068,7 @@ async fn record_client_status_transition_in_tx(
     reason: &str,
     metadata: serde_json::Value,
 ) -> Result<()> {
+    let webhook_metadata = metadata.clone();
     sqlx::query(
         r#"
         INSERT INTO client_status_history (
@@ -977,6 +1099,78 @@ async fn record_client_status_transition_in_tx(
     .bind(metadata)
     .execute(&mut **tx)
     .await?;
+    insert_client_status_webhook_event_in_tx(
+        tx,
+        client_id,
+        from_status,
+        to_status,
+        reason,
+        webhook_metadata,
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_client_status_webhook_event_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    from_status: Option<&str>,
+    to_status: &str,
+    reason: &str,
+    metadata: serde_json::Value,
+) -> Result<()> {
+    let event_id = format!(
+        "vps.status_changed:{client_id}:{to_status}:{}",
+        Uuid::new_v4()
+    );
+    let event_predicates = vec![
+        format!("vps.status.{to_status}"),
+        format!("vps.status.become_{to_status}"),
+    ];
+    let subject_client_ids = vec![client_id.to_string()];
+    let payload = serde_json::json!({
+        "event": {
+            "kind": "vps.status_changed",
+            "from_status": from_status,
+            "to_status": to_status,
+            "reason": reason,
+        },
+        "vps_status": {
+            "client_id": client_id,
+            "from_status": from_status,
+            "to_status": to_status,
+            "reason": reason,
+            "metadata": metadata,
+        }
+    });
+    let occurred_at = Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_events (
+            id,
+            kind,
+            event_id,
+            event_predicates,
+            subject_client_ids,
+            payload,
+            occurred_at,
+            actor_id
+        )
+        VALUES ($1, 'vps.status_changed', $2, $3, $4, $5, $6::timestamptz, NULL)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(&event_id)
+    .bind(&event_predicates)
+    .bind(&subject_client_ids)
+    .bind(SqlJson(payload))
+    .bind(occurred_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+    let _ = sqlx::query("SELECT pg_notify('webhook_events', $1)")
+        .bind(event_id)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

@@ -385,6 +385,105 @@ export type FleetAlertNotificationProcessRequest = {
   confirmed: boolean;
 };
 
+export type WebhookRuleRecord = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  expression: string;
+  target: string;
+  body_template: string;
+  cooldown_secs: number;
+  notes: string | null;
+  actor_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WebhookRuleRequest = {
+  name: string;
+  enabled?: boolean;
+  expression: string;
+  target: string;
+  body_template?: string;
+  cooldown_secs?: number | null;
+  notes?: string | null;
+  confirmed: boolean;
+};
+
+export type WebhookRuleDeliveryRecord = {
+  id: string;
+  rule_id: string;
+  rule_name: string;
+  event_kind: string;
+  event_id: string;
+  status: string;
+  target: string;
+  dedupe_key: string;
+  payload: JsonValue;
+  matched_vps: AgentView[];
+  message: string;
+  error: string | null;
+  cooldown_until_unix: number;
+  attempt_count: number;
+  next_attempt_at: string | null;
+  last_attempt_at: string | null;
+  actor_id: string | null;
+  created_at: string;
+  delivered_at: string | null;
+};
+
+export type WebhookRuleDryRunRecord = {
+  rendered_message: string;
+  matched_vps: AgentView[];
+  payload_context: JsonValue;
+  validation_errors: string[];
+  delivery: WebhookRuleDeliveryRecord | null;
+};
+
+export type WebhookRuleDryRunRequest = {
+  name?: string;
+  enabled?: boolean;
+  expression: string;
+  target?: string;
+  event_kind?: string;
+  event_id?: string | null;
+  body_template?: string;
+  cooldown_secs?: number | null;
+  notes?: string | null;
+};
+
+export type WebhookRuleDispatchRequest = {
+  event_kind?: string;
+  event_id?: string | null;
+  limit?: number;
+  dry_run?: boolean;
+  confirmed: boolean;
+};
+
+export type WebhookRuleProcessRequest = {
+  limit?: number;
+  status?: "queued" | "failed" | string | null;
+  dry_run?: boolean;
+  confirmed: boolean;
+};
+
+export type WebhookDeliveryRotationRequest = {
+  older_than?: string | null;
+  older_than_days?: number | null;
+  status?: string | null;
+  rule_id?: string | null;
+  confirmed: boolean;
+};
+
+export type WebhookDeliveryRotationResponse = {
+  matched_count: number;
+  deleted_count: number;
+  confirmation_required: boolean;
+  older_than: string | null;
+  status: string | null;
+  rule_id: string | null;
+};
+
 export type AgentView = {
   id: string;
   display_name: string;
@@ -1794,7 +1893,23 @@ export type TagMutationResponse = {
   changed_count: number;
   skipped_count: number;
   affected: AgentView[];
+  schedule_impacts: ScheduleImpactRecord[];
   confirmation_required: boolean;
+};
+
+export type ScheduleImpactRecord = {
+  schedule_id: string;
+  name: string;
+  command_type: string;
+  selector_expression: string;
+  before_target_count: number;
+  after_target_count: number;
+  added_target_count: number;
+  removed_target_count: number;
+  unchanged_target_count: number;
+  added_targets: AgentView[];
+  removed_targets: AgentView[];
+  summary: string;
 };
 
 export type DataSourcePresetRecord = {

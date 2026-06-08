@@ -68,7 +68,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "instances", label: "Instances", description: "VPS inventory, health, and selected-instance details" },
     { id: "alerts", label: "Alerts", description: "Active fleet alerts and triage state" },
     { id: "policies", label: "Alert policies", description: "Scoped fleet alert thresholds" },
-    { id: "notifications", label: "Notifications", description: "Alert delivery channels and queue processing" },
+    { id: "notifications", label: "Notifications", description: "Alert channels, expression webhooks, and delivery queues" },
   ],
   Tags: [
     { id: "registry", label: "Registry", description: "Provider, country, and custom tag counts" },

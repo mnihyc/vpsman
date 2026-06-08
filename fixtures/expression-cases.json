@@ -1,0 +1,72 @@
+{
+  "contexts": {
+    "edge": {
+      "vps": {
+        "id": "edge-01",
+        "display_name": "Edge One",
+        "status": "online",
+        "tags": ["edge", "prod", "provider:alpha", "country:US"],
+        "last_seen_at": "2026-06-08T01:00:00Z",
+        "internal_build_number": 42
+      },
+      "event_predicates": ["interval.30sec", "job.created", "job.status:running", "alert.open"],
+      "job": { "status": "running", "type": "shell", "target": { "status": "online" } },
+      "alert": { "severity": "critical", "category": "disk", "state": "open" }
+    },
+    "core": {
+      "vps": {
+        "id": "core-01",
+        "display_name": "Core One",
+        "status": "stale",
+        "tags": ["provider:beta", "country:DE"],
+        "last_seen_at": "2026-06-08T03:00:00Z",
+        "internal_build_number": 7
+      },
+      "event_predicates": ["interval.1min", "vps.status.become_stale"],
+      "job": { "status": "failed", "type": "backup", "target": { "status": "stale" } },
+      "alert": { "severity": "warning", "category": "cpu", "state": "open" }
+    },
+    "untagged": {
+      "vps": {
+        "id": "empty-01",
+        "display_name": "No Tags",
+        "status": "offline",
+        "tags": [],
+        "last_seen_at": null,
+        "internal_build_number": 1
+      },
+      "event_predicates": [],
+      "job": {},
+      "alert": {}
+    },
+    "hidden": {
+      "hidden": true,
+      "vps": {
+        "id": "hidden-01",
+        "display_name": "Hidden One",
+        "status": "online",
+        "tags": ["edge"],
+        "last_seen_at": "2026-06-08T01:00:00Z",
+        "internal_build_number": 42
+      },
+      "event_predicates": ["interval.30sec"],
+      "job": {},
+      "alert": {}
+    }
+  },
+  "cases": [
+    { "name": "precedence_or_after_and", "expression": "provider:alpha || provider:beta && status:stale", "matches": ["edge", "core"] },
+    { "name": "not_and_implicit_and", "expression": "status:online !provider:beta", "matches": ["edge", "hidden"] },
+    { "name": "tilde_not", "expression": "~tag:prod", "matches": ["core", "untagged", "hidden"] },
+    { "name": "explicit_and_or_grouping", "expression": "(provider:alpha || provider:beta) && country:US", "matches": ["edge"] },
+    { "name": "comparisons", "expression": "vps.internal_build_number >= 40 && last_seen < 2026-06-08T02:00:00Z", "matches": ["edge", "hidden"] },
+    { "name": "in_and_not_in", "expression": "status in [online, stale] && vps.tag not in [prod]", "matches": ["core", "hidden"] },
+    { "name": "regex_list", "expression": "vps.tag in [/^provider:a.*/, edge]", "matches": ["edge", "hidden"] },
+    { "name": "quoted_values", "expression": "name = \"Edge One\"", "matches": ["edge"] },
+    { "name": "aliases", "expression": "region:US && id:edge-*", "matches": ["edge"] },
+    { "name": "untagged", "expression": "untagged", "matches": ["untagged"] },
+    { "name": "missing_metadata", "expression": "vps.stale_reason = manual", "matches": [] },
+    { "name": "event_predicates", "expression": "interval.30sec && job.status:running && alert.open", "matches": ["edge"] },
+    { "name": "event_object_fields", "expression": "job.status = running && alert.severity = critical", "matches": ["edge"] }
+  ]
+}

@@ -38,6 +38,10 @@ pub(crate) struct MemoryState {
         Arc<RwLock<Vec<crate::model_alert_notifications::FleetAlertNotificationChannelView>>>,
     pub(crate) fleet_alert_notification_deliveries:
         Arc<RwLock<Vec<crate::model_alert_notifications::FleetAlertNotificationDeliveryView>>>,
+    pub(crate) webhook_rules: Arc<RwLock<Vec<crate::model_webhook_rules::WebhookRuleView>>>,
+    pub(crate) webhook_events: Arc<RwLock<Vec<crate::model_webhook_rules::WebhookEventRow>>>,
+    pub(crate) webhook_rule_deliveries:
+        Arc<RwLock<Vec<crate::model_webhook_rules::WebhookRuleDeliveryView>>>,
     pub(crate) history_retention_policies:
         Arc<RwLock<Vec<crate::model_history::HistoryRetentionPolicyView>>>,
     pub(crate) data_source_presets: Arc<RwLock<Vec<DataSourcePresetView>>>,

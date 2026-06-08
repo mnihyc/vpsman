@@ -12,6 +12,7 @@ use crate::{
     },
     model_alert_policies::FleetAlertPolicyOverrideView,
     model_alert_states::FleetAlertStateView,
+    model_webhook_rules::WebhookEventCandidate,
     state::AppState,
     unix_now,
 };
@@ -274,8 +275,40 @@ impl AppState {
 
         let alert_states = self.repo.list_fleet_alert_states(1000, None).await?;
         apply_alert_states(&mut alerts, &alert_states);
+        self.record_fleet_alert_webhook_events(&alerts).await?;
         apply_alert_filters(&mut alerts, &query);
         Ok(alerts)
+    }
+
+    async fn record_fleet_alert_webhook_events(&self, alerts: &[FleetAlertView]) -> Result<()> {
+        for alert in alerts {
+            if alert.operator_state != "open" {
+                continue;
+            }
+            let mut predicates = vec![
+                format!("alert.severity:{}", alert.severity),
+                format!("alert.category:{}", alert.category),
+                format!("alert.state:{}", alert.operator_state),
+            ];
+            predicates.push("alert.open".to_string());
+            self.repo
+                .record_webhook_event(WebhookEventCandidate {
+                    kind: "alert.open".to_string(),
+                    event_id: format!("alert.open:{}", alert.id),
+                    event_predicates: predicates,
+                    subject_client_ids: alert.client_id.iter().cloned().collect(),
+                    payload: json!({
+                        "event": {
+                            "kind": "alert.open",
+                            "alert_id": &alert.id,
+                        },
+                        "alert": alert,
+                    }),
+                    actor_id: None,
+                })
+                .await?;
+        }
+        Ok(())
     }
 }
 

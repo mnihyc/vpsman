@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -299,22 +299,31 @@ impl Repository {
         &self,
         request: &BulkTagMutationRequest,
     ) -> Result<TagMutationResponse> {
+        let before_agents = self.list_agents().await?;
         let targets = self
             .resolve_bulk_targets(&BulkResolveRequest {
                 selector_expression: request.selector_expression.clone(),
             })
             .await?
             .targets;
+        let target_ids = targets
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        let (after_agents, preview_changed) =
+            simulate_bulk_tag_mutation(&before_agents, &target_ids, &request.tag, &request.action);
+        let schedule_impacts = self
+            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .await?;
         if !request.confirmed {
-            return Ok(TagMutationResponse {
-                tag: request.tag.clone(),
-                action: tag_action_label(&request.action).to_string(),
-                target_count: targets.len(),
-                changed_count: 0,
-                skipped_count: targets.len(),
-                affected: targets,
-                confirmation_required: true,
-            });
+            return Ok(tag_mutation_response(
+                &request.tag,
+                tag_action_label(&request.action),
+                targets,
+                preview_changed,
+                schedule_impacts,
+                true,
+            ));
         }
         match self {
             Self::Memory(memory) => {
@@ -352,15 +361,22 @@ impl Repository {
                         }
                     }
                 }
-                Ok(TagMutationResponse {
-                    tag: request.tag.clone(),
-                    action: tag_action_label(&request.action).to_string(),
-                    target_count: targets.len(),
-                    changed_count: changed,
-                    skipped_count: targets.len().saturating_sub(changed),
-                    affected: targets,
-                    confirmation_required: false,
-                })
+                if changed > 0 {
+                    self.record_tag_mutation_event(
+                        tag_action_label(&request.action),
+                        &request.tag,
+                        &targets,
+                    )
+                    .await?;
+                }
+                Ok(tag_mutation_response(
+                    &request.tag,
+                    tag_action_label(&request.action),
+                    targets,
+                    changed,
+                    schedule_impacts,
+                    false,
+                ))
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -414,15 +430,22 @@ impl Repository {
                 }
                 tx.commit().await?;
                 let changed = changed as usize;
-                Ok(TagMutationResponse {
-                    tag: request.tag.clone(),
-                    action: tag_action_label(&request.action).to_string(),
-                    target_count: targets.len(),
-                    changed_count: changed,
-                    skipped_count: targets.len().saturating_sub(changed),
-                    affected: targets,
-                    confirmation_required: false,
-                })
+                if changed > 0 {
+                    self.record_tag_mutation_event(
+                        tag_action_label(&request.action),
+                        &request.tag,
+                        &targets,
+                    )
+                    .await?;
+                }
+                Ok(tag_mutation_response(
+                    &request.tag,
+                    tag_action_label(&request.action),
+                    targets,
+                    changed,
+                    schedule_impacts,
+                    false,
+                ))
             }
         }
     }
@@ -432,17 +455,25 @@ impl Repository {
         tag: &str,
         confirmed: bool,
     ) -> Result<TagMutationResponse> {
+        let before_agents = self.list_agents().await?;
         let affected = self.clients_for_tag(tag).await?;
+        let target_ids = affected
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        let (after_agents, preview_changed) = simulate_remove_tag(&before_agents, &target_ids, tag);
+        let schedule_impacts = self
+            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .await?;
         if !confirmed {
-            return Ok(TagMutationResponse {
-                tag: tag.to_string(),
-                action: "delete".to_string(),
-                target_count: affected.len(),
-                changed_count: 0,
-                skipped_count: affected.len(),
+            return Ok(tag_mutation_response(
+                tag,
+                "delete",
                 affected,
-                confirmation_required: true,
-            });
+                preview_changed,
+                schedule_impacts,
+                true,
+            ));
         }
         match self {
             Self::Memory(memory) => {
@@ -456,40 +487,199 @@ impl Repository {
                         changed += 1;
                     }
                 }
-                Ok(TagMutationResponse {
-                    tag: tag.to_string(),
-                    action: "delete".to_string(),
-                    target_count: affected.len(),
-                    changed_count: changed,
-                    skipped_count: affected.len().saturating_sub(changed),
+                if changed > 0 {
+                    self.record_tag_mutation_event("delete", tag, &affected)
+                        .await?;
+                }
+                Ok(tag_mutation_response(
+                    tag,
+                    "delete",
                     affected,
-                    confirmation_required: false,
-                })
+                    changed,
+                    schedule_impacts,
+                    false,
+                ))
             }
             Self::Postgres(pool) => {
                 let result = sqlx::query("DELETE FROM tags WHERE name = $1")
                     .bind(tag)
                     .execute(pool)
                     .await?;
-                Ok(TagMutationResponse {
-                    tag: tag.to_string(),
-                    action: "delete".to_string(),
-                    target_count: affected.len(),
-                    changed_count: if result.rows_affected() > 0 {
-                        affected.len()
-                    } else {
-                        0
-                    },
-                    skipped_count: if result.rows_affected() > 0 {
-                        0
-                    } else {
-                        affected.len()
-                    },
+                let changed = if result.rows_affected() > 0 {
+                    affected.len()
+                } else {
+                    0
+                };
+                if changed > 0 {
+                    self.record_tag_mutation_event("delete", tag, &affected)
+                        .await?;
+                }
+                Ok(tag_mutation_response(
+                    tag,
+                    "delete",
                     affected,
-                    confirmation_required: false,
-                })
+                    changed,
+                    schedule_impacts,
+                    false,
+                ))
             }
         }
+    }
+
+    pub(crate) async fn assign_agent_tag_mutation(
+        &self,
+        client_id: &str,
+        tag: &str,
+        confirmed: bool,
+    ) -> Result<TagMutationResponse> {
+        let before_agents = self.list_agents().await?;
+        let affected = before_agents
+            .iter()
+            .find(|agent| agent.id == client_id)
+            .cloned()
+            .with_context(|| format!("agent_not_found:{client_id}"))
+            .map(|agent| vec![agent])?;
+        let target_ids = HashSet::from([client_id.to_string()]);
+        let (after_agents, preview_changed) = simulate_add_tag(&before_agents, &target_ids, tag);
+        let schedule_impacts = self
+            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .await?;
+        if !confirmed {
+            return Ok(tag_mutation_response(
+                tag,
+                "assign",
+                affected,
+                preview_changed,
+                schedule_impacts,
+                true,
+            ));
+        }
+        self.assign_agent_tag(client_id, tag).await?;
+        if preview_changed > 0 {
+            self.record_tag_mutation_event("assign", tag, &affected)
+                .await?;
+        }
+        Ok(tag_mutation_response(
+            tag,
+            "assign",
+            affected,
+            preview_changed,
+            schedule_impacts,
+            false,
+        ))
+    }
+
+    async fn schedule_impacts_for_agent_sets(
+        &self,
+        before_agents: &[AgentView],
+        after_agents: &[AgentView],
+    ) -> Result<Vec<ScheduleImpactView>> {
+        let mut impacts = Vec::new();
+        for schedule in self
+            .list_schedules()
+            .await?
+            .into_iter()
+            .filter(|schedule| schedule.enabled && schedule.deleted_at.is_none())
+        {
+            let before_targets =
+                resolve_agents_from_set(before_agents, &schedule.selector_expression)?;
+            let after_targets =
+                resolve_agents_from_set(after_agents, &schedule.selector_expression)?;
+            let before_ids = before_targets
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect::<HashSet<_>>();
+            let after_ids = after_targets
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect::<HashSet<_>>();
+            if before_ids == after_ids {
+                continue;
+            }
+            let before_by_id = before_targets
+                .iter()
+                .map(|agent| (agent.id.clone(), agent.clone()))
+                .collect::<HashMap<_, _>>();
+            let after_by_id = after_targets
+                .iter()
+                .map(|agent| (agent.id.clone(), agent.clone()))
+                .collect::<HashMap<_, _>>();
+            let mut added_targets = after_ids
+                .difference(&before_ids)
+                .filter_map(|id| after_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            let mut removed_targets = before_ids
+                .difference(&after_ids)
+                .filter_map(|id| before_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            added_targets.sort_by(|left, right| {
+                left.display_name
+                    .cmp(&right.display_name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            removed_targets.sort_by(|left, right| {
+                left.display_name
+                    .cmp(&right.display_name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let unchanged_target_count = before_ids.intersection(&after_ids).count();
+            let added_target_count = added_targets.len();
+            let removed_target_count = removed_targets.len();
+            impacts.push(ScheduleImpactView {
+                schedule_id: schedule.id,
+                name: schedule.name,
+                command_type: schedule.command_type,
+                selector_expression: schedule.selector_expression,
+                before_target_count: before_ids.len(),
+                after_target_count: after_ids.len(),
+                added_target_count,
+                removed_target_count,
+                unchanged_target_count,
+                added_targets,
+                removed_targets,
+                summary: schedule_impact_summary(added_target_count, removed_target_count),
+            });
+        }
+        Ok(impacts)
+    }
+
+    async fn record_tag_mutation_event(
+        &self,
+        action: &str,
+        tag: &str,
+        affected: &[AgentView],
+    ) -> Result<()> {
+        let direction_predicate = match action {
+            "add" | "assign" => format!("vps.tag_event.added:{tag}"),
+            "remove" | "delete" => format!("vps.tag_event.removed:{tag}"),
+            _ => format!("vps.tag_event:{tag}"),
+        };
+        self.record_webhook_event(crate::model_webhook_rules::WebhookEventCandidate {
+            kind: "vps.tag_changed".to_string(),
+            event_id: format!("vps.tag_changed:{}:{}", Uuid::new_v4(), unix_now()),
+            event_predicates: vec![
+                format!("vps.tag_event:{tag}"),
+                direction_predicate,
+            ],
+            subject_client_ids: affected.iter().map(|agent| agent.id.clone()).collect(),
+            payload: json!({
+                "event": {
+                    "kind": "vps.tag_changed",
+                    "tag": tag,
+                    "action": action,
+                },
+                "vps": affected,
+                "tag_mutation": {
+                    "action": action,
+                    "tag": tag,
+                    "affected_client_ids": affected.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>(),
+                    "affected_count": affected.len(),
+                }
+            }),
+            actor_id: None,
+        })
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn delete_agent(
@@ -878,5 +1068,110 @@ fn tag_action_label(action: &BulkTagMutationAction) -> &'static str {
     match action {
         BulkTagMutationAction::Add => "add",
         BulkTagMutationAction::Remove => "remove",
+    }
+}
+
+fn tag_mutation_response(
+    tag: &str,
+    action: &str,
+    affected: Vec<AgentView>,
+    changed_count: usize,
+    schedule_impacts: Vec<ScheduleImpactView>,
+    confirmation_required: bool,
+) -> TagMutationResponse {
+    TagMutationResponse {
+        tag: tag.to_string(),
+        action: action.to_string(),
+        target_count: affected.len(),
+        changed_count,
+        skipped_count: affected.len().saturating_sub(changed_count),
+        affected,
+        schedule_impacts,
+        confirmation_required,
+    }
+}
+
+fn simulate_bulk_tag_mutation(
+    agents: &[AgentView],
+    target_ids: &HashSet<String>,
+    tag: &str,
+    action: &BulkTagMutationAction,
+) -> (Vec<AgentView>, usize) {
+    match action {
+        BulkTagMutationAction::Add => simulate_add_tag(agents, target_ids, tag),
+        BulkTagMutationAction::Remove => simulate_remove_tag(agents, target_ids, tag),
+    }
+}
+
+fn simulate_add_tag(
+    agents: &[AgentView],
+    target_ids: &HashSet<String>,
+    tag: &str,
+) -> (Vec<AgentView>, usize) {
+    let mut changed = 0_usize;
+    let mut after_agents = agents.to_vec();
+    for agent in &mut after_agents {
+        if !target_ids.contains(&agent.id) || agent.tags.iter().any(|existing| existing == tag) {
+            continue;
+        }
+        agent.tags.push(tag.to_string());
+        agent.tags.sort();
+        changed += 1;
+    }
+    (after_agents, changed)
+}
+
+fn simulate_remove_tag(
+    agents: &[AgentView],
+    target_ids: &HashSet<String>,
+    tag: &str,
+) -> (Vec<AgentView>, usize) {
+    let mut changed = 0_usize;
+    let mut after_agents = agents.to_vec();
+    for agent in &mut after_agents {
+        if !target_ids.contains(&agent.id) {
+            continue;
+        }
+        let before = agent.tags.len();
+        agent.tags.retain(|existing| existing != tag);
+        if before != agent.tags.len() {
+            changed += 1;
+        }
+    }
+    (after_agents, changed)
+}
+
+fn resolve_agents_from_set(
+    agents: &[AgentView],
+    selector_expression: &str,
+) -> Result<Vec<AgentView>> {
+    let Some(expression) = parse_selector_expression(selector_expression)
+        .map_err(|error| anyhow!("invalid schedule selector expression: {error}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut targets = agents
+        .iter()
+        .filter(|agent| agent_matches_selector_expression(agent, &expression))
+        .cloned()
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| left.id.cmp(&right.id));
+    targets.dedup_by(|left, right| left.id == right.id);
+    Ok(targets)
+}
+
+fn schedule_impact_summary(added: usize, removed: usize) -> String {
+    match (added, removed) {
+        (0, 0) => "targets unchanged".to_string(),
+        (added, 0) => format!("adds {added} target{}", if added == 1 { "" } else { "s" }),
+        (0, removed) => format!(
+            "removes {removed} target{}",
+            if removed == 1 { "" } else { "s" }
+        ),
+        (added, removed) => format!(
+            "adds {added} target{} and removes {removed} target{}",
+            if added == 1 { "" } else { "s" },
+            if removed == 1 { "" } else { "s" }
+        ),
     }
 }

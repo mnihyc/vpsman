@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { basicSetup, EditorView } from "codemirror";
 import { Activity, AlertTriangle, Bell, Boxes, Clock3, Gauge, LockKeyhole, Network, RefreshCw, Server, Trash2 } from "lucide-react";
 import { bulkOutcomeSummary, targetPreflightUnavailable, waitForBulkJobTargets, type BulkJobProgress } from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
@@ -6,6 +7,7 @@ import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/Conso
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
+import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
@@ -33,6 +35,15 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  WebhookRuleDeliveryRecord,
+  WebhookDeliveryRotationRequest,
+  WebhookDeliveryRotationResponse,
+  WebhookRuleDispatchRequest,
+  WebhookRuleDryRunRecord,
+  WebhookRuleDryRunRequest,
+  WebhookRuleProcessRequest,
+  WebhookRuleRecord,
+  WebhookRuleRequest,
   DeleteAgentRequest,
   DeleteAgentResponse,
   JobOperation,
@@ -56,20 +67,27 @@ export function FleetWorkspace({
   fleetAlertPolicies,
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
+  webhookRules,
+  webhookRuleDeliveries,
   lastLiveEvent,
   onCreateJob,
   onDispatchFleetAlertNotifications,
+  onDispatchWebhookRules,
+  onDryRunWebhookRule,
   onDeleteAgent,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onProcessFleetAlertNotifications,
+  onProcessWebhookRuleDeliveries,
+  onRotateWebhookDeliveryHistory,
   onSelectAgent,
   onUpdateAgentAlias,
   onUpdateFleetAlertState,
   onUpsertFleetAlertNotificationChannel,
   onUpsertFleetAlertPolicy,
+  onUpsertWebhookRule,
   scopeActive,
   selectedAgent,
   summary,
@@ -87,11 +105,15 @@ export function FleetWorkspace({
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
+  webhookRules: WebhookRuleRecord[];
+  webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
   lastLiveEvent: string;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onDispatchWebhookRules: (request: WebhookRuleDispatchRequest) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRunWebhookRule: (request: WebhookRuleDryRunRequest) => Promise<WebhookRuleDryRunRecord>;
   onDeleteAgent: (clientId: string, request: DeleteAgentRequest) => Promise<DeleteAgentResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -100,6 +122,8 @@ export function FleetWorkspace({
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onProcessWebhookRuleDeliveries: (request: WebhookRuleProcessRequest) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotateWebhookDeliveryHistory: (request: WebhookDeliveryRotationRequest) => Promise<WebhookDeliveryRotationResponse>;
   onSelectAgent: (agentId: string | null) => void;
   onUpdateAgentAlias: (clientId: string, displayName: string) => Promise<AgentView>;
   onUpdateFleetAlertState: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
@@ -107,6 +131,7 @@ export function FleetWorkspace({
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
   onUpsertFleetAlertPolicy: (request: FleetAlertPolicyRequest) => Promise<FleetAlertPolicyRecord>;
+  onUpsertWebhookRule: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
   scopeActive: boolean;
   selectedAgent: AgentView | null;
   summary: FleetSummary;
@@ -448,9 +473,14 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Notification channels</h2>
-              <span>{apiError ?? `${fleetAlertNotificationChannels.length} delivery channels`}</span>
+              <span>
+                {apiError ??
+                  `${fleetAlertNotificationChannels.length} alert channels, ${webhookRules.length} expression webhooks`}
+              </span>
             </div>
-            <span className="sectionContext">{fleetAlertNotifications.length} retained deliveries</span>
+            <span className="sectionContext">
+              {fleetAlertNotifications.length + webhookRuleDeliveries.length} retained deliveries
+            </span>
           </div>
           <FleetAlertNotificationManager
             channels={fleetAlertNotificationChannels}
@@ -458,6 +488,16 @@ export function FleetWorkspace({
             onDispatch={onDispatchFleetAlertNotifications}
             onProcess={onProcessFleetAlertNotifications}
             onUpsert={onUpsertFleetAlertNotificationChannel}
+          />
+          <WebhookRuleManager
+            agents={agents}
+            deliveries={webhookRuleDeliveries}
+            onDispatch={onDispatchWebhookRules}
+            onDryRun={onDryRunWebhookRule}
+            onProcess={onProcessWebhookRuleDeliveries}
+            onRotate={onRotateWebhookDeliveryHistory}
+            onUpsert={onUpsertWebhookRule}
+            rules={webhookRules}
           />
         </div>
       )}
@@ -983,6 +1023,307 @@ function FleetAlertNotificationManager({
       </div>
     </div>
   );
+}
+
+function WebhookRuleManager({
+  agents,
+  deliveries,
+  onDispatch,
+  onDryRun,
+  onProcess,
+  onRotate,
+  onUpsert,
+  rules,
+}: {
+  agents: AgentView[];
+  deliveries: WebhookRuleDeliveryRecord[];
+  onDispatch: (request: WebhookRuleDispatchRequest) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRun: (request: WebhookRuleDryRunRequest) => Promise<WebhookRuleDryRunRecord>;
+  onProcess: (request: WebhookRuleProcessRequest) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotate: (request: WebhookDeliveryRotationRequest) => Promise<WebhookDeliveryRotationResponse>;
+  onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
+  rules: WebhookRuleRecord[];
+}) {
+  const [name, setName] = useState("edge-interval-webhook");
+  const [enabled, setEnabled] = useState(true);
+  const [expression, setExpression] = useState("interval.30sec && tag:edge");
+  const [target, setTarget] = useState("https://hooks.example/vpsman");
+  const [bodyTemplate, setBodyTemplate] = useState("{rule.name} {event.kind} {vps.id}");
+  const [cooldownSecs, setCooldownSecs] = useState("300");
+  const [eventKind, setEventKind] = useState("interval.30sec");
+  const [eventId, setEventId] = useState("");
+  const [rotationDays, setRotationDays] = useState("90");
+  const [rotationStatus, setRotationStatus] = useState("delivered");
+  const [status, setStatus] = useState<string | null>(null);
+  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
+  const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
+  const [rotationPreview, setRotationPreview] = useState<WebhookDeliveryRotationResponse | null>(null);
+  const [localRulePreview, setLocalRulePreview] = useState<WebhookRuleRecord | null>(null);
+  const visibleRules = useMemo(() => {
+    if (!localRulePreview) {
+      return rules;
+    }
+    return [localRulePreview, ...rules.filter((rule) => rule.id !== localRulePreview.id && rule.name !== localRulePreview.name)].sort(
+      (left, right) => left.name.localeCompare(right.name),
+    );
+  }, [localRulePreview, rules]);
+  const topRules = visibleRules.slice(0, 4);
+  const topDeliveries = deliveries.slice(0, 4);
+
+  async function submit() {
+    setStatus("saving webhook rule");
+    try {
+      const rule = await onUpsert({
+        name,
+        enabled,
+        expression,
+        target,
+        body_template: bodyTemplate,
+        cooldown_secs: optionalInteger(cooldownSecs),
+        confirmed: true,
+      });
+      setLocalRulePreview(rule);
+      setStatus("webhook rule saved");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook rule save failed");
+    }
+  }
+
+  async function dryRunRule() {
+    setStatus("previewing rule");
+    try {
+      const rows = await onDryRun({
+        name,
+        enabled,
+        expression,
+        target,
+        event_kind: eventKind,
+        event_id: eventId.trim() || null,
+        body_template: bodyTemplate,
+        cooldown_secs: optionalInteger(cooldownSecs),
+      });
+      setDryRunPreview(rows);
+      setPreviewRows(rows.delivery ? [rows.delivery] : []);
+      setStatus(`previewed ${rows.matched_vps.length} matched VPSs`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook rule preview failed");
+    }
+  }
+
+  async function dispatchRules(dryRun: boolean) {
+    setStatus(dryRun ? "matching rules" : "dispatching webhooks");
+    try {
+      const rows = await onDispatch({
+        event_kind: eventKind,
+        event_id: eventId.trim() || null,
+        dry_run: dryRun,
+        confirmed: !dryRun,
+      });
+      if (dryRun) {
+        setPreviewRows(rows);
+      }
+      setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook dispatch failed");
+    }
+  }
+
+  async function process(dryRun: boolean) {
+    setStatus(dryRun ? "previewing queued webhooks" : "delivering webhooks");
+    try {
+      const rows = await onProcess({
+        limit: 50,
+        status: "queued",
+        dry_run: dryRun,
+        confirmed: !dryRun,
+      });
+      if (dryRun) {
+        setPreviewRows(rows);
+      }
+      setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook delivery failed");
+    }
+  }
+
+  async function rotate(confirmed: boolean) {
+    setStatus(confirmed ? "rotating delivery history" : "previewing delivery history rotation");
+    try {
+      const response = await onRotate({
+        older_than_days: optionalInteger(rotationDays),
+        status: rotationStatus || null,
+        confirmed,
+      });
+      setRotationPreview(response);
+      setStatus(confirmed ? `deleted ${response.deleted_count}` : `matched ${response.matched_count}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook delivery rotation failed");
+    }
+  }
+
+  return (
+    <div className="fleetPolicyManager fleetNotificationManager" aria-label="Expression webhook rule manager">
+      <div className="fleetPolicyHeader">
+        <span>
+          <Bell size={16} />
+          <strong>Expression webhooks</strong>
+        </span>
+        <span>{visibleRules.length} rules</span>
+      </div>
+      <div className="fleetPolicyGrid notificationGrid webhookRuleGrid">
+        <input aria-label="Webhook rule name" value={name} onChange={(event) => setName(event.target.value)} />
+        <label className="inlineToggle">
+          <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
+          <span>Enabled</span>
+        </label>
+        <input aria-label="Webhook target URL" value={target} onChange={(event) => setTarget(event.target.value)} />
+        <input aria-label="Webhook cooldown seconds" value={cooldownSecs} onChange={(event) => setCooldownSecs(event.target.value)} />
+        <div className="wideField">
+          <SearchExpressionInput
+            agents={agents}
+            ariaLabel="Webhook rule expression"
+            onChange={setExpression}
+            placeholder="interval.30sec && status = stale"
+            value={expression}
+            verification="neutral"
+            verificationMessage={`${agents.length} VPSs`}
+          />
+        </div>
+        <div className="webhookTemplateEditor wideField">
+          <WebhookTemplateEditor onChange={setBodyTemplate} value={bodyTemplate} />
+        </div>
+        <input aria-label="Webhook event kind" value={eventKind} onChange={(event) => setEventKind(event.target.value)} />
+        <input aria-label="Webhook event id" value={eventId} onChange={(event) => setEventId(event.target.value)} />
+        <button type="button" onClick={() => void submit()}>
+          Save
+        </button>
+        <button type="button" onClick={() => void dryRunRule()}>
+          Preview rule
+        </button>
+        <button type="button" onClick={() => void dispatchRules(true)}>
+          Match rules
+        </button>
+        <button type="button" onClick={() => void dispatchRules(false)}>
+          Queue
+        </button>
+        <button type="button" onClick={() => void process(true)}>
+          Preview queue
+        </button>
+        <button type="button" onClick={() => void process(false)}>
+          Deliver
+        </button>
+        <input aria-label="Webhook rotation days" value={rotationDays} onChange={(event) => setRotationDays(event.target.value)} />
+        <select aria-label="Webhook rotation status" value={rotationStatus} onChange={(event) => setRotationStatus(event.target.value)}>
+          <option value="">Any status</option>
+          <option value="delivered">Delivered</option>
+          <option value="failed">Failed</option>
+          <option value="permanently_failed">Permanently failed</option>
+          <option value="queued">Queued</option>
+        </select>
+        <button type="button" onClick={() => void rotate(false)}>
+          Preview rotation
+        </button>
+        <button type="button" onClick={() => void rotate(true)}>
+          Rotate history
+        </button>
+      </div>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+      {dryRunPreview && (
+        <div className="webhookPreviewSplit">
+          <div>
+            <strong>Rendered message</strong>
+            <pre>{dryRunPreview.rendered_message || "-"}</pre>
+          </div>
+          <div>
+            <strong>Payload context</strong>
+            <pre>{JSON.stringify(dryRunPreview.payload_context, null, 2)}</pre>
+          </div>
+        </div>
+      )}
+      {rotationPreview && (
+        <small className="fleetPolicyStatus">
+          Rotation {rotationPreview.confirmation_required ? "preview" : "applied"} matched {rotationPreview.matched_count}, deleted {rotationPreview.deleted_count}
+        </small>
+      )}
+      {previewRows.length > 0 && (
+        <div className="fleetPolicyRows notificationRows">
+          {previewRows.slice(0, 3).map((delivery) => (
+            <span key={delivery.id}>
+              <strong>{delivery.rule_name}</strong>
+              <small>
+                {delivery.event_kind} matched {delivery.matched_vps.length}:{" "}
+                {delivery.matched_vps.map((vps) => vps.id).join(" ")}
+              </small>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="fleetPolicyRows notificationRows">
+        {topRules.map((rule) => (
+          <span key={rule.id}>
+            <strong>{rule.name}</strong>
+            <small>
+              {rule.enabled ? "enabled" : "disabled"} {rule.expression} cooldown {rule.cooldown_secs}s
+            </small>
+          </span>
+        ))}
+        {topDeliveries.map((delivery) => (
+          <span key={delivery.id}>
+            <strong>{delivery.rule_name}</strong>
+            <small>
+              {delivery.status} {delivery.event_kind} matched {delivery.matched_vps.length} attempts {delivery.attempt_count}
+              {delivery.next_attempt_at ? ` next ${formatCompactTime(delivery.next_attempt_at)}` : ""}
+              {delivery.error ? ` error ${delivery.error}` : ""}
+            </small>
+          </span>
+        ))}
+        {topRules.length === 0 && topDeliveries.length === 0 && <small>No expression webhook rule saved</small>}
+      </div>
+    </div>
+  );
+}
+
+function WebhookTemplateEditor({ onChange, value }: { onChange: (value: string) => void; value: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    if (!containerRef.current) {
+      return;
+    }
+    const view = new EditorView({
+      doc: value,
+      extensions: [
+        basicSetup,
+        EditorView.lineWrapping,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) {
+            onChangeRef.current(update.state.doc.toString());
+          }
+        }),
+      ],
+      parent: containerRef.current,
+    });
+    viewRef.current = view;
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || view.state.doc.toString() === value) {
+      return;
+    }
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: value },
+    });
+  }, [value]);
+
+  return <div className="webhookCodeMirror" ref={containerRef} />;
 }
 
 function FleetAlertList({

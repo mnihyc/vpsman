@@ -85,12 +85,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const assignTag = useCallback(
     async (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => {
-      await apiPost(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, {
+      const response = await apiPost<TagMutationResponse>(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, {
         confirmed: true,
         privilege_assertion: privilegeAssertion,
         tag,
       });
       await Promise.all([onFleetChanged(), loadTagInventory()]);
+      return response;
     },
     [apiToken, loadTagInventory, onFleetChanged],
   );
@@ -107,7 +108,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const deleteTag = useCallback(
-    async (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => {
+    async (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => {
       const response = await apiPost<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
         confirmed,
         privilege_assertion: privilegeAssertion,

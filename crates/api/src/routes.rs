@@ -89,6 +89,11 @@ use crate::{
         stream_agent_update_artifact, upload_agent_update_artifact,
         MAX_RELEASE_ARTIFACT_UPLOAD_BODY_BYTES,
     },
+    routes_webhook_rules::{
+        dispatch_webhook_rules, dry_run_webhook_rule, list_webhook_rule_deliveries,
+        list_webhook_rules, process_webhook_rule_deliveries, rotate_webhook_delivery_history,
+        upsert_webhook_rule,
+    },
     routes_ws::ws_handler,
     state::AppState,
 };
@@ -161,6 +166,27 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/fleet-alert-notifications/process",
             post(process_fleet_alert_notifications),
+        )
+        .route(
+            "/api/v1/webhook-rules",
+            get(list_webhook_rules).post(upsert_webhook_rule),
+        )
+        .route("/api/v1/webhook-rules/dry-run", post(dry_run_webhook_rule))
+        .route(
+            "/api/v1/webhook-rules/dispatch",
+            post(dispatch_webhook_rules),
+        )
+        .route(
+            "/api/v1/webhook-deliveries",
+            get(list_webhook_rule_deliveries),
+        )
+        .route(
+            "/api/v1/webhook-deliveries/process",
+            post(process_webhook_rule_deliveries),
+        )
+        .route(
+            "/api/v1/webhook-deliveries/rotate",
+            post(rotate_webhook_delivery_history),
         )
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/agents/{client_id}/delete", post(delete_agent))

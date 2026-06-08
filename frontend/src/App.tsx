@@ -179,6 +179,8 @@ export function App() {
               fleetAlertPolicies={dashboard.fleetAlertPolicies}
               fleetAlertNotificationChannels={dashboard.fleetAlertNotificationChannels}
               fleetAlertNotifications={dashboard.fleetAlertNotifications}
+              webhookRules={dashboard.webhookRules}
+              webhookRuleDeliveries={dashboard.webhookRuleDeliveries}
               lastLiveEvent={dashboard.lastLiveEvent}
               onCreateJob={dashboard.createJob}
               onDeleteAgent={dashboard.deleteAgent}
@@ -191,10 +193,15 @@ export function App() {
               privilegeMaterial={privilegeMaterial}
               scopeActive={hasFleetScope}
               onDispatchFleetAlertNotifications={dashboard.dispatchFleetAlertNotifications}
+              onDispatchWebhookRules={dashboard.dispatchWebhookRules}
+              onDryRunWebhookRule={dashboard.dryRunWebhookRule}
               onProcessFleetAlertNotifications={dashboard.processFleetAlertNotifications}
+              onProcessWebhookRuleDeliveries={dashboard.processWebhookRuleDeliveries}
+              onRotateWebhookDeliveryHistory={dashboard.rotateWebhookDeliveryHistory}
               onUpdateFleetAlertState={dashboard.updateFleetAlertState}
               onUpsertFleetAlertNotificationChannel={dashboard.upsertFleetAlertNotificationChannel}
               onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
+              onUpsertWebhookRule={dashboard.upsertWebhookRule}
               selectedAgent={selectedAgent}
               summary={dashboard.summary}
               telemetryNetworkRates={dashboard.telemetryNetworkRates}

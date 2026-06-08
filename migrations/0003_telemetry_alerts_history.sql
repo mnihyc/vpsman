@@ -224,6 +224,112 @@ CREATE INDEX fleet_alert_notification_deliveries_attempt_idx
         created_at ASC
     );
 
+CREATE TABLE webhook_rules (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    expression TEXT NOT NULL,
+    target TEXT NOT NULL,
+    body_template TEXT NOT NULL DEFAULT '',
+    cooldown_secs BIGINT NOT NULL DEFAULT 300,
+    notes TEXT,
+    actor_id UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (length(trim(name)) BETWEEN 1 AND 128),
+    CHECK (length(trim(expression)) BETWEEN 1 AND 4096),
+    CHECK (length(trim(target)) BETWEEN 1 AND 512),
+    CHECK (length(body_template) <= 4096),
+    CHECK (cooldown_secs >= 0 AND cooldown_secs <= 2592000),
+    CHECK (notes IS NULL OR length(notes) <= 1024)
+);
+
+CREATE INDEX webhook_rules_enabled_idx
+    ON webhook_rules (enabled, updated_at DESC, name);
+
+CREATE TABLE webhook_events (
+    id UUID NOT NULL,
+    kind TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_predicates TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    subject_client_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    payload JSONB NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ,
+    actor_id UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (occurred_at, id),
+    CHECK (length(trim(kind)) BETWEEN 1 AND 128),
+    CHECK (length(trim(event_id)) BETWEEN 1 AND 256),
+    CHECK (jsonb_typeof(payload) = 'object')
+) PARTITION BY RANGE (occurred_at);
+
+CREATE TABLE webhook_events_default
+    PARTITION OF webhook_events DEFAULT;
+
+CREATE INDEX webhook_events_unprocessed_idx
+    ON webhook_events (processed_at, occurred_at ASC);
+
+CREATE INDEX webhook_events_kind_idx
+    ON webhook_events (kind, event_id, occurred_at DESC);
+
+CREATE TABLE webhook_rule_deliveries (
+    id UUID PRIMARY KEY,
+    rule_id UUID NOT NULL REFERENCES webhook_rules(id) ON DELETE CASCADE,
+    rule_name TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    matched_vps JSONB NOT NULL,
+    message TEXT NOT NULL,
+    error TEXT,
+    cooldown_until_unix BIGINT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ,
+    last_attempt_at TIMESTAMPTZ,
+    actor_id UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    delivered_at TIMESTAMPTZ,
+    CHECK (status IN ('queued', 'failed', 'permanently_failed', 'delivered', 'matched_dry_run')),
+    CHECK (length(trim(event_kind)) BETWEEN 1 AND 128),
+    CHECK (length(trim(event_id)) BETWEEN 1 AND 256),
+    CHECK (length(trim(target)) BETWEEN 1 AND 512),
+    CHECK (jsonb_typeof(payload) = 'object'),
+    CHECK (jsonb_typeof(matched_vps) = 'array'),
+    CHECK (cooldown_until_unix >= 0)
+);
+
+CREATE INDEX webhook_rule_deliveries_status_idx
+    ON webhook_rule_deliveries (status, created_at DESC);
+
+CREATE INDEX webhook_rule_deliveries_rule_idx
+    ON webhook_rule_deliveries (rule_id, created_at DESC);
+
+CREATE INDEX webhook_rule_deliveries_event_idx
+    ON webhook_rule_deliveries (event_kind, event_id, created_at DESC);
+
+CREATE UNIQUE INDEX webhook_rule_deliveries_rule_event_unique_idx
+    ON webhook_rule_deliveries (rule_id, event_id);
+
+CREATE INDEX webhook_rule_deliveries_dedupe_idx
+    ON webhook_rule_deliveries (dedupe_key, cooldown_until_unix DESC);
+
+CREATE INDEX webhook_rule_deliveries_attempt_idx
+    ON webhook_rule_deliveries (status, next_attempt_at ASC, created_at ASC);
+
+CREATE TABLE webhook_rule_cursors (
+    rule_id UUID NOT NULL REFERENCES webhook_rules(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL,
+    last_event_id TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (rule_id, event_key),
+    CHECK (length(trim(event_key)) BETWEEN 1 AND 128),
+    CHECK (length(trim(last_event_id)) BETWEEN 1 AND 256)
+);
+
 CREATE TABLE history_retention_policies (
     domain TEXT PRIMARY KEY,
     retention_days INTEGER NOT NULL,

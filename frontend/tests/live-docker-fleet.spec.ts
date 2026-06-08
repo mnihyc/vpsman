@@ -89,13 +89,16 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({ pag
 
   await openConsoleSubpage(page, "Tags", "Bulk");
   await expect(page.getByRole("heading", { name: "Bulk tags" })).toBeVisible();
+  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:2026-q2-patch");
   await page.getByRole("searchbox", { name: "Bulk tag selector expression" }).fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Preview targets" }).click();
+  await page.getByRole("button", { name: "Preview mutation" }).click();
   await expect(page.getByText("2/24")).toBeVisible();
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
   await expectCleanLayout(page);
+
+  await exerciseExpressionWebhooks(page);
 
   await verifyDesktopSubpages(page);
   await openConsoleSubpage(page, "Preferences", "Operator");
@@ -190,6 +193,57 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
   await page.keyboard.press("Escape");
   await grid.getByLabel("VPS instance records page size").selectOption("25");
   await expect(grid.getByText(`1 / 1`)).toBeVisible();
+}
+
+async function exerciseExpressionWebhooks(page: Page) {
+  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await expect(page.getByRole("heading", { name: "Notification channels" })).toBeVisible();
+  const manager = page.getByLabel("Expression webhook rule manager");
+  await manager.getByLabel("Webhook rule name").fill("docker-fleet-q2-capacity");
+  await manager.getByLabel("Webhook target URL").fill("https://hooks.example/vpsman/docker-fleet");
+  await manager.getByLabel("Webhook cooldown seconds").fill("60");
+  await fillSearchExpression(manager.getByRole("searchbox", { name: "Webhook rule expression" }), 'interval.30sec && vps.tag = "role:edge"');
+  await fillWebhookTemplate(
+    manager,
+    "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",
+  );
+  await manager.getByLabel("Webhook event kind").fill("interval.30sec");
+  await manager.getByRole("button", { name: "Save" }).click();
+  await expect(manager.locator(".fleetPolicyStatus", { hasText: "webhook rule saved" })).toBeVisible();
+  await expect(manager).toContainText("docker-fleet-q2-capacity");
+
+  await manager.getByRole("button", { name: "Preview rule" }).click();
+  await expect(manager.locator(".fleetPolicyStatus", { hasText: "previewed 6 matched VPSs" })).toBeVisible();
+  await expect(manager.locator(".webhookPreviewSplit")).toContainText("docker-fleet-q2-capacity interval.30sec count=6");
+  await expect(manager.locator(".webhookPreviewSplit")).toContainText("df-alpha-US-01");
+  await expect(manager.locator(".webhookPreviewSplit")).toContainText("matched_vps");
+
+  await manager.getByRole("button", { name: "Match rules" }).click();
+  await expect(manager.locator(".fleetPolicyStatus", { hasText: "matched 1" })).toBeVisible();
+  await expect(manager.locator(".notificationRows").filter({ hasText: "interval.30sec matched 6" })).toBeVisible();
+
+  await manager.getByLabel("Webhook rotation days").fill("7");
+  await manager.getByLabel("Webhook rotation status").selectOption("delivered");
+  await manager.getByRole("button", { name: "Preview rotation" }).click();
+  await expect(manager.locator(".fleetPolicyStatus", { hasText: "Rotation preview matched 0, deleted 0" })).toBeVisible();
+  await expectCleanLayout(page);
+}
+
+async function fillWebhookTemplate(manager: Locator, value: string) {
+  const editor = manager.locator(".webhookTemplateEditor .cm-content").first();
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await editor.page().keyboard.press("Control+A");
+  await editor.page().keyboard.press("Backspace");
+  await editor.page().keyboard.insertText(value);
+}
+
+async function fillSearchExpression(editor: Locator, value: string) {
+  await editor.click();
+  await editor.page().keyboard.press("Control+A");
+  await editor.page().keyboard.press("Backspace");
+  await editor.page().keyboard.insertText(value);
+  await editor.page().keyboard.press("Escape");
 }
 
 async function verifyDesktopSubpages(page: Page) {

@@ -53,7 +53,7 @@ pub(crate) struct FleetAlertQuery {
     pub(crate) include_muted: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct AgentView {
     pub(crate) id: String,
     pub(crate) display_name: String,
@@ -790,7 +790,24 @@ pub(crate) struct TagMutationResponse {
     pub(crate) changed_count: usize,
     pub(crate) skipped_count: usize,
     pub(crate) affected: Vec<AgentView>,
+    pub(crate) schedule_impacts: Vec<ScheduleImpactView>,
     pub(crate) confirmation_required: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ScheduleImpactView {
+    pub(crate) schedule_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) command_type: String,
+    pub(crate) selector_expression: String,
+    pub(crate) before_target_count: usize,
+    pub(crate) after_target_count: usize,
+    pub(crate) added_target_count: usize,
+    pub(crate) removed_target_count: usize,
+    pub(crate) unchanged_target_count: usize,
+    pub(crate) added_targets: Vec<AgentView>,
+    pub(crate) removed_targets: Vec<AgentView>,
+    pub(crate) summary: String,
 }
 
 #[derive(Debug, Deserialize)]
