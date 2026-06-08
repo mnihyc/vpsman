@@ -110,3 +110,47 @@
 .migrationCheckItem.optional svg {
   color: #5f6368;
 }
+
+.backupSingleWorkspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.backupWorkflowBody {
+  display: grid;
+  gap: 16px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.pathPresetStrip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.pathPresetStrip span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pathPresetStrip button {
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.pathPresetStrip button:hover {
+  border-color: #1a73e8;
+  color: #174ea6;
+}

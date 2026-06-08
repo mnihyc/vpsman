@@ -1,15 +1,58 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { basicSetup, EditorView } from "codemirror";
-import { Activity, AlertTriangle, Bell, Boxes, Clock3, Gauge, LockKeyhole, Network, RefreshCw, Server, Trash2 } from "lucide-react";
-import { bulkOutcomeSummary, targetPreflightUnavailable, waitForBulkJobTargets, type BulkJobProgress } from "../bulkJobProgress";
+import {
+  Activity,
+  AlertTriangle,
+  BarChart3,
+  Bell,
+  Boxes,
+  Clock3,
+  FileCog,
+  FolderOpen,
+  Gauge,
+  LockKeyhole,
+  Network,
+  Plus,
+  RefreshCw,
+  Server,
+  Tags,
+  TerminalSquare,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  bulkOutcomeSummary,
+  targetPreflightUnavailable,
+  waitForBulkJobTargets,
+  type BulkJobProgress,
+} from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../components/TimeSeriesChart";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
+import {
+  buildPrivilegeAssertion,
+  buildPrivilegeForJobOperation,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeMaterial,
+} from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import {
   decodeOutputPreview,
@@ -21,9 +64,14 @@ import {
   type VpsNameDisplayMode,
 } from "../utils";
 import type {
+  ActiveView,
   AgentView,
+  BulkTagMutationRequest,
   CreateJobRequest,
   CreateJobResponse,
+  DataSourceHotConfigResponse,
+  DataSourcePresetAssignmentRecord,
+  DataSourceStatusRecord,
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
@@ -52,11 +100,43 @@ import type {
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
+  TagMutationResponse,
+  TagView,
 } from "../types";
 
-type FleetDetailTab = "Overview" | "Telemetry" | "Jobs" | "Network";
+type FleetDetailTab = "Overview" | "Telemetry" | "Jobs" | "Network" | "Config";
+type FleetSelectionStatsMode =
+  | "telemetry"
+  | "network"
+  | "overview"
+  | "capabilities";
 
-const detailTabs: FleetDetailTab[] = ["Overview", "Telemetry", "Jobs", "Network"];
+const detailTabs: FleetDetailTab[] = [
+  "Overview",
+  "Telemetry",
+  "Jobs",
+  "Network",
+  "Config",
+];
+const selectionStatsModes: Array<{
+  id: FleetSelectionStatsMode;
+  label: string;
+}> = [
+  { id: "telemetry", label: "Telemetry" },
+  { id: "network", label: "Network" },
+  { id: "overview", label: "Overview" },
+  { id: "capabilities", label: "Config" },
+];
+
+const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
+const MULTI_FILE_SELECTOR_STORAGE_KEY = "vpsman.multiFile.selectorExpression";
+const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
+const CONFIG_SINGLE_SELECTOR_STORAGE_KEY =
+  "vpsman.config.single.selectorExpression";
+const CONFIG_BULK_SELECTOR_STORAGE_KEY =
+  "vpsman.config.bulk.selectorExpression";
+const FILE_BROWSER_STATE_STORAGE_KEY = "vpsman.fileBrowser.state";
+const CHART_COLORS = ["#1a73e8", "#188038", "#f29900", "#a142f4", "#d93025"];
 
 export function FleetWorkspace({
   activeSubpage,
@@ -70,7 +150,12 @@ export function FleetWorkspace({
   webhookRules,
   webhookRuleDeliveries,
   lastLiveEvent,
+  dataSourceAssignments,
+  dataSourceStatus,
   onCreateJob,
+  onBulkMutateTags,
+  onNavigatePanel,
+  onRenderDataSourceHotConfig,
   onDispatchFleetAlertNotifications,
   onDispatchWebhookRules,
   onDryRunWebhookRule,
@@ -91,6 +176,7 @@ export function FleetWorkspace({
   scopeActive,
   selectedAgent,
   summary,
+  tags,
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
@@ -108,13 +194,29 @@ export function FleetWorkspace({
   webhookRules: WebhookRuleRecord[];
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
   lastLiveEvent: string;
+  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
+  dataSourceStatus: DataSourceStatusRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onBulkMutateTags: (
+    request: BulkTagMutationRequest,
+  ) => Promise<TagMutationResponse>;
+  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  onRenderDataSourceHotConfig: (
+    clientId: string,
+  ) => Promise<DataSourceHotConfigResponse>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
-  onDispatchWebhookRules: (request: WebhookRuleDispatchRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onDryRunWebhookRule: (request: WebhookRuleDryRunRequest) => Promise<WebhookRuleDryRunRecord>;
-  onDeleteAgent: (clientId: string, request: DeleteAgentRequest) => Promise<DeleteAgentResponse>;
+  onDispatchWebhookRules: (
+    request: WebhookRuleDispatchRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRunWebhookRule: (
+    request: WebhookRuleDryRunRequest,
+  ) => Promise<WebhookRuleDryRunRecord>;
+  onDeleteAgent: (
+    clientId: string,
+    request: DeleteAgentRequest,
+  ) => Promise<DeleteAgentResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
@@ -122,57 +224,60 @@ export function FleetWorkspace({
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
-  onProcessWebhookRuleDeliveries: (request: WebhookRuleProcessRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onRotateWebhookDeliveryHistory: (request: WebhookDeliveryRotationRequest) => Promise<WebhookDeliveryRotationResponse>;
+  onProcessWebhookRuleDeliveries: (
+    request: WebhookRuleProcessRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotateWebhookDeliveryHistory: (
+    request: WebhookDeliveryRotationRequest,
+  ) => Promise<WebhookDeliveryRotationResponse>;
   onSelectAgent: (agentId: string | null) => void;
-  onUpdateAgentAlias: (clientId: string, displayName: string) => Promise<AgentView>;
-  onUpdateFleetAlertState: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
+  onUpdateAgentAlias: (
+    clientId: string,
+    displayName: string,
+  ) => Promise<AgentView>;
+  onUpdateFleetAlertState: (
+    request: FleetAlertStateRequest,
+  ) => Promise<FleetAlertStateRecord>;
   onUpsertFleetAlertNotificationChannel: (
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
-  onUpsertFleetAlertPolicy: (request: FleetAlertPolicyRequest) => Promise<FleetAlertPolicyRecord>;
-  onUpsertWebhookRule: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
+  onUpsertFleetAlertPolicy: (
+    request: FleetAlertPolicyRequest,
+  ) => Promise<FleetAlertPolicyRecord>;
+  onUpsertWebhookRule: (
+    request: WebhookRuleRequest,
+  ) => Promise<WebhookRuleRecord>;
   scopeActive: boolean;
   selectedAgent: AgentView | null;
   summary: FleetSummary;
+  tags: TagView[];
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
   privilegeMaterial: PrivilegeMaterial | null;
   wsState: string;
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [activeDetailTab, setActiveDetailTab] = useState<FleetDetailTab>("Overview");
-  const [aliasDraft, setAliasDraft] = useState("");
-  const [aliasPending, setAliasPending] = useState(false);
-  const [aliasError, setAliasError] = useState<string | null>(null);
-  const [deletePromptOpen, setDeletePromptOpen] = useState(false);
-  const [deletePending, setDeletePending] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [interfacePending, setInterfacePending] = useState(false);
-  const [interfaceError, setInterfaceError] = useState<string | null>(null);
-  const [interfaceProgress, setInterfaceProgress] = useState<BulkJobProgress | null>(null);
-  const [interfaceSnapshot, setInterfaceSnapshot] = useState<NetworkInterfacesSnapshot | null>(null);
-  const [interfaceJobId, setInterfaceJobId] = useState<string | null>(null);
-  const [interfacePayloadHash, setInterfacePayloadHash] = useState<string | null>(null);
-  const selectedTags = selectedAgent?.tags ?? [];
-  const isNetworkManaged = selectedTags.some((tag) => ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()));
-  const latestRollups = useMemo(() => latestTelemetryRollupsByClient(telemetryRollups), [telemetryRollups]);
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [selectionStatsMode, setSelectionStatsMode] =
+    useState<FleetSelectionStatsMode>("telemetry");
+  const latestRollups = useMemo(
+    () => latestTelemetryRollupsByClient(telemetryRollups),
+    [telemetryRollups],
+  );
   const latestNetworkRates = useMemo(
     () => latestTelemetryNetworkRatesByClient(telemetryNetworkRates),
     [telemetryNetworkRates],
   );
-  const latestTunnels = useMemo(() => latestTelemetryTunnelsByClient(telemetryTunnels), [telemetryTunnels]);
-  const selectedRollup = selectedAgent ? latestRollups.get(selectedAgent.id) ?? null : null;
-  const selectedNetworkRates = selectedAgent ? latestNetworkRates.get(selectedAgent.id) ?? [] : [];
-  const selectedTunnels = selectedAgent ? latestTunnels.get(selectedAgent.id) ?? [] : [];
-  const selectedTrafficSummary = formatSignalTraffic(selectedRollup, selectedNetworkRates);
-  const selectedSampleSummary = formatSignalSamples(selectedRollup, selectedNetworkRates);
-  const selectedCapabilities = selectedAgent?.capabilities;
-  const selectedCountry = selectedAgent ? countryFromTags(selectedAgent.tags) : null;
-  const selectedProvider = selectedAgent ? providerFromTags(selectedAgent.tags) : null;
-  const selectedDisplayTags = selectedAgent ? displayTags(selectedAgent.tags) : [];
-  const fleetSubpage = ["instances", "alerts", "policies", "notifications"].includes(activeSubpage)
+  const latestTunnels = useMemo(
+    () => latestTelemetryTunnelsByClient(telemetryTunnels),
+    [telemetryTunnels],
+  );
+  const fleetSubpage = [
+    "instances",
+    "alerts",
+    "policies",
+    "notifications",
+  ].includes(activeSubpage)
     ? activeSubpage
     : "instances";
   const fleetColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
@@ -190,7 +295,9 @@ export function FleetWorkspace({
             <Server size={17} />
             <span>
               <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-              <ConsoleStatusBadge tone={agent.status === "online" ? "ok" : "warning"}>
+              <ConsoleStatusBadge
+                tone={agent.status === "online" ? "ok" : "warning"}
+              >
                 {agent.status}
               </ConsoleStatusBadge>
             </span>
@@ -204,7 +311,11 @@ export function FleetWorkspace({
         minSize: 110,
         sortValue: (agent) => agent.registration_ip ?? "",
         searchValue: (agent) => agent.registration_ip ?? "",
-        cell: (agent) => <span className="monoValue">{agent.registration_ip ?? "unknown"}</span>,
+        cell: (agent) => (
+          <span className="monoValue">
+            {agent.registration_ip ?? "unknown"}
+          </span>
+        ),
       },
       {
         id: "last_ip",
@@ -213,7 +324,9 @@ export function FleetWorkspace({
         minSize: 110,
         sortValue: (agent) => agent.last_ip ?? "",
         searchValue: (agent) => agent.last_ip ?? "",
-        cell: (agent) => <span className="monoValue">{agent.last_ip ?? "unknown"}</span>,
+        cell: (agent) => (
+          <span className="monoValue">{agent.last_ip ?? "unknown"}</span>
+        ),
       },
       {
         id: "last_seen",
@@ -236,7 +349,12 @@ export function FleetWorkspace({
         minSize: 90,
         sortValue: (agent) => countryFromTags(agent.tags) ?? "",
         searchValue: (agent) => countryFromTags(agent.tags) ?? "",
-        cell: (agent) => <span className="countryBadge">{countryLabel(countryFromTags(agent.tags))}</span>,
+        cell: (agent) => (
+          <CountryBadge
+            country={countryFromTags(agent.tags)}
+            showFlag={preferences.show_country_flags}
+          />
+        ),
       },
       {
         id: "provider",
@@ -262,179 +380,265 @@ export function FleetWorkspace({
           const agentTags = displayTags(agent.tags);
           return (
             <span className="tags">
-              {agentTags.length === 0 ? <em>untagged</em> : agentTags.map((tag) => <em key={tag}>{tag}</em>)}
+              {agentTags.length === 0 ? (
+                <em>untagged</em>
+              ) : (
+                agentTags.map((tag) => <em key={tag}>{tag}</em>)
+              )}
             </span>
           );
         },
       },
     ],
-    [vpsNameDisplayMode],
+    [preferences.show_country_flags, vpsNameDisplayMode],
   );
 
-  useEffect(() => {
-    setAliasDraft(selectedAgent?.display_name ?? "");
-    setAliasError(null);
-    setDeletePromptOpen(false);
-    setDeleteError(null);
-    setInterfaceError(null);
-    setInterfaceProgress(null);
-    setInterfaceSnapshot(null);
-    setInterfaceJobId(null);
-    setInterfacePayloadHash(null);
-  }, [selectedAgent?.display_name, selectedAgent?.id]);
-
-  async function submitAlias(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedAgent) {
-      return;
+  async function mutateTagsForAgents(
+    rows: AgentView[],
+    action: "add" | "remove",
+    tag: string,
+  ) {
+    const normalizedTag = tag.trim();
+    if (!normalizedTag) {
+      throw new Error("Tag is required");
     }
-    const displayName = aliasDraft.trim();
-    if (!displayName) {
-      setAliasError("Alias is required");
-      return;
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      throw new Error("Privilege unlock is required");
     }
-    setAliasPending(true);
-    setAliasError(null);
-    try {
-      await onUpdateAgentAlias(selectedAgent.id, displayName);
-    } catch (error) {
-      setAliasError(error instanceof Error ? error.message : "Alias update failed");
-    } finally {
-      setAliasPending(false);
-    }
-  }
-
-  async function deleteSelectedAgent() {
-    if (!selectedAgent) {
-      return;
-    }
-    const clientId = selectedAgent.id;
-    await runPanelAction(setDeletePending, setDeleteError, async () => {
-      await onDeleteAgent(clientId, {
+    const targetIds = rows.map((agent) => agent.id);
+    const selectorExpression = selectorExpressionForClientIds(targetIds);
+    const privilegeAssertion = await buildPrivilegeAssertion({
+      intent: canonicalDbPrivilegeIntent({
+        action: action === "add" ? "tag.bulk_add" : "tag.bulk_remove",
         confirmed: true,
-        reason: "Deleted from fleet inventory panel",
-      });
-      setDeletePromptOpen(false);
-      onSelectAgent(null);
+        resolvedTargets: targetIds,
+        selectorExpression,
+        target: normalizedTag,
+      }),
+      privilegeMaterial,
+    });
+    return onBulkMutateTags({
+      action,
+      confirmed: true,
+      privilege_assertion: privilegeAssertion,
+      selector_expression: selectorExpression,
+      tag: normalizedTag,
     });
   }
 
-  async function refreshSelectedInterfaces() {
-    await runPanelAction(setInterfacePending, setInterfaceError, async () => {
-      if (!selectedAgent) {
-        throw new Error("Select a VPS");
-      }
-      if (!privilegeMaterial) {
-        throw new Error("Privilege unlock is locked");
-      }
-      const operation: JobOperation = { type: "network_interfaces" };
-      const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
-      const builtPrivilege = await buildPrivilegeForJobOperation({
-        clientIds: [selectedAgent.id],
-        commandType: "network_interfaces",
-        operation,
-        privilegeMaterial,
-        selectorExpression,
-        timeoutSecs: 30,
-      });
-      setInterfacePayloadHash(builtPrivilege.payloadHashHex);
-      setInterfaceSnapshot(null);
-      setInterfaceProgress({
-        accepted: 0,
-        completed: 0,
-        doing: 0,
-        expected: 1,
-        failed: 0,
-        jobId: "",
-        retrieved: 0,
-        unavailable: targetPreflightUnavailable(selectedAgent) ? 1 : 0,
-      });
-      const job = await onCreateJob({
-        argv: [],
-        selector_expression: selectorExpression,
-        command: "network_interfaces",
-        confirmed: false,
-        destructive: false,
-        operation,
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: builtPrivilege.privilegeAssertion,
-        timeout_secs: 30,
-      });
-      setInterfaceJobId(job.job_id);
-      const progress = await waitForBulkJobTargets(job.job_id, onLoadJobTargets, {
-        acceptedTargets: job.accepted_targets,
-        onProgress: setInterfaceProgress,
-        targets: [selectedAgent],
-      });
-      setInterfaceProgress(progress.progress);
-      const outputs = await onLoadJobOutputs(job.job_id);
-      const snapshot = parseNetworkInterfacesSnapshot(outputs);
-      if (!snapshot) {
-        throw new Error("No network interface snapshot returned");
-      }
-      setInterfaceSnapshot(snapshot);
-    });
+  function openSelectorWorkflow(
+    rows: AgentView[],
+    view: ActiveView,
+    subpage: string,
+    storageKey: string,
+  ) {
+    const selectorExpression = selectorExpressionForClientIds(
+      rows.map((agent) => agent.id),
+    );
+    writeLocalString(storageKey, selectorExpression);
+    if (rows.length === 1) {
+      onSelectAgent(rows[0].id);
+    }
+    onNavigatePanel?.(view, subpage);
+  }
+
+  function openFileBrowserWorkflow(rows: AgentView[]) {
+    if (rows.length !== 1) {
+      return;
+    }
+    seedSingleFileBrowser(rows[0]);
+    onNavigatePanel?.("Jobs", "files");
   }
 
   return (
-    <section className={fleetSubpage === "instances" ? "workspace" : "workspace singleColumn"}>
+    <section
+      className={
+        fleetSubpage === "instances"
+          ? "workspace singleColumn fleetInstancesWorkspace"
+          : "workspace singleColumn"
+      }
+    >
       {fleetSubpage === "instances" && (
-      <div className="fleetPanel">
-        <div className="sectionHeader">
-          <div>
-            <h2>VPS instances</h2>
-            <span>{apiError ? "API unavailable" : "Live control-plane inventory"}</span>
+        <div className="fleetPanel fleetInstancesPanel">
+          <div className="sectionHeader fleetInstancesHeader">
+            <div>
+              <h2>VPS instances</h2>
+              <span>
+                {apiError ? "API unavailable" : "Live control-plane inventory"}
+              </span>
+            </div>
+            <span className="sectionContext">
+              {summary.online} online / {summary.total} total · WebSocket{" "}
+              {wsState}
+            </span>
           </div>
-          <span className="sectionContext">Tags scoped from inventory</span>
-        </div>
 
-        <ConsoleDataGrid
-          actions={[
-            {
-              label: "Inspect selected",
-              disabled: (rows) => rows.length !== 1,
-              onSelect: (rows) => onSelectAgent(rows[0].id),
-            },
-            {
-              label: "Copy client IDs",
-              onSelect: (rows) => void copyText(rows.map((agent) => agent.id).join("\n")),
-            },
-            {
-              label: "Copy tag query",
-              onSelect: (rows) =>
-                void copyText(
-                  Array.from(new Set(rows.flatMap((agent) => agent.tags)))
-                    .sort()
-                    .map((tag) => `tag:${tag}`)
-                    .join(" "),
-                ),
-            },
-          ]}
-          columns={fleetColumns}
-          defaultPageSize={10}
-          empty={
-            <div className="emptyState">
-              <Server size={22} />
-              <strong>{scopeActive ? "No VPS match this view" : "No agents online"}</strong>
-              <span>{apiError ?? (scopeActive ? "Adjust or clear the saved fleet view." : "Waiting for enrolled VPS agents to report in.")}</span>
-            </div>
-          }
-          getRowId={(agent) => agent.id}
-          itemLabel="instances"
-          onOpenRow={(agent) => onSelectAgent(agent.id)}
-          renderExpandedRow={(agent) => (
-            <div className="gridDetailLine">
-              <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-              <span>{agent.id}</span>
-              <span>{agent.capabilities.privilege_mode}; uid {agent.capabilities.effective_uid ?? "unknown"}</span>
-            </div>
-          )}
-          rows={agents}
-          storageKey="vpsman.grid.fleet.instances"
-          title="VPS instance records"
-        />
-      </div>
+          <ConsoleDataGrid
+            actions={[
+              {
+                label: "Inspect selected",
+                disabled: (rows) => rows.length !== 1,
+                expandRow: true,
+                onSelect: (rows) => onSelectAgent(rows[0].id),
+              },
+              {
+                label: "Open bulk execution",
+                onSelect: (rows) =>
+                  openSelectorWorkflow(
+                    rows,
+                    "Jobs",
+                    "dispatch",
+                    JOB_SELECTOR_STORAGE_KEY,
+                  ),
+              },
+              {
+                label: "Open multi-file actions",
+                onSelect: (rows) =>
+                  openSelectorWorkflow(
+                    rows,
+                    "Jobs",
+                    "multi_files",
+                    MULTI_FILE_SELECTOR_STORAGE_KEY,
+                  ),
+              },
+              {
+                label: "Open file browser",
+                disabled: (rows) => rows.length !== 1,
+                onSelect: openFileBrowserWorkflow,
+              },
+              {
+                label: "Open bulk tags",
+                onSelect: (rows) =>
+                  openSelectorWorkflow(
+                    rows,
+                    "Tags",
+                    "bulk",
+                    TAG_BULK_SELECTOR_STORAGE_KEY,
+                  ),
+              },
+              {
+                label: "Open config bulk apply",
+                onSelect: (rows) =>
+                  openSelectorWorkflow(
+                    rows,
+                    "Config",
+                    "bulk",
+                    CONFIG_BULK_SELECTOR_STORAGE_KEY,
+                  ),
+              },
+              {
+                label: "Open single config",
+                disabled: (rows) => rows.length !== 1,
+                onSelect: (rows) =>
+                  openSelectorWorkflow(
+                    rows,
+                    "Config",
+                    "single",
+                    CONFIG_SINGLE_SELECTOR_STORAGE_KEY,
+                  ),
+              },
+              {
+                label: "Copy client IDs",
+                onSelect: (rows) =>
+                  void copyText(rows.map((agent) => agent.id).join("\n")),
+              },
+              {
+                label: "Copy selector",
+                onSelect: (rows) =>
+                  void copyText(
+                    selectorExpressionForClientIds(
+                      rows.map((agent) => agent.id),
+                    ),
+                  ),
+              },
+              {
+                label: "Copy tag query",
+                onSelect: (rows) =>
+                  void copyText(
+                    Array.from(new Set(rows.flatMap((agent) => agent.tags)))
+                      .sort()
+                      .map((tag) => `tag:${tag}`)
+                      .join(" "),
+                  ),
+              },
+            ]}
+            columns={fleetColumns}
+            defaultPageSize={20}
+            empty={
+              <div className="emptyState">
+                <Server size={22} />
+                <strong>
+                  {scopeActive ? "No VPS match this view" : "No agents online"}
+                </strong>
+                <span>
+                  {apiError ??
+                    (scopeActive
+                      ? "Adjust or clear the saved fleet view."
+                      : "Waiting for enrolled VPS agents to report in.")}
+                </span>
+              </div>
+            }
+            expandOnRowClick
+            getRowId={(agent) => agent.id}
+            itemLabel="instances"
+            onOpenRow={(agent) => onSelectAgent(agent.id)}
+            renderExpandedRow={(agent) => (
+              <FleetInstanceDetail
+                agent={agent}
+                dataSourceAssignments={dataSourceAssignments.filter(
+                  (assignment) => assignment.client_id === agent.id,
+                )}
+                dataSourceStatus={dataSourceStatus.filter(
+                  (status) => status.client_id === agent.id,
+                )}
+                lastLiveEvent={lastLiveEvent}
+                latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
+                latestRollup={latestRollups.get(agent.id) ?? null}
+                latestTunnels={latestTunnels.get(agent.id) ?? []}
+                mutateTagsForAgents={mutateTagsForAgents}
+                onCreateJob={onCreateJob}
+                onDeleteAgent={onDeleteAgent}
+                onLoadJobOutputs={onLoadJobOutputs}
+                onLoadJobTargets={onLoadJobTargets}
+                onOpenJobDetails={onOpenJobDetails}
+                onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                onRenderDataSourceHotConfig={onRenderDataSourceHotConfig}
+                onSelectAgent={onSelectAgent}
+                onUpdateAgentAlias={onUpdateAgentAlias}
+                privilegeMaterial={privilegeMaterial}
+                showCountryFlags={preferences.show_country_flags}
+                summary={summary}
+                telemetryNetworkRates={telemetryNetworkRates.filter(
+                  (rate) => rate.client_id === agent.id,
+                )}
+                telemetryRollups={telemetryRollups.filter(
+                  (rollup) => rollup.client_id === agent.id,
+                )}
+                vpsNameDisplayMode={vpsNameDisplayMode}
+                wsState={wsState}
+              />
+            )}
+            renderSelectionPanel={(rows) => (
+              <FleetSelectionPanel
+                agents={rows}
+                allTags={tags}
+                latestNetworkRates={latestNetworkRates}
+                latestRollups={latestRollups}
+                mutateTagsForAgents={mutateTagsForAgents}
+                onOpenFileBrowser={openFileBrowserWorkflow}
+                onOpenSelectorWorkflow={openSelectorWorkflow}
+                selectionStatsMode={selectionStatsMode}
+                setSelectionStatsMode={setSelectionStatsMode}
+                vpsNameDisplayMode={vpsNameDisplayMode}
+              />
+            )}
+            rows={agents}
+            singleExpandedRow
+            storageKey="vpsman.grid.fleet.instances"
+            title="VPS instance records"
+          />
+        </div>
       )}
 
       {fleetSubpage === "alerts" && (
@@ -442,9 +646,13 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Fleet alerts</h2>
-              <span>{apiError ?? `${fleetAlerts.length} active fleet alerts`}</span>
+              <span>
+                {apiError ?? `${fleetAlerts.length} active fleet alerts`}
+              </span>
             </div>
-            <span className="sectionContext">{fleetAlertStates.length} triaged states</span>
+            <span className="sectionContext">
+              {fleetAlertStates.length} triaged states
+            </span>
           </div>
           <FleetAlertList
             agents={agents}
@@ -460,11 +668,18 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Alert policies</h2>
-              <span>{apiError ?? `${fleetAlertPolicies.length} scoped thresholds`}</span>
+              <span>
+                {apiError ?? `${fleetAlertPolicies.length} scoped thresholds`}
+              </span>
             </div>
-            <span className="sectionContext">Thresholds resolve by tag, provider, client, or global scope</span>
+            <span className="sectionContext">
+              Thresholds resolve by tag, provider, client, or global scope
+            </span>
           </div>
-          <FleetAlertPolicyManager policies={fleetAlertPolicies} onUpsert={onUpsertFleetAlertPolicy} />
+          <FleetAlertPolicyManager
+            policies={fleetAlertPolicies}
+            onUpsert={onUpsertFleetAlertPolicy}
+          />
         </div>
       )}
 
@@ -479,7 +694,8 @@ export function FleetWorkspace({
               </span>
             </div>
             <span className="sectionContext">
-              {fleetAlertNotifications.length + webhookRuleDeliveries.length} retained deliveries
+              {fleetAlertNotifications.length + webhookRuleDeliveries.length}{" "}
+              retained deliveries
             </span>
           </div>
           <FleetAlertNotificationManager
@@ -501,177 +717,1342 @@ export function FleetWorkspace({
           />
         </div>
       )}
-
-      {fleetSubpage === "instances" && (
-      <aside className="inspector">
-        <div className="sectionHeader compact">
-          <h2>{selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No VPS selected"}</h2>
-          <span>WebSocket {wsState}</span>
-        </div>
-        {selectedAgent && (
-          <form className="aliasEditor" onSubmit={submitAlias}>
-            <label>
-              <span>Display name</span>
-              <input
-                aria-label="VPS display name"
-                onChange={(event) => setAliasDraft(event.target.value)}
-                value={aliasDraft}
-              />
-            </label>
-            <button
-              className="secondaryAction"
-              disabled={aliasPending || aliasDraft.trim() === selectedAgent.display_name}
-              type="submit"
-            >
-              Rename
-            </button>
-            {aliasError && <small className="errorText">{aliasError}</small>}
-          </form>
-        )}
-        {selectedAgent && (
-          <div className="deleteVpsControls">
-            <div>
-              <strong>Delete VPS</strong>
-              <span>Deactivate access immediately and remove this VPS from normal workflows.</span>
-            </div>
-            <button
-              className="secondaryAction dangerAction"
-              disabled={deletePending}
-              onClick={() => setDeletePromptOpen(true)}
-              type="button"
-            >
-              <Trash2 size={16} />
-              Delete VPS
-            </button>
-          </div>
-        )}
-        {selectedAgent && (
-          <ConfirmationPrompt
-            confirmLabel="Delete VPS"
-            detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
-            items={[
-              { label: "VPS", value: formatVpsName(selectedAgent, vpsNameDisplayMode) },
-              { label: "Client ID", value: selectedAgent.id },
-              { label: "Status", value: selectedAgent.status },
-            ]}
-            onCancel={() => setDeletePromptOpen(false)}
-            onConfirm={() => void deleteSelectedAgent()}
-            open={deletePromptOpen}
-            pending={deletePending}
-            title="Delete VPS from panel"
-            tone="danger"
-          />
-        )}
-        {deleteError && <small className="errorText">{deleteError}</small>}
-        <div className="detailTabs" role="tablist" aria-label="VPS detail sections">
-          {detailTabs.map((tab) => (
-            <button
-              aria-selected={activeDetailTab === tab}
-              className={activeDetailTab === tab ? "selected" : ""}
-              key={tab}
-              onClick={() => setActiveDetailTab(tab)}
-              role="tab"
-              type="button"
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-        <div className="signalGrid">
-          <Metric label="Traffic" value={selectedTrafficSummary} tone="blue" />
-          <Metric label="Samples" value={selectedSampleSummary} tone="green" />
-        </div>
-        <div className="detailPane" role="tabpanel">
-          {activeDetailTab === "Overview" && (
-            <>
-              <DetailLine
-                icon={<Server size={18} />}
-                label="Name"
-                value={selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : "No target"}
-              />
-              <DetailLine icon={<Server size={18} />} label="Status" value={selectedAgent?.status ?? "No target"} />
-              <DetailLine icon={<Boxes size={18} />} label="Client ID" value={selectedAgent?.id ?? "No VPS selected"} mono />
-              <DetailLine
-                icon={<Clock3 size={18} />}
-                label="Last seen"
-                value={formatLastSeenDetail(selectedAgent?.last_seen_at)}
-              />
-              <DetailLine
-                icon={<Network size={18} />}
-                label="Registration IP"
-                value={selectedAgent?.registration_ip ?? "unknown"}
-                mono
-              />
-              <DetailLine icon={<Network size={18} />} label="Last IP" value={selectedAgent?.last_ip ?? "unknown"} mono />
-              <DetailLine icon={<Boxes size={18} />} label="Country" value={countryLabel(selectedCountry)} />
-              <DetailLine icon={<Boxes size={18} />} label="Provider" value={selectedProvider || "unset"} />
-              <DetailLine icon={<Gauge size={18} />} label="Privilege" value={formatPrivilege(selectedCapabilities)} />
-              <DetailLine
-                icon={<Gauge size={18} />}
-                label="Fleet position"
-                value={selectedAgent ? `${summary.online} online / ${summary.total} total` : "No VPS selected"}
-              />
-            </>
-          )}
-          {activeDetailTab === "Telemetry" && (
-            <>
-              <DetailLine icon={<Activity size={18} />} label="Stream" value={wsState} />
-              <DetailLine
-                icon={<Gauge size={18} />}
-                label="Last event"
-                value={summary.total === 0 ? "No samples" : lastLiveEvent}
-              />
-              <DetailLine icon={<Gauge size={18} />} label="CPU load" value={formatLoad(selectedRollup?.cpu_load_1_avg)} />
-              <DetailLine icon={<Server size={18} />} label="RAM used" value={formatMemoryUsed(selectedRollup)} />
-              <DetailLine icon={<Boxes size={18} />} label="Disk free" value={formatDiskFree(selectedRollup)} />
-              <DetailLine icon={<Network size={18} />} label="Network bytes" value={formatNetworkBytes(selectedRollup)} />
-              <DetailLine icon={<Network size={18} />} label="Network rate" value={formatNetworkRateSummary(selectedNetworkRates, selectedRollup)} />
-              <DetailLine icon={<Activity size={18} />} label="Rollup samples" value={formatRollupSamples(selectedRollup)} />
-              <DetailLine icon={<Server size={18} />} label="Agent status" value={selectedAgent?.status ?? "No VPS selected"} />
-            </>
-          )}
-          {activeDetailTab === "Jobs" && (
-            <>
-              <DetailLine icon={<Gauge size={18} />} label="Running jobs" value={String(summary.running_jobs)} />
-              <DetailLine icon={<Server size={18} />} label="Target" value={selectedAgent?.id ?? "No VPS selected"} mono />
-              <DetailLine icon={<Activity size={18} />} label="Privilege state" value="Local unlock required" />
-            </>
-          )}
-          {activeDetailTab === "Network" && (
-            <>
-              <DetailLine icon={<Network size={18} />} label="Managed routing" value={isNetworkManaged ? "BGP/OSPF" : "Standard"} />
-              <DetailLine
-                icon={<Gauge size={18} />}
-                label="Runtime control"
-                value={formatTunnelCapability(selectedCapabilities)}
-              />
-              <DetailLine icon={<Boxes size={18} />} label="Tags" value={selectedDisplayTags.join(", ") || "untagged"} />
-              <NetworkInterfacesPanel
-                error={interfaceError}
-                jobId={interfaceJobId}
-                onOpenJobDetails={onOpenJobDetails}
-                onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-                onRefresh={() => void refreshSelectedInterfaces()}
-                payloadHash={interfacePayloadHash}
-                pending={interfacePending}
-                progress={interfaceProgress}
-                privilegeReady={Boolean(privilegeMaterial)}
-                selectedAgent={selectedAgent}
-                snapshot={interfaceSnapshot}
-              />
-              <TunnelList tunnels={selectedTunnels} />
-              <NetworkRateList rates={selectedNetworkRates} rollup={selectedRollup} />
-              <DetailLine icon={<Activity size={18} />} label="Tunnel apply" value="Observe and plan" />
-              {selectedCapabilities?.unprivileged_hint && (
-                <DetailLine icon={<Activity size={18} />} label="Privilege hint" value={selectedCapabilities.unprivileged_hint} />
-              )}
-            </>
-          )}
-        </div>
-      </aside>
-      )}
     </section>
   );
+}
+
+function FleetInstanceDetail({
+  agent,
+  dataSourceAssignments,
+  dataSourceStatus,
+  lastLiveEvent,
+  latestNetworkRates,
+  latestRollup,
+  latestTunnels,
+  mutateTagsForAgents,
+  onCreateJob,
+  onDeleteAgent,
+  onLoadJobOutputs,
+  onLoadJobTargets,
+  onOpenJobDetails,
+  onOpenPrivilegeUnlock,
+  onRenderDataSourceHotConfig,
+  onSelectAgent,
+  onUpdateAgentAlias,
+  privilegeMaterial,
+  showCountryFlags,
+  summary,
+  telemetryNetworkRates,
+  telemetryRollups,
+  vpsNameDisplayMode,
+  wsState,
+}: {
+  agent: AgentView;
+  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
+  dataSourceStatus: DataSourceStatusRecord[];
+  lastLiveEvent: string;
+  latestNetworkRates: TelemetryNetworkRateRecord[];
+  latestRollup: TelemetryRollupRecord | null;
+  latestTunnels: TelemetryTunnelRecord[];
+  mutateTagsForAgents: (
+    rows: AgentView[],
+    action: "add" | "remove",
+    tag: string,
+  ) => Promise<TagMutationResponse>;
+  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onDeleteAgent: (
+    clientId: string,
+    request: DeleteAgentRequest,
+  ) => Promise<DeleteAgentResponse>;
+  onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenPrivilegeUnlock: () => void;
+  onRenderDataSourceHotConfig: (
+    clientId: string,
+  ) => Promise<DataSourceHotConfigResponse>;
+  onSelectAgent: (agentId: string | null) => void;
+  onUpdateAgentAlias: (
+    clientId: string,
+    displayName: string,
+  ) => Promise<AgentView>;
+  privilegeMaterial: PrivilegeMaterial | null;
+  showCountryFlags: boolean;
+  summary: FleetSummary;
+  telemetryNetworkRates: TelemetryNetworkRateRecord[];
+  telemetryRollups: TelemetryRollupRecord[];
+  vpsNameDisplayMode: VpsNameDisplayMode;
+  wsState: string;
+}) {
+  const [activeDetailTab, setActiveDetailTab] =
+    useState<FleetDetailTab>("Overview");
+  const [aliasDraft, setAliasDraft] = useState(agent.display_name ?? "");
+  const [aliasPending, setAliasPending] = useState(false);
+  const [aliasError, setAliasError] = useState<string | null>(null);
+  const [deletePromptOpen, setDeletePromptOpen] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [tagDraft, setTagDraft] = useState("");
+  const [tagPending, setTagPending] = useState(false);
+  const [tagStatus, setTagStatus] = useState<string | null>(null);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [interfacePending, setInterfacePending] = useState(false);
+  const [interfaceError, setInterfaceError] = useState<string | null>(null);
+  const [interfaceProgress, setInterfaceProgress] =
+    useState<BulkJobProgress | null>(null);
+  const [interfaceSnapshot, setInterfaceSnapshot] =
+    useState<NetworkInterfacesSnapshot | null>(null);
+  const [interfaceJobId, setInterfaceJobId] = useState<string | null>(null);
+  const [interfacePayloadHash, setInterfacePayloadHash] = useState<
+    string | null
+  >(null);
+  const [configPending, setConfigPending] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configPreview, setConfigPreview] =
+    useState<DataSourceHotConfigResponse | null>(null);
+  const country = countryFromTags(agent.tags);
+  const provider = providerFromTags(agent.tags);
+  const displayOnlyTags = displayTags(agent.tags);
+  const isNetworkManaged = agent.tags.some((tag) =>
+    ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()),
+  );
+  const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
+  const configPreviewSummary = configPreview
+    ? `${configPreview.assignments.length} assignments · ${configPreview.unsupported_domains.length} unsupported domains`
+    : "Load redacted hot-config view for this VPS.";
+
+  useEffect(() => {
+    setAliasDraft(agent.display_name ?? "");
+    setAliasError(null);
+    setDeleteError(null);
+    setDeletePromptOpen(false);
+    setTagDraft("");
+    setTagError(null);
+    setTagStatus(null);
+    setInterfaceError(null);
+    setInterfaceProgress(null);
+    setInterfaceSnapshot(null);
+    setInterfaceJobId(null);
+    setInterfacePayloadHash(null);
+    setConfigError(null);
+    setConfigPreview(null);
+  }, [agent.display_name, agent.id]);
+
+  async function submitAlias(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const displayName = aliasDraft.trim();
+    if (!displayName) {
+      setAliasError("Alias is required");
+      return;
+    }
+    setAliasPending(true);
+    setAliasError(null);
+    try {
+      await onUpdateAgentAlias(agent.id, displayName);
+    } catch (error) {
+      setAliasError(
+        error instanceof Error ? error.message : "Alias update failed",
+      );
+    } finally {
+      setAliasPending(false);
+    }
+  }
+
+  async function deleteAgent() {
+    await runPanelAction(setDeletePending, setDeleteError, async () => {
+      await onDeleteAgent(agent.id, {
+        confirmed: true,
+        reason: "Deleted from expanded fleet inventory details",
+      });
+      setDeletePromptOpen(false);
+      onSelectAgent(null);
+    });
+  }
+
+  async function refreshInterfaces() {
+    await runPanelAction(setInterfacePending, setInterfaceError, async () => {
+      if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
+        throw new Error("Privilege unlock is locked");
+      }
+      const operation: JobOperation = { type: "network_interfaces" };
+      const selectorExpression = selectorExpressionForClientIds([agent.id]);
+      const builtPrivilege = await buildPrivilegeForJobOperation({
+        clientIds: [agent.id],
+        commandType: "network_interfaces",
+        operation,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: 30,
+      });
+      setInterfacePayloadHash(builtPrivilege.payloadHashHex);
+      setInterfaceSnapshot(null);
+      setInterfaceProgress({
+        accepted: 0,
+        completed: 0,
+        doing: 0,
+        expected: 1,
+        failed: 0,
+        jobId: "",
+        retrieved: 0,
+        unavailable: targetPreflightUnavailable(agent) ? 1 : 0,
+      });
+      const job = await onCreateJob({
+        argv: [],
+        selector_expression: selectorExpression,
+        command: "network_interfaces",
+        confirmed: false,
+        destructive: false,
+        operation,
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: builtPrivilege.privilegeAssertion,
+        timeout_secs: 30,
+      });
+      setInterfaceJobId(job.job_id);
+      const progress = await waitForBulkJobTargets(
+        job.job_id,
+        onLoadJobTargets,
+        {
+          acceptedTargets: job.accepted_targets,
+          onProgress: setInterfaceProgress,
+          targets: [agent],
+        },
+      );
+      setInterfaceProgress(progress.progress);
+      const outputs = await onLoadJobOutputs(job.job_id);
+      const snapshot = parseNetworkInterfacesSnapshot(outputs);
+      if (!snapshot) {
+        throw new Error("No network interface snapshot returned");
+      }
+      setInterfaceSnapshot(snapshot);
+    });
+  }
+
+  async function mutateTag(action: "add" | "remove", tag: string) {
+    await runPanelAction(setTagPending, setTagError, async () => {
+      const response = await mutateTagsForAgents([agent], action, tag);
+      setTagStatus(
+        `${response.action} ${response.tag}: ${response.changed_count} changed, ${response.skipped_count} skipped`,
+      );
+      setTagDraft("");
+    });
+  }
+
+  async function loadRenderedConfig() {
+    await runPanelAction(setConfigPending, setConfigError, async () => {
+      setConfigPreview(await onRenderDataSourceHotConfig(agent.id));
+    });
+  }
+
+  return (
+    <div className="fleetNodeDetailCard">
+      <div className="fleetNodeDetailHeader">
+        <div>
+          <h3>{agentLabel}</h3>
+          <span className="monoValue">{agent.id}</span>
+        </div>
+        <span className="sectionContext">WebSocket {wsState}</span>
+      </div>
+      <div className="fleetNodeDetailControls">
+        <form className="aliasEditor" onSubmit={submitAlias}>
+          <label>
+            <span>Display name</span>
+            <input
+              aria-label="VPS display name"
+              onChange={(event) => setAliasDraft(event.target.value)}
+              value={aliasDraft}
+            />
+          </label>
+          <button
+            className="secondaryAction"
+            disabled={aliasPending || aliasDraft.trim() === agent.display_name}
+            type="submit"
+          >
+            Rename
+          </button>
+          {aliasError && <small className="errorText">{aliasError}</small>}
+        </form>
+        <form
+          className="fleetInlineTagForm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void mutateTag("add", tagDraft);
+          }}
+        >
+          <label>
+            <span>Add tag</span>
+            <input
+              aria-label="Fleet inline tag"
+              onChange={(event) => setTagDraft(event.target.value)}
+              placeholder="app:edge"
+              value={tagDraft}
+            />
+          </label>
+          <button
+            className="secondaryAction"
+            disabled={tagPending || !tagDraft.trim()}
+            type="submit"
+          >
+            <Plus size={15} />
+            Add
+          </button>
+        </form>
+        <div className="deleteVpsControls compactDeleteControls">
+          <div>
+            <strong>Delete VPS</strong>
+            <span>Deactivate access and remove from normal workflows.</span>
+          </div>
+          <button
+            className="secondaryAction dangerAction"
+            disabled={deletePending}
+            onClick={() => setDeletePromptOpen(true)}
+            type="button"
+          >
+            <Trash2 size={16} />
+            Delete VPS
+          </button>
+        </div>
+      </div>
+      <div className="fleetInlineTagChips">
+        {agent.tags.length === 0 ? (
+          <span className="mutedText">No tags assigned</span>
+        ) : (
+          agent.tags
+            .slice()
+            .sort()
+            .map((tag) => (
+              <button
+                className="tagEditChip"
+                disabled={tagPending}
+                key={tag}
+                onClick={() => void mutateTag("remove", tag)}
+                title={`Remove ${tag}`}
+                type="button"
+              >
+                <span>{tag}</span>
+                <X size={13} />
+              </button>
+            ))
+        )}
+      </div>
+      {(tagError || tagStatus) && (
+        <small
+          className={tagError ? "errorText panelErrorText" : "panelStatusText"}
+        >
+          {tagError ?? tagStatus}
+        </small>
+      )}
+      <ConfirmationPrompt
+        confirmLabel="Delete VPS"
+        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
+        items={[
+          { label: "VPS", value: agentLabel },
+          { label: "Client ID", value: agent.id },
+          { label: "Status", value: agent.status },
+        ]}
+        onCancel={() => setDeletePromptOpen(false)}
+        onConfirm={() => void deleteAgent()}
+        open={deletePromptOpen}
+        pending={deletePending}
+        title="Delete VPS from panel"
+        tone="danger"
+      />
+      {deleteError && (
+        <small className="errorText panelErrorText">{deleteError}</small>
+      )}
+      <div
+        className="detailTabs"
+        role="tablist"
+        aria-label="VPS detail sections"
+      >
+        {detailTabs.map((tab) => (
+          <button
+            aria-selected={activeDetailTab === tab}
+            className={activeDetailTab === tab ? "selected" : ""}
+            key={tab}
+            onClick={() => setActiveDetailTab(tab)}
+            role="tab"
+            type="button"
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+      <div className="signalGrid fleetSignalGrid">
+        <Metric
+          label="Traffic"
+          value={formatSignalTraffic(latestRollup, latestNetworkRates)}
+          tone="blue"
+        />
+        <Metric
+          label="Samples"
+          value={formatSignalSamples(latestRollup, latestNetworkRates)}
+          tone="green"
+        />
+        <Metric
+          label="RAM used"
+          value={formatMemoryUsed(latestRollup)}
+          tone="blue"
+        />
+        <Metric
+          label="Disk free"
+          value={formatDiskFree(latestRollup)}
+          tone="green"
+        />
+      </div>
+      <div className="detailPane fleetDetailPane" role="tabpanel">
+        {activeDetailTab === "Overview" && (
+          <>
+            <DetailLine
+              icon={<Server size={18} />}
+              label="Name"
+              value={agentLabel}
+            />
+            <DetailLine
+              icon={<Server size={18} />}
+              label="Status"
+              value={agent.status}
+            />
+            <DetailLine
+              icon={<Boxes size={18} />}
+              label="Client ID"
+              value={agent.id}
+              mono
+            />
+            <DetailLine
+              icon={<Clock3 size={18} />}
+              label="Last seen"
+              value={formatLastSeenDetail(agent.last_seen_at)}
+            />
+            <DetailLine
+              icon={<Network size={18} />}
+              label="Registration IP"
+              value={agent.registration_ip ?? "unknown"}
+              mono
+            />
+            <DetailLine
+              icon={<Network size={18} />}
+              label="Last IP"
+              value={agent.last_ip ?? "unknown"}
+              mono
+            />
+            <DetailLine
+              icon={<Boxes size={18} />}
+              label="Country"
+              value={
+                <CountryBadge country={country} showFlag={showCountryFlags} />
+              }
+            />
+            <DetailLine
+              icon={<Boxes size={18} />}
+              label="Provider"
+              value={provider || "unset"}
+            />
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Privilege"
+              value={formatPrivilege(agent.capabilities)}
+            />
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Fleet position"
+              value={`${summary.online} online / ${summary.total} total`}
+            />
+          </>
+        )}
+        {activeDetailTab === "Telemetry" && (
+          <>
+            <DetailLine
+              icon={<Activity size={18} />}
+              label="Stream"
+              value={wsState}
+            />
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Last event"
+              value={summary.total === 0 ? "No samples" : lastLiveEvent}
+            />
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="CPU load"
+              value={formatLoad(latestRollup?.cpu_load_1_avg)}
+            />
+            <DetailLine
+              icon={<Server size={18} />}
+              label="RAM used"
+              value={formatMemoryUsed(latestRollup)}
+            />
+            <DetailLine
+              icon={<Boxes size={18} />}
+              label="Disk free"
+              value={formatDiskFree(latestRollup)}
+            />
+            <DetailLine
+              icon={<Network size={18} />}
+              label="Network bytes"
+              value={formatNetworkBytes(latestRollup)}
+            />
+            <DetailLine
+              icon={<Network size={18} />}
+              label="Network rate"
+              value={formatNetworkRateSummary(latestNetworkRates, latestRollup)}
+            />
+            <DetailLine
+              icon={<Activity size={18} />}
+              label="Rollup samples"
+              value={formatRollupSamples(latestRollup)}
+            />
+            <DetailLine
+              icon={<Server size={18} />}
+              label="Agent status"
+              value={agent.status}
+            />
+          </>
+        )}
+        {activeDetailTab === "Jobs" && (
+          <>
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Running jobs"
+              value={String(summary.running_jobs)}
+            />
+            <DetailLine
+              icon={<Server size={18} />}
+              label="Target"
+              value={agent.id}
+              mono
+            />
+            <DetailLine
+              icon={<Activity size={18} />}
+              label="Privilege state"
+              value={
+                privilegeMaterial ? "Unlocked locally" : "Local unlock required"
+              }
+            />
+          </>
+        )}
+        {activeDetailTab === "Network" && (
+          <>
+            <DetailLine
+              icon={<Network size={18} />}
+              label="Managed routing"
+              value={isNetworkManaged ? "BGP/OSPF/tunnel tagged" : "Standard"}
+            />
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Runtime control"
+              value={formatTunnelCapability(agent.capabilities)}
+            />
+            <DetailLine
+              icon={<Boxes size={18} />}
+              label="Tags"
+              value={displayOnlyTags.join(", ") || "untagged"}
+            />
+            <NetworkInterfacesPanel
+              error={interfaceError}
+              jobId={interfaceJobId}
+              onOpenJobDetails={onOpenJobDetails}
+              onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onRefresh={() => void refreshInterfaces()}
+              payloadHash={interfacePayloadHash}
+              pending={interfacePending}
+              progress={interfaceProgress}
+              privilegeReady={Boolean(privilegeMaterial)}
+              selectedAgent={agent}
+              snapshot={interfaceSnapshot}
+            />
+            <TunnelList tunnels={latestTunnels} />
+            <NetworkRateList rates={latestNetworkRates} rollup={latestRollup} />
+            {agent.capabilities.unprivileged_hint && (
+              <DetailLine
+                icon={<Activity size={18} />}
+                label="Privilege hint"
+                value={agent.capabilities.unprivileged_hint}
+              />
+            )}
+          </>
+        )}
+        {activeDetailTab === "Config" && (
+          <>
+            <DetailLine
+              icon={<Gauge size={18} />}
+              label="Privilege"
+              value={formatPrivilege(agent.capabilities)}
+            />
+            <DetailLine
+              icon={<FileCog size={18} />}
+              label="Runtime tunnels"
+              value={formatTunnelCapability(agent.capabilities)}
+            />
+            <DetailLine
+              icon={<FileCog size={18} />}
+              label="Process limits"
+              value={yesNo(agent.capabilities.can_apply_process_limits)}
+            />
+            <DataSourceConfigList
+              assignments={dataSourceAssignments}
+              statuses={dataSourceStatus}
+            />
+            <ConfigPreviewBlock
+              error={configError}
+              onLoad={() => void loadRenderedConfig()}
+              pending={configPending}
+              preview={configPreview}
+              summary={configPreviewSummary}
+            />
+          </>
+        )}
+      </div>
+      <FleetNodeCharts
+        networkRates={telemetryNetworkRates}
+        rollups={telemetryRollups}
+        title={agentLabel}
+      />
+    </div>
+  );
+}
+
+function DataSourceConfigList({
+  assignments,
+  statuses,
+}: {
+  assignments: DataSourcePresetAssignmentRecord[];
+  statuses: DataSourceStatusRecord[];
+}) {
+  const domains = Array.from(
+    new Set(assignments.map((assignment) => assignment.domain)),
+  ).sort();
+  const statusRows = statuses
+    .slice()
+    .sort((left, right) =>
+      `${left.domain}:${left.module}`.localeCompare(
+        `${right.domain}:${right.module}`,
+      ),
+    );
+  return (
+    <div className="fleetConfigRows">
+      <div className="detailLine">
+        <FileCog size={18} />
+        <div>
+          <span>Assigned preset domains</span>
+          <strong>
+            {domains.length === 0
+              ? "No explicit assignments"
+              : domains.join(", ")}
+          </strong>
+        </div>
+      </div>
+      {assignments.slice(0, 8).map((assignment) => (
+        <div
+          className="detailLine compactConfigLine"
+          key={`${assignment.client_id}-${assignment.domain}-${assignment.preset_id}`}
+        >
+          <Boxes size={18} />
+          <div>
+            <span>{assignment.domain}</span>
+            <strong>
+              {assignment.preset_name} · {assignment.preset_scope}
+            </strong>
+          </div>
+        </div>
+      ))}
+      {assignments.length > 8 && (
+        <small className="mutedText">
+          +{assignments.length - 8} more preset assignment
+          {assignments.length - 8 === 1 ? "" : "s"}
+        </small>
+      )}
+      <div className="detailLine">
+        <Activity size={18} />
+        <div>
+          <span>Runtime config sources</span>
+          <strong>{formatDataSourceStatusSummary(statusRows)}</strong>
+        </div>
+      </div>
+      {statusRows.slice(0, 8).map((row) => (
+        <div
+          className="detailLine compactConfigLine"
+          key={`${row.client_id}-${row.domain}-${row.module}`}
+        >
+          <FileCog size={18} />
+          <div>
+            <span>
+              {row.domain} / {row.module}
+            </span>
+            <strong>
+              {row.status} · {row.preset_name} · {row.source_kind}
+            </strong>
+            <small>{row.status_reason || formatDataSourceEvidence(row)}</small>
+          </div>
+        </div>
+      ))}
+      {statusRows.length > 8 && (
+        <small className="mutedText">
+          +{statusRows.length - 8} more runtime config source
+          {statusRows.length - 8 === 1 ? "" : "s"}
+        </small>
+      )}
+    </div>
+  );
+}
+
+function formatDataSourceStatusSummary(rows: DataSourceStatusRecord[]) {
+  if (rows.length === 0) {
+    return "No runtime config source status loaded";
+  }
+  const ok = rows.filter((row) => row.status.toLowerCase() === "ok").length;
+  const degraded = rows.filter(
+    (row) => row.status.toLowerCase() !== "ok",
+  ).length;
+  return `${rows.length} source${rows.length === 1 ? "" : "s"} · ${ok} ok${degraded > 0 ? ` · ${degraded} needs review` : ""}`;
+}
+
+function formatDataSourceEvidence(row: DataSourceStatusRecord) {
+  const evidence = row.evidence;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return row.status_reason || "No evidence reported";
+  }
+  const parts: string[] = [];
+  for (const key of [
+    "sample_count",
+    "artifact_count",
+    "release_count",
+    "backup_request_count",
+    "restore_source_count",
+  ]) {
+    const value = evidence[key];
+    if (typeof value === "number") {
+      parts.push(`${key.replace(/_/g, " ")}: ${value}`);
+    }
+  }
+  const objectStoreKind = evidence.server_object_store_kind;
+  if (typeof objectStoreKind === "string" && objectStoreKind) {
+    parts.push(`object store: ${objectStoreKind}`);
+  }
+  return parts.join(" · ") || row.status_reason || "Evidence available";
+}
+
+function ConfigPreviewBlock({
+  error,
+  onLoad,
+  pending,
+  preview,
+  summary,
+}: {
+  error: string | null;
+  onLoad: () => void;
+  pending: boolean;
+  preview: DataSourceHotConfigResponse | null;
+  summary: string;
+}) {
+  return (
+    <div className="timeline configPreviewBlock">
+      <FileCog size={18} />
+      <div>
+        <strong>Rendered custom agent config</strong>
+        <span>{summary}</span>
+        <button
+          className="secondaryAction compactAction"
+          disabled={pending}
+          onClick={onLoad}
+          type="button"
+        >
+          <RefreshCw size={14} />
+          Load config
+        </button>
+        {error ? <small className="errorText">{error}</small> : null}
+        {preview ? (
+          <pre className="configPreviewToml">{preview.toml}</pre>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function FleetNodeCharts({
+  networkRates,
+  rollups,
+  title,
+}: {
+  networkRates: TelemetryNetworkRateRecord[];
+  rollups: TelemetryRollupRecord[];
+  title: string;
+}) {
+  const resourceChart = resourcePercentChartData(rollups);
+  const cpuChart = cpuLoadChartData(rollups);
+  const networkChart = networkRateChartData(networkRates);
+  return (
+    <div className="fleetNodeCharts">
+      <div className="fleetNodeChartsHeader">
+        <span>
+          <BarChart3 size={16} /> Overview curves
+        </span>
+        <small>{title}</small>
+      </div>
+      <div className="fleetNodeChartGrid">
+        <TimeSeriesChart
+          ariaLabel={`${title} resource percentage curves`}
+          emptyLabel="No resource rollup history"
+          height={210}
+          lines={resourceChart.lines}
+          times={resourceChart.times}
+          valueFormatter={formatChartPercent}
+        />
+        <TimeSeriesChart
+          ariaLabel={`${title} CPU load curve`}
+          emptyLabel="No CPU rollup history"
+          height={210}
+          lines={cpuChart.lines}
+          times={cpuChart.times}
+          valueFormatter={formatChartLoad}
+        />
+        <TimeSeriesChart
+          ariaLabel={`${title} network rate curves`}
+          emptyLabel="No network rate history"
+          height={210}
+          lines={networkChart.lines}
+          times={networkChart.times}
+          valueFormatter={formatChartBitsPerSecond}
+        />
+      </div>
+    </div>
+  );
+}
+
+function FleetSelectionPanel({
+  agents,
+  allTags,
+  latestNetworkRates,
+  latestRollups,
+  mutateTagsForAgents,
+  onOpenFileBrowser,
+  onOpenSelectorWorkflow,
+  selectionStatsMode,
+  setSelectionStatsMode,
+  vpsNameDisplayMode,
+}: {
+  agents: AgentView[];
+  allTags: TagView[];
+  latestNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
+  latestRollups: Map<string, TelemetryRollupRecord>;
+  mutateTagsForAgents: (
+    rows: AgentView[],
+    action: "add" | "remove",
+    tag: string,
+  ) => Promise<TagMutationResponse>;
+  onOpenFileBrowser: (rows: AgentView[]) => void;
+  onOpenSelectorWorkflow: (
+    rows: AgentView[],
+    view: ActiveView,
+    subpage: string,
+    storageKey: string,
+  ) => void;
+  selectionStatsMode: FleetSelectionStatsMode;
+  setSelectionStatsMode: (mode: FleetSelectionStatsMode) => void;
+  vpsNameDisplayMode: VpsNameDisplayMode;
+}) {
+  const [tagToAdd, setTagToAdd] = useState("");
+  const [tagToRemove, setTagToRemove] = useState("");
+  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const selectorExpression = selectorExpressionForClientIds(
+    agents.map((agent) => agent.id),
+  );
+  const tagNames = useMemo(
+    () => allTags.map((tag) => tag.name).sort(),
+    [allTags],
+  );
+  async function submitTag(action: "add" | "remove", tag: string) {
+    await runPanelAction(setPending, setError, async () => {
+      const response = await mutateTagsForAgents(agents, action, tag);
+      setStatus(
+        `${response.action} ${response.tag}: ${response.changed_count} changed, ${response.skipped_count} skipped`,
+      );
+      if (action === "add") setTagToAdd("");
+      else setTagToRemove("");
+    });
+  }
+  return (
+    <div className="fleetSelectionPanel">
+      <div className="fleetSelectionHeader">
+        <div>
+          <strong>
+            {agents.length} selected VPS{agents.length === 1 ? "" : "s"}
+          </strong>
+          <span className="monoValue">{selectorExpression}</span>
+        </div>
+        <div className="fleetSelectionActions">
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenSelectorWorkflow(
+                agents,
+                "Jobs",
+                "dispatch",
+                JOB_SELECTOR_STORAGE_KEY,
+              )
+            }
+            type="button"
+          >
+            <TerminalSquare size={14} /> Bulk execution
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenSelectorWorkflow(
+                agents,
+                "Jobs",
+                "multi_files",
+                MULTI_FILE_SELECTOR_STORAGE_KEY,
+              )
+            }
+            type="button"
+          >
+            <FolderOpen size={14} /> Multi-file
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            disabled={agents.length !== 1}
+            onClick={() => onOpenFileBrowser(agents)}
+            type="button"
+          >
+            <FolderOpen size={14} /> File browser
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenSelectorWorkflow(
+                agents,
+                "Config",
+                "bulk",
+                CONFIG_BULK_SELECTOR_STORAGE_KEY,
+              )
+            }
+            type="button"
+          >
+            <FileCog size={14} /> Config bulk
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenSelectorWorkflow(
+                agents,
+                "Tags",
+                "bulk",
+                TAG_BULK_SELECTOR_STORAGE_KEY,
+              )
+            }
+            type="button"
+          >
+            <Tags size={14} /> Tags bulk
+          </button>
+        </div>
+      </div>
+      <div className="fleetInlineMutationPanel">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitTag("add", tagToAdd);
+          }}
+        >
+          <input
+            aria-label="Tag to add to selected VPSs"
+            list="fleet-selected-tag-options"
+            onChange={(event) => setTagToAdd(event.target.value)}
+            placeholder="provider:alpha or app:edge"
+            value={tagToAdd}
+          />
+          <button
+            className="secondaryAction compactAction"
+            disabled={pending || !tagToAdd.trim()}
+            type="submit"
+          >
+            Add tag
+          </button>
+        </form>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitTag("remove", tagToRemove);
+          }}
+        >
+          <input
+            aria-label="Tag to remove from selected VPSs"
+            list="fleet-selected-tag-options"
+            onChange={(event) => setTagToRemove(event.target.value)}
+            placeholder="tag to remove"
+            value={tagToRemove}
+          />
+          <button
+            className="secondaryAction compactAction dangerAction"
+            disabled={pending || !tagToRemove.trim()}
+            type="submit"
+          >
+            Remove tag
+          </button>
+        </form>
+        <datalist id="fleet-selected-tag-options">
+          {tagNames.map((tag) => (
+            <option key={tag} value={tag} />
+          ))}
+        </datalist>
+        {(error || status) && (
+          <small className={error ? "errorText" : undefined}>
+            {error ?? status}
+          </small>
+        )}
+      </div>
+      <div
+        className="selectionStatsTabs"
+        role="tablist"
+        aria-label="Selected VPS statistical tables"
+      >
+        {selectionStatsModes.map((mode) => (
+          <button
+            aria-selected={selectionStatsMode === mode.id}
+            className={selectionStatsMode === mode.id ? "selected" : ""}
+            key={mode.id}
+            onClick={() => setSelectionStatsMode(mode.id)}
+            type="button"
+          >
+            {mode.label}
+          </button>
+        ))}
+      </div>
+      <FleetSelectionStatsTable
+        agents={agents}
+        latestNetworkRates={latestNetworkRates}
+        latestRollups={latestRollups}
+        mode={selectionStatsMode}
+        vpsNameDisplayMode={vpsNameDisplayMode}
+      />
+    </div>
+  );
+}
+
+function FleetSelectionStatsTable({
+  agents,
+  latestNetworkRates,
+  latestRollups,
+  mode,
+  vpsNameDisplayMode,
+}: {
+  agents: AgentView[];
+  latestNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
+  latestRollups: Map<string, TelemetryRollupRecord>;
+  mode: FleetSelectionStatsMode;
+  vpsNameDisplayMode: VpsNameDisplayMode;
+}) {
+  const rows = agents
+    .slice()
+    .sort((left, right) =>
+      mode === "telemetry"
+        ? (memoryUsedRatio(latestRollups.get(right.id)) ?? -1) -
+          (memoryUsedRatio(latestRollups.get(left.id)) ?? -1)
+        : mode === "network"
+          ? networkRateTotal(latestNetworkRates.get(right.id) ?? []) -
+            networkRateTotal(latestNetworkRates.get(left.id) ?? [])
+          : formatVpsName(left, vpsNameDisplayMode).localeCompare(
+              formatVpsName(right, vpsNameDisplayMode),
+            ),
+    );
+  if (mode === "network")
+    return (
+      <div className="fleetSelectionStatsTable networkMode">
+        <div className="fleetSelectionStatsRow heading">
+          <span>VPS</span>
+          <span>Total rate</span>
+          <span>Interface rates</span>
+          <span>Counters</span>
+        </div>
+        {rows.map((agent) => {
+          const rates = latestNetworkRates.get(agent.id) ?? [];
+          const rollup = latestRollups.get(agent.id) ?? null;
+          return (
+            <div className="fleetSelectionStatsRow" key={agent.id}>
+              <span title={agent.id}>
+                {formatVpsName(agent, vpsNameDisplayMode)}
+              </span>
+              <span>{formatNetworkRateSummary(rates, rollup)}</span>
+              <span>
+                {rates
+                  .map(
+                    (rate) =>
+                      `${rate.interface}: ${formatBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
+                  )
+                  .join("; ") || "no rate rollup"}
+              </span>
+              <span>{formatNetworkBytes(rollup)}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  if (mode === "overview")
+    return (
+      <div className="fleetSelectionStatsTable overviewMode">
+        <div className="fleetSelectionStatsRow heading">
+          <span>VPS</span>
+          <span>Status</span>
+          <span>Country</span>
+          <span>Provider</span>
+          <span>Last seen</span>
+          <span>Tags</span>
+        </div>
+        {rows.map((agent) => (
+          <div className="fleetSelectionStatsRow" key={agent.id}>
+            <span title={agent.id}>
+              {formatVpsName(agent, vpsNameDisplayMode)}
+            </span>
+            <span>{agent.status}</span>
+            <span>{countryFromTags(agent.tags) ?? "unset"}</span>
+            <span>{providerFromTags(agent.tags) ?? "unset"}</span>
+            <span>{formatLastSeen(agent.last_seen_at)}</span>
+            <span>{displayTags(agent.tags).join(", ") || "untagged"}</span>
+          </div>
+        ))}
+      </div>
+    );
+  if (mode === "capabilities")
+    return (
+      <div className="fleetSelectionStatsTable capabilitiesMode">
+        <div className="fleetSelectionStatsRow heading">
+          <span>VPS</span>
+          <span>Privilege</span>
+          <span>UID</span>
+          <span>Tunnels</span>
+          <span>Process limits</span>
+          <span>Build</span>
+        </div>
+        {rows.map((agent) => (
+          <div className="fleetSelectionStatsRow" key={agent.id}>
+            <span title={agent.id}>
+              {formatVpsName(agent, vpsNameDisplayMode)}
+            </span>
+            <span>{formatPrivilege(agent.capabilities)}</span>
+            <span>{agent.capabilities.effective_uid ?? "unknown"}</span>
+            <span>{yesNo(agent.capabilities.can_manage_runtime_tunnels)}</span>
+            <span>{yesNo(agent.capabilities.can_apply_process_limits)}</span>
+            <span>
+              {agent.internal_build_number
+                ? `#${agent.internal_build_number}`
+                : "unknown"}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  return (
+    <div className="fleetSelectionStatsTable telemetryMode">
+      <div className="fleetSelectionStatsRow heading">
+        <span>VPS</span>
+        <span>CPU</span>
+        <span>RAM used</span>
+        <span>Disk free</span>
+        <span>Network</span>
+        <span>Samples</span>
+      </div>
+      {rows.map((agent) => {
+        const rollup = latestRollups.get(agent.id) ?? null;
+        const rates = latestNetworkRates.get(agent.id) ?? [];
+        return (
+          <div className="fleetSelectionStatsRow" key={agent.id}>
+            <span title={agent.id}>
+              {formatVpsName(agent, vpsNameDisplayMode)}
+            </span>
+            <span>{formatLoad(rollup?.cpu_load_1_avg)}</span>
+            <span>{formatMemoryUsed(rollup)}</span>
+            <span>{formatDiskFree(rollup)}</span>
+            <span>{formatNetworkRateSummary(rates, rollup)}</span>
+            <span>{formatRollupSamples(rollup)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CountryBadge({
+  country,
+  showFlag,
+}: {
+  country: string | null;
+  showFlag: boolean;
+}) {
+  if (!country) return <span className="countryBadge">unset</span>;
+  const normalized = country.toUpperCase();
+  return (
+    <span className="countryBadge" title={normalized}>
+      {showFlag && /^[A-Z]{2}$/.test(normalized) && (
+        <img
+          alt=""
+          className="countryFlag"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          src={`https://flagcdn.com/16x12/${normalized.toLowerCase()}.png`}
+        />
+      )}
+      <span>{normalized}</span>
+    </span>
+  );
+}
+
+function writeLocalString(key: string, value: string) {
+  if (typeof window === "undefined") return;
+  try {
+    if (value.trim()) window.localStorage.setItem(key, value);
+    else window.localStorage.removeItem(key);
+  } catch {
+    /* local handoff only */
+  }
+}
+
+function seedSingleFileBrowser(agent: AgentView) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      FILE_BROWSER_STATE_STORAGE_KEY,
+      JSON.stringify({
+        path: "/",
+        showHidden: false,
+        targetExpression: selectorExpressionForClientIds([agent.id]),
+      }),
+    );
+  } catch {
+    /* local handoff only */
+  }
+}
+
+function resourcePercentChartData(rollups: TelemetryRollupRecord[]) {
+  const sorted = sortRollups(rollups);
+  return {
+    times: sorted.map((rollup) => rollup.bucket_start),
+    lines: [
+      {
+        color: CHART_COLORS[0],
+        label: "RAM used",
+        values: sorted.map((rollup) => memoryUsedRatio(rollup)),
+      },
+      {
+        color: CHART_COLORS[1],
+        label: "Disk free",
+        values: sorted.map((rollup) => diskFreeRatio(rollup)),
+      },
+    ] satisfies TimeSeriesChartLine[],
+  };
+}
+function cpuLoadChartData(rollups: TelemetryRollupRecord[]) {
+  const sorted = sortRollups(rollups);
+  return {
+    times: sorted.map((rollup) => rollup.bucket_start),
+    lines: [
+      {
+        color: CHART_COLORS[2],
+        label: "CPU load",
+        values: sorted.map((rollup) => rollup.cpu_load_1_avg),
+      },
+    ] satisfies TimeSeriesChartLine[],
+  };
+}
+function networkRateChartData(rates: TelemetryNetworkRateRecord[]) {
+  const times = sortedUniqueTimes(rates.map((rate) => rate.bucket_start));
+  const rx = new Map<string, number>();
+  const tx = new Map<string, number>();
+  for (const rate of rates) {
+    rx.set(
+      rate.bucket_start,
+      (rx.get(rate.bucket_start) ?? 0) + rate.rx_bps_avg,
+    );
+    tx.set(
+      rate.bucket_start,
+      (tx.get(rate.bucket_start) ?? 0) + rate.tx_bps_avg,
+    );
+  }
+  return {
+    times,
+    lines: [
+      {
+        color: CHART_COLORS[0],
+        label: "RX",
+        values: times.map((time) => rx.get(time) ?? null),
+      },
+      {
+        color: CHART_COLORS[3],
+        label: "TX",
+        values: times.map((time) => tx.get(time) ?? null),
+      },
+    ] satisfies TimeSeriesChartLine[],
+  };
+}
+function sortRollups(rollups: TelemetryRollupRecord[]) {
+  return rollups
+    .slice()
+    .sort((left, right) => left.bucket_start.localeCompare(right.bucket_start));
+}
+function sortedUniqueTimes(times: string[]) {
+  return Array.from(new Set(times)).sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+function memoryUsedRatio(
+  rollup: TelemetryRollupRecord | null | undefined,
+): number | null {
+  if (!rollup || rollup.memory_total_bytes_max <= 0) return null;
+  return (
+    ((rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg) /
+      rollup.memory_total_bytes_max) *
+    100
+  );
+}
+function diskFreeRatio(
+  rollup: TelemetryRollupRecord | null | undefined,
+): number | null {
+  if (!rollup || rollup.disk_total_bytes_max <= 0) return null;
+  return (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100;
+}
+function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
+  return rates.reduce(
+    (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
+    0,
+  );
+}
+function formatChartPercent(value: number | null) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${Math.round(value)}%`
+    : "-";
+}
+function formatChartLoad(value: number | null) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(2)
+    : "-";
+}
+function formatChartBitsPerSecond(value: number | null) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? formatBitsPerSecond(value)
+    : "-";
+}
+function yesNo(value: boolean | null | undefined) {
+  return value ? "yes" : "no";
+}
+
+function formatJsonInline(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    const rendered = JSON.stringify(value);
+    if (!rendered) {
+      return "-";
+    }
+    return rendered.length > 120 ? `${rendered.slice(0, 117)}...` : rendered;
+  } catch {
+    return String(value);
+  }
 }
 
 function FleetAlertPolicyManager({
@@ -679,7 +2060,9 @@ function FleetAlertPolicyManager({
   onUpsert,
 }: {
   policies: FleetAlertPolicyRecord[];
-  onUpsert: (request: FleetAlertPolicyRequest) => Promise<FleetAlertPolicyRecord>;
+  onUpsert: (
+    request: FleetAlertPolicyRequest,
+  ) => Promise<FleetAlertPolicyRecord>;
 }) {
   const [name, setName] = useState("edge-resource-policy");
   const [scopeKind, setScopeKind] = useState("tag");
@@ -724,8 +2107,16 @@ function FleetAlertPolicyManager({
         <span>{policies.length} scoped</span>
       </div>
       <div className="fleetPolicyGrid">
-        <input aria-label="Policy name" value={name} onChange={(event) => setName(event.target.value)} />
-        <select aria-label="Policy scope kind" value={scopeKind} onChange={(event) => setScopeKind(event.target.value)}>
+        <input
+          aria-label="Policy name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <select
+          aria-label="Policy scope kind"
+          value={scopeKind}
+          onChange={(event) => setScopeKind(event.target.value)}
+        >
           <option value="global">global</option>
           <option value="provider">provider</option>
           <option value="tag">tag</option>
@@ -737,13 +2128,45 @@ function FleetAlertPolicyManager({
           value={scopeValue}
           onChange={(event) => setScopeValue(event.target.value)}
         />
-        <input aria-label="Memory warning ratio" value={memoryWarning} onChange={(event) => setMemoryWarning(event.target.value)} />
-        <input aria-label="Memory critical ratio" value={memoryCritical} onChange={(event) => setMemoryCritical(event.target.value)} />
-        <input aria-label="Disk warning ratio" value={diskWarning} onChange={(event) => setDiskWarning(event.target.value)} placeholder="disk warn" />
-        <input aria-label="Disk critical ratio" value={diskCritical} onChange={(event) => setDiskCritical(event.target.value)} placeholder="disk crit" />
-        <input aria-label="CPU warning load" value={cpuWarning} onChange={(event) => setCpuWarning(event.target.value)} placeholder="cpu warn" />
-        <input aria-label="CPU critical load" value={cpuCritical} onChange={(event) => setCpuCritical(event.target.value)} placeholder="cpu crit" />
-        <input aria-label="Policy priority" value={priority} onChange={(event) => setPriority(event.target.value)} />
+        <input
+          aria-label="Memory warning ratio"
+          value={memoryWarning}
+          onChange={(event) => setMemoryWarning(event.target.value)}
+        />
+        <input
+          aria-label="Memory critical ratio"
+          value={memoryCritical}
+          onChange={(event) => setMemoryCritical(event.target.value)}
+        />
+        <input
+          aria-label="Disk warning ratio"
+          value={diskWarning}
+          onChange={(event) => setDiskWarning(event.target.value)}
+          placeholder="disk warn"
+        />
+        <input
+          aria-label="Disk critical ratio"
+          value={diskCritical}
+          onChange={(event) => setDiskCritical(event.target.value)}
+          placeholder="disk crit"
+        />
+        <input
+          aria-label="CPU warning load"
+          value={cpuWarning}
+          onChange={(event) => setCpuWarning(event.target.value)}
+          placeholder="cpu warn"
+        />
+        <input
+          aria-label="CPU critical load"
+          value={cpuCritical}
+          onChange={(event) => setCpuCritical(event.target.value)}
+          placeholder="cpu crit"
+        />
+        <input
+          aria-label="Policy priority"
+          value={priority}
+          onChange={(event) => setPriority(event.target.value)}
+        />
         <button type="button" onClick={() => void submit()}>
           Save
         </button>
@@ -755,7 +2178,8 @@ function FleetAlertPolicyManager({
             <strong>{policy.name}</strong>
             <small>
               {policy.scope_kind}
-              {policy.scope_value ? `:${policy.scope_value}` : ""} priority {policy.priority}
+              {policy.scope_value ? `:${policy.scope_value}` : ""} priority{" "}
+              {policy.priority}
             </small>
           </span>
         ))}
@@ -790,12 +2214,17 @@ function csvValues(value: string): string[] {
     .filter((entry) => entry.length > 0);
 }
 
-function agentNamesById(agents: AgentView[], mode: VpsNameDisplayMode): Map<string, string> {
+function agentNamesById(
+  agents: AgentView[],
+  mode: VpsNameDisplayMode,
+): Map<string, string> {
   return new Map(agents.map((agent) => [agent.id, formatVpsName(agent, mode)]));
 }
 
 function countryFromTags(tags: string[]): string | null {
-  const countryTag = tags.find((tag) => /^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag));
+  const countryTag = tags.find((tag) =>
+    /^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag),
+  );
   if (!countryTag) {
     return null;
   }
@@ -804,7 +2233,9 @@ function countryFromTags(tags: string[]): string | null {
 }
 
 function providerFromTags(tags: string[]): string | null {
-  const providerTag = tags.find((tag) => /^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag));
+  const providerTag = tags.find((tag) =>
+    /^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag),
+  );
   if (!providerTag) {
     return null;
   }
@@ -833,7 +2264,9 @@ function normalizedLastSeenSort(value: string | null | undefined): string {
   return normalizeAgentTimestamp(value) ?? "";
 }
 
-function normalizeAgentTimestamp(value: string | null | undefined): string | null {
+function normalizeAgentTimestamp(
+  value: string | null | undefined,
+): string | null {
   const trimmed = value?.trim();
   if (!trimmed) {
     return null;
@@ -854,23 +2287,6 @@ async function copyText(value: string) {
   await navigator.clipboard?.writeText(value);
 }
 
-function countryLabel(country: string | null): string {
-  if (!country) {
-    return "unset";
-  }
-  if (/^[A-Z]{2}$/.test(country)) {
-    return `${countryFlag(country)} ${country}`;
-  }
-  return country;
-}
-
-function countryFlag(country: string): string {
-  const base = 0x1f1e6;
-  return Array.from(country)
-    .map((letter) => String.fromCodePoint(base + letter.charCodeAt(0) - 65))
-    .join("");
-}
-
 function FleetAlertNotificationManager({
   channels,
   deliveries,
@@ -880,9 +2296,15 @@ function FleetAlertNotificationManager({
 }: {
   channels: FleetAlertNotificationChannelRecord[];
   deliveries: FleetAlertNotificationDeliveryRecord[];
-  onDispatch: (request: FleetAlertNotificationDispatchRequest) => Promise<FleetAlertNotificationDeliveryRecord[]>;
-  onProcess: (request: FleetAlertNotificationProcessRequest) => Promise<FleetAlertNotificationDeliveryRecord[]>;
-  onUpsert: (request: FleetAlertNotificationChannelRequest) => Promise<FleetAlertNotificationChannelRecord>;
+  onDispatch: (
+    request: FleetAlertNotificationDispatchRequest,
+  ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onProcess: (
+    request: FleetAlertNotificationProcessRequest,
+  ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onUpsert: (
+    request: FleetAlertNotificationChannelRequest,
+  ) => Promise<FleetAlertNotificationChannelRecord>;
 }) {
   const [name, setName] = useState("edge-audit-channel");
   const [scopeKind, setScopeKind] = useState("tag");
@@ -946,12 +2368,17 @@ function FleetAlertNotificationManager({
       });
       setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "delivery processing failed");
+      setStatus(
+        error instanceof Error ? error.message : "delivery processing failed",
+      );
     }
   }
 
   return (
-    <div className="fleetPolicyManager fleetNotificationManager" aria-label="Fleet alert notification manager">
+    <div
+      className="fleetPolicyManager fleetNotificationManager"
+      aria-label="Fleet alert notification manager"
+    >
       <div className="fleetPolicyHeader">
         <span>
           <Bell size={16} />
@@ -960,8 +2387,16 @@ function FleetAlertNotificationManager({
         <span>{channels.length} channels</span>
       </div>
       <div className="fleetPolicyGrid notificationGrid">
-        <input aria-label="Notification channel name" value={name} onChange={(event) => setName(event.target.value)} />
-        <select aria-label="Notification scope kind" value={scopeKind} onChange={(event) => setScopeKind(event.target.value)}>
+        <input
+          aria-label="Notification channel name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <select
+          aria-label="Notification scope kind"
+          value={scopeKind}
+          onChange={(event) => setScopeKind(event.target.value)}
+        >
           <option value="global">global</option>
           <option value="provider">provider</option>
           <option value="tag">tag</option>
@@ -973,16 +2408,40 @@ function FleetAlertNotificationManager({
           value={scopeValue}
           onChange={(event) => setScopeValue(event.target.value)}
         />
-        <select aria-label="Minimum severity" value={minSeverity} onChange={(event) => setMinSeverity(event.target.value)}>
+        <select
+          aria-label="Minimum severity"
+          value={minSeverity}
+          onChange={(event) => setMinSeverity(event.target.value)}
+        >
           <option value="critical">critical</option>
           <option value="warning">warning</option>
           <option value="info">info</option>
         </select>
-        <input aria-label="Alert categories" value={categories} onChange={(event) => setCategories(event.target.value)} />
-        <input aria-label="Operator states" value={operatorStates} onChange={(event) => setOperatorStates(event.target.value)} />
-        <input aria-label="Delivery kind" value={deliveryKind} onChange={(event) => setDeliveryKind(event.target.value)} />
-        <input aria-label="Delivery target" value={target} onChange={(event) => setTarget(event.target.value)} />
-        <input aria-label="Cooldown seconds" value={cooldownSecs} onChange={(event) => setCooldownSecs(event.target.value)} />
+        <input
+          aria-label="Alert categories"
+          value={categories}
+          onChange={(event) => setCategories(event.target.value)}
+        />
+        <input
+          aria-label="Operator states"
+          value={operatorStates}
+          onChange={(event) => setOperatorStates(event.target.value)}
+        />
+        <input
+          aria-label="Delivery kind"
+          value={deliveryKind}
+          onChange={(event) => setDeliveryKind(event.target.value)}
+        />
+        <input
+          aria-label="Delivery target"
+          value={target}
+          onChange={(event) => setTarget(event.target.value)}
+        />
+        <input
+          aria-label="Cooldown seconds"
+          value={cooldownSecs}
+          onChange={(event) => setCooldownSecs(event.target.value)}
+        />
         <button type="button" onClick={() => void submit()}>
           Save
         </button>
@@ -1006,7 +2465,8 @@ function FleetAlertNotificationManager({
             <strong>{channel.name}</strong>
             <small>
               {channel.scope_kind}
-              {channel.scope_value ? `:${channel.scope_value}` : ""} {channel.delivery_kind} {channel.min_severity}
+              {channel.scope_value ? `:${channel.scope_value}` : ""}{" "}
+              {channel.delivery_kind} {channel.min_severity}
             </small>
           </span>
         ))}
@@ -1014,12 +2474,15 @@ function FleetAlertNotificationManager({
           <span key={delivery.id}>
             <strong>{delivery.channel_name}</strong>
             <small>
-              {delivery.status} {delivery.alert_category} {delivery.delivery_kind} attempts {delivery.attempt_count}
+              {delivery.status} {delivery.alert_category}{" "}
+              {delivery.delivery_kind} attempts {delivery.attempt_count}
               {delivery.error ? ` error ${delivery.error}` : ""}
             </small>
           </span>
         ))}
-        {topChannels.length === 0 && topDeliveries.length === 0 && <small>No notification channel saved</small>}
+        {topChannels.length === 0 && topDeliveries.length === 0 && (
+          <small>No notification channel saved</small>
+        )}
       </div>
     </div>
   );
@@ -1037,10 +2500,18 @@ function WebhookRuleManager({
 }: {
   agents: AgentView[];
   deliveries: WebhookRuleDeliveryRecord[];
-  onDispatch: (request: WebhookRuleDispatchRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onDryRun: (request: WebhookRuleDryRunRequest) => Promise<WebhookRuleDryRunRecord>;
-  onProcess: (request: WebhookRuleProcessRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onRotate: (request: WebhookDeliveryRotationRequest) => Promise<WebhookDeliveryRotationResponse>;
+  onDispatch: (
+    request: WebhookRuleDispatchRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRun: (
+    request: WebhookRuleDryRunRequest,
+  ) => Promise<WebhookRuleDryRunRecord>;
+  onProcess: (
+    request: WebhookRuleProcessRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotate: (
+    request: WebhookDeliveryRotationRequest,
+  ) => Promise<WebhookDeliveryRotationResponse>;
   onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
   rules: WebhookRuleRecord[];
 }) {
@@ -1048,24 +2519,36 @@ function WebhookRuleManager({
   const [enabled, setEnabled] = useState(true);
   const [expression, setExpression] = useState("interval.30sec && tag:edge");
   const [target, setTarget] = useState("https://hooks.example/vpsman");
-  const [bodyTemplate, setBodyTemplate] = useState("{rule.name} {event.kind} {vps.id}");
+  const [bodyTemplate, setBodyTemplate] = useState(
+    "{rule.name} {event.kind} {vps.id}",
+  );
   const [cooldownSecs, setCooldownSecs] = useState("300");
   const [eventKind, setEventKind] = useState("interval.30sec");
   const [eventId, setEventId] = useState("");
   const [rotationDays, setRotationDays] = useState("90");
   const [rotationStatus, setRotationStatus] = useState("delivered");
   const [status, setStatus] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
-  const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
-  const [rotationPreview, setRotationPreview] = useState<WebhookDeliveryRotationResponse | null>(null);
-  const [localRulePreview, setLocalRulePreview] = useState<WebhookRuleRecord | null>(null);
+  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>(
+    [],
+  );
+  const [dryRunPreview, setDryRunPreview] =
+    useState<WebhookRuleDryRunRecord | null>(null);
+  const [rotationPreview, setRotationPreview] =
+    useState<WebhookDeliveryRotationResponse | null>(null);
+  const [localRulePreview, setLocalRulePreview] =
+    useState<WebhookRuleRecord | null>(null);
   const visibleRules = useMemo(() => {
     if (!localRulePreview) {
       return rules;
     }
-    return [localRulePreview, ...rules.filter((rule) => rule.id !== localRulePreview.id && rule.name !== localRulePreview.name)].sort(
-      (left, right) => left.name.localeCompare(right.name),
-    );
+    return [
+      localRulePreview,
+      ...rules.filter(
+        (rule) =>
+          rule.id !== localRulePreview.id &&
+          rule.name !== localRulePreview.name,
+      ),
+    ].sort((left, right) => left.name.localeCompare(right.name));
   }, [localRulePreview, rules]);
   const topRules = visibleRules.slice(0, 4);
   const topDeliveries = deliveries.slice(0, 4);
@@ -1085,7 +2568,9 @@ function WebhookRuleManager({
       setLocalRulePreview(rule);
       setStatus("webhook rule saved");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule save failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook rule save failed",
+      );
     }
   }
 
@@ -1106,7 +2591,9 @@ function WebhookRuleManager({
       setPreviewRows(rows.delivery ? [rows.delivery] : []);
       setStatus(`previewed ${rows.matched_vps.length} matched VPSs`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule preview failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook rule preview failed",
+      );
     }
   }
 
@@ -1124,7 +2611,9 @@ function WebhookRuleManager({
       }
       setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook dispatch failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook dispatch failed",
+      );
     }
   }
 
@@ -1142,12 +2631,18 @@ function WebhookRuleManager({
       }
       setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook delivery failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook delivery failed",
+      );
     }
   }
 
   async function rotate(confirmed: boolean) {
-    setStatus(confirmed ? "rotating delivery history" : "previewing delivery history rotation");
+    setStatus(
+      confirmed
+        ? "rotating delivery history"
+        : "previewing delivery history rotation",
+    );
     try {
       const response = await onRotate({
         older_than_days: optionalInteger(rotationDays),
@@ -1155,14 +2650,25 @@ function WebhookRuleManager({
         confirmed,
       });
       setRotationPreview(response);
-      setStatus(confirmed ? `deleted ${response.deleted_count}` : `matched ${response.matched_count}`);
+      setStatus(
+        confirmed
+          ? `deleted ${response.deleted_count}`
+          : `matched ${response.matched_count}`,
+      );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook delivery rotation failed");
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "webhook delivery rotation failed",
+      );
     }
   }
 
   return (
-    <div className="fleetPolicyManager fleetNotificationManager" aria-label="Expression webhook rule manager">
+    <div
+      className="fleetPolicyManager fleetNotificationManager"
+      aria-label="Expression webhook rule manager"
+    >
       <div className="fleetPolicyHeader">
         <span>
           <Bell size={16} />
@@ -1171,13 +2677,29 @@ function WebhookRuleManager({
         <span>{visibleRules.length} rules</span>
       </div>
       <div className="fleetPolicyGrid notificationGrid webhookRuleGrid">
-        <input aria-label="Webhook rule name" value={name} onChange={(event) => setName(event.target.value)} />
+        <input
+          aria-label="Webhook rule name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
         <label className="inlineToggle">
-          <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
+          <input
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+            type="checkbox"
+          />
           <span>Enabled</span>
         </label>
-        <input aria-label="Webhook target URL" value={target} onChange={(event) => setTarget(event.target.value)} />
-        <input aria-label="Webhook cooldown seconds" value={cooldownSecs} onChange={(event) => setCooldownSecs(event.target.value)} />
+        <input
+          aria-label="Webhook target URL"
+          value={target}
+          onChange={(event) => setTarget(event.target.value)}
+        />
+        <input
+          aria-label="Webhook cooldown seconds"
+          value={cooldownSecs}
+          onChange={(event) => setCooldownSecs(event.target.value)}
+        />
         <div className="wideField">
           <SearchExpressionInput
             agents={agents}
@@ -1190,10 +2712,21 @@ function WebhookRuleManager({
           />
         </div>
         <div className="webhookTemplateEditor wideField">
-          <WebhookTemplateEditor onChange={setBodyTemplate} value={bodyTemplate} />
+          <WebhookTemplateEditor
+            onChange={setBodyTemplate}
+            value={bodyTemplate}
+          />
         </div>
-        <input aria-label="Webhook event kind" value={eventKind} onChange={(event) => setEventKind(event.target.value)} />
-        <input aria-label="Webhook event id" value={eventId} onChange={(event) => setEventId(event.target.value)} />
+        <input
+          aria-label="Webhook event kind"
+          value={eventKind}
+          onChange={(event) => setEventKind(event.target.value)}
+        />
+        <input
+          aria-label="Webhook event id"
+          value={eventId}
+          onChange={(event) => setEventId(event.target.value)}
+        />
         <button type="button" onClick={() => void submit()}>
           Save
         </button>
@@ -1212,8 +2745,16 @@ function WebhookRuleManager({
         <button type="button" onClick={() => void process(false)}>
           Deliver
         </button>
-        <input aria-label="Webhook rotation days" value={rotationDays} onChange={(event) => setRotationDays(event.target.value)} />
-        <select aria-label="Webhook rotation status" value={rotationStatus} onChange={(event) => setRotationStatus(event.target.value)}>
+        <input
+          aria-label="Webhook rotation days"
+          value={rotationDays}
+          onChange={(event) => setRotationDays(event.target.value)}
+        />
+        <select
+          aria-label="Webhook rotation status"
+          value={rotationStatus}
+          onChange={(event) => setRotationStatus(event.target.value)}
+        >
           <option value="">Any status</option>
           <option value="delivered">Delivered</option>
           <option value="failed">Failed</option>
@@ -1242,7 +2783,10 @@ function WebhookRuleManager({
       )}
       {rotationPreview && (
         <small className="fleetPolicyStatus">
-          Rotation {rotationPreview.confirmation_required ? "preview" : "applied"} matched {rotationPreview.matched_count}, deleted {rotationPreview.deleted_count}
+          Rotation{" "}
+          {rotationPreview.confirmation_required ? "preview" : "applied"}{" "}
+          matched {rotationPreview.matched_count}, deleted{" "}
+          {rotationPreview.deleted_count}
         </small>
       )}
       {previewRows.length > 0 && (
@@ -1263,7 +2807,8 @@ function WebhookRuleManager({
           <span key={rule.id}>
             <strong>{rule.name}</strong>
             <small>
-              {rule.enabled ? "enabled" : "disabled"} {rule.expression} cooldown {rule.cooldown_secs}s
+              {rule.enabled ? "enabled" : "disabled"} {rule.expression} cooldown{" "}
+              {rule.cooldown_secs}s
             </small>
           </span>
         ))}
@@ -1271,19 +2816,30 @@ function WebhookRuleManager({
           <span key={delivery.id}>
             <strong>{delivery.rule_name}</strong>
             <small>
-              {delivery.status} {delivery.event_kind} matched {delivery.matched_vps.length} attempts {delivery.attempt_count}
-              {delivery.next_attempt_at ? ` next ${formatCompactTime(delivery.next_attempt_at)}` : ""}
+              {delivery.status} {delivery.event_kind} matched{" "}
+              {delivery.matched_vps.length} attempts {delivery.attempt_count}
+              {delivery.next_attempt_at
+                ? ` next ${formatCompactTime(delivery.next_attempt_at)}`
+                : ""}
               {delivery.error ? ` error ${delivery.error}` : ""}
             </small>
           </span>
         ))}
-        {topRules.length === 0 && topDeliveries.length === 0 && <small>No expression webhook rule saved</small>}
+        {topRules.length === 0 && topDeliveries.length === 0 && (
+          <small>No expression webhook rule saved</small>
+        )}
       </div>
     </div>
   );
 }
 
-function WebhookTemplateEditor({ onChange, value }: { onChange: (value: string) => void; value: string }) {
+function WebhookTemplateEditor({
+  onChange,
+  value,
+}: {
+  onChange: (value: string) => void;
+  value: string;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -1337,14 +2893,26 @@ function FleetAlertList({
   stateCount: number;
   onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [selectionStatsMode, setSelectionStatsMode] =
+    useState<FleetSelectionStatsMode>("telemetry");
   const [pending, setPending] = useState<string | null>(null);
   const topAlerts = alerts.slice(0, 6);
-  const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
-  const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
-  const nameById = useMemo(() => agentNamesById(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
+  const criticalCount = alerts.filter(
+    (alert) => alert.severity === "critical",
+  ).length;
+  const warningCount = alerts.filter(
+    (alert) => alert.severity === "warning",
+  ).length;
+  const nameById = useMemo(
+    () => agentNamesById(agents, vpsNameDisplayMode),
+    [agents, vpsNameDisplayMode],
+  );
 
-  async function updateAlert(alert: FleetAlertRecord, action: FleetAlertStateRequest["action"]) {
+  async function updateAlert(
+    alert: FleetAlertRecord,
+    action: FleetAlertStateRequest["action"],
+  ) {
     const pendingKey = `${alert.id}:${action}`;
     setPending(pendingKey);
     try {
@@ -1352,7 +2920,12 @@ function FleetAlertList({
         alert_id: alert.id,
         action,
         muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
-        reason: action === "mute" ? "panel mute" : action === "acknowledge" ? "panel acknowledgement" : "panel action",
+        reason:
+          action === "mute"
+            ? "panel mute"
+            : action === "acknowledge"
+              ? "panel acknowledgement"
+              : "panel action",
         confirmed: true,
       });
     } finally {
@@ -1377,12 +2950,21 @@ function FleetAlertList({
         <span className="fleetAlertEmpty">No active alerts</span>
       ) : (
         topAlerts.map((alert) => (
-          <div className={`fleetAlertRow ${alertTone(alert.severity)}`} key={alert.id}>
+          <div
+            className={`fleetAlertRow ${alertTone(alert.severity)}`}
+            key={alert.id}
+          >
             <span className="status">{alert.severity}</span>
             <strong>{alert.title}</strong>
-            <small>{alert.client_id ? nameById.get(alert.client_id) ?? "Unnamed VPS" : alertTargetLabel(alert)}</small>
+            <small>
+              {alert.client_id
+                ? (nameById.get(alert.client_id) ?? "Unnamed VPS")
+                : alertTargetLabel(alert)}
+            </small>
             <span>{alert.detail}</span>
-            <span className={`fleetAlertState ${alert.operator_state}`}>{alert.operator_state}</span>
+            <span className={`fleetAlertState ${alert.operator_state}`}>
+              {alert.operator_state}
+            </span>
             <div className="fleetAlertActions">
               {alert.operator_state === "open" && (
                 <>
@@ -1419,7 +3001,9 @@ function FleetAlertList({
                 </button>
               )}
             </div>
-            {alert.state_reason && <small className="fleetAlertReason">{alert.state_reason}</small>}
+            {alert.state_reason && (
+              <small className="fleetAlertReason">{alert.state_reason}</small>
+            )}
           </div>
         ))
       )}
@@ -1452,10 +3036,14 @@ function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {
   return latest;
 }
 
-function latestTelemetryNetworkRatesByClient(rates: TelemetryNetworkRateRecord[]) {
+function latestTelemetryNetworkRatesByClient(
+  rates: TelemetryNetworkRateRecord[],
+) {
   const latest = new Map<string, Map<string, TelemetryNetworkRateRecord>>();
   for (const rate of rates) {
-    const clientRates = latest.get(rate.client_id) ?? new Map<string, TelemetryNetworkRateRecord>();
+    const clientRates =
+      latest.get(rate.client_id) ??
+      new Map<string, TelemetryNetworkRateRecord>();
     const current = clientRates.get(rate.interface);
     if (!current || rate.bucket_start > current.bucket_start) {
       clientRates.set(rate.interface, rate);
@@ -1463,14 +3051,18 @@ function latestTelemetryNetworkRatesByClient(rates: TelemetryNetworkRateRecord[]
     latest.set(rate.client_id, clientRates);
   }
   return new Map(
-    Array.from(latest.entries(), ([clientId, byInterface]) => [clientId, Array.from(byInterface.values())]),
+    Array.from(latest.entries(), ([clientId, byInterface]) => [
+      clientId,
+      Array.from(byInterface.values()),
+    ]),
   );
 }
 
 function latestTelemetryTunnelsByClient(tunnels: TelemetryTunnelRecord[]) {
   const latest = new Map<string, Map<string, TelemetryTunnelRecord>>();
   for (const tunnel of tunnels) {
-    const clientTunnels = latest.get(tunnel.client_id) ?? new Map<string, TelemetryTunnelRecord>();
+    const clientTunnels =
+      latest.get(tunnel.client_id) ?? new Map<string, TelemetryTunnelRecord>();
     const current = clientTunnels.get(tunnel.interface);
     if (!current || tunnel.observed_at > current.observed_at) {
       clientTunnels.set(tunnel.interface, tunnel);
@@ -1478,7 +3070,10 @@ function latestTelemetryTunnelsByClient(tunnels: TelemetryTunnelRecord[]) {
     latest.set(tunnel.client_id, clientTunnels);
   }
   return new Map(
-    Array.from(latest.entries(), ([clientId, byInterface]) => [clientId, Array.from(byInterface.values())]),
+    Array.from(latest.entries(), ([clientId, byInterface]) => [
+      clientId,
+      Array.from(byInterface.values()),
+    ]),
   );
 }
 
@@ -1490,28 +3085,39 @@ function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
     return "No rollup";
   }
-  const used = rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg;
-  return `${Math.round((used / rollup.memory_total_bytes_max) * 100)}%`;
+  const used =
+    rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg;
+  const percent = Math.round((used / rollup.memory_total_bytes_max) * 100);
+  return `${percent}% (${formatBytes(used)} / ${formatBytes(rollup.memory_total_bytes_max)})`;
 }
 
 function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
     return "No rollup";
   }
-  const percent = Math.round((rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100);
-  return `${percent}% free`;
+  const percent = Math.round(
+    (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100,
+  );
+  return `${percent}% free (${formatBytes(rollup.disk_available_bytes_avg)} / ${formatBytes(rollup.disk_total_bytes_max)})`;
 }
 
 function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
-  if (!rollup || (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)) {
+  if (
+    !rollup ||
+    (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)
+  ) {
     return "No counters";
   }
   return `RX ${formatBytes(rollup.network_rx_bytes_max)} / TX ${formatBytes(rollup.network_tx_bytes_max)}`;
 }
 
-function formatNetworkRateSummary(rates: TelemetryNetworkRateRecord[], rollup: TelemetryRollupRecord | null | undefined) {
+function formatNetworkRateSummary(
+  rates: TelemetryNetworkRateRecord[],
+  rollup: TelemetryRollupRecord | null | undefined,
+) {
   if (rates.length === 0) {
-    return rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
+    return rollup &&
+      (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
       ? "Rate rollup pending; counters active"
       : "Awaiting rate rollup";
   }
@@ -1520,22 +3126,39 @@ function formatNetworkRateSummary(rates: TelemetryNetworkRateRecord[], rollup: T
   return `RX ${formatBitsPerSecond(rx)} / TX ${formatBitsPerSecond(tx)}`;
 }
 
-function formatSignalTraffic(rollup: TelemetryRollupRecord | null | undefined, rates: TelemetryNetworkRateRecord[]) {
+function formatSignalTraffic(
+  rollup: TelemetryRollupRecord | null | undefined,
+  rates: TelemetryNetworkRateRecord[],
+) {
   if (rates.length > 0) {
-    const totalBps = rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0);
+    const totalBps = rates.reduce(
+      (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
+      0,
+    );
     return formatBitsPerSecond(totalBps);
   }
-  if (rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)) {
-    return formatBytes(rollup.network_rx_bytes_max + rollup.network_tx_bytes_max);
+  if (
+    rollup &&
+    (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
+  ) {
+    return formatBytes(
+      rollup.network_rx_bytes_max + rollup.network_tx_bytes_max,
+    );
   }
   return "Awaiting rate rollup";
 }
 
-function formatSignalSamples(rollup: TelemetryRollupRecord | null | undefined, rates: TelemetryNetworkRateRecord[]) {
+function formatSignalSamples(
+  rollup: TelemetryRollupRecord | null | undefined,
+  rates: TelemetryNetworkRateRecord[],
+) {
   if (rollup && rollup.sample_count > 0) {
     return `${rollup.sample_count} rollup`;
   }
-  const rateSamples = rates.reduce((total, rate) => total + rate.sample_count, 0);
+  const rateSamples = rates.reduce(
+    (total, rate) => total + rate.sample_count,
+    0,
+  );
   return rateSamples > 0 ? `${rateSamples} rate` : "No rollup";
 }
 
@@ -1543,11 +3166,18 @@ function formatPrivilege(capabilities: AgentView["capabilities"] | undefined) {
   if (!capabilities || capabilities.privilege_mode === "unknown") {
     return "Unknown";
   }
-  const uid = typeof capabilities.effective_uid === "number" ? ` uid ${capabilities.effective_uid}` : "";
-  return capabilities.privilege_mode === "root" ? `Root${uid}` : `Unprivileged${uid}`;
+  const uid =
+    typeof capabilities.effective_uid === "number"
+      ? ` uid ${capabilities.effective_uid}`
+      : "";
+  return capabilities.privilege_mode === "root"
+    ? `Root${uid}`
+    : `Unprivileged${uid}`;
 }
 
-function formatTunnelCapability(capabilities: AgentView["capabilities"] | undefined) {
+function formatTunnelCapability(
+  capabilities: AgentView["capabilities"] | undefined,
+) {
   if (!capabilities) {
     return "Unknown";
   }
@@ -1675,25 +3305,39 @@ function NetworkInterfacesPanel({
             Refresh interfaces
           </button>
           {!privilegeReady && (
-            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenPrivilegeUnlock}
+              type="button"
+            >
               <LockKeyhole size={15} />
               Unlock privilege
             </button>
           )}
           {jobId && onOpenJobDetails && (
-            <button className="secondaryAction compactAction" onClick={() => onOpenJobDetails(jobId)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenJobDetails(jobId)}
+              type="button"
+            >
               Job {shortId(jobId)}
             </button>
           )}
         </div>
-        {progress && <FailureReasonGroups reasons={progress.failureReasons ?? []} />}
+        {progress && (
+          <FailureReasonGroups reasons={progress.failureReasons ?? []} />
+        )}
         {snapshot && <NetworkInterfaceList snapshot={snapshot} />}
       </div>
     </div>
   );
 }
 
-function NetworkInterfaceList({ snapshot }: { snapshot: NetworkInterfacesSnapshot }) {
+function NetworkInterfaceList({
+  snapshot,
+}: {
+  snapshot: NetworkInterfacesSnapshot;
+}) {
   if (snapshot.interfaces.length === 0) {
     return <span>No interfaces returned</span>;
   }
@@ -1714,35 +3358,61 @@ function NetworkInterfaceList({ snapshot }: { snapshot: NetworkInterfacesSnapsho
   );
 }
 
-function interfaceStateSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
-  const state = networkInterface.operstate ?? (networkInterface.flags?.includes("up") ? "up" : "unknown");
-  const mtu = typeof networkInterface.mtu === "number" ? `mtu ${networkInterface.mtu}` : "mtu unknown";
-  const mac = networkInterface.mac ? `mac ${networkInterface.mac}` : "mac unknown";
+function interfaceStateSummary(
+  networkInterface: NetworkInterfaceSnapshotRecord,
+) {
+  const state =
+    networkInterface.operstate ??
+    (networkInterface.flags?.includes("up") ? "up" : "unknown");
+  const mtu =
+    typeof networkInterface.mtu === "number"
+      ? `mtu ${networkInterface.mtu}`
+      : "mtu unknown";
+  const mac = networkInterface.mac
+    ? `mac ${networkInterface.mac}`
+    : "mac unknown";
   return `${state}; ${mtu}; ${mac}`;
 }
 
-function interfaceAddressSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
+function interfaceAddressSummary(
+  networkInterface: NetworkInterfaceSnapshotRecord,
+) {
   const addresses = networkInterface.addresses ?? [];
   if (addresses.length === 0) {
     return "no IPs reported";
   }
   return addresses
-    .map((address) => `${address.family} ${address.address}${typeof address.prefix_len === "number" ? `/${address.prefix_len}` : ""}`)
+    .map(
+      (address) =>
+        `${address.family} ${address.address}${typeof address.prefix_len === "number" ? `/${address.prefix_len}` : ""}`,
+    )
     .join(", ");
 }
 
-function interfaceTrafficSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
-  const rxBytes = typeof networkInterface.rx_bytes === "number" ? networkInterface.rx_bytes : 0;
-  const txBytes = typeof networkInterface.tx_bytes === "number" ? networkInterface.tx_bytes : 0;
+function interfaceTrafficSummary(
+  networkInterface: NetworkInterfaceSnapshotRecord,
+) {
+  const rxBytes =
+    typeof networkInterface.rx_bytes === "number"
+      ? networkInterface.rx_bytes
+      : 0;
+  const txBytes =
+    typeof networkInterface.tx_bytes === "number"
+      ? networkInterface.tx_bytes
+      : 0;
   return `RX ${formatBytes(rxBytes)} / TX ${formatBytes(txBytes)}`;
 }
 
-function parseNetworkInterfacesSnapshot(outputs: JobOutputRecord[]): NetworkInterfacesSnapshot | null {
+function parseNetworkInterfacesSnapshot(
+  outputs: JobOutputRecord[],
+): NetworkInterfacesSnapshot | null {
   const snapshots = outputs
     .filter((output) => output.stream === "status" && output.data_base64)
     .map((output) => {
       try {
-        const value = JSON.parse(decodeOutputPreview(output.data_base64)) as unknown;
+        const value = JSON.parse(
+          decodeOutputPreview(output.data_base64),
+        ) as unknown;
         return isNetworkInterfacesSnapshot(value) ? value : null;
       } catch {
         return null;
@@ -1752,12 +3422,16 @@ function parseNetworkInterfacesSnapshot(outputs: JobOutputRecord[]): NetworkInte
   return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
 }
 
-function isNetworkInterfacesSnapshot(value: unknown): value is NetworkInterfacesSnapshot {
+function isNetworkInterfacesSnapshot(
+  value: unknown,
+): value is NetworkInterfacesSnapshot {
   if (!value || typeof value !== "object") {
     return false;
   }
   const record = value as Partial<NetworkInterfacesSnapshot>;
-  return record.type === "network_interfaces" && Array.isArray(record.interfaces);
+  return (
+    record.type === "network_interfaces" && Array.isArray(record.interfaces)
+  );
 }
 
 function NetworkRateList({
@@ -1773,7 +3447,8 @@ function NetworkRateList({
         icon={<Network size={18} />}
         label="Interfaces"
         value={
-          rollup && (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
+          rollup &&
+          (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
             ? "Counter-only telemetry; rate rollup pending"
             : "Awaiting rate rollup"
         }
@@ -1788,7 +3463,9 @@ function NetworkRateList({
         <span>
           {rates
             .slice()
-            .sort((left, right) => left.interface.localeCompare(right.interface))
+            .sort((left, right) =>
+              left.interface.localeCompare(right.interface),
+            )
             .map(
               (rate) =>
                 `${rate.interface} RX ${formatBitsPerSecond(rate.rx_bps_avg)} / TX ${formatBitsPerSecond(rate.tx_bps_avg)}`,
@@ -1802,7 +3479,13 @@ function NetworkRateList({
 
 function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
   if (tunnels.length === 0) {
-    return <DetailLine icon={<Network size={18} />} label="Runtime tunnels" value="No tunnel reports" />;
+    return (
+      <DetailLine
+        icon={<Network size={18} />}
+        label="Runtime tunnels"
+        value="No tunnel reports"
+      />
+    );
   }
   return (
     <div className="timeline">
@@ -1812,8 +3495,13 @@ function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
         <span>
           {tunnels
             .slice()
-            .sort((left, right) => left.interface.localeCompare(right.interface))
-            .map((tunnel) => `${tunnel.interface} ${tunnel.kind} ${tunnel.operstate ?? "unknown"} ${formatTunnelPolicy(tunnel)}`)
+            .sort((left, right) =>
+              left.interface.localeCompare(right.interface),
+            )
+            .map(
+              (tunnel) =>
+                `${tunnel.interface} ${tunnel.kind} ${tunnel.operstate ?? "unknown"} ${formatTunnelPolicy(tunnel)}`,
+            )
             .join("; ")}
         </span>
       </div>
@@ -1861,7 +3549,10 @@ function formatTunnelTraffic(tunnel: TelemetryTunnelRecord) {
   if (!source) {
     return "";
   }
-  const status = tunnel.traffic_status && tunnel.traffic_status !== "ok" ? ` ${tunnel.traffic_status}` : "";
+  const status =
+    tunnel.traffic_status && tunnel.traffic_status !== "ok"
+      ? ` ${tunnel.traffic_status}`
+      : "";
   return ` traffic ${source}${status}`;
 }
 
@@ -1881,7 +3572,7 @@ function DetailLine({
   icon: ReactNode;
   label: string;
   mono?: boolean;
-  value: string;
+  value: ReactNode;
 }) {
   return (
     <div className="timeline">

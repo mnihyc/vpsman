@@ -60,6 +60,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) timezone: Option<String>,
     #[serde(default = "default_operator_language")]
     pub(crate) language: String,
+    #[serde(default = "default_show_country_flags")]
+    pub(crate) show_country_flags: bool,
     #[serde(default = "default_sidebar_subpanel_default")]
     pub(crate) sidebar_subpanel_default: String,
     #[serde(default)]
@@ -80,6 +82,7 @@ impl Default for OperatorPreferences {
             vps_name_display_mode: default_vps_name_display_mode(),
             timezone: None,
             language: default_operator_language(),
+            show_country_flags: default_show_country_flags(),
             sidebar_subpanel_default: default_sidebar_subpanel_default(),
             dashboard_curve_exclusions: Vec::new(),
             dashboard_resource_top_limit: default_dashboard_top_limit(),
@@ -100,6 +103,7 @@ impl OperatorPreferences {
             ),
             timezone: self.timezone.and_then(normalize_operator_timezone),
             language: normalize_choice(self.language, "en", &["en"]),
+            show_country_flags: self.show_country_flags,
             sidebar_subpanel_default: normalize_choice(
                 self.sidebar_subpanel_default,
                 "active",
@@ -155,6 +159,10 @@ fn default_vps_name_display_mode() -> String {
 
 fn default_operator_language() -> String {
     "en".to_string()
+}
+
+fn default_show_country_flags() -> bool {
+    true
 }
 
 fn default_sidebar_subpanel_default() -> String {

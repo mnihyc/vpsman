@@ -41,7 +41,10 @@ import {
   GripVertical,
 } from "lucide-react";
 import { SearchExpressionInput } from "./SearchExpressionInput";
-import { filterBySearchExpression, type SearchFields } from "../searchExpression";
+import {
+  filterBySearchExpression,
+  type SearchFields,
+} from "../searchExpression";
 
 export type ConsoleDataGridColumn<T> = {
   align?: "end" | "start";
@@ -57,6 +60,7 @@ export type ConsoleDataGridColumn<T> = {
 
 export type ConsoleDataGridAction<T> = {
   disabled?: (rows: T[]) => boolean;
+  expandRow?: boolean;
   label: string;
   onSelect: (rows: T[]) => void;
   tone?: "danger" | "normal";
@@ -79,9 +83,14 @@ export function ConsoleDataGrid<T>({
   empty,
   getRowId,
   itemLabel = "rows",
+  expandOnRowClick = false,
+  onExpandedRowChange,
   onOpenRow,
+  onSelectionChange,
   renderExpandedRow,
+  renderSelectionPanel,
   rows,
+  singleExpandedRow = false,
   searchPlaceholder = "Search",
   storageKey,
   title,
@@ -91,11 +100,16 @@ export function ConsoleDataGrid<T>({
   defaultColumnVisibility?: VisibilityState;
   defaultPageSize?: number;
   empty?: ReactNode;
+  expandOnRowClick?: boolean;
   getRowId: (row: T) => string;
   itemLabel?: string;
+  onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
+  onSelectionChange?: (rows: T[]) => void;
   renderExpandedRow?: (row: T) => ReactNode;
+  renderSelectionPanel?: (rows: T[]) => ReactNode;
   rows: T[];
+  singleExpandedRow?: boolean;
   searchPlaceholder?: string;
   storageKey: string;
   title: string;
@@ -111,16 +125,26 @@ export function ConsoleDataGrid<T>({
     preferences.columnOrder ?? [],
   );
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
-  const [globalFilter, setGlobalFilter] = useState(preferences.globalFilter ?? "");
-  const [pageSize, setPageSize] = useState(preferences.pageSize ?? defaultPageSize);
+  const [globalFilter, setGlobalFilter] = useState(
+    preferences.globalFilter ?? "",
+  );
+  const [pageSize, setPageSize] = useState(
+    preferences.pageSize ?? defaultPageSize,
+  );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
   const filteredRows = useMemo(() => {
-    return filterBySearchExpression(rows, globalFilter, (row): SearchFields => ({
-      all: columns.map((column) => String(column.searchValue?.(row) ?? column.sortValue?.(row) ?? "")),
-    })).items;
+    return filterBySearchExpression(
+      rows,
+      globalFilter,
+      (row): SearchFields => ({
+        all: columns.map((column) =>
+          String(column.searchValue?.(row) ?? column.sortValue?.(row) ?? ""),
+        ),
+      }),
+    ).items;
   }, [columns, globalFilter, rows]);
   const tableColumns = useMemo<ColumnDef<T>[]>(
     () => [
@@ -147,6 +171,7 @@ export function ConsoleDataGrid<T>({
           <input
             aria-label={`Select ${title} row`}
             checked={row.getIsSelected()}
+            onClick={(event) => event.stopPropagation()}
             onChange={row.getToggleSelectedHandler()}
             type="checkbox"
           />
@@ -170,10 +195,7 @@ export function ConsoleDataGrid<T>({
                     className="iconButton gridIconButton"
                     onClick={(event) => {
                       event.stopPropagation();
-                      setExpandedRows((current) => ({
-                        ...current,
-                        [row.id]: !current[row.id],
-                      }));
+                      toggleExpandedRow(row.id, row.original);
                     }}
                     type="button"
                   >
@@ -209,7 +231,7 @@ export function ConsoleDataGrid<T>({
         ),
       })),
     ],
-    [columns, expandedRows, renderExpandedRow, title],
+    [columns, expandedRows, renderExpandedRow, singleExpandedRow, title],
   );
   const defaultColumnOrder = useMemo(
     () =>
@@ -257,6 +279,7 @@ export function ConsoleDataGrid<T>({
   const selectedRows = table
     .getSelectedRowModel()
     .rows.map((row) => row.original);
+  const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
   const pageCount = table.getPageCount() || 1;
   const currentPage = table.getState().pagination.pageIndex + 1;
 
@@ -284,10 +307,54 @@ export function ConsoleDataGrid<T>({
     storageKey,
   ]);
 
+  useEffect(() => {
+    onSelectionChange?.(selectedRows);
+    // Use row IDs as the dependency so parent selection summaries do not churn
+    // on every table render with referentially fresh row objects.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onSelectionChange, selectedRowSignature]);
+
+  function toggleExpandedRow(rowId: string, row?: T) {
+    if (!renderExpandedRow) {
+      return;
+    }
+    setExpandedRows((current) => {
+      const nextOpen = !current[rowId];
+      onExpandedRowChange?.(nextOpen ? (row ?? null) : null);
+      if (singleExpandedRow) {
+        return nextOpen ? { [rowId]: true } : {};
+      }
+      return {
+        ...current,
+        [rowId]: nextOpen,
+      };
+    });
+  }
+
+  function openExpandedRow(row: T) {
+    if (!renderExpandedRow) {
+      return;
+    }
+    const rowId = getRowId(row);
+    onExpandedRowChange?.(row);
+    setExpandedRows((current) => {
+      if (singleExpandedRow) {
+        return { [rowId]: true };
+      }
+      return {
+        ...current,
+        [rowId]: true,
+      };
+    });
+  }
+
   function invokeAction(action: ConsoleDataGridAction<T>, sourceRows?: T[]) {
     const actionRows = sourceRows ?? selectedRows;
     if (actionRows.length === 0 || action.disabled?.(actionRows)) {
       return;
+    }
+    if (action.expandRow && actionRows.length === 1) {
+      openExpandedRow(actionRows[0]);
     }
     action.onSelect(actionRows);
   }
@@ -484,7 +551,12 @@ export function ConsoleDataGrid<T>({
                       className={
                         row.getIsSelected() ? "gridRow selected" : "gridRow"
                       }
-                      onClick={() => onOpenRow?.(row.original)}
+                      onClick={() => {
+                        onOpenRow?.(row.original);
+                        if (expandOnRowClick) {
+                          toggleExpandedRow(row.id, row.original);
+                        }
+                      }}
                       role="row"
                     >
                       {row.getVisibleCells().map((cell) => (
@@ -534,6 +606,11 @@ export function ConsoleDataGrid<T>({
               </ContextMenu.Root>
             ))}
           </div>
+        </div>
+      )}
+      {renderSelectionPanel && selectedRows.length > 0 && (
+        <div className="gridSelectionPanel">
+          {renderSelectionPanel(selectedRows)}
         </div>
       )}
     </div>

@@ -125,6 +125,10 @@ test.beforeEach(async ({ page }) => {
 // Generate one test per batch
 batches.forEach((batch, batchIndex) => {
   test(`screenshot batch ${batchIndex + 1} of ${batches.length} (${batch[0].id}–${batch[batch.length - 1].id})`, async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "structured screenshot capture uses the desktop navigation shell",
+    );
     test.setTimeout(120_000);
 
     await page.goto("/");

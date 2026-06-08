@@ -2,7 +2,7 @@ import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { ConsoleSplitWorkspace } from "../components/ConsoleLayout";
+import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { bytesToBase64 } from "../fileTransfer";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -261,6 +261,7 @@ export function BackupsPanel({
     useState<BackupConfirmationAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [workflowOpen, setWorkflowOpen] = useState(false);
   const paths = useMemo(() => parseBackupPaths(pathsText), [pathsText]);
   const policyPaths = useMemo(
     () => parseBackupPaths(policyPathsText),
@@ -350,7 +351,9 @@ export function BackupsPanel({
         throw new Error("Select config or at least one absolute path");
       }
       if (policyTargetParse.error) {
-        throw new Error(`Invalid target expression: ${policyTargetParse.error}`);
+        throw new Error(
+          `Invalid target expression: ${policyTargetParse.error}`,
+        );
       }
       if (policyTargetCount === 0) {
         throw new Error("Add at least one matching target selector");
@@ -542,7 +545,9 @@ export function BackupsPanel({
         archive_size_bytes: null,
         archive_sha256_hex: null,
       };
-      const selectorExpression = selectorExpressionForClientIds([restoreTargetId]);
+      const selectorExpression = selectorExpressionForClientIds([
+        restoreTargetId,
+      ]);
       const built = await buildPrivilegeForJobOperation({
         clientIds: [restoreTargetId],
         commandType: "restore",
@@ -657,7 +662,9 @@ export function BackupsPanel({
         post_restore_argv: postRestoreArgv,
       };
     }
-    const selectorExpression = selectorExpressionForClientIds([input.targetClientId]);
+    const selectorExpression = selectorExpressionForClientIds([
+      input.targetClientId,
+    ]);
     const boundedTimeoutSecs = clampInteger(input.timeoutSecs, 1, 3600);
     const built = await buildPrivilegeForJobOperation({
       clientIds: [input.targetClientId],
@@ -735,7 +742,9 @@ export function BackupsPanel({
         targetClientId,
         outputs,
       );
-      const selectorExpression = selectorExpressionForClientIds([targetClientId]);
+      const selectorExpression = selectorExpressionForClientIds([
+        targetClientId,
+      ]);
       const boundedTimeoutSecs = clampInteger(rollbackTimeoutSecs, 1, 3600);
       const built = await buildPrivilegeForJobOperation({
         clientIds: [targetClientId],
@@ -835,59 +844,143 @@ export function BackupsPanel({
         return [
           { label: "Policy", value: policyName.trim() || "unnamed" },
           { label: "Targets", value: `${policyTargetCount} VPSs` },
-          { label: "Scope", value: `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths` },
-          { label: "Schedule", value: policyCronExpr.trim() || "cron required" },
+          {
+            label: "Scope",
+            value: `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths`,
+          },
+          {
+            label: "Schedule",
+            value: policyCronExpr.trim() || "cron required",
+          },
         ];
       case "policy-prune":
         return [
-          { label: "Scope", value: policyPruneScheduleId ? shortId(policyPruneScheduleId) : "all policies" },
-          { label: "Mode", value: policyPruneMetadataOnly ? "metadata only" : "metadata and objects" },
+          {
+            label: "Scope",
+            value: policyPruneScheduleId
+              ? shortId(policyPruneScheduleId)
+              : "all policies",
+          },
+          {
+            label: "Mode",
+            value: policyPruneMetadataOnly
+              ? "metadata only"
+              : "metadata and objects",
+          },
         ];
       case "backup-request":
         return [
-          { label: "VPS", value: selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : clientId || "none" },
-          { label: "Scope", value: `${includeConfig ? "config, " : ""}${paths.length} paths` },
-          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          {
+            label: "VPS",
+            value: selectedAgent
+              ? formatVpsName(selectedAgent, vpsNameDisplayMode)
+              : clientId || "none",
+          },
+          {
+            label: "Scope",
+            value: `${includeConfig ? "config, " : ""}${paths.length} paths`,
+          },
+          {
+            label: "Privilege",
+            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+          },
         ];
       case "artifact-upload":
         return [
-          { label: "Request", value: artifactBackupId ? shortId(artifactBackupId) : "none" },
+          {
+            label: "Request",
+            value: artifactBackupId ? shortId(artifactBackupId) : "none",
+          },
           { label: "Object", value: artifactObjectKey.trim() || "missing" },
           { label: "Mode", value: artifactUploadMode },
         ];
       case "artifact-handoff":
         return [
-          { label: "Request", value: artifactBackupId ? shortId(artifactBackupId) : "none" },
-          { label: "Source job", value: handoffJobId.trim() || "latest retained output" },
+          {
+            label: "Request",
+            value: artifactBackupId ? shortId(artifactBackupId) : "none",
+          },
+          {
+            label: "Source job",
+            value: handoffJobId.trim() || "latest retained output",
+          },
         ];
       case "restore-plan":
         return [
-          { label: "Source", value: restoreSourceId ? shortId(restoreSourceId) : "none" },
-          { label: "Target", value: restoreTarget ? formatVpsName(restoreTarget, vpsNameDisplayMode) : restoreTargetId || "none" },
-          { label: "Scope", value: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths` },
-          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          {
+            label: "Source",
+            value: restoreSourceId ? shortId(restoreSourceId) : "none",
+          },
+          {
+            label: "Target",
+            value: restoreTarget
+              ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+              : restoreTargetId || "none",
+          },
+          {
+            label: "Scope",
+            value: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
+          },
+          {
+            label: "Privilege",
+            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+          },
         ];
       case "restore-run":
         return [
-          { label: "Source", value: restoreSourceId ? shortId(restoreSourceId) : "none" },
-          { label: "Target", value: restoreTarget ? formatVpsName(restoreTarget, vpsNameDisplayMode) : restoreTargetId || "none" },
+          {
+            label: "Source",
+            value: restoreSourceId ? shortId(restoreSourceId) : "none",
+          },
+          {
+            label: "Target",
+            value: restoreTarget
+              ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+              : restoreTargetId || "none",
+          },
           { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
-          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          {
+            label: "Privilege",
+            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+          },
         ];
       case "restore-rollback":
         return [
-          { label: "Restore job", value: rollbackRestoreJobId.trim() ? shortId(rollbackRestoreJobId.trim()) : "none" },
-          { label: "Target", value: rollbackTarget ? formatVpsName(rollbackTarget, vpsNameDisplayMode) : rollbackTargetId || "none" },
-          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          {
+            label: "Restore job",
+            value: rollbackRestoreJobId.trim()
+              ? shortId(rollbackRestoreJobId.trim())
+              : "none",
+          },
+          {
+            label: "Target",
+            value: rollbackTarget
+              ? formatVpsName(rollbackTarget, vpsNameDisplayMode)
+              : rollbackTargetId || "none",
+          },
+          {
+            label: "Privilege",
+            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+          },
         ];
       case "migration-link":
         return [
-          { label: "Restore plan", value: migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none" },
+          {
+            label: "Restore plan",
+            value: migrationRestorePlanId
+              ? shortId(migrationRestorePlanId)
+              : "none",
+          },
           { label: "Note", value: migrationNote.trim() || "none" },
         ];
       case "migration-run":
         return [
-          { label: "Restore plan", value: selectedMigrationRestorePlan ? shortId(selectedMigrationRestorePlan.id) : "none" },
+          {
+            label: "Restore plan",
+            value: selectedMigrationRestorePlan
+              ? shortId(selectedMigrationRestorePlan.id)
+              : "none",
+          },
           {
             label: "Route",
             value: selectedMigrationRestorePlan
@@ -895,12 +988,17 @@ export function BackupsPanel({
               : "none",
           },
           { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
-          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          {
+            label: "Privilege",
+            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+          },
         ];
     }
   }
 
-  function backupConfirmationDetail(action: BackupConfirmationAction | null): string {
+  function backupConfirmationDetail(
+    action: BackupConfirmationAction | null,
+  ): string {
     switch (action) {
       case "policy":
         return "Confirm the saved schedule, target snapshot, and backup scope.";
@@ -915,13 +1013,17 @@ export function BackupsPanel({
       case "restore-plan":
         return "Confirm the restore intent and target before saving the plan.";
       case "restore-run":
-        return restoreDryRun ? "Confirm the restore rehearsal dispatch." : "Confirm the live restore dispatch.";
+        return restoreDryRun
+          ? "Confirm the restore rehearsal dispatch."
+          : "Confirm the live restore dispatch.";
       case "restore-rollback":
         return "Confirm restore rollback dispatch for the selected target.";
       case "migration-link":
         return "Confirm writing the migration link for the selected restore plan.";
       case "migration-run":
-        return restoreDryRun ? "Confirm migration link and restore rehearsal dispatch." : "Confirm migration link and live restore dispatch.";
+        return restoreDryRun
+          ? "Confirm migration link and restore rehearsal dispatch."
+          : "Confirm migration link and live restore dispatch.";
       default:
         return "";
     }
@@ -998,259 +1100,281 @@ export function BackupsPanel({
       ? "danger"
       : "normal";
 
+  const backupWorkflowLabel =
+    backupSubpage === "policies"
+      ? "Open policy workflow"
+      : backupSubpage === "artifacts"
+        ? "Open artifact workflow"
+        : backupSubpage === "restore"
+          ? "Open restore workflow"
+          : backupSubpage === "migration"
+            ? "Open migration workflow"
+            : "Open backup request";
+
   return (
-    <section className="workspace singleColumn backupWorkspace">
-      <ConsoleSplitWorkspace
-        detailMin={22}
-        detailSize={26}
-        id={`backups-${backupSubpage}`}
-        main={
-          <div className="fleetPanel">
-            <div className="sectionHeader">
-              <div>
-                <h2>{backupSubpageMeta.title}</h2>
-                <span>{loading ? backupSubpageMeta.loading : status}</span>
-              </div>
-              <button
-                className="secondaryAction"
-                onClick={() => void onRefresh()}
-                type="button"
-              >
-                <RefreshCw size={17} />
-                Refresh
-              </button>
-            </div>
-            <BackupHistoryTables
-              activeSubpage={backupSubpage}
-              artifacts={artifacts}
-              backupPolicies={backupPolicies}
+    <section className="workspace singleColumn backupWorkspace backupSingleWorkspace">
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>{backupSubpageMeta.title}</h2>
+            <span>{loading ? backupSubpageMeta.loading : status}</span>
+          </div>
+          <div className="sectionActions">
+            <button
+              className="secondaryAction"
+              onClick={() => void onRefresh()}
+              type="button"
+            >
+              <RefreshCw size={17} />
+              Refresh
+            </button>
+            <button
+              className="primaryAction"
+              onClick={() => setWorkflowOpen(true)}
+              type="button"
+            >
+              {backupWorkflowLabel}
+            </button>
+          </div>
+        </div>
+        <BackupHistoryTables
+          activeSubpage={backupSubpage}
+          artifacts={artifacts}
+          backupPolicies={backupPolicies}
+          backups={backups}
+          clientLabel={clientLabel}
+          error={error}
+          migrationLinks={migrationLinks}
+          restorePlans={restorePlans}
+        />
+      </div>
+      <ConsoleActionDrawer
+        description="One-time backup, restore, artifact, and migration inputs stay out of the data table until needed."
+        onClose={() => setWorkflowOpen(false)}
+        open={workflowOpen}
+        title={backupWorkflowLabel}
+      >
+        <div className="backupInspector backupWorkflowBody">
+          <ConfirmationPrompt
+            confirmLabel="Confirm"
+            detail={backupConfirmationDetail(pendingConfirmation)}
+            items={backupConfirmationItems}
+            onCancel={() => setPendingConfirmation(null)}
+            onConfirm={() => void confirmBackupAction()}
+            open={pendingConfirmation !== null}
+            pending={pending}
+            title={backupConfirmationTitle}
+            tone={backupConfirmationTone}
+          />
+          {backupSubpage === "policies" && (
+            <>
+              <BackupPolicyForm
+                agents={agents}
+                confirmationOpen={pendingConfirmation === "policy"}
+                cronExpr={policyCronExpr}
+                includeConfig={policyIncludeConfig}
+                keepLast={policyKeepLast}
+                name={policyName}
+                onCronExprChange={setPolicyCronExpr}
+                onEnabledChange={setPolicyEnabled}
+                onIncludeConfigChange={setPolicyIncludeConfig}
+                onKeepLastChange={setPolicyKeepLast}
+                onNameChange={setPolicyName}
+                onPathsTextChange={setPolicyPathsText}
+                onRecipientPublicKeyHexChange={setPolicyRecipientPublicKeyHex}
+                onRetentionDaysChange={setPolicyRetentionDays}
+                onRotationGenerationChange={setPolicyRotationGeneration}
+                onSubmit={submitPolicy}
+                onTargetsTextChange={setPolicyTargetsText}
+                pathsCount={policyPaths.length}
+                pathsText={policyPathsText}
+                pending={pending}
+                policyEnabled={policyEnabled}
+                recipientPublicKeyHex={policyRecipientPublicKeyHex}
+                retentionDays={policyRetentionDays}
+                rotationGeneration={policyRotationGeneration}
+                targetCount={policyTargetCount}
+                targetExpressionMessage={
+                  policyTargetParse.error ??
+                  `${policyTargetCount}/${agents.length}`
+                }
+                targetExpressionValid={!policyTargetParse.error}
+                targetsText={policyTargetsText}
+              />
+              <BackupPolicyPruneForm
+                confirmationOpen={pendingConfirmation === "policy-prune"}
+                dryRun={policyPruneDryRun}
+                metadataOnly={policyPruneMetadataOnly}
+                onDryRunChange={setPolicyPruneDryRun}
+                onMetadataOnlyChange={setPolicyPruneMetadataOnly}
+                onScheduleIdChange={setPolicyPruneScheduleId}
+                onSubmit={submitPolicyPrune}
+                pending={pending}
+                policies={backupPolicies}
+                result={lastPolicyPrune}
+                scheduleId={policyPruneScheduleId}
+              />
+            </>
+          )}
+          {backupSubpage === "requests" && (
+            <BackupRequestForm
+              agents={agents}
+              clientId={clientId}
+              confirmationOpen={pendingConfirmation === "backup-request"}
+              includeConfig={includeConfig}
+              note={note}
+              onClientIdChange={setClientId}
+              onIncludeConfigChange={setIncludeConfig}
+              onNoteChange={setNote}
+              onPathsTextChange={setPathsText}
+              onSubmit={submitRequest}
+              pathsCount={paths.length}
+              pathsText={pathsText}
+              pending={pending}
+              privilegeReady={Boolean(privilegeMaterial)}
+              selectedAgentName={
+                selectedAgent
+                  ? formatVpsName(selectedAgent, vpsNameDisplayMode)
+                  : null
+              }
+            />
+          )}
+          {backupSubpage === "artifacts" && (
+            <ArtifactUploadForm
+              artifactBackupId={artifactBackupId}
+              artifactConfirmationOpen={
+                pendingConfirmation === "artifact-upload"
+              }
+              artifactFile={artifactFile}
+              artifactObjectKey={artifactObjectKey}
+              artifactUploadMode={artifactUploadMode}
               backups={backups}
               clientLabel={clientLabel}
-              error={error}
-              migrationLinks={migrationLinks}
-              restorePlans={restorePlans}
-            />
-          </div>
-        }
-        detail={
-          <aside className="inspector backupInspector">
-            <ConfirmationPrompt
-              confirmLabel="Confirm"
-              detail={backupConfirmationDetail(pendingConfirmation)}
-              items={backupConfirmationItems}
-              onCancel={() => setPendingConfirmation(null)}
-              onConfirm={() => void confirmBackupAction()}
-              open={pendingConfirmation !== null}
+              handoffConfirmationOpen={
+                pendingConfirmation === "artifact-handoff"
+              }
+              handoffJobId={handoffJobId}
+              onArtifactBackupIdChange={selectArtifactBackupId}
+              onArtifactFileChange={selectArtifactFile}
+              onArtifactObjectKeyChange={setArtifactObjectKey}
+              onArtifactUploadModeChange={setArtifactUploadMode}
+              onHandoffJobIdChange={setHandoffJobId}
+              onHandoffSubmit={submitArtifactHandoff}
+              onSubmit={submitArtifactUpload}
               pending={pending}
-              title={backupConfirmationTitle}
-              tone={backupConfirmationTone}
             />
-            {backupSubpage === "policies" && (
-              <>
-                <BackupPolicyForm
-                  agents={agents}
-                  confirmationOpen={pendingConfirmation === "policy"}
-                  cronExpr={policyCronExpr}
-                  includeConfig={policyIncludeConfig}
-                  keepLast={policyKeepLast}
-                  name={policyName}
-                  onCronExprChange={setPolicyCronExpr}
-                  onEnabledChange={setPolicyEnabled}
-                  onIncludeConfigChange={setPolicyIncludeConfig}
-                  onKeepLastChange={setPolicyKeepLast}
-                  onNameChange={setPolicyName}
-                  onPathsTextChange={setPolicyPathsText}
-                  onRecipientPublicKeyHexChange={setPolicyRecipientPublicKeyHex}
-                  onRetentionDaysChange={setPolicyRetentionDays}
-                  onRotationGenerationChange={setPolicyRotationGeneration}
-                  onSubmit={submitPolicy}
-                  onTargetsTextChange={setPolicyTargetsText}
-                  pathsCount={policyPaths.length}
-                  pathsText={policyPathsText}
-                  pending={pending}
-                  policyEnabled={policyEnabled}
-                  recipientPublicKeyHex={policyRecipientPublicKeyHex}
-                  retentionDays={policyRetentionDays}
-                  rotationGeneration={policyRotationGeneration}
-                  targetCount={policyTargetCount}
-                  targetExpressionMessage={
-                    policyTargetParse.error ??
-                    `${policyTargetCount}/${agents.length}`
-                  }
-                  targetExpressionValid={!policyTargetParse.error}
-                  targetsText={policyTargetsText}
-                />
-                <BackupPolicyPruneForm
-                  confirmationOpen={pendingConfirmation === "policy-prune"}
-                  dryRun={policyPruneDryRun}
-                  metadataOnly={policyPruneMetadataOnly}
-                  onDryRunChange={setPolicyPruneDryRun}
-                  onMetadataOnlyChange={setPolicyPruneMetadataOnly}
-                  onScheduleIdChange={setPolicyPruneScheduleId}
-                  onSubmit={submitPolicyPrune}
-                  pending={pending}
-                  policies={backupPolicies}
-                  result={lastPolicyPrune}
-                  scheduleId={policyPruneScheduleId}
-                />
-              </>
-            )}
-            {backupSubpage === "requests" && (
-              <BackupRequestForm
+          )}
+          {backupSubpage === "restore" && (
+            <>
+              <RestorePlanForm
                 agents={agents}
-                clientId={clientId}
-                confirmationOpen={pendingConfirmation === "backup-request"}
-                includeConfig={includeConfig}
-                note={note}
-                onClientIdChange={setClientId}
-                onIncludeConfigChange={setIncludeConfig}
-                onNoteChange={setNote}
-                onPathsTextChange={setPathsText}
-                onSubmit={submitRequest}
-                pathsCount={paths.length}
-                pathsText={pathsText}
+                backups={backups}
+                confirmationOpen={pendingConfirmation === "restore-plan"}
+                onDestinationRootChange={setRestoreDestinationRoot}
+                onIncludeConfigChange={setRestoreIncludeConfig}
+                onNoteChange={setRestoreNote}
+                onPathsTextChange={setRestorePathsText}
+                onSourceIdChange={setRestoreSourceId}
+                onSubmit={submitRestorePlan}
+                onTargetIdChange={setRestoreTargetId}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
-                selectedAgentName={
-                  selectedAgent
-                    ? formatVpsName(selectedAgent, vpsNameDisplayMode)
+                restoreDestinationRoot={restoreDestinationRoot}
+                restoreIncludeConfig={restoreIncludeConfig}
+                restoreNote={restoreNote}
+                restorePathsCount={restorePaths.length}
+                restorePathsText={restorePathsText}
+                restoreSourceId={restoreSourceId}
+                restoreTargetId={restoreTargetId}
+                restoreTargetName={
+                  restoreTarget
+                    ? formatVpsName(restoreTarget, vpsNameDisplayMode)
                     : null
                 }
-              />
-            )}
-            {backupSubpage === "artifacts" && (
-              <ArtifactUploadForm
-                artifactBackupId={artifactBackupId}
-                artifactConfirmationOpen={pendingConfirmation === "artifact-upload"}
-                artifactFile={artifactFile}
-                artifactObjectKey={artifactObjectKey}
-                artifactUploadMode={artifactUploadMode}
-                backups={backups}
                 clientLabel={clientLabel}
-                handoffConfirmationOpen={pendingConfirmation === "artifact-handoff"}
-                handoffJobId={handoffJobId}
-                onArtifactBackupIdChange={selectArtifactBackupId}
-                onArtifactFileChange={selectArtifactFile}
-                onArtifactObjectKeyChange={setArtifactObjectKey}
-                onArtifactUploadModeChange={setArtifactUploadMode}
-                onHandoffJobIdChange={setHandoffJobId}
-                onHandoffSubmit={submitArtifactHandoff}
-                onSubmit={submitArtifactUpload}
-                pending={pending}
               />
-            )}
-            {backupSubpage === "restore" && (
-              <>
-                <RestorePlanForm
-                  agents={agents}
-                  backups={backups}
-                  confirmationOpen={pendingConfirmation === "restore-plan"}
-                  onDestinationRootChange={setRestoreDestinationRoot}
-                  onIncludeConfigChange={setRestoreIncludeConfig}
-                  onNoteChange={setRestoreNote}
-                  onPathsTextChange={setRestorePathsText}
-                  onSourceIdChange={setRestoreSourceId}
-                  onSubmit={submitRestorePlan}
-                  onTargetIdChange={setRestoreTargetId}
-                  pending={pending}
-                  privilegeReady={Boolean(privilegeMaterial)}
-                  restoreDestinationRoot={restoreDestinationRoot}
-                  restoreIncludeConfig={restoreIncludeConfig}
-                  restoreNote={restoreNote}
-                  restorePathsCount={restorePaths.length}
-                  restorePathsText={restorePathsText}
-                  restoreSourceId={restoreSourceId}
-                  restoreTargetId={restoreTargetId}
-                  restoreTargetName={
-                    restoreTarget
-                      ? formatVpsName(restoreTarget, vpsNameDisplayMode)
-                      : null
-                  }
-                  clientLabel={clientLabel}
-                />
-                <RestoreRunForm
-                  confirmationOpen={pendingConfirmation === "restore-run"}
-                  forceUnprivileged={restoreForceUnprivileged}
-                  onForceUnprivilegedChange={setRestoreForceUnprivileged}
-                  onArtifactFileChange={setRestoreArtifactFile}
-                  onArchivePathChange={setRestoreArchivePath}
-                  onArchiveSha256HexChange={setRestoreArchiveSha256Hex}
-                  onDryRunChange={setRestoreDryRun}
-                  onPrivateKeyHexChange={setRestorePrivateKeyHex}
-                  onPostRestoreArgvChange={setRestorePostRestoreArgv}
-                  onRestoreTimeoutSecsChange={setRestoreTimeoutSecs}
-                  onRunRestore={submitRestoreRun}
-                  pending={pending}
-                  privilegeReady={Boolean(privilegeMaterial)}
-                  restoreArchivePath={restoreArchivePath}
-                  restoreArchiveSha256Hex={restoreArchiveSha256Hex}
-                  restoreArtifactFile={restoreArtifactFile}
-                  restoreDryRun={restoreDryRun}
-                  restorePrivateKeyHex={restorePrivateKeyHex}
-                  restorePostRestoreArgv={restorePostRestoreArgv}
-                  restoreSourceId={restoreSourceId}
-                  restoreTarget={restoreTarget}
-                  restoreTargetId={restoreTargetId}
-                  restoreTimeoutSecs={restoreTimeoutSecs}
-                />
-                <RestoreRollbackForm
-                  confirmationOpen={pendingConfirmation === "restore-rollback"}
-                  forceUnprivileged={rollbackForceUnprivileged}
-                  onForceUnprivilegedChange={setRollbackForceUnprivileged}
-                  onRestoreJobIdChange={setRollbackRestoreJobId}
-                  onRestoreRollbackTimeoutSecsChange={setRollbackTimeoutSecs}
-                  onRunRestoreRollback={submitRestoreRollback}
-                  onTargetClientIdChange={setRollbackTargetId}
-                  pending={pending}
-                  privilegeReady={Boolean(privilegeMaterial)}
-                  restoreJobId={rollbackRestoreJobId}
-                  restoreRollbackTimeoutSecs={rollbackTimeoutSecs}
-                  targetAgent={rollbackTarget}
-                  targetClientId={rollbackTargetId}
-                />
-                <PrivilegeVaultBox
-                  lastPayloadHash={lastPayloadHash}
-                  onOpenUnlock={onOpenPrivilegeUnlock}
-                  onPrivilegeMaterialChange={setPrivilegeMaterial}
-                  privilegeMaterial={privilegeMaterial}
-                />
-              </>
-            )}
-            {backupSubpage === "migration" && (
-              <>
-                <MigrationLinkForm
-                  archivePath={restoreArchivePath}
-                  clientLabel={clientLabel}
-                  forceUnprivileged={restoreForceUnprivileged}
-                  lastMigrationLink={lastMigrationLink}
-                  linkConfirmationOpen={pendingConfirmation === "migration-link"}
-                  migrationNote={migrationNote}
-                  migrationRestorePlanId={migrationRestorePlanId}
-                  onMigrationNoteChange={setMigrationNote}
-                  onMigrationRestorePlanIdChange={setMigrationRestorePlanId}
-                  onRunMigrationRestore={submitMigrationRun}
-                  onSubmit={submitMigrationLink}
-                  pending={pending}
-                  postRestoreArgv={restorePostRestoreArgv}
-                  privateKeyReady={Boolean(restorePrivateKeyHex.trim())}
-                  privilegeReady={Boolean(privilegeMaterial)}
-                  restoreDryRun={restoreDryRun}
-                  restorePlans={restorePlans}
-                  runConfirmationOpen={pendingConfirmation === "migration-run"}
-                  selectedPlan={selectedMigrationRestorePlan}
-                  sourceBackup={selectedMigrationSourceBackup}
-                />
-                <PrivilegeVaultBox
-                  lastPayloadHash={lastPayloadHash}
-                  onOpenUnlock={onOpenPrivilegeUnlock}
-                  onPrivilegeMaterialChange={setPrivilegeMaterial}
-                  privilegeMaterial={privilegeMaterial}
-                />
-              </>
-            )}
-          </aside>
-        }
-      />
+              <RestoreRunForm
+                confirmationOpen={pendingConfirmation === "restore-run"}
+                forceUnprivileged={restoreForceUnprivileged}
+                onForceUnprivilegedChange={setRestoreForceUnprivileged}
+                onArtifactFileChange={setRestoreArtifactFile}
+                onArchivePathChange={setRestoreArchivePath}
+                onArchiveSha256HexChange={setRestoreArchiveSha256Hex}
+                onDryRunChange={setRestoreDryRun}
+                onPrivateKeyHexChange={setRestorePrivateKeyHex}
+                onPostRestoreArgvChange={setRestorePostRestoreArgv}
+                onRestoreTimeoutSecsChange={setRestoreTimeoutSecs}
+                onRunRestore={submitRestoreRun}
+                pending={pending}
+                privilegeReady={Boolean(privilegeMaterial)}
+                restoreArchivePath={restoreArchivePath}
+                restoreArchiveSha256Hex={restoreArchiveSha256Hex}
+                restoreArtifactFile={restoreArtifactFile}
+                restoreDryRun={restoreDryRun}
+                restorePrivateKeyHex={restorePrivateKeyHex}
+                restorePostRestoreArgv={restorePostRestoreArgv}
+                restoreSourceId={restoreSourceId}
+                restoreTarget={restoreTarget}
+                restoreTargetId={restoreTargetId}
+                restoreTimeoutSecs={restoreTimeoutSecs}
+              />
+              <RestoreRollbackForm
+                confirmationOpen={pendingConfirmation === "restore-rollback"}
+                forceUnprivileged={rollbackForceUnprivileged}
+                onForceUnprivilegedChange={setRollbackForceUnprivileged}
+                onRestoreJobIdChange={setRollbackRestoreJobId}
+                onRestoreRollbackTimeoutSecsChange={setRollbackTimeoutSecs}
+                onRunRestoreRollback={submitRestoreRollback}
+                onTargetClientIdChange={setRollbackTargetId}
+                pending={pending}
+                privilegeReady={Boolean(privilegeMaterial)}
+                restoreJobId={rollbackRestoreJobId}
+                restoreRollbackTimeoutSecs={rollbackTimeoutSecs}
+                targetAgent={rollbackTarget}
+                targetClientId={rollbackTargetId}
+              />
+              <PrivilegeVaultBox
+                lastPayloadHash={lastPayloadHash}
+                onOpenUnlock={onOpenPrivilegeUnlock}
+                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                privilegeMaterial={privilegeMaterial}
+              />
+            </>
+          )}
+          {backupSubpage === "migration" && (
+            <>
+              <MigrationLinkForm
+                archivePath={restoreArchivePath}
+                clientLabel={clientLabel}
+                forceUnprivileged={restoreForceUnprivileged}
+                lastMigrationLink={lastMigrationLink}
+                linkConfirmationOpen={pendingConfirmation === "migration-link"}
+                migrationNote={migrationNote}
+                migrationRestorePlanId={migrationRestorePlanId}
+                onMigrationNoteChange={setMigrationNote}
+                onMigrationRestorePlanIdChange={setMigrationRestorePlanId}
+                onRunMigrationRestore={submitMigrationRun}
+                onSubmit={submitMigrationLink}
+                pending={pending}
+                postRestoreArgv={restorePostRestoreArgv}
+                privateKeyReady={Boolean(restorePrivateKeyHex.trim())}
+                privilegeReady={Boolean(privilegeMaterial)}
+                restoreDryRun={restoreDryRun}
+                restorePlans={restorePlans}
+                runConfirmationOpen={pendingConfirmation === "migration-run"}
+                selectedPlan={selectedMigrationRestorePlan}
+                sourceBackup={selectedMigrationSourceBackup}
+              />
+              <PrivilegeVaultBox
+                lastPayloadHash={lastPayloadHash}
+                onOpenUnlock={onOpenPrivilegeUnlock}
+                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                privilegeMaterial={privilegeMaterial}
+              />
+            </>
+          )}
+        </div>
+      </ConsoleActionDrawer>
     </section>
   );
 }

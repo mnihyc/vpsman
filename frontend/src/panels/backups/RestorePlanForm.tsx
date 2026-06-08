@@ -1,7 +1,11 @@
 import type { FormEvent } from "react";
 import { RotateCcw } from "lucide-react";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { RESTORE_PATH_PLACEHOLDER } from "../../presets/backupPathPresets";
+import {
+  RESTORE_PATH_PLACEHOLDER,
+  RESTORE_PATH_PRESETS,
+} from "../../presets/backupPathPresets";
+import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView, BackupRequestRecord } from "../../types";
 import { formatVpsName, shortId } from "../../utils";
 
@@ -62,7 +66,11 @@ export function RestorePlanForm({
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
           <span>Source backup</span>
-          <select aria-label="Restore source backup request" onChange={(event) => onSourceIdChange(event.target.value)} value={restoreSourceId}>
+          <select
+            aria-label="Restore source backup request"
+            onChange={(event) => onSourceIdChange(event.target.value)}
+            value={restoreSourceId}
+          >
             <option value="">Select backup request</option>
             {backups.map((backup) => (
               <option key={backup.id} value={backup.id}>
@@ -73,7 +81,11 @@ export function RestorePlanForm({
         </label>
         <label>
           <span>Target VPS</span>
-          <select aria-label="Restore target client" onChange={(event) => onTargetIdChange(event.target.value)} value={restoreTargetId}>
+          <select
+            aria-label="Restore target client"
+            onChange={(event) => onTargetIdChange(event.target.value)}
+            value={restoreTargetId}
+          >
             <option value="">Select VPS</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
@@ -91,6 +103,10 @@ export function RestorePlanForm({
             rows={4}
             value={restorePathsText}
           />
+          <PathPresetButtons
+            onApply={onPathsTextChange}
+            presets={RESTORE_PATH_PRESETS}
+          />
         </label>
         <label>
           <span>Destination root</span>
@@ -103,19 +119,36 @@ export function RestorePlanForm({
         </label>
         <label>
           <span>Note</span>
-          <input aria-label="Restore note" onChange={(event) => onNoteChange(event.target.value)} placeholder="restore rehearsal" value={restoreNote} />
+          <input
+            aria-label="Restore note"
+            onChange={(event) => onNoteChange(event.target.value)}
+            placeholder="restore rehearsal"
+            value={restoreNote}
+          />
         </label>
         <label className="checkLine inlineCheck">
-          <input checked={restoreIncludeConfig} onChange={(event) => onIncludeConfigChange(event.target.checked)} type="checkbox" />
+          <input
+            checked={restoreIncludeConfig}
+            onChange={(event) => onIncludeConfigChange(event.target.checked)}
+            type="checkbox"
+          />
           <span>Include agent config</span>
         </label>
         <div className="backupScopeList">
           <RotateCcw size={18} />
           <span>{restoreIncludeConfig ? "config" : "no config"}</span>
-          <span>{restorePathsCount} path{restorePathsCount === 1 ? "" : "s"}</span>
+          <span>
+            {restorePathsCount} path{restorePathsCount === 1 ? "" : "s"}
+          </span>
         </div>
         {!confirmationOpen && (
-          <button className="primaryAction" disabled={pending || !privilegeReady || !restoreSourceId || !restoreTargetId} type="submit">
+          <button
+            className="primaryAction"
+            disabled={
+              pending || !privilegeReady || !restoreSourceId || !restoreTargetId
+            }
+            type="submit"
+          >
             <RotateCcw size={17} />
             Plan restore
           </button>

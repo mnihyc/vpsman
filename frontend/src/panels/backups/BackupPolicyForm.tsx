@@ -1,7 +1,11 @@
 import type { FormEvent } from "react";
 import { CalendarClock, Save } from "lucide-react";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
-import { BACKUP_PATH_PLACEHOLDER } from "../../presets/backupPathPresets";
+import {
+  BACKUP_PATH_PLACEHOLDER,
+  BACKUP_PATH_PRESETS,
+} from "../../presets/backupPathPresets";
+import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView } from "../../types";
 
 type BackupPolicyFormProps = {
@@ -69,12 +73,18 @@ export function BackupPolicyForm({
     <>
       <div className="sectionHeader compact">
         <h2>Backup policy</h2>
-        <span>{targetCount} matching VPS{targetCount === 1 ? "" : "s"}</span>
+        <span>
+          {targetCount} matching VPS{targetCount === 1 ? "" : "s"}
+        </span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
           <span>Name</span>
-          <input aria-label="Backup policy name" onChange={(event) => onNameChange(event.target.value)} value={name} />
+          <input
+            aria-label="Backup policy name"
+            onChange={(event) => onNameChange(event.target.value)}
+            value={name}
+          />
         </label>
         <div className="targetSelector">
           <div className="targetSelectorHeader">
@@ -102,12 +112,18 @@ export function BackupPolicyForm({
             rows={4}
             value={pathsText}
           />
+          <PathPresetButtons
+            onApply={onPathsTextChange}
+            presets={BACKUP_PATH_PRESETS}
+          />
         </label>
         <label>
           <span>Recipient public key</span>
           <input
             aria-label="Backup recipient public key hex"
-            onChange={(event) => onRecipientPublicKeyHexChange(event.target.value)}
+            onChange={(event) =>
+              onRecipientPublicKeyHexChange(event.target.value)
+            }
             placeholder="optional 32-byte hex"
             value={recipientPublicKeyHex}
           />
@@ -128,7 +144,9 @@ export function BackupPolicyForm({
               aria-label="Backup policy retention days"
               max={3650}
               min={1}
-              onChange={(event) => onRetentionDaysChange(Number(event.target.value))}
+              onChange={(event) =>
+                onRetentionDaysChange(Number(event.target.value))
+              }
               type="number"
               value={retentionDays}
             />
@@ -155,21 +173,41 @@ export function BackupPolicyForm({
           />
         </label>
         <label className="checkLine inlineCheck">
-          <input checked={includeConfig} onChange={(event) => onIncludeConfigChange(event.target.checked)} type="checkbox" />
+          <input
+            checked={includeConfig}
+            onChange={(event) => onIncludeConfigChange(event.target.checked)}
+            type="checkbox"
+          />
           <span>Include agent config</span>
         </label>
         <label className="checkLine inlineCheck">
-          <input checked={policyEnabled} onChange={(event) => onEnabledChange(event.target.checked)} type="checkbox" />
+          <input
+            checked={policyEnabled}
+            onChange={(event) => onEnabledChange(event.target.checked)}
+            type="checkbox"
+          />
           <span>Enabled</span>
         </label>
         <div className="backupScopeList">
           <CalendarClock size={18} />
           <span>{cronExpr.trim() || "cron required"}</span>
           <span>{includeConfig ? "config" : "no config"}</span>
-          <span>{pathsCount} path{pathsCount === 1 ? "" : "s"}</span>
+          <span>
+            {pathsCount} path{pathsCount === 1 ? "" : "s"}
+          </span>
         </div>
         {!confirmationOpen && (
-          <button className="primaryAction" disabled={pending || !name.trim() || !cronExpr.trim() || targetCount === 0 || !targetExpressionValid} type="submit">
+          <button
+            className="primaryAction"
+            disabled={
+              pending ||
+              !name.trim() ||
+              !cronExpr.trim() ||
+              targetCount === 0 ||
+              !targetExpressionValid
+            }
+            type="submit"
+          >
             <Save size={17} />
             Save policy
           </button>

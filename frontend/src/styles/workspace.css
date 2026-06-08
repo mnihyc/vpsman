@@ -545,7 +545,10 @@
 
 .dashboardTrafficRow {
   display: grid;
-  grid-template-columns: minmax(150px, 0.42fr) minmax(160px, 1fr) minmax(80px, auto);
+  grid-template-columns: minmax(150px, 0.42fr) minmax(160px, 1fr) minmax(
+      80px,
+      auto
+    );
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -1118,4 +1121,371 @@
   background: #e8f0fe;
   color: #174ea6;
   font-weight: 700;
+}
+
+.sectionActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fleetInstancesWorkspace {
+  align-items: start;
+}
+
+.fleetInstancesPanel .consoleDataGrid {
+  border-top: 1px solid #eef1f6;
+}
+
+.countryBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.1;
+}
+
+.countryFlag {
+  display: block;
+  width: 16px;
+  height: 12px;
+  object-fit: cover;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(60, 64, 67, 0.18);
+}
+
+.fleetNodeDetailCard {
+  display: grid;
+  gap: 14px;
+  min-width: min(100%, 860px);
+  border: 1px solid #dfe3eb;
+  border-radius: 10px;
+  background: #fff;
+  padding: 14px;
+}
+
+.fleetNodeDetailHeader,
+.fleetSelectionHeader,
+.fleetCurveHeader,
+.fleetConfigRowsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.fleetNodeDetailHeader h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.fleetNodeDetailControls {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 0.9fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.fleetNodeDetailControls .aliasEditor,
+.compactDeleteControls {
+  margin: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 10px;
+}
+
+.compactDeleteControls {
+  min-height: 100%;
+}
+
+.panelErrorText {
+  margin: 0 4px;
+}
+
+.fleetNodeDetailCard .detailTabs {
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  margin: 0;
+}
+
+.fleetSignalGrid {
+  margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.fleetDetailPane {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 0;
+}
+
+.fleetNodeDetailCard .timeline {
+  margin: 14px;
+}
+
+.fleetConfigRows {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  margin: 14px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 12px;
+}
+
+.fleetConfigRowsHeader {
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.fleetConfigRowsHeader span {
+  margin-left: auto;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.fleetConfigTable,
+.fleetSelectionStatsTable {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.fleetConfigTableRow,
+.fleetSelectionStatsRow {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  min-width: 760px;
+  border: 1px solid #eef1f6;
+  border-radius: 6px;
+  background: #fff;
+  padding: 7px 9px;
+  color: #3c4043;
+  font-size: 12px;
+}
+
+.fleetConfigTableRow {
+  grid-template-columns:
+    minmax(90px, 0.8fr) minmax(150px, 1.3fr) minmax(90px, 0.8fr)
+    minmax(180px, 1.6fr);
+}
+
+.fleetConfigTableRow.heading,
+.fleetSelectionStatsRow.heading {
+  background: #f1f3f4;
+  color: #5f6368;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.fleetCurveSection,
+.fleetSelectionPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 10px;
+  background: #f8fafd;
+  padding: 12px;
+}
+
+.fleetCurveHeader span,
+.fleetSelectionHeader > div:first-child,
+.fleetConfigRowsHeader {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.fleetCurveHeader small,
+.fleetSelectionHeader small {
+  color: #5f6368;
+}
+
+.fleetCurveGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.fleetCurveCard {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
+.gridSelectionPanel {
+  border-top: 1px solid #dfe3eb;
+  background: #f8fafd;
+  padding: 12px;
+}
+
+.fleetSelectionActions,
+.fleetInlineMutationPanel,
+.selectionStatsTabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fleetSelectionHeader {
+  align-items: center;
+}
+
+.fleetSelectionHeader .monoValue {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.fleetInlineMutationPanel form {
+  display: flex;
+  min-width: min(100%, 360px);
+  gap: 8px;
+}
+
+.fleetInlineMutationPanel input {
+  flex: 1;
+  min-width: 160px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 0 10px;
+}
+
+.selectionStatsTabs button {
+  min-height: 30px;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 12px;
+}
+
+.selectionStatsTabs button.selected {
+  border-color: #1a73e8;
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.telemetryMode .fleetSelectionStatsRow {
+  grid-template-columns:
+    minmax(160px, 1fr) minmax(60px, 0.4fr) minmax(160px, 1fr)
+    minmax(160px, 1fr) minmax(160px, 1fr) minmax(90px, 0.6fr);
+}
+
+.networkMode .fleetSelectionStatsRow {
+  grid-template-columns:
+    minmax(160px, 1fr) minmax(170px, 1fr) minmax(260px, 1.6fr)
+    minmax(160px, 1fr);
+}
+
+.overviewMode .fleetSelectionStatsRow {
+  grid-template-columns:
+    minmax(160px, 1fr) minmax(80px, 0.5fr) minmax(70px, 0.45fr)
+    minmax(100px, 0.7fr) minmax(120px, 0.8fr) minmax(220px, 1.4fr);
+}
+
+.capabilitiesMode .fleetSelectionStatsRow {
+  grid-template-columns:
+    minmax(160px, 1fr) minmax(150px, 1fr) minmax(70px, 0.45fr)
+    minmax(80px, 0.5fr) minmax(100px, 0.6fr) minmax(80px, 0.5fr);
+}
+
+@media (max-width: 900px) {
+  .fleetNodeDetailControls,
+  .fleetDetailPane {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fleetSelectionHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+.fleetConfigList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  grid-column: 1 / -1;
+}
+
+.fleetConfigListHeader,
+.fleetConfigTableBlock > strong {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.fleetConfigListHeader {
+  color: var(--text);
+  justify-content: space-between;
+}
+
+.fleetConfigListHeader small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.fleetConfigTables {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+}
+
+.fleetConfigTableBlock {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.fleetConfigTableBlock table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.fleetConfigTableBlock th,
+.fleetConfigTableBlock td {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 7px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.fleetConfigTableBlock th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1100px) {
+  .fleetConfigTables {
+    grid-template-columns: 1fr;
+  }
 }

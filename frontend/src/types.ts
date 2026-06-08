@@ -7,11 +7,31 @@ export type FleetSummary = {
   running_jobs: number;
 };
 
-export type DashboardWindow = "15m" | "1h" | "6h" | "24h" | "7d" | "14d" | "30d" | "all";
+export type DashboardWindow =
+  | "15m"
+  | "1h"
+  | "6h"
+  | "24h"
+  | "7d"
+  | "14d"
+  | "30d"
+  | "all";
 
-export type DashboardGroupBy = "labels" | "tags" | "countries" | "providers" | "clients" | "status" | "date";
+export type DashboardGroupBy =
+  | "labels"
+  | "tags"
+  | "countries"
+  | "providers"
+  | "clients"
+  | "status"
+  | "date";
 
-export type DashboardScopeKind = "all" | "tag" | "country" | "provider" | "client";
+export type DashboardScopeKind =
+  | "all"
+  | "tag"
+  | "country"
+  | "provider"
+  | "client";
 
 export type DashboardResourceMetric = "cpu_load" | "memory_used" | "disk_free";
 
@@ -611,9 +631,25 @@ export type WsEvent =
   | { type: "hello"; service: string; stream: string }
   | { type: "fleet_snapshot"; summary: FleetSummary; agents: AgentView[] }
   | { type: "agent_updated"; client_id: string; gateway_id: string }
-  | { type: "telemetry_updated"; client_id: string; observed_unix: number; gateway_id: string }
-  | { type: "job_rejected"; job_id: string; accepted_targets: number; status: string }
-  | { type: "job_output_recorded"; job_id: string; client_id: string; seq: number; done: boolean }
+  | {
+      type: "telemetry_updated";
+      client_id: string;
+      observed_unix: number;
+      gateway_id: string;
+    }
+  | {
+      type: "job_rejected";
+      job_id: string;
+      accepted_targets: number;
+      status: string;
+    }
+  | {
+      type: "job_output_recorded";
+      job_id: string;
+      client_id: string;
+      seq: number;
+      done: boolean;
+    }
   | {
       type: "terminal_output_recorded";
       job_id: string;
@@ -623,11 +659,27 @@ export type WsEvent =
       seq: number;
       done: boolean;
     }
-  | { type: "job_finished"; job_id: string; accepted_targets: number; status: string }
-  | { type: "backup_artifact_recorded"; backup_request_id: string; client_id: string; artifact_id: string };
+  | {
+      type: "job_finished";
+      job_id: string;
+      accepted_targets: number;
+      status: string;
+    }
+  | {
+      type: "backup_artifact_recorded";
+      backup_request_id: string;
+      client_id: string;
+      artifact_id: string;
+    };
 
-export type WsJobOutputEvent = Extract<WsEvent, { type: "job_output_recorded" }>;
-export type WsTerminalOutputEvent = Extract<WsEvent, { type: "terminal_output_recorded" }>;
+export type WsJobOutputEvent = Extract<
+  WsEvent,
+  { type: "job_output_recorded" }
+>;
+export type WsTerminalOutputEvent = Extract<
+  WsEvent,
+  { type: "terminal_output_recorded" }
+>;
 
 export type OperatorView = {
   id: string;
@@ -642,6 +694,7 @@ export type OperatorPreferences = {
   vps_name_display_mode: "name" | "name_id_suffix";
   timezone: string | null;
   language: "en";
+  show_country_flags: boolean;
   sidebar_subpanel_default: "active" | "all";
   dashboard_curve_exclusions: string[];
   dashboard_resource_top_limit: number;
@@ -781,11 +834,22 @@ export type ScheduleRecord = {
   updated_at: string;
 };
 
-export type TunnelKind = "gre" | "ipip" | "sit" | "fou" | "openvpn" | "wireguard" | "tun_tap" | "custom";
+export type TunnelKind =
+  | "gre"
+  | "ipip"
+  | "sit"
+  | "fou"
+  | "openvpn"
+  | "wireguard"
+  | "tun_tap"
+  | "custom";
 export type BandwidthTier = "10m" | "100m" | "1000m";
 export type TunnelEndpointSide = "left" | "right";
 export type TunnelConfigBackend = "ifupdown" | "netplan" | "systemd_networkd";
-export type RuntimeTunnelManager = "agent_iproute2_managed" | "external_observed" | "external_managed_adapter";
+export type RuntimeTunnelManager =
+  | "agent_iproute2_managed"
+  | "external_observed"
+  | "external_managed_adapter";
 
 export type RuntimeTunnelCommand = {
   argv: string[];
@@ -1310,7 +1374,12 @@ export type JobOperation =
       idle_timeout_secs: number;
       flow_window_bytes: number;
     }
-  | { type: "terminal_input"; session_id: string; input_seq: number; data_base64: string }
+  | {
+      type: "terminal_input";
+      session_id: string;
+      input_seq: number;
+      data_base64: string;
+    }
   | { type: "terminal_poll"; session_id: string; replay_from_seq?: number }
   | { type: "terminal_resize"; session_id: string; cols: number; rows: number }
   | { type: "terminal_close"; session_id: string; reason?: string }
@@ -1330,9 +1399,18 @@ export type JobOperation =
       artifact_signature_hex?: string;
       artifact_signing_key_hex?: string;
     }
-  | { type: "agent_update_activate"; staged_sha256_hex: string; restart_agent?: boolean }
+  | {
+      type: "agent_update_activate";
+      staged_sha256_hex: string;
+      restart_agent?: boolean;
+    }
   | { type: "agent_update_rollback"; rollback_sha256_hex?: string }
-  | { type: "agent_update_check"; version_url?: string; activate?: boolean; restart_agent?: boolean }
+  | {
+      type: "agent_update_check";
+      version_url?: string;
+      activate?: boolean;
+      restart_agent?: boolean;
+    }
   | {
       type: "file_push";
       path: string;
@@ -1353,7 +1431,12 @@ export type JobOperation =
       mode: number;
       size_bytes: number;
       sha256_hex: string;
-      chunks: Array<{ offset: number; size_bytes: number; sha256_hex: string; data_base64: string }>;
+      chunks: Array<{
+        offset: number;
+        size_bytes: number;
+        sha256_hex: string;
+        data_base64: string;
+      }>;
       existing_policy?: FileExistingPolicy;
       owner?: string | null;
       group?: string | null;
@@ -1377,11 +1460,24 @@ export type JobOperation =
       type: "file_transfer_chunk";
       session_id: string;
       offset: number;
-      chunk: { offset: number; size_bytes: number; sha256_hex: string; data_base64: string };
+      chunk: {
+        offset: number;
+        size_bytes: number;
+        sha256_hex: string;
+        data_base64: string;
+      };
       resume_token_hash: string;
     }
-  | { type: "file_transfer_commit"; session_id: string; resume_token_hash: string }
-  | { type: "file_transfer_abort"; session_id: string; resume_token_hash: string }
+  | {
+      type: "file_transfer_commit";
+      session_id: string;
+      resume_token_hash: string;
+    }
+  | {
+      type: "file_transfer_abort";
+      session_id: string;
+      resume_token_hash: string;
+    }
   | {
       type: "file_transfer_download_start";
       session_id: string;
@@ -1398,7 +1494,13 @@ export type JobOperation =
       resume_token_hash: string;
     }
   | { type: "file_stat"; path: string }
-  | { type: "file_list_dir"; path: string; offset?: number; limit?: number; show_hidden?: boolean }
+  | {
+      type: "file_list_dir";
+      path: string;
+      offset?: number;
+      limit?: number;
+      show_hidden?: boolean;
+    }
   | { type: "file_read_text"; path: string; max_bytes?: number }
   | {
       type: "file_write_text";
@@ -1411,10 +1513,33 @@ export type JobOperation =
       create?: boolean;
       policy?: FileActionPolicy;
     }
-  | { type: "file_mkdir"; path: string; mode: number; recursive?: boolean; policy?: FileActionPolicy }
-  | { type: "file_rename"; path: string; new_path: string; overwrite?: boolean; policy?: FileActionPolicy }
-  | { type: "file_delete"; path: string; recursive?: boolean; policy?: FileActionPolicy }
-  | { type: "file_chmod"; path: string; mode: number; recursive?: boolean; policy?: FileActionPolicy }
+  | {
+      type: "file_mkdir";
+      path: string;
+      mode: number;
+      recursive?: boolean;
+      policy?: FileActionPolicy;
+    }
+  | {
+      type: "file_rename";
+      path: string;
+      new_path: string;
+      overwrite?: boolean;
+      policy?: FileActionPolicy;
+    }
+  | {
+      type: "file_delete";
+      path: string;
+      recursive?: boolean;
+      policy?: FileActionPolicy;
+    }
+  | {
+      type: "file_chmod";
+      path: string;
+      mode: number;
+      recursive?: boolean;
+      policy?: FileActionPolicy;
+    }
   | {
       type: "file_chown";
       path: string;
@@ -1426,7 +1551,14 @@ export type JobOperation =
       ownership_policy?: FileOwnershipPolicy;
       policy?: FileActionPolicy;
     }
-  | { type: "file_copy"; path: string; new_path: string; overwrite?: boolean; recursive?: boolean; policy?: FileActionPolicy }
+  | {
+      type: "file_copy";
+      path: string;
+      new_path: string;
+      overwrite?: boolean;
+      recursive?: boolean;
+      policy?: FileActionPolicy;
+    }
   | { type: "file_download"; path: string; max_bytes?: number }
   | { type: "file_archive_tar"; path: string; max_bytes?: number }
   | { type: "user_sessions" }
@@ -1455,7 +1587,12 @@ export type JobOperation =
   | { type: "process_restart"; name: string }
   | { type: "process_status"; name: string | null }
   | { type: "process_logs"; name: string; max_bytes: number }
-  | { type: "backup"; paths: string[]; include_config: boolean; recipient_public_key_hex?: string | null }
+  | {
+      type: "backup";
+      paths: string[];
+      include_config: boolean;
+      recipient_public_key_hex?: string | null;
+    }
   | {
       type: "network_apply";
       plan: TunnelPlan;
@@ -1802,7 +1939,13 @@ export type JobTargetSelection = {
   selector_expression: string;
 };
 
-export type JsonValue = JsonValue[] | boolean | null | number | string | { [key: string]: JsonValue };
+export type JsonValue =
+  | JsonValue[]
+  | boolean
+  | null
+  | number
+  | string
+  | { [key: string]: JsonValue };
 
 export type AuditLogRecord = {
   id: string;

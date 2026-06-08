@@ -1,4 +1,9 @@
-import type { ActiveView, JsonValue, OperatorPreferences, WsEvent } from "./types";
+import type {
+  ActiveView,
+  JsonValue,
+  OperatorPreferences,
+  WsEvent,
+} from "./types";
 import { DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE } from "./enrollmentInstallCommand";
 
 export function parseWsEvent(value: unknown): WsEvent | null {
@@ -100,8 +105,10 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  enrollment_install_command_template: DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
+  enrollment_install_command_template:
+    DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
   language: "en",
+  show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
   vps_name_display_mode: DEFAULT_VPS_NAME_DISPLAY_MODE,
@@ -177,10 +184,14 @@ let preferredTimeZone: string | null = null;
 
 export function setPreferredTimeZone(timeZone: string | null): void {
   const normalized = timeZone?.trim() || null;
-  preferredTimeZone = normalized && isBrowserTimeZoneSupported(normalized) ? normalized : null;
+  preferredTimeZone =
+    normalized && isBrowserTimeZoneSupported(normalized) ? normalized : null;
 }
 
-export function formatTime(value: string, timeZone = preferredTimeZone): string {
+export function formatTime(
+  value: string,
+  timeZone = preferredTimeZone,
+): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
@@ -188,7 +199,10 @@ export function formatTime(value: string, timeZone = preferredTimeZone): string 
   return safeLocaleString(date, timeZone ? { timeZone } : undefined);
 }
 
-export function formatCompactTime(value: string, timeZone = preferredTimeZone): string {
+export function formatCompactTime(
+  value: string,
+  timeZone = preferredTimeZone,
+): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
@@ -211,7 +225,10 @@ function isBrowserTimeZoneSupported(timeZone: string): boolean {
   }
 }
 
-function safeLocaleString(date: Date, options?: Intl.DateTimeFormatOptions): string {
+function safeLocaleString(
+  date: Date,
+  options?: Intl.DateTimeFormatOptions,
+): string {
   try {
     return date.toLocaleString(undefined, options);
   } catch {

@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   Activity,
+  Flag,
   LayoutPanelTop,
   Languages,
   ListChecks,
@@ -38,11 +45,22 @@ const COMMON_TIMEZONES = [
 const DASHBOARD_TOP_LIMIT_OPTIONS = [3, 5, 8, 12, 16];
 
 export function PreferencesPanel({ operator }: PreferencesPanelProps) {
-  const { preferences, preferencesError, preferencesSaving, updatePreferences } = usePanelDisplaySettings();
+  const {
+    preferences,
+    preferencesError,
+    preferencesSaving,
+    updatePreferences,
+  } = usePanelDisplaySettings();
   const [draft, setDraft] = useState<OperatorPreferences>(preferences);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [localSelectionMessage, setLocalSelectionMessage] = useState<string | null>(null);
-  const browserTimezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "local browser time", []);
+  const [localSelectionMessage, setLocalSelectionMessage] = useState<
+    string | null
+  >(null);
+  const browserTimezone = useMemo(
+    () =>
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "local browser time",
+    [],
+  );
   const timezonePreview = useMemo(
     () => previewTimezone(draft.timezone || browserTimezone),
     [browserTimezone, draft.timezone],
@@ -57,11 +75,18 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
     event.preventDefault();
     setLocalError(null);
     const timezone = draft.timezone?.trim() || null;
-    const dashboardCurveExclusions = normalizeCurveExclusions(draft.dashboard_curve_exclusions);
+    const dashboardCurveExclusions = normalizeCurveExclusions(
+      draft.dashboard_curve_exclusions,
+    );
     const validationError =
       validateTimezone(timezone) ??
-      validateDashboardLimits(draft.dashboard_resource_top_limit, draft.dashboard_network_top_limit) ??
-      validateEnrollmentInstallCommandTemplate(draft.enrollment_install_command_template);
+      validateDashboardLimits(
+        draft.dashboard_resource_top_limit,
+        draft.dashboard_network_top_limit,
+      ) ??
+      validateEnrollmentInstallCommandTemplate(
+        draft.enrollment_install_command_template,
+      );
     if (validationError) {
       setLocalError(validationError);
       return;
@@ -71,7 +96,8 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
         ...draft,
         dashboard_curve_exclusions: dashboardCurveExclusions,
         enrollment_install_command_template:
-          draft.enrollment_install_command_template.trim() || DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
+          draft.enrollment_install_command_template.trim() ||
+          DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
         timezone,
       });
     } catch {
@@ -103,11 +129,17 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
           <div>
             <h2>Operator preferences</h2>
             <span>
-              {operator ? `${operator.username} / ${operator.role}` : "Current authenticated operator"} / Console build{" "}
-              {FRONTEND_BUILD_NUMBER}
+              {operator
+                ? `${operator.username} / ${operator.role}`
+                : "Current authenticated operator"}{" "}
+              / Console build {FRONTEND_BUILD_NUMBER}
             </span>
           </div>
-          <span className={dirty ? "consoleStatusBadge warning" : "consoleStatusBadge ok"}>
+          <span
+            className={
+              dirty ? "consoleStatusBadge warning" : "consoleStatusBadge ok"
+            }
+          >
             {dirty ? "Unsaved changes" : "Saved"}
           </span>
         </div>
@@ -125,13 +157,36 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    vps_name_display_mode: event.target.value === "name" ? "name" : "name_id_suffix",
+                    vps_name_display_mode:
+                      event.target.value === "name" ? "name" : "name_id_suffix",
                   }))
                 }
               >
-                <option value="name_id_suffix">Name with client ID suffix</option>
+                <option value="name_id_suffix">
+                  Name with client ID suffix
+                </option>
                 <option value="name">Name only</option>
               </select>
+            </label>
+          </PreferenceGroup>
+
+          <PreferenceGroup
+            description="Country columns show a compact flag glyph plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
+            icon={<Flag size={18} />}
+            title="Country flags"
+          >
+            <label className="checkLine inlineCheck">
+              <input
+                checked={draft.show_country_flags}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    show_country_flags: event.target.checked,
+                  }))
+                }
+                type="checkbox"
+              />
+              <span>Show flag next to country code</span>
             </label>
           </PreferenceGroup>
 
@@ -149,7 +204,9 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    timezone: event.target.value.trim() ? event.target.value : null,
+                    timezone: event.target.value.trim()
+                      ? event.target.value
+                      : null,
                   }))
                 }
               />
@@ -160,7 +217,9 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
               </datalist>
             </label>
             <div className="preferenceHint">
-              <strong>{draft.timezone ? draft.timezone : "Browser timezone"}</strong>
+              <strong>
+                {draft.timezone ? draft.timezone : "Browser timezone"}
+              </strong>
               <span>{timezonePreview}</span>
             </div>
           </PreferenceGroup>
@@ -198,7 +257,8 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    sidebar_subpanel_default: event.target.value === "all" ? "all" : "active",
+                    sidebar_subpanel_default:
+                      event.target.value === "all" ? "all" : "active",
                   }))
                 }
               >
@@ -215,15 +275,26 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
           >
             <div className="preferenceResetRow">
               <div className="preferenceHint">
-                <strong>Server preferences and encrypted vaults are preserved.</strong>
-                <span>After clearing, the console reloads and reads default local selections.</span>
+                <strong>
+                  Server preferences and encrypted vaults are preserved.
+                </strong>
+                <span>
+                  After clearing, the console reloads and reads default local
+                  selections.
+                </span>
               </div>
-              <button className="secondaryAction" onClick={resetLocalSelections} type="button">
+              <button
+                className="secondaryAction"
+                onClick={resetLocalSelections}
+                type="button"
+              >
                 <Trash2 size={18} />
                 <span>Clear local selections</span>
               </button>
             </div>
-            {localSelectionMessage && <p className="preferencesNotice">{localSelectionMessage}</p>}
+            {localSelectionMessage && (
+              <p className="preferencesNotice">{localSelectionMessage}</p>
+            )}
           </PreferenceGroup>
 
           <PreferenceGroup
@@ -246,13 +317,18 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
               />
             </label>
             <div className="preferenceHint">
-              <strong>{ENROLLMENT_INSTALL_TEMPLATE_VARIABLES.map((variable) => `{${variable}}`).join(" ")}</strong>
+              <strong>
+                {ENROLLMENT_INSTALL_TEMPLATE_VARIABLES.map(
+                  (variable) => `{${variable}}`,
+                ).join(" ")}
+              </strong>
               <button
                 className="secondaryAction compactAction"
                 onClick={() =>
                   setDraft((current) => ({
                     ...current,
-                    enrollment_install_command_template: DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
+                    enrollment_install_command_template:
+                      DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
                   }))
                 }
                 type="button"
@@ -276,7 +352,8 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    bulk_output_compare_mode: event.target.value === "text" ? "text" : "binary",
+                    bulk_output_compare_mode:
+                      event.target.value === "text" ? "text" : "binary",
                   }))
                 }
               >
@@ -286,10 +363,13 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
             </label>
             <div className="preferenceHint">
               <strong>
-                {draft.bulk_output_compare_mode === "text" ? "Text normalized" : "Binary exact"}
+                {draft.bulk_output_compare_mode === "text"
+                  ? "Text normalized"
+                  : "Binary exact"}
               </strong>
               <span>
-                Binary is safest for correctness; text mode normalizes line endings and trailing whitespace for command output review.
+                Binary is safest for correctness; text mode normalizes line
+                endings and trailing whitespace for command output review.
               </span>
             </div>
           </PreferenceGroup>
@@ -346,17 +426,30 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    dashboard_curve_exclusions: splitCurveExclusions(event.target.value),
+                    dashboard_curve_exclusions: splitCurveExclusions(
+                      event.target.value,
+                    ),
                   }))
                 }
-                placeholder={"provider:test\ncountry:lab\nname:canary\nid:agent-dev-"}
+                placeholder={
+                  "provider:test\ncountry:lab\nname:canary\nid:agent-dev-"
+                }
                 rows={5}
                 value={draft.dashboard_curve_exclusions.join("\n")}
               />
             </label>
             <div className="preferenceHint">
-              <strong>{normalizeCurveExclusions(draft.dashboard_curve_exclusions).length} exclusions</strong>
-              <span>Applied server-side before top-N resource and network curves are selected.</span>
+              <strong>
+                {
+                  normalizeCurveExclusions(draft.dashboard_curve_exclusions)
+                    .length
+                }{" "}
+                exclusions
+              </strong>
+              <span>
+                Applied server-side before top-N resource and network curves are
+                selected.
+              </span>
             </div>
           </PreferenceGroup>
 
@@ -365,11 +458,20 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
           )}
 
           <div className="preferencesActions">
-            <button className="secondaryAction" disabled={!dirty || preferencesSaving} onClick={resetPreferences} type="button">
+            <button
+              className="secondaryAction"
+              disabled={!dirty || preferencesSaving}
+              onClick={resetPreferences}
+              type="button"
+            >
               <RotateCcw size={18} />
               <span>Reset</span>
             </button>
-            <button className="primaryAction" disabled={!dirty || preferencesSaving} type="submit">
+            <button
+              className="primaryAction"
+              disabled={!dirty || preferencesSaving}
+              type="submit"
+            >
               <Save size={18} />
               <span>{preferencesSaving ? "Saving" : "Save preferences"}</span>
             </button>
@@ -416,7 +518,12 @@ function normalizeCurveExclusions(values: string[]): string[] {
   const normalized: string[] = [];
   for (const value of values) {
     const trimmed = value.trim();
-    if (!trimmed || trimmed.length > 128 || normalized.includes(trimmed) || normalized.length >= 50) {
+    if (
+      !trimmed ||
+      trimmed.length > 128 ||
+      normalized.includes(trimmed) ||
+      normalized.length >= 50
+    ) {
       continue;
     }
     normalized.push(trimmed);
@@ -424,11 +531,22 @@ function normalizeCurveExclusions(values: string[]): string[] {
   return normalized;
 }
 
-function validateDashboardLimits(resourceTopLimit: number, networkTopLimit: number): string | null {
-  if (!Number.isInteger(resourceTopLimit) || resourceTopLimit < 3 || resourceTopLimit > 16) {
+function validateDashboardLimits(
+  resourceTopLimit: number,
+  networkTopLimit: number,
+): string | null {
+  if (
+    !Number.isInteger(resourceTopLimit) ||
+    resourceTopLimit < 3 ||
+    resourceTopLimit > 16
+  ) {
     return "Resource curve top VPS must be between 3 and 16";
   }
-  if (!Number.isInteger(networkTopLimit) || networkTopLimit < 3 || networkTopLimit > 16) {
+  if (
+    !Number.isInteger(networkTopLimit) ||
+    networkTopLimit < 3 ||
+    networkTopLimit > 16
+  ) {
     return "Network top VPS must be between 3 and 16";
   }
   return null;
@@ -439,7 +557,9 @@ function validateTimezone(timezone: string | null): string | null {
     return null;
   }
   try {
-    new Intl.DateTimeFormat(undefined, { timeZone: timezone }).format(new Date());
+    new Intl.DateTimeFormat(undefined, { timeZone: timezone }).format(
+      new Date(),
+    );
     return null;
   } catch {
     return "Timezone must be a valid IANA identifier such as UTC or America/Los_Angeles";

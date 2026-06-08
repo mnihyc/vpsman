@@ -7,7 +7,10 @@ import {
   sha256Hex,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
+import {
+  openConsoleSubpage,
+  unlockPrivilegeFromTop,
+} from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -29,16 +32,27 @@ async function checkControl(locator: Locator) {
 async function dispatchWithPrompt(composer: Locator) {
   await activate(composer.getByRole("button", { name: "Dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
-  await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+  await activate(
+    composer
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Dispatch job" }),
+  );
 }
 
-async function confirmVisiblePrompt(page: import("@playwright/test").Page, label: string) {
+async function confirmVisiblePrompt(
+  page: import("@playwright/test").Page,
+  label: string,
+) {
   const prompt = page.locator(".confirmationPrompt").last();
   await expect(prompt).toBeVisible();
   await activate(prompt.getByRole("button", { name: label }));
 }
 
-async function unlockPrivilegeFor(page: import("@playwright/test").Page, view: string, subpage: string) {
+async function unlockPrivilegeFor(
+  page: import("@playwright/test").Page,
+  view: string,
+  subpage: string,
+) {
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, view, subpage);
 }
@@ -46,23 +60,40 @@ async function unlockPrivilegeFor(page: import("@playwright/test").Page, view: s
 function expectPrivilegeAssertion(request: unknown) {
   expect((request as { envelope?: unknown }).envelope).toBeUndefined();
   expect((request as { envelopes?: unknown }).envelopes).toBeUndefined();
-  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
+  expect(
+    (request as { privilege_assertion?: { assertion_hex?: string } })
+      .privilege_assertion?.assertion_hex,
+  ).toMatch(/^[0-9a-f]+$/);
 }
 
 async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   await activate(page.getByRole("button", { name: /Fleet health/ }));
   await activate(page.getByRole("button", { name: "Open fleet instances" }));
-  await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Fleet overview" }),
+  ).toBeVisible();
 }
 
-test("renders an operational cloud-console fleet workspace", async ({ page }, testInfo) => {
+test("renders an operational cloud-console fleet workspace", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Operational Health" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Resource Usage" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Network", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Grouped Statistics" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operational Health" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Resource Usage" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Network", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Grouped Statistics" }),
+  ).toBeVisible();
   const resourceUsage = page.locator(".dashboardSection").filter({
     has: page.getByRole("heading", { name: "Resource Usage" }),
   });
@@ -74,7 +105,9 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
   });
   await expect(networkSection.getByLabel("Network speed curve")).toBeVisible();
   await activate(networkSection.getByRole("button", { name: "Traffic" }));
-  await expect(networkSection.getByLabel("Network traffic curve")).toBeVisible();
+  await expect(
+    networkSection.getByLabel("Network traffic curve"),
+  ).toBeVisible();
   await activate(page.getByRole("button", { name: "All", exact: true }));
   await expect(page.getByText(/All VPS; grouped by Labels/)).toBeVisible();
   await expect(page.getByLabel("Dashboard group by")).toBeVisible();
@@ -86,9 +119,13 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
   await page.getByLabel("Dashboard group by").selectOption("countries");
   await page.getByLabel("Dashboard scope kind").selectOption("provider");
   await page.getByLabel("Dashboard scope value").selectOption("alpha");
-  await expect(page.getByText(/provider:alpha; grouped by Countries/)).toBeVisible();
+  await expect(
+    page.getByText(/provider:alpha; grouped by Countries/),
+  ).toBeVisible();
   const dashboardPreferences = await page.evaluate(() =>
-    JSON.parse(window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}"),
+    JSON.parse(
+      window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}",
+    ),
   );
   expect(dashboardPreferences).toMatchObject({
     groupBy: "countries",
@@ -100,40 +137,67 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     scopeValue: "alpha",
     window: "all",
   });
-  await expect(page.getByRole("button", { name: /Fleet health/ })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Fleet health/ }),
+  ).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await openFleetFromDashboard(page);
   } else {
     await activate(page.getByRole("button", { name: /Network activity/ }));
-    await expect(page.getByRole("heading", { name: "Network activity" })).toBeVisible();
-    await activate(page.getByRole("button", { name: "Inspect topology evidence" }));
-    await expect(page.getByRole("heading", { name: "Topology evidence" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Network activity" }),
+    ).toBeVisible();
+    await activate(
+      page.getByRole("button", { name: "Inspect topology evidence" }),
+    );
+    await expect(
+      page.getByRole("heading", { name: "Topology evidence" }),
+    ).toBeVisible();
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
-  await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Fleet overview" }),
+  ).toBeVisible();
   if (testInfo.project.name.includes("desktop")) {
-    await expect(page.getByRole("searchbox", { name: "Search fleet" })).toBeVisible();
+    await expect(
+      page.getByRole("searchbox", { name: "Search fleet" }),
+    ).toBeVisible();
   }
   const fleetGrid = page.getByLabel("VPS instance records data grid");
-  const edgeRow = fleetGrid.locator(".gridBody [role=row]", { hasText: "edge-sfo-01" }).first();
+  const edgeRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
   await expect(edgeRow).toBeVisible();
   await expect(edgeRow).toContainText("edge-sfo-01 (fo01)");
-  await expect(edgeRow).toContainText("🇺🇸 US");
+  await expect(edgeRow).toContainText("US");
+  await expect(edgeRow.locator(".countryFlag")).toBeVisible();
   await expect(edgeRow).toContainText("alpha");
   await expect(edgeRow).not.toContainText("agent-sfo-01");
   if (testInfo.project.name.includes("desktop")) {
-    const nav = page.getByRole("navigation", { name: "Primary console navigation" });
+    const nav = page.getByRole("navigation", {
+      name: "Primary console navigation",
+    });
     await page.getByRole("button", { name: "Preferences" }).click();
-    await expect(page.getByRole("heading", { name: "Preferences", exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Preferences", exact: true }),
+    ).toBeVisible();
     await page.getByLabel("Name display").selectOption("name");
-    await page.getByLabel("Bulk output comparison default").selectOption("text");
+    await page
+      .getByLabel("Bulk output comparison default")
+      .selectOption("text");
     await page
       .getByLabel("Enrollment install command template")
-      .fill("env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
+      .fill(
+        "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
+      );
     await page.getByRole("button", { name: "Save preferences" }).click();
     const savedPreferences = await page.evaluate(() => {
-      const requests = (window as unknown as { __vpsmanTestRequests: { operatorPreferences: unknown[] } }).__vpsmanTestRequests;
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { operatorPreferences: unknown[] };
+        }
+      ).__vpsmanTestRequests;
       return requests.operatorPreferences.at(-1);
     });
     expect(savedPreferences).toMatchObject({
@@ -147,7 +211,9 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await expect(edgeRow).not.toContainText("(fo01)");
     await nav.getByRole("button", { name: "Preferences", exact: true }).click();
     await page.getByLabel("Name display").selectOption("name_id_suffix");
-    await page.getByLabel("Bulk output comparison default").selectOption("binary");
+    await page
+      .getByLabel("Bulk output comparison default")
+      .selectOption("binary");
     await page
       .getByLabel("Enrollment install command template")
       .fill(
@@ -156,7 +222,9 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await page.getByRole("button", { name: "Save preferences" }).click();
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
   }
-  await expect(page.locator(".consoleHeader").getByText("2 online / 3 total")).toBeVisible();
+  await expect(
+    page.locator(".consoleHeader").getByText("2 online / 3 total"),
+  ).toBeVisible();
   await expect(page.getByText("VPS instances")).toBeVisible();
   await expect(page.getByLabel("Fleet alerts")).toHaveCount(0);
   if (testInfo.project.name.includes("desktop")) {
@@ -167,56 +235,116 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
-  await activate(fleetGrid.locator(".gridBody [role=row]", { hasText: "core-fra-02" }).first());
-  await expect(page.getByRole("heading", { name: "core-fra-02 (ra02)" })).toBeVisible();
-  await expect(page.getByRole("tabpanel").getByText("agent-fra-02")).toBeVisible();
+  const coreRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+    .first();
+  await activate(coreRow.getByLabel("Expand VPS instance records row"));
+  const coreDetail = fleetGrid
+    .locator(".gridExpandedRow", { hasText: "core-fra-02" })
+    .first();
+  await expect(
+    coreDetail.getByRole("heading", { name: "core-fra-02 (ra02)" }),
+  ).toBeVisible();
+  await expect(
+    coreDetail.getByRole("tabpanel").getByText("agent-fra-02"),
+  ).toBeVisible();
 
-  await activate(page.getByRole("tab", { name: "Network" }));
-  await expect(page.getByText("BGP/OSPF")).toBeVisible();
-  await expect(page.getByText("Client-managed runtime tunnels enabled")).toBeVisible();
-  await expect(page.getByText("bgp, bird2")).toBeVisible();
-  await expect(page.getByText(/tun0 tun_tap up/)).toBeVisible();
-  await expect(page.getByText(/eth0 RX 8.7 Kbps \/ TX 17 Kbps/)).toBeVisible();
+  await activate(coreDetail.getByRole("tab", { name: "Network" }));
+  await expect(coreDetail.getByText("BGP/OSPF")).toBeVisible();
+  await expect(
+    coreDetail.getByText("Client-managed runtime tunnels enabled"),
+  ).toBeVisible();
+  await expect(coreDetail.getByText("bgp, bird2")).toBeVisible();
+  await expect(coreDetail.getByText(/tun0 tun_tap up/)).toBeVisible();
+  await expect(
+    coreDetail.getByText(/eth0 RX 8.7 Kbps \/ TX 17 Kbps/),
+  ).toBeVisible();
 
-  await activate(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }).first());
-  await activate(page.getByRole("tab", { name: "Network" }));
-  await expect(page.getByText("Unprivileged best-effort, root operations may be ineffective")).toBeVisible();
+  const backupNetworkRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  await activate(
+    backupNetworkRow.getByLabel("Expand VPS instance records row"),
+  );
+  const backupNetworkDetail = fleetGrid
+    .locator(".gridExpandedRow", { hasText: "backup-nyc-03" })
+    .first();
+  await activate(backupNetworkDetail.getByRole("tab", { name: "Network" }));
+  await expect(
+    backupNetworkDetail.getByText(
+      "Unprivileged best-effort, root operations may be ineffective",
+    ),
+  ).toBeVisible();
 });
 
-test("deletes a VPS through a styled in-panel confirmation", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "delete confirmation layout is covered in desktop detail view");
+test("deletes a VPS through a styled in-panel confirmation", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "delete confirmation layout is covered in desktop detail view",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Fleet", "Instances");
 
   const fleetGrid = page.getByLabel("VPS instance records data grid");
-  await activate(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }).first());
-  await expect(page.getByRole("heading", { name: "backup-nyc-03 (yc03)" })).toBeVisible();
+  const backupRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  await activate(backupRow.getByLabel("Expand VPS instance records row"));
+  const backupDetail = fleetGrid
+    .locator(".gridExpandedRow", { hasText: "backup-nyc-03" })
+    .first();
+  await expect(
+    backupDetail.getByRole("heading", { name: "backup-nyc-03 (yc03)" }),
+  ).toBeVisible();
 
-  await activate(page.locator(".deleteVpsControls").getByRole("button", { name: "Delete VPS" }));
-  const prompt = page.locator(".inspector .confirmationPrompt");
+  await activate(
+    backupDetail
+      .locator(".deleteVpsControls")
+      .getByRole("button", { name: "Delete VPS" }),
+  );
+  const prompt = backupDetail.locator(".confirmationPrompt");
   await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
   await expect(prompt).toContainText("deactivates VPS access immediately");
   await activate(prompt.getByRole("button", { name: "Cancel" }));
-  await expect(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })).toBeVisible();
+  await expect(
+    fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
+  ).toBeVisible();
 
-  await activate(page.locator(".deleteVpsControls").getByRole("button", { name: "Delete VPS" }));
+  await activate(
+    backupDetail
+      .locator(".deleteVpsControls")
+      .getByRole("button", { name: "Delete VPS" }),
+  );
   await activate(prompt.getByRole("button", { name: "Delete VPS" }));
-  await expect(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })).toHaveCount(0);
-  await expect(page.locator(".consoleHeader").getByText("2 online / 2 total")).toBeVisible();
+  await expect(
+    fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".consoleHeader").getByText("2 online / 2 total"),
+  ).toBeVisible();
 
   const deleteRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { agentDeletes: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { agentDeletes: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.agentDeletes.at(-1);
   });
   expect(deleteRequest).toMatchObject({
     confirmed: true,
-    reason: "Deleted from fleet inventory panel",
+    reason: "Deleted from expanded fleet inventory details",
   });
 });
 
-test("clears browser-local console selections without deleting vault records", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "local reset control is covered in the desktop preferences layout");
+test("clears browser-local console selections without deleting vault records", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "local reset control is covered in the desktop preferences layout",
+  );
 
   await page.goto("/");
   await page.getByLabel("Dashboard group by").selectOption("countries");
@@ -225,21 +353,33 @@ test("clears browser-local console selections without deleting vault records", a
   await page.evaluate(() => {
     window.localStorage.setItem("vpsman.authVault", "preserved-auth");
     window.localStorage.setItem("vpsman.privilegeVault", "preserved-privilege");
-    window.localStorage.setItem("vpsman.sidebarSubpanels", JSON.stringify({ state: { Jobs: true } }));
-    window.localStorage.setItem("vpsman.grid.example", JSON.stringify({ pageSize: 50 }));
+    window.localStorage.setItem(
+      "vpsman.sidebarSubpanels",
+      JSON.stringify({ state: { Jobs: true } }),
+    );
+    window.localStorage.setItem(
+      "vpsman.grid.example",
+      JSON.stringify({ pageSize: 50 }),
+    );
   });
 
   await openConsoleSubpage(page, "Preferences", "Operator");
-  await expect(page.getByRole("heading", { name: "Operator preferences" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operator preferences" }),
+  ).toBeVisible();
   const reloaded = page.waitForEvent("load");
   await page.getByRole("button", { name: "Clear local selections" }).click();
   await reloaded;
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
   await expect(page.getByText(/All VPS; grouped by Labels/)).toBeVisible();
 
   const storage = await page.evaluate(() => ({
     authVault: window.localStorage.getItem("vpsman.authVault"),
-    dashboardPreferences: window.localStorage.getItem("vpsman.dashboardPreferences"),
+    dashboardPreferences: window.localStorage.getItem(
+      "vpsman.dashboardPreferences",
+    ),
     grid: window.localStorage.getItem("vpsman.grid.example"),
     privilegeVault: window.localStorage.getItem("vpsman.privilegeVault"),
     sidebarSubpanels: window.localStorage.getItem("vpsman.sidebarSubpanels"),
@@ -253,7 +393,9 @@ test("clears browser-local console selections without deleting vault records", a
   });
 });
 
-test("supports interactive fleet data grid controls", async ({ page }, testInfo) => {
+test("supports interactive fleet data grid controls", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
   if (testInfo.project.name.includes("mobile")) {
     await openFleetFromDashboard(page);
@@ -265,113 +407,213 @@ test("supports interactive fleet data grid controls", async ({ page }, testInfo)
   await expect(grid.getByText("3 of 3 instances")).toBeVisible();
   await grid.getByLabel("VPS instance records search").fill("fra");
   await expect(grid.getByText("1 of 3 instances")).toBeVisible();
-  await expect(grid.locator("[role=row]", { hasText: "core-fra-02" })).toBeVisible();
+  await expect(
+    grid.locator("[role=row]", { hasText: "core-fra-02" }),
+  ).toBeVisible();
   await grid.getByLabel("VPS instance records search").fill("");
 
-  const coreRow = grid.locator(".gridBody [role=row]", { hasText: "core-fra-02" }).first();
+  const coreRow = grid
+    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+    .first();
   await coreRow.getByLabel("Expand VPS instance records row").click();
-  await expect(grid.getByText("agent-fra-02")).toBeVisible();
-  await expect(grid.getByText("root; uid 0")).toBeVisible();
+  const coreDetail = grid
+    .locator(".gridExpandedRow", { hasText: "agent-fra-02" })
+    .first();
+  await expect(coreDetail.getByText("agent-fra-02").first()).toBeVisible();
+  await expect(coreDetail.getByText("Root uid 0")).toBeVisible();
 
   await coreRow.getByLabel("Select VPS instance records row").check();
-  await expect(grid.getByText("1 selected")).toBeVisible();
+  await expect(grid.getByText("1 selected", { exact: true })).toBeVisible();
   await grid.getByRole("button", { name: "Selection" }).click();
-  await expect(page.getByRole("menuitem", { name: "Copy client IDs" })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Copy client IDs" }),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
 
   await grid.getByLabel("VPS instance records columns").click();
   await page.getByRole("menuitemcheckbox", { name: "Provider" }).click();
-  await expect(grid.getByRole("columnheader", { name: /Provider/ })).toHaveCount(0);
+  await expect(
+    grid.getByRole("columnheader", { name: /Provider/ }),
+  ).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   await coreRow.click({ button: "right" });
   await expect(page.getByText("Row actions")).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Inspect selected" })).toBeVisible();
-  await page.keyboard.press("Escape");
+  await page.getByRole("menuitem", { name: "Inspect selected" }).click();
+  await expect(
+    grid.locator(".gridExpandedRow", { hasText: "agent-fra-02" }),
+  ).toBeVisible();
 
   await coreRow.click();
-  await expect(page.getByRole("heading", { name: "core-fra-02 (ra02)" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "core-fra-02 (ra02)" }),
+  ).toHaveCount(0);
+  await coreRow.click();
+  await expect(
+    page.getByRole("heading", { name: "core-fra-02 (ra02)" }),
+  ).toBeVisible();
 });
 
-test("keeps console layout usable on desktop and mobile widths", async ({ page }, testInfo) => {
+test("keeps console layout usable on desktop and mobile widths", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
 
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  const overflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
   expect(overflow).toBeLessThanOrEqual(1);
 
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
   await expect(page.locator(".topbar")).toBeVisible();
   await expect(page.locator(".quickStats")).toBeVisible();
   if (testInfo.project.name.includes("desktop")) {
     await expect(page.locator(".sidebar")).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "Primary console navigation" })).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Primary console navigation" }),
+    ).toBeVisible();
     const sidebarBox = await page.locator(".sidebar").boundingBox();
     expect(sidebarBox?.x).toBe(0);
     expect(sidebarBox?.y).toBe(0);
-    await expect(page.locator(".navSectionTitle", { hasText: "Operations" })).toBeVisible();
-    await expect(page.locator(".navSectionTitle", { hasText: "Network" })).toBeVisible();
-    await expect(page.locator(".navSectionTitle", { hasText: "Data & access" })).toBeVisible();
-    await expect(page.locator(".navSectionTitle", { hasText: "System" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /All VPS resources/ })).toBeVisible();
-    await expect(page.locator(".controlPlanePill", { hasText: "Live control plane" })).toBeVisible();
+    await expect(
+      page.locator(".navSectionTitle", { hasText: "Operations" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".navSectionTitle", { hasText: "Network" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".navSectionTitle", { hasText: "Data & access" }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".navSectionTitle", { hasText: "System" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /All VPS resources/ }),
+    ).toBeVisible();
+    await expect(
+      page.locator(".controlPlanePill", { hasText: "Live control plane" }),
+    ).toBeVisible();
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();
     await expect(page.locator(".scopeSelector")).toBeHidden();
   }
 });
 
-test("manages data-source preset assignments from the config view", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense preset management is covered in the desktop console layout");
+test("manages data-source preset assignments from the config view", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense preset management is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Config", "Status");
 
   const panel = page.locator(".dataSourcePresetPanel");
-  const activeSourcesSearchField = panel.getByRole("combobox", { name: "Active sources search field" });
-  const activeSourcesSearch = panel.getByRole("searchbox", { name: "Active sources search" });
-  await expect(panel.getByRole("heading", { name: "Active source status" })).toBeVisible();
+  const activeSourcesSearchField = panel.getByRole("combobox", {
+    name: "Active sources search field",
+  });
+  const activeSourcesSearch = panel.getByRole("searchbox", {
+    name: "Active sources search",
+  });
+  await expect(
+    panel.getByRole("heading", { name: "Active source status" }),
+  ).toBeVisible();
   await expect(panel.getByLabel("Active sources table controls")).toBeVisible();
   await expect(activeSourcesSearchField).toBeVisible();
   await expect(activeSourcesSearch).toBeVisible();
   await expect(panel.getByText(/\d+ of \d+ sources/)).toBeVisible();
   await expect(panel.getByText(/Page 1 \/ \d+/).first()).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection .historyRow").filter({ hasText: "shared:vnstat-json" })).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection").getByText("vnstat", { exact: true })).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection").getByText("no server store, 2 artifacts")).toBeVisible();
-  await expect(panel.locator(".sourceStatusSection").getByText("no server store, 1 releases, 1 external")).toBeVisible();
+  await expect(
+    panel
+      .locator(".sourceStatusSection .historyRow")
+      .filter({ hasText: "shared:vnstat-json" }),
+  ).toBeVisible();
+  await expect(
+    panel.locator(".sourceStatusSection").getByText("vnstat", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    panel
+      .locator(".sourceStatusSection")
+      .getByText("no server store, 2 artifacts"),
+  ).toBeVisible();
+  await expect(
+    panel
+      .locator(".sourceStatusSection")
+      .getByText("no server store, 1 releases, 1 external"),
+  ).toBeVisible();
   await activeSourcesSearchField.selectOption("Preset");
   await activeSourcesSearch.fill("shared:vnstat-json");
-  await expect(panel.locator(".sourceStatusSection .historyRow").filter({ hasText: "shared:vnstat-json" })).toBeVisible();
+  await expect(
+    panel
+      .locator(".sourceStatusSection .historyRow")
+      .filter({ hasText: "shared:vnstat-json" }),
+  ).toBeVisible();
   await activeSourcesSearch.fill("");
 
   await openConsoleSubpage(page, "Config", "Templates");
   const presetPanel = page.locator(".dataSourcePresetPanel");
-  const presetRegistrySearchField = presetPanel.getByRole("combobox", { name: "Preset registry search field" });
-  const presetRegistrySearch = presetPanel.getByRole("searchbox", { name: "Preset registry search" });
-  await expect(presetPanel.getByRole("heading", { name: "Data-source presets" })).toBeVisible();
-  await expect(presetPanel.getByLabel("Preset registry table controls")).toBeVisible();
+  const presetRegistrySearchField = presetPanel.getByRole("combobox", {
+    name: "Preset registry search field",
+  });
+  const presetRegistrySearch = presetPanel.getByRole("searchbox", {
+    name: "Preset registry search",
+  });
+  await expect(
+    presetPanel.getByRole("heading", { name: "Data-source presets" }),
+  ).toBeVisible();
+  await expect(
+    presetPanel.getByLabel("Preset registry table controls"),
+  ).toBeVisible();
   await expect(presetRegistrySearchField).toBeVisible();
   await expect(presetRegistrySearch).toBeVisible();
-  await expect(presetPanel.locator(".historyRow.dataSourcePresetGrid", { hasText: "builtin:interface_counters" })).toBeVisible();
-  await expect(presetPanel.locator(".historyRow.dataSourcePresetGrid", { hasText: "shared:vnstat-json" })).toBeVisible();
+  await expect(
+    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
+      hasText: "builtin:interface_counters",
+    }),
+  ).toBeVisible();
+  await expect(
+    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
+      hasText: "shared:vnstat-json",
+    }),
+  ).toBeVisible();
   await presetRegistrySearchField.selectOption("Domain");
   await presetRegistrySearch.fill("runtime_traffic_accounting_source");
-  await expect(presetPanel.locator(".historyRow.dataSourcePresetGrid", { hasText: "builtin:interface_counters" })).toBeVisible();
+  await expect(
+    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
+      hasText: "builtin:interface_counters",
+    }),
+  ).toBeVisible();
   await presetRegistrySearch.fill("");
-  await presetPanel.getByLabel("Assignment domain").selectOption("runtime_traffic_accounting_source");
-  await presetPanel.getByLabel("Preset", { exact: true }).selectOption("11111111-1111-4111-8111-111111111111");
   await presetPanel
-    .getByRole("searchbox", { name: "Data-source assignment target expression" })
+    .getByLabel("Assignment domain")
+    .selectOption("runtime_traffic_accounting_source");
+  await presetPanel
+    .getByLabel("Preset", { exact: true })
+    .selectOption("11111111-1111-4111-8111-111111111111");
+  await presetPanel
+    .getByRole("searchbox", {
+      name: "Data-source assignment target expression",
+    })
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
   await expect(presetPanel.getByText("2/3 matching VPSs")).toBeVisible();
   await activate(presetPanel.getByRole("button", { name: "Assign preset" }));
-  await expect(presetPanel.getByText("Assign data-source preset")).toBeVisible();
+  await expect(
+    presetPanel.getByText("Assign data-source preset"),
+  ).toBeVisible();
   await confirmVisiblePrompt(page, "Confirm");
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { dataSourcePresetAssignments: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { dataSourcePresetAssignments: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.dataSourcePresetAssignments.at(-1);
   });
   expect(request).toMatchObject({
@@ -382,28 +624,43 @@ test("manages data-source preset assignments from the config view", async ({ pag
   });
 });
 
-test("creates a cron schedule from a command template with target preview", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense schedule composition is covered in the desktop console layout");
+test("creates a cron schedule from a command template with target preview", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense schedule composition is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Schedules", "Schedule registry");
   await unlockPrivilegeFor(page, "Schedules", "Schedule registry");
 
   await activate(page.getByRole("button", { name: "Expand Create schedule" }));
-  await page.getByLabel("Schedule command template").selectOption("46464646-5656-4789-8abc-defdefdefdef");
+  await page
+    .getByLabel("Schedule command template")
+    .selectOption("46464646-5656-4789-8abc-defdefdefdef");
   await page.getByLabel("Schedule cron expression").fill("*/15 * * * *");
   await page.getByLabel("Schedule target expression").fill("country:US");
   await expect(page.getByText("2 matching VPSs")).toBeVisible();
-  await expect(page.getByText(/UTC schedule, displayed in browser timezone/)).toBeVisible();
+  await expect(
+    page.getByText(/UTC schedule, displayed in browser timezone/),
+  ).toBeVisible();
   await expect(page.getByText(/2 targets; edge-health-check/)).toBeVisible();
   await activate(page.getByRole("button", { name: "Save", exact: true }));
   await expect(page.getByText("Confirm schedule")).toBeVisible();
-  await activate(page.locator(".confirmationPrompt").getByRole("button", { name: "Save schedule" }));
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Save schedule" }),
+  );
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { schedules: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { schedules: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.schedules.at(-1);
   });
   expect(request).toMatchObject({
@@ -415,8 +672,13 @@ test("creates a cron schedule from a command template with target preview", asyn
   });
 });
 
-test("creates server-assigned provision tokens and bound rebuild tokens from the access panel", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense access administration is covered in the desktop console layout");
+test("creates server-assigned provision tokens and bound rebuild tokens from the access panel", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense access administration is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Preferences", "Operator");
@@ -424,36 +686,64 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
     .getByLabel("Enrollment install command template")
     .fill("env URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
   await page.getByRole("button", { name: "Save preferences" }).click();
-  await expect(page.getByText("Enrollment install command template must include {TOKEN}")).toBeVisible();
+  await expect(
+    page.getByText("Enrollment install command template must include {TOKEN}"),
+  ).toBeVisible();
   await page
     .getByLabel("Enrollment install command template")
-    .fill("env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
+    .fill(
+      "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
+    );
   await page.getByRole("button", { name: "Save preferences" }).click();
   await activate(page.getByRole("button", { name: "Open privilege unlock" }));
   await activate(page.getByRole("tab", { name: "VPS clients" }));
 
-  await expect(page.getByRole("heading", { name: "Enrollment tokens" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Enrollment tokens" }),
+  ).toBeVisible();
   await expect(page.getByText("vpsm12345678")).toBeVisible();
   const inspector = page.locator(".accessInspector");
-  await expect(inspector.getByLabel("Enrollment token existing VPS ID")).toHaveCount(0);
+  await expect(
+    inspector.getByLabel("Enrollment token existing VPS ID"),
+  ).toHaveCount(0);
   await inspector.getByLabel("Enrollment token ttl").fill("1200");
   await inspector.getByLabel("Enrollment default tags").fill("country:JP,edge");
-  await inspector.getByLabel("Enrollment default display name").fill("edge-tokyo-04");
-  await expect(inspector.getByText("Create token to generate command")).toBeVisible();
-  await expect(inspector.getByRole("button", { name: "Copy enrollment install command" })).toHaveCount(0);
+  await inspector
+    .getByLabel("Enrollment default display name")
+    .fill("edge-tokyo-04");
+  await expect(
+    inspector.getByText("Create token to generate command"),
+  ).toBeVisible();
+  await expect(
+    inspector.getByRole("button", { name: "Copy enrollment install command" }),
+  ).toHaveCount(0);
   await activate(inspector.getByRole("button", { name: "Create token" }));
-  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText("vpsm_provision_token_secret");
+  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText(
+    "vpsm_provision_token_secret",
+  );
   await expect(inspector.getByText("Root install command")).toBeVisible();
-  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("TOKEN='vpsm_provision_token_secret'");
-  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("MODE='root'");
-  await expect(inspector.locator(".enrollmentInstallCommand code")).not.toContainText("{TOKEN}");
-  await expect(inspector.getByRole("button", { name: "Copy enrollment install command" })).toBeVisible();
+  await expect(
+    inspector.locator(".enrollmentInstallCommand code"),
+  ).toContainText("TOKEN='vpsm_provision_token_secret'");
+  await expect(
+    inspector.locator(".enrollmentInstallCommand code"),
+  ).toContainText("MODE='root'");
+  await expect(
+    inspector.locator(".enrollmentInstallCommand code"),
+  ).not.toContainText("{TOKEN}");
+  await expect(
+    inspector.getByRole("button", { name: "Copy enrollment install command" }),
+  ).toBeVisible();
   await expect(inspector.getByText("Name edge-tokyo-04")).toBeVisible();
-  await expect(inspector.getByText("11111111-2222-4333-8444-555555555555")).toHaveCount(0);
+  await expect(
+    inspector.getByText("11111111-2222-4333-8444-555555555555"),
+  ).toHaveCount(0);
   const provisionRequest = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { enrollmentTokens: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { enrollmentTokens: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.enrollmentTokens.at(-1);
   });
   expect(provisionRequest).toMatchObject({
@@ -466,22 +756,42 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
     ttl_secs: 1200,
   });
 
-  await inspector.getByLabel("Enrollment token purpose").selectOption("rebuild_reenrollment");
-  await inspector.getByLabel("Enrollment token existing VPS ID").fill("agent-sfo-01");
+  await inspector
+    .getByLabel("Enrollment token purpose")
+    .selectOption("rebuild_reenrollment");
+  await inspector
+    .getByLabel("Enrollment token existing VPS ID")
+    .fill("agent-sfo-01");
   await inspector.getByLabel("Enrollment token ttl").fill("900");
-  await inspector.getByLabel("Enrollment default tags").fill("rebuilt,provider:alpha");
-  await inspector.getByLabel("Enrollment default display name").fill("edge-sfo-01-rebuild");
+  await inspector
+    .getByLabel("Enrollment default tags")
+    .fill("rebuilt,provider:alpha");
+  await inspector
+    .getByLabel("Enrollment default display name")
+    .fill("edge-sfo-01-rebuild");
   await activate(inspector.getByRole("button", { name: "Rebuild token" }));
   await expect(inspector.getByLabel("Create rebuild token")).toBeVisible();
-  await activate(inspector.getByLabel("Create rebuild token").getByRole("button", { name: "Create rebuild token" }));
+  await activate(
+    inspector
+      .getByLabel("Create rebuild token")
+      .getByRole("button", { name: "Create rebuild token" }),
+  );
 
-  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText("vpsm_rebuild_token_secret");
-  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("TOKEN='vpsm_rebuild_token_secret'");
-  await expect(inspector.locator(".enrollmentInstallCommand code")).not.toContainText("{TOKEN}");
+  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText(
+    "vpsm_rebuild_token_secret",
+  );
+  await expect(
+    inspector.locator(".enrollmentInstallCommand code"),
+  ).toContainText("TOKEN='vpsm_rebuild_token_secret'");
+  await expect(
+    inspector.locator(".enrollmentInstallCommand code"),
+  ).not.toContainText("{TOKEN}");
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { enrollmentTokens: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { enrollmentTokens: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.enrollmentTokens.at(-1);
   });
   expect(request).toMatchObject({
@@ -494,25 +804,49 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   });
 });
 
-test("shows topology network evidence, speed metrics, and probe latency history", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "topology evidence drilldown is covered in the desktop console layout");
+test("shows topology network evidence, speed metrics, and probe latency history", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "topology evidence drilldown is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await activate(page.getByRole("button", { name: "Topology" }));
 
-  await expect(page.getByRole("heading", { name: "Topology graph" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Topology graph" }),
+  ).toBeVisible();
   await expect(page.getByRole("img", { name: "Topology graph" })).toBeVisible();
-  await expect(page.getByText("2 shown / 2 nodes; 1 shown / 1 tunnels")).toBeVisible();
-  await expect(page.locator(".topologyGraphPanel").getByText("healthy", { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText("2 shown / 2 nodes; 1 shown / 1 tunnels"),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".topologyGraphPanel")
+      .getByText("healthy", { exact: true })
+      .first(),
+  ).toBeVisible();
   await page.getByLabel("Filter topology graph").fill("fra");
-  await expect(page.locator(".topologyGraphPanel").getByRole("button", { name: /Select core-fra-02/ })).toBeVisible();
-  const graphFilter = page.getByRole("group", { name: "Topology health filter" });
+  await expect(
+    page
+      .locator(".topologyGraphPanel")
+      .getByRole("button", { name: /Select core-fra-02/ }),
+  ).toBeVisible();
+  const graphFilter = page.getByRole("group", {
+    name: "Topology health filter",
+  });
   await activate(graphFilter.getByRole("button", { name: "Attention" }));
-  await expect(page.locator(".topologyGraphPanel").getByText("0 visible tunnels")).toBeVisible();
+  await expect(
+    page.locator(".topologyGraphPanel").getByText("0 visible tunnels"),
+  ).toBeVisible();
   await activate(graphFilter.getByRole("button", { name: "All", exact: true }));
   await page.getByLabel("Filter topology graph").fill("");
   await openConsoleSubpage(page, "Topology", "Evidence");
-  await expect(page.getByRole("heading", { name: "Topology evidence" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Topology evidence" }),
+  ).toBeVisible();
   await activate(page.getByRole("button", { name: "Refresh evidence" }));
   await expect(page.getByLabel("Network probe latency history")).toBeVisible();
   const evidence = page.locator(".topologyEvidence");
@@ -520,48 +854,85 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(evidence.getByText("14 -> 22").first()).toBeVisible();
   await expect(evidence.getByText("3 samples")).toBeVisible();
-  await expect(evidence.getByText("10.1 Mbps avg", { exact: true })).toBeVisible();
+  await expect(
+    evidence.getByText("10.1 Mbps avg", { exact: true }),
+  ).toBeVisible();
   await expect(evidence.getByText("10.9-14.8 ms; 0.25% loss")).toBeVisible();
   const observationTable = evidence.locator(".observationTable");
   await expect(observationTable.getByText("network_speed_test")).toBeVisible();
   await expect(observationTable.getByText("10.1 Mbps")).toBeVisible();
   await expect(observationTable.getByText("12.4 ms")).toBeVisible();
   await expect(observationTable.getByText("0.25% loss")).toBeVisible();
-  await expect(observationTable.getByText("10.255.0.1", { exact: true })).toBeVisible();
-  await expect(observationTable.getByText("Runtime adapter unhealthy")).toBeVisible();
-  await expect(observationTable.getByText("adapter status failed")).toBeVisible();
+  await expect(
+    observationTable.getByText("10.255.0.1", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    observationTable.getByText("Runtime adapter unhealthy"),
+  ).toBeVisible();
+  await expect(
+    observationTable.getByText("adapter status failed"),
+  ).toBeVisible();
   await expect(evidence.getByText("Managed blocks match")).toBeVisible();
 });
 
-test("authors external adapter tunnel plans from the topology panel", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense topology authoring is covered in the desktop console layout");
+test("authors external adapter tunnel plans from the topology panel", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense topology authoring is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Topology", "Tunnel plans");
 
-  const composer = page.locator(".scheduleComposer", { has: page.getByRole("heading", { name: "Create tunnel plan" }) });
+  const composer = page.locator(".scheduleComposer", {
+    has: page.getByRole("heading", { name: "Create tunnel plan" }),
+  });
   await composer.scrollIntoViewIfNeeded();
   await composer.getByLabel("Name", { exact: true }).fill("external-openvpn");
   await composer.getByLabel("Interface", { exact: true }).fill("ovpn42");
   await composer.getByLabel("Kind").selectOption("openvpn");
   await composer.getByLabel("Left VPS").selectOption("agent-sfo-01");
   await composer.getByLabel("Right VPS").selectOption("agent-fra-02");
-  await composer.getByLabel("Left underlay", { exact: true }).fill("198.51.100.10");
-  await composer.getByLabel("Right underlay", { exact: true }).fill("203.0.113.20");
-  await composer.getByLabel("Runtime owner").selectOption("external_managed_adapter");
+  await composer
+    .getByLabel("Left underlay", { exact: true })
+    .fill("198.51.100.10");
+  await composer
+    .getByLabel("Right underlay", { exact: true })
+    .fill("203.0.113.20");
+  await composer
+    .getByLabel("Runtime owner")
+    .selectOption("external_managed_adapter");
   await composer.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await composer.getByLabel("Burst KB", { exact: true }).fill("4096");
-  await composer.getByLabel("Topology version", { exact: true }).fill("provider-a:42");
-  await composer.getByLabel("Start argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
-  await composer.getByLabel("Cleanup argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\ncleanup\n{interface}");
-  await composer.getByLabel("Status argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
-  await composer.getByLabel("Traffic argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
-  await composer.getByLabel("Desired interfaces", { exact: true }).fill("ovpn42");
-  await composer.getByLabel("Routes", { exact: true }).fill("10.42.0.0/24,dev=ovpn42,metric=42");
+  await composer
+    .getByLabel("Topology version", { exact: true })
+    .fill("provider-a:42");
+  await composer
+    .getByLabel("Start argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
+  await composer
+    .getByLabel("Cleanup argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\ncleanup\n{interface}");
+  await composer
+    .getByLabel("Status argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
+  await composer
+    .getByLabel("Traffic argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
+  await composer
+    .getByLabel("Desired interfaces", { exact: true })
+    .fill("ovpn42");
+  await composer
+    .getByLabel("Routes", { exact: true })
+    .fill("10.42.0.0/24,dev=ovpn42,metric=42");
   await activate(composer.getByRole("button", { name: "Save plan" }));
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { tunnelPlans: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { tunnelPlans: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.tunnelPlans.at(-1);
   });
   expect(request).toMatchObject({
@@ -570,51 +941,112 @@ test("authors external adapter tunnel plans from the topology panel", async ({ p
     name: "external-openvpn",
     runtime_control: {
       manager: "external_managed_adapter",
-      cleanup: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "cleanup", "{interface}"] },
-      startup: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "start", "{interface}"] },
-      status: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "status", "{interface}"] },
+      cleanup: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "cleanup",
+          "{interface}",
+        ],
+      },
+      startup: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "start",
+          "{interface}",
+        ],
+      },
+      status: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "status",
+          "{interface}",
+        ],
+      },
       traffic_limit: {
         burst_kb: 4096,
         egress_kbps: 100000,
       },
-      traffic_limit_apply: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "shape", "{interface}"] },
+      traffic_limit_apply: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "shape",
+          "{interface}",
+        ],
+      },
     },
     runtime_topology: {
       desired_interfaces: ["ovpn42"],
-      routes: [{ destination_cidr: "10.42.0.0/24", interface_name: "ovpn42", metric: 42 }],
+      routes: [
+        {
+          destination_cidr: "10.42.0.0/24",
+          interface_name: "ovpn42",
+          metric: 42,
+        },
+      ],
       version: "provider-a:42",
     },
   });
 });
 
-test("promotes saved observed tunnel plans into adapter contracts", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense topology promotion is covered in the desktop console layout");
+test("promotes saved observed tunnel plans into adapter contracts", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense topology promotion is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Topology", "Promotion");
 
-  const promotionPanel = page.locator(".scheduleComposer", { has: page.getByRole("heading", { name: "Tunnel promotion" }) });
-  const adapterForm = promotionPanel.locator("form", { has: page.getByRole("heading", { name: "Adapter contract" }) });
+  const promotionPanel = page.locator(".scheduleComposer", {
+    has: page.getByRole("heading", { name: "Tunnel promotion" }),
+  });
+  const adapterForm = promotionPanel.locator("form", {
+    has: page.getByRole("heading", { name: "Adapter contract" }),
+  });
   await promotionPanel.scrollIntoViewIfNeeded();
-  await adapterForm.getByLabel("Observed plan").selectOption("eeeeeeee-ffff-4000-8111-222222222222");
-  await adapterForm.getByLabel("Name", { exact: true }).fill("external-openvpn-managed");
-  await adapterForm.getByLabel("Status argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
-  await adapterForm.getByLabel("Start argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
-  await adapterForm.getByLabel("Stop argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nstop\n{interface}");
-  await adapterForm.getByLabel("Cleanup argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\ncleanup\n{interface}");
-  await adapterForm.getByLabel("Traffic argv", { exact: true }).fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
+  await adapterForm
+    .getByLabel("Observed plan")
+    .selectOption("eeeeeeee-ffff-4000-8111-222222222222");
+  await adapterForm
+    .getByLabel("Name", { exact: true })
+    .fill("external-openvpn-managed");
+  await adapterForm
+    .getByLabel("Status argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
+  await adapterForm
+    .getByLabel("Start argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
+  await adapterForm
+    .getByLabel("Stop argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstop\n{interface}");
+  await adapterForm
+    .getByLabel("Cleanup argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\ncleanup\n{interface}");
+  await adapterForm
+    .getByLabel("Traffic argv", { exact: true })
+    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
-  await adapterForm.getByLabel("Topology version", { exact: true }).fill("adapter:ovpn42");
-  await adapterForm.getByLabel("Desired interfaces", { exact: true }).fill("ovpn42");
+  await adapterForm
+    .getByLabel("Topology version", { exact: true })
+    .fill("adapter:ovpn42");
+  await adapterForm
+    .getByLabel("Desired interfaces", { exact: true })
+    .fill("ovpn42");
   await activate(adapterForm.getByRole("button", { name: "Promote adapter" }));
-  await expect(promotionPanel.getByText("Promote tunnel adapter")).toBeVisible();
+  await expect(
+    promotionPanel.getByText("Promote tunnel adapter"),
+  ).toBeVisible();
   await confirmVisiblePrompt(page, "Promote adapter");
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { tunnelPlanAdapterPromotions: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { tunnelPlanAdapterPromotions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.tunnelPlanAdapterPromotions.at(-1);
   });
   expect(request).toMatchObject({
@@ -623,15 +1055,45 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({ pag
     plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
     runtime_control: {
       manager: "external_managed_adapter",
-      cleanup: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "cleanup", "{interface}"] },
-      startup: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "start", "{interface}"] },
-      status: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "status", "{interface}"] },
-      stop: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "stop", "{interface}"] },
+      cleanup: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "cleanup",
+          "{interface}",
+        ],
+      },
+      startup: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "start",
+          "{interface}",
+        ],
+      },
+      status: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "status",
+          "{interface}",
+        ],
+      },
+      stop: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "stop",
+          "{interface}",
+        ],
+      },
       traffic_limit: {
         burst_kb: 4096,
         egress_kbps: 100000,
       },
-      traffic_limit_apply: { argv: ["/usr/local/libexec/vpsman-openvpn-adapter", "shape", "{interface}"] },
+      traffic_limit_apply: {
+        argv: [
+          "/usr/local/libexec/vpsman-openvpn-adapter",
+          "shape",
+          "{interface}",
+        ],
+      },
     },
     runtime_topology: {
       desired_interfaces: ["ovpn42"],
@@ -640,50 +1102,84 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({ pag
   });
 });
 
-test("shows grouped execution summaries for job output details", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "job detail summary density is covered in the desktop layout");
+test("shows grouped execution summaries for job output details", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "job detail summary density is covered in the desktop layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "History");
   await activate(page.getByRole("button", { name: "2", exact: true }).first());
 
-  await expect(page.getByRole("heading", { name: "Execution summary" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Execution summary" }),
+  ).toBeVisible();
   await expect(page.getByText(/2 groups across 2 targets/)).toBeVisible();
   await expect(page.getByText("Grouped outcomes")).toBeVisible();
   await expect(page.getByText("Target result details")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Binary", exact: true })).toHaveClass(/selected/);
+  await expect(
+    page.getByRole("button", { name: "Binary", exact: true }),
+  ).toHaveClass(/selected/);
 
   await activate(page.getByRole("button", { name: "Text", exact: true }));
-  await expect(page.getByRole("button", { name: "Text", exact: true })).toHaveClass(/selected/);
+  await expect(
+    page.getByRole("button", { name: "Text", exact: true }),
+  ).toHaveClass(/selected/);
   const comparisonRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobOutputComparisons: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { jobOutputComparisons: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.jobOutputComparisons.at(-1);
   });
   expect(comparisonRequest).toMatchObject({ mode: "text" });
 });
 
-test("generates local privilege assertions before dispatching a privileged job", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "privileged dispatch flow is covered in the desktop console layout");
+test("generates local privilege assertions before dispatching a privileged job", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "privileged dispatch flow is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
-  await expect(page.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dispatch command" }),
+  ).toBeVisible();
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   const topbar = page.locator(".topbar");
-  await expect(topbar.getByRole("button", { name: "Lock privilege" })).toBeVisible();
+  await expect(
+    topbar.getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
   await activate(topbar.getByRole("button", { name: "Lock privilege" }));
-  await expect(topbar.getByRole("button", { name: "Open privilege unlock" })).toBeVisible();
-  await expect(page.locator(".commandComposer").getByLabel("Super password")).toHaveCount(0);
-  await expect(page.locator(".commandComposer").getByRole("button", { name: "Unlock" })).toBeVisible();
+  await expect(
+    topbar.getByRole("button", { name: "Open privilege unlock" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".commandComposer").getByLabel("Super password"),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".commandComposer").getByRole("button", { name: "Unlock" }),
+  ).toBeVisible();
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
 
   await page.getByLabel("Command argv").fill("/usr/bin/uptime");
   const targetExpression = page.getByLabel("Bulk target selector expression");
   await targetExpression.fill("name:s");
-  await expect(page.getByRole("option", { name: "name:edge-sfo-01" })).toBeVisible();
+  await expect(
+    page.getByRole("option", { name: "name:edge-sfo-01" }),
+  ).toBeVisible();
   await targetExpression.fill("");
-  await page.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
+  await page
+    .getByLabel("Bulk target selector expression")
+    .fill("id:agent-sfo-01");
   await activate(page.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("1 resolved targets")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
@@ -692,10 +1188,16 @@ test("generates local privilege assertions before dispatching a privileged job",
   await expect(resultPanel).toBeVisible();
   await expect(resultPanel.getByText(/completed on 1 VPS/)).toBeVisible();
   await activate(page.getByRole("button", { name: "Open job details" }));
-  await expect(page.getByRole("heading", { level: 1, name: "Job history" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Target results" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Job history" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
@@ -706,11 +1208,19 @@ test("generates local privilege assertions before dispatching a privileged job",
     operation: { argv: ["/usr/bin/uptime"], pty: false, type: "shell" },
     privileged: true,
   });
-  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
+  expect(
+    (request as { privilege_assertion?: { assertion_hex?: string } })
+      .privilege_assertion?.assertion_hex,
+  ).toMatch(/^[0-9a-f]+$/);
 });
 
-test("dispatches terminal session control operations with local privilege unlock", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "terminal control dispatch is covered in the desktop job composer");
+test("dispatches terminal session control operations with local privilege unlock", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "terminal control dispatch is covered in the desktop job composer",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
@@ -722,13 +1232,20 @@ test("dispatches terminal session control operations with local privilege unlock
   await composer.getByLabel("Terminal cwd").fill("/root");
   await composer.getByLabel("Terminal columns").fill("100");
   await composer.getByLabel("Terminal rows").fill("30");
-  await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
+  await composer
+    .getByLabel("Bulk target selector expression")
+    .fill("id:agent-sfo-01");
   await dispatchWithPrompt(composer);
 
-  await expect(page.getByLabel("Execution result").getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page.getByLabel("Execution result").getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> } })
-      .__vpsmanTestRequests.jobs;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> };
+      }
+    ).__vpsmanTestRequests.jobs;
     return requests.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
@@ -744,21 +1261,36 @@ test("dispatches terminal session control operations with local privilege unlock
     },
     privileged: true,
   });
-  expect((request as { operation: { session_id: string } }).operation.session_id).toMatch(/[0-9a-f-]{36}/);
-  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
+  expect(
+    (request as { operation: { session_id: string } }).operation.session_id,
+  ).toMatch(/[0-9a-f-]{36}/);
+  expect(
+    (request as { privilege_assertion?: { assertion_hex?: string } })
+      .privilege_assertion?.assertion_hex,
+  ).toMatch(/^[0-9a-f]+$/);
 });
 
-test("previews degraded update targets and sends explicit force override", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "target impact controls are covered in the desktop console layout");
+test("previews degraded update targets and sends explicit force override", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "target impact controls are covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   await activate(page.getByRole("button", { name: "Update", exact: true }));
-  await page.getByLabel("Agent update artifact URL").fill("https://updates.example/vpsman-agent");
+  await page
+    .getByLabel("Agent update artifact URL")
+    .fill("https://updates.example/vpsman-agent");
   await page.getByLabel("Agent update SHA-256").fill("a".repeat(64));
-  await page.locator(".commandComposer").getByLabel("Bulk target selector expression").fill("id:agent-nyc-03");
+  await page
+    .locator(".commandComposer")
+    .getByLabel("Bulk target selector expression")
+    .fill("id:agent-nyc-03");
   await activate(page.getByRole("button", { name: "Preview" }));
 
   const impact = page.locator(".commandComposer .targetImpactPreview");
@@ -769,19 +1301,29 @@ test("previews degraded update targets and sends explicit force override", async
   await checkControl(page.getByLabel("Force unprivileged job best effort"));
   await expect(impact.getByText("Stale")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
-  await expect(page.getByLabel("Execution result").getByText(/failed on 1 VPS/)).toBeVisible();
-  await expect(page.getByLabel("Failed target reasons").getByText(/stale: agent rejected agent_update command_version 3/)).toBeVisible();
+  await expect(
+    page.getByLabel("Execution result").getByText(/failed on 1 VPS/),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Failed target reasons")
+      .getByText(/stale: agent rejected agent_update command_version 3/),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {
-        const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+        const requests = (
+          window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+        ).__vpsmanTestRequests;
         return requests.jobs.length;
       }),
     )
     .toBeGreaterThan(0);
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
@@ -798,9 +1340,13 @@ test("previews degraded update targets and sends explicit force override", async
   });
 });
 
-
-test("requests active in-flight job cancellation from the console", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "active job cancellation controls are covered in the desktop console layout");
+test("requests active in-flight job cancellation from the console", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "active job cancellation controls are covered in the desktop console layout",
+  );
 
   await page.addInitScript(() => {
     const activeJobId = "66666666-aaaa-4bbb-8ccc-dddddddddddd";
@@ -827,13 +1373,23 @@ test("requests active in-flight job cancellation from the console", async ({ pag
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       const pathname = new URL(url, window.location.href).pathname;
-      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
       if (pathname === "/api/v1/jobs" && method === "GET") {
         return response([job()]);
       }
-      if (pathname === `/api/v1/jobs/${activeJobId}/cancel` && method === "POST") {
-        const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
-        const requests = (window as unknown as { __vpsmanTestRequests: { jobCancels?: unknown[] } }).__vpsmanTestRequests;
+      if (
+        pathname === `/api/v1/jobs/${activeJobId}/cancel` &&
+        method === "POST"
+      ) {
+        const body =
+          typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: { jobCancels?: unknown[] };
+          }
+        ).__vpsmanTestRequests;
         requests.jobCancels = [...(requests.jobCancels ?? []), body];
         cancelRequested = true;
         return response({
@@ -852,9 +1408,13 @@ test("requests active in-flight job cancellation from the console", async ({ pag
   await activate(page.getByRole("button", { name: "Jobs", exact: true }));
   await expect(page.getByText("dispatching")).toBeVisible();
   await activate(page.getByRole("button", { name: "Cancel active job" }));
-  await expect(page.getByText("cancel requested", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("cancel requested", { exact: true }),
+  ).toBeVisible();
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobCancels: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobCancels: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobCancels.at(-1);
   });
   expect(request).toMatchObject({
@@ -863,28 +1423,54 @@ test("requests active in-flight job cancellation from the console", async ({ pag
   });
 });
 
-test("prepares backup artifacts server-side before dispatching executable restores", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "restore artifact dispatch is covered in the desktop console layout");
+test("prepares backup artifacts server-side before dispatching executable restores", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "restore artifact dispatch is covered in the desktop console layout",
+  );
 
   const privateKeyHex = "07".repeat(32);
-  const fixture = buildEncryptedBackupArtifactFixture(privateKeyHex, "agent-sfo-01");
+  const fixture = buildEncryptedBackupArtifactFixture(
+    privateKeyHex,
+    "agent-sfo-01",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Restore");
 
-  await expect(page.getByRole("heading", { name: "Restore operations" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Restore operations" }),
+  ).toBeVisible();
   await unlockPrivilegeFor(page, "Backups", "Restore");
-  await expect(page.locator(".topbar").getByRole("button", { name: "Lock privilege" })).toBeVisible();
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
+  await activate(page.getByRole("button", { name: "Open restore workflow" }));
+  const restoreWorkflow = page.getByLabel("Open restore workflow");
 
-  await page.getByLabel("Restore source backup request").selectOption(backupId);
-  await page.getByLabel("Restore target client").selectOption("agent-fra-02");
-  await page.getByLabel("Restore destination root").fill("/restore");
-  await activate(page.getByRole("button", { name: "Plan restore" }));
-  await expect(page.getByLabel("Create restore plan")).toBeVisible();
-  await activate(page.getByLabel("Create restore plan").getByRole("button", { name: "Confirm" }));
-  await expect(page.getByText(/Restore cccccccc planned_metadata_only/)).toBeVisible();
+  await restoreWorkflow
+    .getByLabel("Restore source backup request")
+    .selectOption(backupId);
+  await restoreWorkflow
+    .getByLabel("Restore target client")
+    .selectOption("agent-fra-02");
+  await restoreWorkflow.getByLabel("Restore destination root").fill("/restore");
+  await activate(restoreWorkflow.getByRole("button", { name: "Plan restore" }));
+  await expect(restoreWorkflow.getByLabel("Create restore plan")).toBeVisible();
+  await activate(
+    restoreWorkflow
+      .getByLabel("Create restore plan")
+      .getByRole("button", { name: "Confirm" }),
+  );
+  await expect(
+    page.getByText(/Restore cccccccc planned_metadata_only/),
+  ).toBeVisible();
   const restorePlanRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { restorePlans: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { restorePlans: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.restorePlans.at(-1);
   });
   expect(restorePlanRequest).toMatchObject({
@@ -895,30 +1481,40 @@ test("prepares backup artifacts server-side before dispatching executable restor
     target_client_id: "agent-fra-02",
   });
   expectPrivilegeAssertion(restorePlanRequest);
-  await page.getByLabel("Restore artifact file").setInputFiles({
+  await restoreWorkflow.getByLabel("Restore artifact file").setInputFiles({
     buffer: Buffer.from(JSON.stringify(fixture.artifact)),
     mimeType: "application/json",
     name: "backup-artifact.json",
   });
-  await page.getByLabel("Backup private key hex").fill(privateKeyHex);
-  await page.getByLabel("Restore timeout seconds").fill("120");
-  await activate(page.getByRole("button", { name: "Run restore" }));
-  await expect(page.getByLabel("Run restore")).toBeVisible();
-  await activate(page.getByLabel("Run restore").getByRole("button", { name: "Confirm" }));
+  await restoreWorkflow.getByLabel("Backup private key hex").fill(privateKeyHex);
+  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
+  await activate(restoreWorkflow.getByRole("button", { name: "Run restore" }));
+  await expect(restoreWorkflow.getByLabel("Run restore")).toBeVisible();
+  await activate(
+    restoreWorkflow
+      .getByLabel("Run restore")
+      .getByRole("button", { name: "Confirm" }),
+  );
 
   await expect(page.getByText(/Restore job 11111111 accepted/)).toBeVisible();
   const prepareRequest = await page.evaluate(() => {
-    const requests = (window as unknown as {
-      __vpsmanTestRequests: { backupArtifactRestorePreparations: unknown[] };
-    }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { backupArtifactRestorePreparations: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.backupArtifactRestorePreparations.at(-1);
   });
   expect(prepareRequest).toMatchObject({
-    artifact_base64: Buffer.from(JSON.stringify(fixture.artifact)).toString("base64"),
+    artifact_base64: Buffer.from(JSON.stringify(fixture.artifact)).toString(
+      "base64",
+    ),
     private_key_hex: privateKeyHex,
   });
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain(privateKeyHex);
@@ -941,8 +1537,11 @@ test("prepares backup artifacts server-side before dispatching executable restor
     privileged: true,
     timeout_secs: 120,
   });
-  const operation = (request as { operation: { archive_base64: string } }).operation;
-  expect(operation.archive_base64).toBe(Buffer.from(fixture.archiveBytes).toString("base64"));
+  const operation = (request as { operation: { archive_base64: string } })
+    .operation;
+  expect(operation.archive_base64).toBe(
+    Buffer.from(fixture.archiveBytes).toString("base64"),
+  );
   expectPrivilegeAssertion(request);
 
   const restoreJobId = "11111111-2222-4333-8444-555555555555";
@@ -988,15 +1587,29 @@ test("prepares backup artifacts server-side before dispatching executable restor
     },
     { restoreJobId, restoreStatusBase64 },
   );
-  await expect(page.getByLabel("Restore rollback source job id")).toHaveValue(restoreJobId);
-  await expect(page.getByLabel("Restore rollback target VPS ID")).toHaveValue("agent-fra-02");
-  await page.getByLabel("Restore rollback timeout seconds").fill("45");
-  await activate(page.getByRole("button", { name: "Rollback restore" }));
-  await expect(page.getByLabel("Rollback restore")).toBeVisible();
-  await activate(page.getByLabel("Rollback restore").getByRole("button", { name: "Confirm" }));
-  await expect(page.getByText(/Restore rollback job 11111111 accepted/)).toBeVisible();
+  await expect(
+    restoreWorkflow.getByLabel("Restore rollback source job id"),
+  ).toHaveValue(restoreJobId);
+  await expect(
+    restoreWorkflow.getByLabel("Restore rollback target VPS ID"),
+  ).toHaveValue("agent-fra-02");
+  await restoreWorkflow.getByLabel("Restore rollback timeout seconds").fill("45");
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Rollback restore" }),
+  );
+  await expect(restoreWorkflow.getByLabel("Rollback restore")).toBeVisible();
+  await activate(
+    restoreWorkflow
+      .getByLabel("Rollback restore")
+      .getByRole("button", { name: "Confirm" }),
+  );
+  await expect(
+    page.getByText(/Restore rollback job 11111111 accepted/),
+  ).toBeVisible();
   const rollbackRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(rollbackRequest)).not.toContain("local-super-password");
@@ -1024,24 +1637,46 @@ test("prepares backup artifacts server-side before dispatching executable restor
   });
 });
 
-test("promotes retained backup output into a stored artifact", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "backup handoff controls are covered in the desktop layout");
+test("promotes retained backup output into a stored artifact", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "backup handoff controls are covered in the desktop layout",
+  );
 
   const sourceJobId = "99999999-2222-4333-8444-555555555555";
 
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Artifacts");
 
-  await page.getByLabel("Artifact backup request").selectOption(backupId);
-  await page.getByLabel("Backup artifact handoff source job ID").fill(sourceJobId);
-  await activate(page.getByRole("button", { name: "Promote retained output" }));
-  await expect(page.getByLabel("Promote retained output")).toBeVisible();
-  await activate(page.getByLabel("Promote retained output").getByRole("button", { name: "Confirm" }));
+  await activate(page.getByRole("button", { name: "Open artifact workflow" }));
+  const artifactWorkflow = page.getByLabel("Open artifact workflow");
+  await artifactWorkflow
+    .getByLabel("Artifact backup request")
+    .selectOption(backupId);
+  await artifactWorkflow
+    .getByLabel("Backup artifact handoff source job ID")
+    .fill(sourceJobId);
+  await activate(
+    artifactWorkflow.getByRole("button", { name: "Promote retained output" }),
+  );
+  await expect(
+    artifactWorkflow.getByLabel("Promote retained output"),
+  ).toBeVisible();
+  await activate(
+    artifactWorkflow
+      .getByLabel("Promote retained output")
+      .getByRole("button", { name: "Confirm" }),
+  );
 
   await expect(page.getByText(/Artifact dddddddd uploaded/)).toBeVisible();
   const handoffRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { backupArtifactHandoffs: unknown[] } })
-      .__vpsmanTestRequests;
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { backupArtifactHandoffs: unknown[] };
+      }
+    ).__vpsmanTestRequests;
     return requests.backupArtifactHandoffs.at(-1);
   });
   expect(handoffRequest).toMatchObject({
@@ -1053,14 +1688,21 @@ test("promotes retained backup output into a stored artifact", async ({ page }, 
 test("dispatches topology network apply, rollback, status, probe, and speed test with local privilege unlock", async ({
   page,
 }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "network apply privilege unlock flow is covered in the desktop console layout");
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "network apply privilege unlock flow is covered in the desktop console layout",
+  );
 
   await page.goto("/");
   await openConsoleSubpage(page, "Topology", "Apply / rollback");
 
-  await expect(page.getByRole("heading", { name: "Network apply" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Network apply" }),
+  ).toBeVisible();
   await unlockPrivilegeFor(page, "Topology", "Apply / rollback");
-  await expect(page.locator(".topbar").getByRole("button", { name: "Lock privilege" })).toBeVisible();
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toBeVisible();
 
   await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network apply endpoint side").selectOption("left");
@@ -1068,9 +1710,16 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await activate(page.getByRole("button", { name: "Apply side" }));
   await confirmVisiblePrompt(page, "Apply side");
 
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
@@ -1098,7 +1747,9 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       };
     }
   ).operation;
-  expect(operation.ifupdown_sha256_hex).toBe(sha256Hex(new TextEncoder().encode(tunnelPlans[0].plan.ifupdown_snippet)));
+  expect(operation.ifupdown_sha256_hex).toBe(
+    sha256Hex(new TextEncoder().encode(tunnelPlans[0].plan.ifupdown_snippet)),
+  );
   expect(operation.config_backend).toBe("ifupdown");
   expect(operation.config_sha256_hex).toBe(
     sha256Hex(
@@ -1116,15 +1767,24 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     ),
   );
   expect(operation.bird2_sha256_hex).toBe(
-    sha256Hex(new TextEncoder().encode(tunnelPlans[0].plan.bird2_interface_snippet)),
+    sha256Hex(
+      new TextEncoder().encode(tunnelPlans[0].plan.bird2_interface_snippet),
+    ),
   );
   expectPrivilegeAssertion(request);
 
   await activate(page.getByRole("button", { name: "Rollback side" }));
   await confirmVisiblePrompt(page, "Rollback side");
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const rollbackRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(rollbackRequest)).not.toContain("local-super-password");
@@ -1146,9 +1806,16 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
 
   await activate(page.getByRole("button", { name: "Inspect side" }));
   await confirmVisiblePrompt(page, "Inspect side");
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const statusRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(statusRequest)).not.toContain("local-super-password");
@@ -1172,9 +1839,16 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network probe interval milliseconds").fill("700");
   await activate(page.getByRole("button", { name: "Probe latency" }));
   await confirmVisiblePrompt(page, "Probe latency");
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const probeRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(probeRequest)).not.toContain("local-super-password");
@@ -1200,12 +1874,21 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network speed test max mebibytes").fill("8");
   await page.getByLabel("Network speed test rate limit Kbps").fill("25000");
   await page.getByLabel("Network speed test TCP port").fill("55201");
-  await page.getByLabel("Network speed test connect timeout milliseconds").fill("2500");
+  await page
+    .getByLabel("Network speed test connect timeout milliseconds")
+    .fill("2500");
   await activate(page.getByRole("button", { name: "Test speed" }));
   await confirmVisiblePrompt(page, "Run speed test");
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 2 VPSs/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 2 VPSs/),
+  ).toBeVisible();
   const speedRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(speedRequest)).not.toContain("local-super-password");
@@ -1231,16 +1914,27 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expectPrivilegeAssertion(speedRequest);
 
   await openConsoleSubpage(page, "Topology", "OSPF");
-  await expect(page.getByRole("heading", { name: "OSPF cost apply" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "OSPF cost apply" }),
+  ).toBeVisible();
   await unlockPrivilegeFor(page, "Topology", "OSPF");
-  await page.getByLabel("OSPF update plan").selectOption(ospfUpdatePlans[0].plan_id);
+  await page
+    .getByLabel("OSPF update plan")
+    .selectOption(ospfUpdatePlans[0].plan_id);
   await page.getByLabel("OSPF update endpoint side").selectOption("left");
   await page.getByLabel("OSPF update timeout seconds").fill("45");
   await activate(page.getByRole("button", { name: "Apply cost" }));
   await confirmVisiblePrompt(page, "Apply cost");
-  await expect(page.getByLabel("Execution result").last().getByText(/completed on 1 VPS/)).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .getByText(/completed on 1 VPS/),
+  ).toBeVisible();
   const ospfRequest = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
   const proposedPlan = {
@@ -1277,11 +1971,19 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     }
   ).operation;
   expect(ospfOperation.bird2_sha256_hex).toBe(
-    sha256Hex(new TextEncoder().encode(ospfUpdatePlans[0].proposed_left_bird2_interface_snippet)),
+    sha256Hex(
+      new TextEncoder().encode(
+        ospfUpdatePlans[0].proposed_left_bird2_interface_snippet,
+      ),
+    ),
   );
   expectPrivilegeAssertion(ospfRequest);
   await expect(page.getByLabel("Execution result").last()).toBeVisible();
   await activate(page.getByRole("button", { name: "Open job details" }).last());
-  await expect(page.getByRole("heading", { level: 1, name: "Job history" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Target results" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Job history" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
 });

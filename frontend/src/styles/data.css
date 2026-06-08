@@ -82,7 +82,10 @@
 
 .row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.4fr) minmax(88px, 0.45fr) minmax(150px, 0.8fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(190px, 1.4fr) minmax(88px, 0.45fr) minmax(
+      150px,
+      0.8fr
+    ) minmax(180px, 1fr);
   align-items: center;
   min-height: 64px;
   gap: 16px;
@@ -204,7 +207,10 @@
 
 .fleetAlertRow {
   display: grid;
-  grid-template-columns: auto minmax(140px, 0.8fr) minmax(110px, 0.55fr) minmax(0, 1.1fr) auto auto;
+  grid-template-columns: auto minmax(140px, 0.8fr) minmax(110px, 0.55fr) minmax(
+      0,
+      1.1fr
+    ) auto auto;
   align-items: center;
   gap: 10px;
   min-height: 38px;
@@ -245,7 +251,10 @@
 
 .historyRetentionGrid {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) repeat(2, minmax(120px, 0.6fr)) repeat(2, minmax(120px, 0.5fr)) auto;
+  grid-template-columns: minmax(160px, 1fr) repeat(
+      2,
+      minmax(120px, 0.6fr)
+    ) repeat(2, minmax(120px, 0.5fr)) auto;
   gap: 12px;
   align-items: end;
   padding: 16px 18px;
@@ -622,44 +631,71 @@
 }
 
 .auditHistoryGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1.1fr) minmax(120px, 0.7fr) minmax(120px, 0.7fr) minmax(160px, 0.8fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1.1fr) minmax(
+      120px,
+      0.7fr
+    ) minmax(120px, 0.7fr) minmax(160px, 0.8fr);
 }
 
 .targetHistoryGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(180px, 1fr) 70px minmax(160px, 0.8fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(
+      180px,
+      1fr
+    ) 70px minmax(160px, 0.8fr);
 }
 
 .scheduledRunGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) 80px minmax(160px, 0.8fr) minmax(150px, 0.6fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) 80px minmax(
+      160px,
+      0.8fr
+    ) minmax(150px, 0.6fr);
 }
 
 .gatewaySessionGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(130px, 0.7fr) minmax(160px, 0.9fr) minmax(160px, 0.8fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(130px, 0.7fr) minmax(
+      160px,
+      0.9fr
+    ) minmax(160px, 0.8fr);
 }
 
 .operatorGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.45fr) minmax(180px, 1fr) minmax(150px, 0.7fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.45fr) minmax(
+      180px,
+      1fr
+    ) minmax(150px, 0.7fr);
 }
 
 .operatorSessionGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) minmax(160px, 0.7fr) minmax(110px, 0.4fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) minmax(
+      160px,
+      0.7fr
+    ) minmax(110px, 0.4fr);
 }
 
 .rolloutGrid {
   grid-template-columns:
-    minmax(170px, 1fr) minmax(150px, 0.8fr) minmax(110px, 0.6fr) minmax(150px, 0.8fr)
+    minmax(170px, 1fr) minmax(150px, 0.8fr) minmax(110px, 0.6fr) minmax(
+      150px,
+      0.8fr
+    )
     minmax(120px, 0.7fr) minmax(160px, 0.8fr) minmax(250px, 1.1fr);
 }
 
 .releaseGrid {
   grid-template-columns:
-    minmax(170px, 1fr) minmax(150px, 0.7fr) minmax(120px, 0.6fr) minmax(120px, 0.6fr)
+    minmax(170px, 1fr) minmax(150px, 0.7fr) minmax(120px, 0.6fr) minmax(
+      120px,
+      0.6fr
+    )
     minmax(120px, 0.6fr) minmax(220px, 1fr) minmax(160px, 0.7fr);
 }
 
 .supervisorInventoryGrid {
   grid-template-columns:
-    minmax(170px, 1fr) minmax(130px, 0.7fr) minmax(80px, 0.4fr) minmax(150px, 0.8fr)
+    minmax(170px, 1fr) minmax(130px, 0.7fr) minmax(80px, 0.4fr) minmax(
+      150px,
+      0.8fr
+    )
     minmax(150px, 0.8fr) minmax(160px, 0.8fr);
 }
 
@@ -668,7 +704,10 @@
 }
 
 .dataSourcePresetGrid {
-  grid-template-columns: minmax(190px, 1fr) minmax(180px, 1fr) minmax(110px, 0.5fr) 90px minmax(170px, 0.8fr);
+  grid-template-columns: minmax(190px, 1fr) minmax(180px, 1fr) minmax(
+      110px,
+      0.5fr
+    ) 90px minmax(170px, 0.8fr);
 }
 
 .sourceStatusSection {
@@ -727,7 +766,10 @@
 }
 
 .tagAssignmentGrid {
-  grid-template-columns: minmax(190px, 0.9fr) 100px minmax(260px, 1.25fr) minmax(220px, 0.9fr);
+  grid-template-columns: minmax(190px, 0.9fr) 100px minmax(
+      260px,
+      1.25fr
+    ) minmax(220px, 0.9fr);
 }
 
 .configRuleWorkspace,
@@ -760,7 +802,10 @@
 
 .tagScheduleImpactRow {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) 92px 72px minmax(110px, 0.8fr) minmax(130px, 1fr) minmax(130px, 1fr);
+  grid-template-columns: minmax(150px, 1fr) 92px 72px minmax(
+      110px,
+      0.8fr
+    ) minmax(130px, 1fr) minmax(130px, 1fr);
   gap: 8px;
   align-items: start;
   min-width: 0;
@@ -902,7 +947,10 @@
 }
 
 .presetFormRow {
-  grid-template-columns: minmax(180px, 1.1fr) minmax(160px, 1fr) minmax(120px, 0.6fr);
+  grid-template-columns: minmax(180px, 1.1fr) minmax(160px, 1fr) minmax(
+      120px,
+      0.6fr
+    );
 }
 
 .configPreview {
@@ -1008,7 +1056,9 @@
 
 .monoValue {
   color: #3c4043;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 12px;
 }
 
@@ -1048,14 +1098,27 @@
 }
 
 .countryBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   width: fit-content;
   border: 1px solid #dfe3eb;
   border-radius: 999px;
   color: #3c4043;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.1;
   padding: 3px 8px;
   white-space: nowrap;
+}
+
+.countryFlag {
+  display: block;
+  width: 16px;
+  height: 12px;
+  object-fit: cover;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(60, 64, 67, 0.18);
 }
 
 .inspector {
@@ -1133,7 +1196,10 @@
 
 .networkInterfaceRow {
   display: grid;
-  grid-template-columns: minmax(72px, 0.8fr) minmax(140px, 1.2fr) minmax(180px, 2fr) minmax(120px, 1fr);
+  grid-template-columns: minmax(72px, 0.8fr) minmax(140px, 1.2fr) minmax(
+      180px,
+      2fr
+    ) minmax(120px, 1fr);
   gap: 8px;
   align-items: center;
   border: 1px solid #dfe3eb;
@@ -1277,7 +1343,10 @@
 
 .comparisonGroupGrid,
 .comparisonTargetGrid {
-  grid-template-columns: minmax(180px, 1.1fr) minmax(130px, 0.8fr) minmax(170px, 1fr) minmax(110px, 0.6fr);
+  grid-template-columns: minmax(180px, 1.1fr) minmax(130px, 0.8fr) minmax(
+      170px,
+      1fr
+    ) minmax(110px, 0.6fr);
 }
 
 .clickableRow {
@@ -1351,7 +1420,9 @@
   border-radius: 8px;
   background: #f8fafd;
   color: #202124;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 12px;
   line-height: 1.5;
   padding: 12px;
