@@ -1239,7 +1239,7 @@ mod tests {
     #[test]
     fn shared_expression_fixture_cases_match() {
         let fixture: Value =
-            serde_json::from_str(include_str!("../../../fixtures/expression-cases.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/expression-cases.json")).unwrap();
         let contexts = fixture
             .get("contexts")
             .and_then(Value::as_object)

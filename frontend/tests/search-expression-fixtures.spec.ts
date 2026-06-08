@@ -30,7 +30,10 @@ type ExpressionFixture = {
   contexts: Record<string, FixtureContext>;
 };
 
-const fixturePath = resolve(dirname(fileURLToPath(import.meta.url)), "../../fixtures/expression-cases.json");
+const fixturePath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../crates/common/tests/fixtures/expression-cases.json",
+);
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as ExpressionFixture;
 
 test("shared expression fixture cases match frontend evaluator", () => {
