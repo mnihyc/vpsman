@@ -92,9 +92,10 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
-                    SELECT public_key
+                    SELECT public_key, status
                     FROM clients
                     WHERE id = $1
+                      AND (hidden_at IS NULL OR status = 'revoked')
                     FOR UPDATE
                     "#,
                 )
@@ -108,15 +109,20 @@ impl Repository {
                 if current_public_key.is_empty() {
                     anyhow::bail!("client public key missing for {client_id}");
                 }
+                let prior_status: String = row.try_get("status")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
                     fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
                         .await?
                 {
-                    sqlx::query("UPDATE clients SET status = 'revoked' WHERE id = $1")
-                        .bind(client_id)
-                        .execute(&mut *tx)
-                        .await?;
+                    mark_postgres_agent_revoked(
+                        &mut tx,
+                        client_id,
+                        operator.operator.id,
+                        reason.as_deref(),
+                        &prior_status,
+                    )
+                    .await?;
                     tx.commit().await?;
                     return Ok(existing);
                 }
@@ -137,10 +143,14 @@ impl Repository {
                 .bind(operator.operator.id)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query("UPDATE clients SET status = 'revoked' WHERE id = $1")
-                    .bind(client_id)
-                    .execute(&mut *tx)
-                    .await?;
+                mark_postgres_agent_revoked(
+                    &mut tx,
+                    client_id,
+                    operator.operator.id,
+                    reason.as_deref(),
+                    &prior_status,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -420,6 +430,12 @@ impl Repository {
 }
 
 async fn mark_memory_agent_revoked(memory: &crate::repository::MemoryState, client_id: &str) {
+    let now = unix_now().to_string();
+    memory
+        .hidden_clients
+        .write()
+        .await
+        .insert(client_id.to_string());
     if let Some(agent) = memory
         .agents
         .write()
@@ -428,7 +444,82 @@ async fn mark_memory_agent_revoked(memory: &crate::repository::MemoryState, clie
         .find(|agent| agent.id == client_id)
     {
         agent.status = "revoked".to_string();
+        agent.stale_since = None;
+        agent.stale_reason = None;
     }
+    for session in memory.gateway_sessions.write().await.iter_mut() {
+        if session.client_id == client_id && session.status == "active" {
+            session.status = "ended".to_string();
+            session.last_seen_at = now.clone();
+            session.ended_at = Some(now.clone());
+            session.end_reason = Some("client_key_revoked".to_string());
+        }
+    }
+}
+
+async fn mark_postgres_agent_revoked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    operator_id: Uuid,
+    request_reason: Option<&str>,
+    prior_status: &str,
+) -> Result<()> {
+    let hidden_reason = request_reason.unwrap_or("client_key_revoked");
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET
+            hidden_at = COALESCE(hidden_at, now()),
+            hidden_by = COALESCE(hidden_by, $2),
+            hidden_reason = COALESCE($3, hidden_reason),
+            status = 'revoked',
+            stale_since = NULL,
+            stale_reason = NULL,
+            stale_build_number = NULL
+        WHERE id = $1
+          AND (hidden_at IS NULL OR status = 'revoked')
+        "#,
+    )
+    .bind(client_id)
+    .bind(operator_id)
+    .bind(hidden_reason)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE gateway_sessions
+        SET
+            status = 'ended',
+            last_seen_at = now(),
+            ended_at = COALESCE(ended_at, now()),
+            end_reason = COALESCE(end_reason, 'client_key_revoked')
+        WHERE client_id = $1 AND status = 'active'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+    if prior_status != "revoked" {
+        sqlx::query(
+            r#"
+            INSERT INTO client_status_history (
+                id, client_id, from_status, to_status, reason, metadata
+            )
+            VALUES ($1, $2, $3, 'revoked', 'client_key_revoked', $4)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(client_id)
+        .bind(prior_status)
+        .bind(json!({
+            "reason": request_reason,
+            "frontend_visible": false,
+            "access_deactivated": true,
+        }))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn fetch_postgres_key_revocation(

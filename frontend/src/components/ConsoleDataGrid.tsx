@@ -441,10 +441,11 @@ export function ConsoleDataGrid<T>({
             <DropdownMenu.Trigger asChild>
               <button
                 aria-label={`${title} columns`}
-                className="iconButton"
+                className="secondaryAction compactAction columnChooserButton"
                 type="button"
               >
                 <Columns3 size={17} />
+                <span>Fields</span>
               </button>
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>

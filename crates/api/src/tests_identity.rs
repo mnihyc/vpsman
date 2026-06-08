@@ -200,9 +200,10 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         })
         .await
         .unwrap();
-    assert_eq!(report.current_key_revoked_count, 1);
+    assert_eq!(report.current_key_revoked_count, 0);
     assert_eq!(report.revocation_count, 1);
-    assert!(report.clients[0].current_key_revoked);
+    assert!(report.clients.is_empty());
+    assert!(repo.list_agents().await.unwrap().is_empty());
 
     let second_token = repo
         .create_enrollment_token(

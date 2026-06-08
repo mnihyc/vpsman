@@ -745,39 +745,51 @@ export function AccessPanel({
           <span>{operatorActionError ?? (canManageOperators ? "Admin role" : "Admin role required")}</span>
         </div>
         <form className="sideForm" hidden={activeSubpage !== "Operators"} onSubmit={(event) => void createOperator(event)}>
-          <input
-            aria-label="Operator username"
-            disabled={!canManageOperators || operatorActionPending}
-            onChange={(event) => setNewOperatorUsername(event.target.value)}
-            placeholder="operator username"
-            value={newOperatorUsername}
-          />
-          <select
-            aria-label="Operator role"
-            disabled={!canManageOperators || operatorActionPending}
-            onChange={(event) => setNewOperatorRole(event.target.value)}
-            value={newOperatorRole}
-          >
-            <option value="operator">operator</option>
-            <option value="viewer">viewer</option>
-            <option value="admin">admin</option>
-          </select>
-          <input
-            aria-label="Operator password"
-            autoComplete="new-password"
-            disabled={!canManageOperators || operatorActionPending}
-            onChange={(event) => setNewOperatorPassword(event.target.value)}
-            placeholder="temporary password, min 12 chars"
-            type="password"
-            value={newOperatorPassword}
-          />
-          <input
-            aria-label="Operator scopes"
-            disabled={!canManageOperators || operatorActionPending}
-            onChange={(event) => setNewOperatorScopes(event.target.value)}
-            placeholder="scopes, blank for role defaults"
-            value={newOperatorScopes}
-          />
+          <label>
+            <span>Username</span>
+            <input
+              aria-label="Operator username"
+              disabled={!canManageOperators || operatorActionPending}
+              onChange={(event) => setNewOperatorUsername(event.target.value)}
+              placeholder="ops-shift-lead"
+              value={newOperatorUsername}
+            />
+          </label>
+          <label>
+            <span>Role</span>
+            <select
+              aria-label="Operator role"
+              disabled={!canManageOperators || operatorActionPending}
+              onChange={(event) => setNewOperatorRole(event.target.value)}
+              value={newOperatorRole}
+            >
+              <option value="operator">operator</option>
+              <option value="viewer">viewer</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <label>
+            <span>Temporary password</span>
+            <input
+              aria-label="Operator password"
+              autoComplete="new-password"
+              disabled={!canManageOperators || operatorActionPending}
+              onChange={(event) => setNewOperatorPassword(event.target.value)}
+              placeholder="minimum 12 characters"
+              type="password"
+              value={newOperatorPassword}
+            />
+          </label>
+          <label>
+            <span>Scopes</span>
+            <input
+              aria-label="Operator scopes"
+              disabled={!canManageOperators || operatorActionPending}
+              onChange={(event) => setNewOperatorScopes(event.target.value)}
+              placeholder="blank uses role defaults"
+              value={newOperatorScopes}
+            />
+          </label>
           <button className="secondaryAction" disabled={!canCreateOperator} type="submit">
             <UserPlus size={17} />
             Create operator
@@ -789,23 +801,29 @@ export function AccessPanel({
           <span>{totpError ?? (operator?.totp_enabled ? "Enabled" : "Optional")}</span>
         </div>
         <div className="sideForm" hidden={activeSubpage !== "Operators"}>
-          <input
-            aria-label="TOTP password"
-            autoComplete="current-password"
-            onChange={(event) => setTotpPassword(event.target.value)}
-            placeholder="current password"
-            type="password"
-            value={totpPassword}
-          />
-          <input
-            aria-label="TOTP code"
-            autoComplete="one-time-code"
-            inputMode="numeric"
-            maxLength={6}
-            onChange={(event) => setTotpCode(event.target.value)}
-            placeholder="6-digit code"
-            value={totpCode}
-          />
+          <label>
+            <span>Current password</span>
+            <input
+              aria-label="TOTP password"
+              autoComplete="current-password"
+              onChange={(event) => setTotpPassword(event.target.value)}
+              placeholder="operator password"
+              type="password"
+              value={totpPassword}
+            />
+          </label>
+          <label>
+            <span>Authenticator code</span>
+            <input
+              aria-label="TOTP code"
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) => setTotpCode(event.target.value)}
+              placeholder="6-digit code"
+              value={totpCode}
+            />
+          </label>
           {totpSetup && (
             <div className="inlineSecret">
               <strong>{totpSetup.secret_base32}</strong>
@@ -875,57 +893,72 @@ export function AccessPanel({
           <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
         </div>
         <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void createEnrollmentToken(event)}>
-          <select
-            aria-label="Enrollment token purpose"
-            disabled={!canManageOperators || tokenPending}
-            onChange={(event) => {
-              const nextPurpose = event.target.value as EnrollmentTokenPurpose;
-              setTokenPurpose(nextPurpose);
-              if (nextPurpose === "provision") {
-                setTokenClientId("");
-              }
-            }}
-            value={tokenPurpose}
-          >
-            <option value="provision">Provision token</option>
-            <option value="rebuild_reenrollment">Rebuild token</option>
-          </select>
-          {tokenPurpose === "rebuild_reenrollment" ? (
-            <input
-              aria-label="Enrollment token existing VPS ID"
+          <label>
+            <span>Token purpose</span>
+            <select
+              aria-label="Enrollment token purpose"
               disabled={!canManageOperators || tokenPending}
-              onChange={(event) => setTokenClientId(event.target.value)}
-              placeholder="VPS ID from details"
-              value={tokenClientId}
-            />
+              onChange={(event) => {
+                const nextPurpose = event.target.value as EnrollmentTokenPurpose;
+                setTokenPurpose(nextPurpose);
+                if (nextPurpose === "provision") {
+                  setTokenClientId("");
+                }
+              }}
+              value={tokenPurpose}
+            >
+              <option value="provision">Provision token</option>
+              <option value="rebuild_reenrollment">Rebuild token</option>
+            </select>
+          </label>
+          {tokenPurpose === "rebuild_reenrollment" ? (
+            <label>
+              <span>Existing VPS ID</span>
+              <input
+                aria-label="Enrollment token existing VPS ID"
+                disabled={!canManageOperators || tokenPending}
+                onChange={(event) => setTokenClientId(event.target.value)}
+                placeholder="VPS ID from details"
+                value={tokenClientId}
+              />
+            </label>
           ) : (
             <div className="formNote">
               <strong>VPS identity</strong>
               <span>System ID is assigned server-side; set the display name below.</span>
             </div>
           )}
-          <input
-            aria-label="Enrollment token ttl"
-            disabled={!canManageOperators || tokenPending}
-            inputMode="numeric"
-            onChange={(event) => setTokenTtlSecs(event.target.value)}
-            placeholder="ttl seconds"
-            value={tokenTtlSecs}
-          />
-          <input
-            aria-label="Enrollment default tags"
-            disabled={!canManageOperators || tokenPending}
-            onChange={(event) => setTokenTags(event.target.value)}
-            placeholder="default tags"
-            value={tokenTags}
-          />
-          <input
-            aria-label="Enrollment default display name"
-            disabled={!canManageOperators || tokenPending}
-            onChange={(event) => setTokenDisplayName(event.target.value)}
-            placeholder="initial display name"
-            value={tokenDisplayName}
-          />
+          <label>
+            <span>Token TTL seconds</span>
+            <input
+              aria-label="Enrollment token ttl"
+              disabled={!canManageOperators || tokenPending}
+              inputMode="numeric"
+              onChange={(event) => setTokenTtlSecs(event.target.value)}
+              placeholder="1800"
+              value={tokenTtlSecs}
+            />
+          </label>
+          <label>
+            <span>Default tags</span>
+            <input
+              aria-label="Enrollment default tags"
+              disabled={!canManageOperators || tokenPending}
+              onChange={(event) => setTokenTags(event.target.value)}
+              placeholder="country:JP,role:edge"
+              value={tokenTags}
+            />
+          </label>
+          <label>
+            <span>Initial display name</span>
+            <input
+              aria-label="Enrollment default display name"
+              disabled={!canManageOperators || tokenPending}
+              onChange={(event) => setTokenDisplayName(event.target.value)}
+              placeholder="edge-nrt-04"
+              value={tokenDisplayName}
+            />
+          </label>
           <label className="inlineCheck">
             <input
               checked={tokenUnmanagedUpdateEnabled}
@@ -935,29 +968,38 @@ export function AccessPanel({
             />
             <span>Auto-check updates</span>
           </label>
-          <input
-            aria-label="Enrollment unmanaged update version URL"
-            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-            onChange={(event) => setTokenUnmanagedUpdateVersionUrl(event.target.value)}
-            placeholder="version.json URL"
-            value={tokenUnmanagedUpdateVersionUrl}
-          />
-          <input
-            aria-label="Enrollment unmanaged update interval"
-            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-            inputMode="numeric"
-            onChange={(event) => setTokenUnmanagedUpdateIntervalSecs(event.target.value)}
-            placeholder="interval seconds"
-            value={tokenUnmanagedUpdateIntervalSecs}
-          />
-          <input
-            aria-label="Enrollment unmanaged update jitter"
-            disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-            inputMode="numeric"
-            onChange={(event) => setTokenUnmanagedUpdateJitterSecs(event.target.value)}
-            placeholder="jitter seconds"
-            value={tokenUnmanagedUpdateJitterSecs}
-          />
+          <label>
+            <span>Version metadata URL</span>
+            <input
+              aria-label="Enrollment unmanaged update version URL"
+              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+              onChange={(event) => setTokenUnmanagedUpdateVersionUrl(event.target.value)}
+              placeholder="https://updates.example/version.json"
+              value={tokenUnmanagedUpdateVersionUrl}
+            />
+          </label>
+          <label>
+            <span>Update interval seconds</span>
+            <input
+              aria-label="Enrollment unmanaged update interval"
+              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+              inputMode="numeric"
+              onChange={(event) => setTokenUnmanagedUpdateIntervalSecs(event.target.value)}
+              placeholder="86400"
+              value={tokenUnmanagedUpdateIntervalSecs}
+            />
+          </label>
+          <label>
+            <span>Update jitter seconds</span>
+            <input
+              aria-label="Enrollment unmanaged update jitter"
+              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
+              inputMode="numeric"
+              onChange={(event) => setTokenUnmanagedUpdateJitterSecs(event.target.value)}
+              placeholder="300"
+              value={tokenUnmanagedUpdateJitterSecs}
+            />
+          </label>
           <label className="inlineCheck">
             <input
               checked={tokenUnmanagedUpdateActivate}
@@ -1016,20 +1058,26 @@ export function AccessPanel({
           <span>{revokeError ?? (canManageOperators ? "Current VPS key" : "Admin role required")}</span>
         </div>
         <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void revokeClientKey(event)}>
-          <input
-            aria-label="VPS key revoke VPS ID"
-            disabled={!canManageOperators || revokePending}
-            onChange={(event) => setRevokeClientId(event.target.value)}
-            placeholder="VPS ID from details"
-            value={revokeClientId}
-          />
-          <input
-            aria-label="VPS key revoke reason"
-            disabled={!canManageOperators || revokePending}
-            onChange={(event) => setRevokeReason(event.target.value)}
-            placeholder="reason"
-            value={revokeReason}
-          />
+          <label>
+            <span>VPS ID</span>
+            <input
+              aria-label="VPS key revoke VPS ID"
+              disabled={!canManageOperators || revokePending}
+              onChange={(event) => setRevokeClientId(event.target.value)}
+              placeholder="VPS ID from details"
+              value={revokeClientId}
+            />
+          </label>
+          <label>
+            <span>Reason</span>
+            <input
+              aria-label="VPS key revoke reason"
+              disabled={!canManageOperators || revokePending}
+              onChange={(event) => setRevokeReason(event.target.value)}
+              placeholder="lost host, rebuild, or operator request"
+              value={revokeReason}
+            />
+          </label>
           {pendingConfirmation !== "key-revoke" && (
             <button className="secondaryAction dangerAction" disabled={!canRevokeClientKey} type="submit">
               <Ban size={17} />

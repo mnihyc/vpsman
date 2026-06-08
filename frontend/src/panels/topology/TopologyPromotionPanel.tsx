@@ -188,7 +188,7 @@ export function TopologyPromotionPanel({
         </div>
         <Network size={20} />
       </div>
-      <div className="dispatchControls">
+      <div className="promotionWorkflow">
         <ConfirmationPrompt
           confirmLabel="Promote adapter"
           detail="Confirm promoting the observed tunnel plan into an externally managed runtime adapter."
@@ -206,11 +206,12 @@ export function TopologyPromotionPanel({
           pending={pending}
           title="Promote tunnel adapter"
         />
-        <form className="dispatchForm" onSubmit={submitTelemetryPromotion}>
-          <div className="sectionHeader compactHeader">
+        <form className="dispatchForm promotionStageCard promotionImportCard" onSubmit={submitTelemetryPromotion}>
+          <div className="sectionHeader compactHeader promotionStageHeader">
             <div>
+              <small>Step 1</small>
               <h3>Observed import</h3>
-              <span>Save telemetry candidate</span>
+              <span>Convert one telemetry candidate into a saved observed plan.</span>
             </div>
             <Save size={18} />
           </div>
@@ -324,11 +325,12 @@ export function TopologyPromotionPanel({
           </button>
         </form>
 
-        <form className="dispatchForm" onSubmit={submitAdapterPromotion}>
-          <div className="sectionHeader compactHeader">
+        <form className="dispatchForm promotionStageCard promotionAdapterCard" onSubmit={submitAdapterPromotion}>
+          <div className="sectionHeader compactHeader promotionStageHeader">
             <div>
+              <small>Step 2</small>
               <h3>Adapter contract</h3>
-              <span>Promote saved observed plan</span>
+              <span>Attach status/start/traffic commands to a saved observed plan.</span>
             </div>
             <ShieldCheck size={18} />
           </div>
@@ -348,6 +350,10 @@ export function TopologyPromotionPanel({
               <span>Name</span>
               <input value={adapterForm.name} onChange={(event) => setAdapterField("name", event.target.value)} />
             </label>
+          </div>
+          <div className="promotionGroupLabel">
+            <strong>Runtime commands</strong>
+            <span>Status is required; other commands are optional lifecycle hooks.</span>
           </div>
           <div className="dispatchControls">
             <label>
@@ -377,6 +383,10 @@ export function TopologyPromotionPanel({
             <span>Traffic argv</span>
             <textarea value={adapterForm.trafficArgv} onChange={(event) => setAdapterField("trafficArgv", event.target.value)} />
           </label>
+          <div className="promotionGroupLabel">
+            <strong>Traffic shaping</strong>
+            <span>Optional adapter limits, expressed in Kbps and burst KB.</span>
+          </div>
           <div className="dispatchControls">
             <label>
               <span>Egress Kbps</span>
@@ -405,6 +415,10 @@ export function TopologyPromotionPanel({
                 value={adapterForm.trafficBurstKb}
               />
             </label>
+          </div>
+          <div className="promotionGroupLabel">
+            <strong>Topology evidence</strong>
+            <span>Optional desired/stale interface and route evidence for drift checks.</span>
           </div>
           <div className="dispatchControls">
             <label>

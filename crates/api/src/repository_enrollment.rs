@@ -587,7 +587,13 @@ impl Repository {
                     ON CONFLICT (id) DO UPDATE SET
                         display_name = EXCLUDED.display_name,
                         public_key = EXCLUDED.public_key,
-                        status = CASE WHEN clients.status = 'stale' THEN clients.status ELSE 'offline' END
+                        status = CASE WHEN clients.status = 'stale' THEN clients.status ELSE 'offline' END,
+                        stale_since = CASE WHEN clients.status = 'stale' THEN clients.stale_since ELSE NULL END,
+                        stale_reason = CASE WHEN clients.status = 'stale' THEN clients.stale_reason ELSE NULL END,
+                        stale_build_number = CASE WHEN clients.status = 'stale' THEN clients.stale_build_number ELSE NULL END,
+                        hidden_at = NULL,
+                        hidden_by = NULL,
+                        hidden_reason = NULL
                     "#,
                 )
                 .bind(&effective_client_id)
@@ -676,17 +682,44 @@ impl Repository {
         client_id: &str,
     ) -> Result<Option<String>> {
         match self {
-            Self::Memory(memory) => Ok(memory
-                .client_public_keys
-                .read()
-                .await
-                .get(client_id)
-                .and_then(|key| (!key.is_empty()).then(|| public_key_sha256_hex(key)))),
+            Self::Memory(memory) => {
+                let key = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(client_id)
+                    .cloned();
+                let Some(key) = key else {
+                    return Ok(None);
+                };
+                if key.is_empty() {
+                    return Ok(None);
+                }
+                if memory.hidden_clients.read().await.contains(client_id) {
+                    let is_revoked = memory
+                        .agents
+                        .read()
+                        .await
+                        .iter()
+                        .any(|agent| agent.id == client_id && agent.status == "revoked");
+                    if !is_revoked {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(public_key_sha256_hex(&key)))
+            }
             Self::Postgres(pool) => {
-                let row = sqlx::query("SELECT public_key FROM clients WHERE id = $1")
-                    .bind(client_id)
-                    .fetch_optional(pool)
-                    .await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT public_key
+                    FROM clients
+                    WHERE id = $1
+                      AND (hidden_at IS NULL OR status = 'revoked')
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(pool)
+                .await?;
                 let Some(row) = row else {
                     return Ok(None);
                 };
@@ -902,10 +935,17 @@ async fn current_postgres_client_identity(
     tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
 ) -> Result<Option<PostgresClientIdentity>> {
-    let row = sqlx::query("SELECT public_key, display_name FROM clients WHERE id = $1")
-        .bind(client_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT public_key, display_name
+        FROM clients
+        WHERE id = $1
+          AND (hidden_at IS NULL OR status = 'revoked')
+        "#,
+    )
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
     row.map(|row| {
         Ok(PostgresClientIdentity {
             public_key: row.try_get("public_key")?,
@@ -955,6 +995,7 @@ async fn upsert_memory_enrolled_client(
     display_name: &str,
     tags: &[String],
 ) {
+    memory.hidden_clients.write().await.remove(client_id);
     if let Ok(public_key) = decode_public_key(&request.client_public_key_hex) {
         memory
             .client_public_keys
@@ -966,6 +1007,8 @@ async fn upsert_memory_enrolled_client(
     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
         agent.display_name = display_name.to_string();
         agent.status = "offline".to_string();
+        agent.stale_since = None;
+        agent.stale_reason = None;
         for tag in tags {
             if !agent.tags.iter().any(|existing| existing == tag) {
                 agent.tags.push(tag.clone());

@@ -21,7 +21,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
   await openConsoleSubpage(page, "Jobs", "Files");
-  await expect(page.getByRole("heading", { name: "File browser" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "File browser", exact: true })).toBeVisible();
   await unlockPrivilege(page, "Files");
 
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));

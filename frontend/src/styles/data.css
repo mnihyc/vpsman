@@ -392,6 +392,13 @@
   color: #3c4043;
 }
 
+.fleetPolicyHeader > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #3c4043;
+}
+
 .fleetPolicyHeader span,
 .fleetPolicyStatus,
 .fleetPolicyRows small {
@@ -410,6 +417,129 @@
 
 .fleetNotificationManager {
   background: #fff;
+}
+
+.professionalFormManager {
+  gap: 12px;
+  background: #fbfdff;
+}
+
+.consoleFormStack {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.consoleFormGroup {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.consoleFormGroupHeader {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.consoleFormGroupHeader strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.consoleFormGroupHeader span {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.consoleFormGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.consoleField {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.consoleField > span {
+  color: #3c4043;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.consoleField > small {
+  color: #5f6368;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.consoleField input,
+.consoleField select,
+.consoleField textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #202124;
+}
+
+.consoleField input,
+.consoleField select {
+  min-height: 36px;
+  padding: 0 9px;
+}
+
+.consoleField textarea {
+  padding: 8px 9px;
+  resize: vertical;
+}
+
+.fieldWide {
+  grid-column: span 2;
+}
+
+.fieldFull {
+  grid-column: 1 / -1;
+}
+
+.consoleFormActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.consoleFormActions button,
+.professionalFormManager button {
+  min-height: 36px;
+}
+
+.borderedToggle {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  padding: 0 9px;
+  background: #fff;
+}
+
+.consoleField .borderedToggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
 }
 
 .notificationGrid {
@@ -766,10 +896,10 @@
 }
 
 .tagAssignmentGrid {
-  grid-template-columns: minmax(190px, 0.9fr) 100px minmax(
-      260px,
-      1.25fr
-    ) minmax(220px, 0.9fr);
+  grid-template-columns: minmax(220px, 0.9fr) 90px minmax(
+      320px,
+      1.4fr
+    ) minmax(280px, 1fr);
 }
 
 .configRuleWorkspace,
@@ -926,7 +1056,7 @@
 }
 
 .inlineTagAdd {
-  grid-template-columns: minmax(120px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1fr) auto;
 }
 
 .privilegeGateBox {
@@ -943,14 +1073,52 @@
 }
 
 .presetManagementGrid {
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
+.presetForm {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.presetForm .formHint {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.presetForm label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.presetForm label span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .presetFormRow {
-  grid-template-columns: minmax(180px, 1.1fr) minmax(160px, 1fr) minmax(
-      120px,
-      0.6fr
-    );
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.presetLifecycleActions {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.presetForm input,
+.presetForm select,
+.presetForm textarea {
+  width: 100%;
+  min-width: 0;
 }
 
 .configPreview {
@@ -1426,4 +1594,46 @@
   font-size: 12px;
   line-height: 1.5;
   padding: 12px;
+}
+
+.bulkTagApplyGrid {
+  grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.35fr);
+}
+
+.bulkTagMutationForm {
+  align-items: stretch;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.bulkTagMutationForm > strong {
+  margin-bottom: 2px;
+}
+
+.bulkTagMutationForm label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bulkTagMutationForm label span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.bulkTagMutationForm .searchExpressionInput {
+  min-width: 0;
+}
+
+.bulkTagPreview {
+  align-content: start;
+  min-height: 180px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
 }

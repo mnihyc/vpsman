@@ -280,6 +280,10 @@ export function TopologyPanel({
           <GitBranch size={20} />
         </div>
         <form className="dispatchForm" onSubmit={submitPlan}>
+          <div className="operationNote formSectionNote">
+            <strong>Plan identity</strong>
+            <span>Name the intended tunnel and choose the link type before selecting endpoints.</span>
+          </div>
           <div className="dispatchControls">
             <label>
               <span>Name</span>
@@ -317,6 +321,10 @@ export function TopologyPanel({
                 ))}
               </select>
             </label>
+          </div>
+          <div className="operationNote formSectionNote">
+            <strong>Endpoints and address plan</strong>
+            <span>Pair exactly two VPSs, provide their underlay addresses, then reserve the overlay address pool.</span>
           </div>
           <div className="dispatchControls">
             <label>
@@ -385,6 +393,10 @@ export function TopologyPanel({
                 value={form.preference}
               />
             </label>
+          </div>
+          <div className="operationNote formSectionNote">
+            <strong>Runtime ownership and traffic limits</strong>
+            <span>Choose whether the agent owns the tunnel, only observes it, or delegates commands to an adapter.</span>
           </div>
           <div className="dispatchControls">
             <label>
@@ -488,6 +500,10 @@ export function TopologyPanel({
               </label>
             </>
           )}
+          <div className="operationNote formSectionNote">
+            <strong>Topology evidence</strong>
+            <span>Optional desired/stale interface and route evidence helps later promotion and drift review.</span>
+          </div>
           <div className="dispatchControls">
             <label>
               <span>Desired interfaces</span>

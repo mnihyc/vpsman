@@ -15,6 +15,16 @@
   min-width: 0;
 }
 
+.workspaceGrid {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.workspaceGrid > * {
+  min-width: 0;
+}
+
 .dashboardWorkspace {
   grid-template-columns: minmax(0, 1fr) 360px;
   align-items: start;
@@ -773,7 +783,7 @@
 }
 
 .preferencesWorkspace {
-  max-width: 1120px;
+  max-width: none;
 }
 
 .preferencesPanel {
@@ -786,8 +796,8 @@
 
 .preferenceGroup {
   display: grid;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(280px, 1.1fr);
-  gap: 18px;
+  grid-template-columns: minmax(200px, 0.32fr) minmax(420px, 1.68fr);
+  gap: 24px;
   align-items: start;
   padding: 18px;
   border-bottom: 1px solid #eef1f6;

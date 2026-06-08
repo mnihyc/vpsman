@@ -482,31 +482,37 @@ function BulkTagPanel({
   }
 
   return (
-    <div className="configApplyGrid">
-      <div className="compactForm">
+    <div className="configApplyGrid bulkTagApplyGrid">
+      <div className="compactForm bulkTagMutationForm">
         <strong>Bulk mutation</strong>
-        <select
-          aria-label="Bulk tag action"
-          onChange={(event) => {
-            setAction(event.target.value as "add" | "remove" | "delete");
-            setPreview(null);
-          }}
-          value={action}
-        >
-          <option value="add">Add tag by selector</option>
-          <option value="remove">Remove tag by selector</option>
-          <option value="delete">Delete tag globally</option>
-        </select>
-        <input
-          aria-label="Bulk tag"
-          list="bulk-tag-options"
-          onChange={(event) => {
-            setTag(event.target.value);
-            setPreview(null);
-          }}
-          placeholder="tag"
-          value={tag}
-        />
+        <label>
+          <span>Mutation</span>
+          <select
+            aria-label="Bulk tag action"
+            onChange={(event) => {
+              setAction(event.target.value as "add" | "remove" | "delete");
+              setPreview(null);
+            }}
+            value={action}
+          >
+            <option value="add">Add tag by selector</option>
+            <option value="remove">Remove tag by selector</option>
+            <option value="delete">Delete tag globally</option>
+          </select>
+        </label>
+        <label>
+          <span>Tag</span>
+          <input
+            aria-label="Bulk tag"
+            list="bulk-tag-options"
+            onChange={(event) => {
+              setTag(event.target.value);
+              setPreview(null);
+            }}
+            placeholder="provider:aws or role:edge"
+            value={tag}
+          />
+        </label>
         <datalist id="bulk-tag-options">
           {tags.map((item) => (
             <option key={item.name} value={item.name} />

@@ -305,30 +305,6 @@ export function FleetWorkspace({
         ),
       },
       {
-        id: "registration_ip",
-        header: "Reg IP",
-        size: 135,
-        minSize: 110,
-        sortValue: (agent) => agent.registration_ip ?? "",
-        searchValue: (agent) => agent.registration_ip ?? "",
-        cell: (agent) => (
-          <span className="monoValue">
-            {agent.registration_ip ?? "unknown"}
-          </span>
-        ),
-      },
-      {
-        id: "last_ip",
-        header: "Last IP",
-        size: 135,
-        minSize: 110,
-        sortValue: (agent) => agent.last_ip ?? "",
-        searchValue: (agent) => agent.last_ip ?? "",
-        cell: (agent) => (
-          <span className="monoValue">{agent.last_ip ?? "unknown"}</span>
-        ),
-      },
-      {
         id: "last_seen",
         header: "Last seen",
         size: 150,
@@ -341,6 +317,26 @@ export function FleetWorkspace({
             {!agent.last_seen_at && <small>after enrollment</small>}
           </span>
         ),
+      },
+      {
+        id: "tags",
+        header: "Tags",
+        size: 260,
+        minSize: 170,
+        sortValue: (agent) => displayTags(agent.tags).join(" "),
+        searchValue: (agent) => agent.tags.join(" "),
+        cell: (agent) => {
+          const agentTags = displayTags(agent.tags);
+          return (
+            <span className="tags">
+              {agentTags.length === 0 ? (
+                <em>untagged</em>
+              ) : (
+                agentTags.map((tag) => <em key={tag}>{tag}</em>)
+              )}
+            </span>
+          );
+        },
       },
       {
         id: "country",
@@ -370,24 +366,28 @@ export function FleetWorkspace({
         ),
       },
       {
-        id: "tags",
-        header: "Tags",
-        size: 240,
-        minSize: 150,
-        sortValue: (agent) => displayTags(agent.tags).join(" "),
-        searchValue: (agent) => agent.tags.join(" "),
-        cell: (agent) => {
-          const agentTags = displayTags(agent.tags);
-          return (
-            <span className="tags">
-              {agentTags.length === 0 ? (
-                <em>untagged</em>
-              ) : (
-                agentTags.map((tag) => <em key={tag}>{tag}</em>)
-              )}
-            </span>
-          );
-        },
+        id: "last_ip",
+        header: "Last IP",
+        size: 135,
+        minSize: 110,
+        sortValue: (agent) => agent.last_ip ?? "",
+        searchValue: (agent) => agent.last_ip ?? "",
+        cell: (agent) => (
+          <span className="monoValue">{agent.last_ip ?? "unknown"}</span>
+        ),
+      },
+      {
+        id: "registration_ip",
+        header: "Reg IP",
+        size: 135,
+        minSize: 110,
+        sortValue: (agent) => agent.registration_ip ?? "",
+        searchValue: (agent) => agent.registration_ip ?? "",
+        cell: (agent) => (
+          <span className="monoValue">
+            {agent.registration_ip ?? "unknown"}
+          </span>
+        ),
       },
     ],
     [preferences.show_country_flags, vpsNameDisplayMode],
@@ -564,6 +564,7 @@ export function FleetWorkspace({
               },
             ]}
             columns={fleetColumns}
+            defaultColumnVisibility={{ last_ip: false, registration_ip: false }}
             defaultPageSize={20}
             empty={
               <div className="emptyState">
@@ -635,7 +636,7 @@ export function FleetWorkspace({
             )}
             rows={agents}
             singleExpandedRow
-            storageKey="vpsman.grid.fleet.instances"
+            storageKey="vpsman.grid.fleet.instances.v2"
             title="VPS instance records"
           />
         </div>
@@ -2055,6 +2056,51 @@ function formatJsonInline(value: unknown): string {
   }
 }
 
+function ConsoleField({
+  children,
+  className,
+  hint,
+  label,
+}: {
+  children: ReactNode;
+  className?: string;
+  hint?: ReactNode;
+  label: ReactNode;
+}) {
+  return (
+    <div className={className ? `consoleField ${className}` : "consoleField"}>
+      <span>{label}</span>
+      {children}
+      {hint && <small>{hint}</small>}
+    </div>
+  );
+}
+
+function ConsoleFormGroup({
+  actions,
+  children,
+  className,
+  description,
+  title,
+}: {
+  actions?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  description?: ReactNode;
+  title: ReactNode;
+}) {
+  return (
+    <section className={className ? `consoleFormGroup ${className}` : "consoleFormGroup"}>
+      <div className="consoleFormGroupHeader">
+        <strong>{title}</strong>
+        {description && <span>{description}</span>}
+      </div>
+      <div className="consoleFormGrid">{children}</div>
+      {actions && <div className="consoleFormActions">{actions}</div>}
+    </section>
+  );
+}
+
 function FleetAlertPolicyManager({
   policies,
   onUpsert,
@@ -2101,75 +2147,110 @@ function FleetAlertPolicyManager({
   }
 
   return (
-    <div className="fleetPolicyManager" aria-label="Fleet alert policy manager">
+    <div className="fleetPolicyManager professionalFormManager" aria-label="Fleet alert policy manager">
       <div className="fleetPolicyHeader">
         <strong>Alert policies</strong>
         <span>{policies.length} scoped</span>
       </div>
-      <div className="fleetPolicyGrid">
-        <input
-          aria-label="Policy name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <select
-          aria-label="Policy scope kind"
-          value={scopeKind}
-          onChange={(event) => setScopeKind(event.target.value)}
+      <div className="consoleFormStack">
+        <ConsoleFormGroup
+          title="Policy identity and scope"
+          description="Decide which VPS records this policy evaluates before setting thresholds."
         >
-          <option value="global">global</option>
-          <option value="provider">provider</option>
-          <option value="tag">tag</option>
-          <option value="client">client</option>
-        </select>
-        <input
-          aria-label="Policy scope value"
-          disabled={scopeKind === "global"}
-          value={scopeValue}
-          onChange={(event) => setScopeValue(event.target.value)}
-        />
-        <input
-          aria-label="Memory warning ratio"
-          value={memoryWarning}
-          onChange={(event) => setMemoryWarning(event.target.value)}
-        />
-        <input
-          aria-label="Memory critical ratio"
-          value={memoryCritical}
-          onChange={(event) => setMemoryCritical(event.target.value)}
-        />
-        <input
-          aria-label="Disk warning ratio"
-          value={diskWarning}
-          onChange={(event) => setDiskWarning(event.target.value)}
-          placeholder="disk warn"
-        />
-        <input
-          aria-label="Disk critical ratio"
-          value={diskCritical}
-          onChange={(event) => setDiskCritical(event.target.value)}
-          placeholder="disk crit"
-        />
-        <input
-          aria-label="CPU warning load"
-          value={cpuWarning}
-          onChange={(event) => setCpuWarning(event.target.value)}
-          placeholder="cpu warn"
-        />
-        <input
-          aria-label="CPU critical load"
-          value={cpuCritical}
-          onChange={(event) => setCpuCritical(event.target.value)}
-          placeholder="cpu crit"
-        />
-        <input
-          aria-label="Policy priority"
-          value={priority}
-          onChange={(event) => setPriority(event.target.value)}
-        />
-        <button type="button" onClick={() => void submit()}>
-          Save
-        </button>
+          <ConsoleField label="Policy name" className="fieldWide">
+            <input
+              aria-label="Policy name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Scope kind">
+            <select
+              aria-label="Policy scope kind"
+              value={scopeKind}
+              onChange={(event) => setScopeKind(event.target.value)}
+            >
+              <option value="global">global</option>
+              <option value="provider">provider</option>
+              <option value="tag">tag</option>
+              <option value="client">client</option>
+            </select>
+          </ConsoleField>
+          <ConsoleField
+            label="Scope value"
+            hint={scopeKind === "global" ? "Global policies do not need a value." : "Tag, provider, or client id to match."}
+          >
+            <input
+              aria-label="Policy scope value"
+              disabled={scopeKind === "global"}
+              value={scopeValue}
+              onChange={(event) => setScopeValue(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Priority" hint="Lower numbers run first.">
+            <input
+              aria-label="Policy priority"
+              value={priority}
+              onChange={(event) => setPriority(event.target.value)}
+            />
+          </ConsoleField>
+        </ConsoleFormGroup>
+        <ConsoleFormGroup
+          title="Thresholds"
+          description="Memory and disk values are available-resource ratios; CPU is load. Leave fields blank to ignore that signal."
+          actions={
+            <button className="primaryAction" type="button" onClick={() => void submit()}>
+              Save policy
+            </button>
+          }
+        >
+          <ConsoleField label="Memory warning ratio" hint="Example: 0.20 means less than 20% memory free.">
+            <input
+              aria-label="Memory warning ratio"
+              value={memoryWarning}
+              onChange={(event) => setMemoryWarning(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Memory critical ratio">
+            <input
+              aria-label="Memory critical ratio"
+              value={memoryCritical}
+              onChange={(event) => setMemoryCritical(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Disk warning ratio">
+            <input
+              aria-label="Disk warning ratio"
+              value={diskWarning}
+              onChange={(event) => setDiskWarning(event.target.value)}
+              placeholder="0.15"
+            />
+          </ConsoleField>
+          <ConsoleField label="Disk critical ratio">
+            <input
+              aria-label="Disk critical ratio"
+              value={diskCritical}
+              onChange={(event) => setDiskCritical(event.target.value)}
+              placeholder="0.08"
+            />
+          </ConsoleField>
+          <ConsoleField label="CPU warning load">
+            <input
+              aria-label="CPU warning load"
+              value={cpuWarning}
+              onChange={(event) => setCpuWarning(event.target.value)}
+              placeholder="4.0"
+            />
+          </ConsoleField>
+          <ConsoleField label="CPU critical load">
+            <input
+              aria-label="CPU critical load"
+              value={cpuCritical}
+              onChange={(event) => setCpuCritical(event.target.value)}
+              placeholder="8.0"
+            />
+          </ConsoleField>
+        </ConsoleFormGroup>
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <div className="fleetPolicyRows">
@@ -2376,7 +2457,7 @@ function FleetAlertNotificationManager({
 
   return (
     <div
-      className="fleetPolicyManager fleetNotificationManager"
+      className="fleetPolicyManager fleetNotificationManager professionalFormManager"
       aria-label="Fleet alert notification manager"
     >
       <div className="fleetPolicyHeader">
@@ -2386,77 +2467,112 @@ function FleetAlertNotificationManager({
         </span>
         <span>{channels.length} channels</span>
       </div>
-      <div className="fleetPolicyGrid notificationGrid">
-        <input
-          aria-label="Notification channel name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <select
-          aria-label="Notification scope kind"
-          value={scopeKind}
-          onChange={(event) => setScopeKind(event.target.value)}
+      <div className="consoleFormStack">
+        <ConsoleFormGroup
+          title="Channel scope and filters"
+          description="Name the channel, choose which alerts it listens to, and keep comma-separated filters explicit."
         >
-          <option value="global">global</option>
-          <option value="provider">provider</option>
-          <option value="tag">tag</option>
-          <option value="client">client</option>
-        </select>
-        <input
-          aria-label="Notification scope value"
-          disabled={scopeKind === "global"}
-          value={scopeValue}
-          onChange={(event) => setScopeValue(event.target.value)}
-        />
-        <select
-          aria-label="Minimum severity"
-          value={minSeverity}
-          onChange={(event) => setMinSeverity(event.target.value)}
+          <ConsoleField label="Channel name" className="fieldWide">
+            <input
+              aria-label="Notification channel name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Scope kind">
+            <select
+              aria-label="Notification scope kind"
+              value={scopeKind}
+              onChange={(event) => setScopeKind(event.target.value)}
+            >
+              <option value="global">global</option>
+              <option value="provider">provider</option>
+              <option value="tag">tag</option>
+              <option value="client">client</option>
+            </select>
+          </ConsoleField>
+          <ConsoleField
+            label="Scope value"
+            hint={scopeKind === "global" ? "Global channels do not need a value." : "Tag, provider, or client id to match."}
+          >
+            <input
+              aria-label="Notification scope value"
+              disabled={scopeKind === "global"}
+              value={scopeValue}
+              onChange={(event) => setScopeValue(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Minimum severity">
+            <select
+              aria-label="Minimum severity"
+              value={minSeverity}
+              onChange={(event) => setMinSeverity(event.target.value)}
+            >
+              <option value="critical">critical</option>
+              <option value="warning">warning</option>
+              <option value="info">info</option>
+            </select>
+          </ConsoleField>
+          <ConsoleField label="Alert categories" className="fieldWide" hint="Comma-separated categories, for example agent_status,network.">
+            <input
+              aria-label="Alert categories"
+              value={categories}
+              onChange={(event) => setCategories(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Operator states" className="fieldWide" hint="Comma-separated states accepted by this channel.">
+            <input
+              aria-label="Operator states"
+              value={operatorStates}
+              onChange={(event) => setOperatorStates(event.target.value)}
+            />
+          </ConsoleField>
+        </ConsoleFormGroup>
+        <ConsoleFormGroup
+          title="Delivery target"
+          description="Configure the actual sink, then preview matches before queueing or processing deliveries."
+          actions={
+            <>
+              <button className="primaryAction" type="button" onClick={() => void submit()}>
+                Save channel
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void dispatch(true)}>
+                Match alerts
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void dispatch(false)}>
+                Queue dispatch
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void process(true)}>
+                Preview queue
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void process(false)}>
+                Deliver queued
+              </button>
+            </>
+          }
         >
-          <option value="critical">critical</option>
-          <option value="warning">warning</option>
-          <option value="info">info</option>
-        </select>
-        <input
-          aria-label="Alert categories"
-          value={categories}
-          onChange={(event) => setCategories(event.target.value)}
-        />
-        <input
-          aria-label="Operator states"
-          value={operatorStates}
-          onChange={(event) => setOperatorStates(event.target.value)}
-        />
-        <input
-          aria-label="Delivery kind"
-          value={deliveryKind}
-          onChange={(event) => setDeliveryKind(event.target.value)}
-        />
-        <input
-          aria-label="Delivery target"
-          value={target}
-          onChange={(event) => setTarget(event.target.value)}
-        />
-        <input
-          aria-label="Cooldown seconds"
-          value={cooldownSecs}
-          onChange={(event) => setCooldownSecs(event.target.value)}
-        />
-        <button type="button" onClick={() => void submit()}>
-          Save
-        </button>
-        <button type="button" onClick={() => void dispatch(true)}>
-          Match
-        </button>
-        <button type="button" onClick={() => void dispatch(false)}>
-          Dispatch
-        </button>
-        <button type="button" onClick={() => void process(true)}>
-          Preview
-        </button>
-        <button type="button" onClick={() => void process(false)}>
-          Deliver
-        </button>
+          <ConsoleField label="Delivery kind" hint="For example audit_log or webhook.">
+            <input
+              aria-label="Delivery kind"
+              value={deliveryKind}
+              onChange={(event) => setDeliveryKind(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Delivery target" className="fieldWide" hint="Audit stream, endpoint, or channel-specific target identifier.">
+            <input
+              aria-label="Delivery target"
+              value={target}
+              onChange={(event) => setTarget(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Cooldown seconds">
+            <input
+              aria-label="Cooldown seconds"
+              value={cooldownSecs}
+              onChange={(event) => setCooldownSecs(event.target.value)}
+            />
+          </ConsoleField>
+        </ConsoleFormGroup>
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <div className="fleetPolicyRows notificationRows">
@@ -2666,7 +2782,7 @@ function WebhookRuleManager({
 
   return (
     <div
-      className="fleetPolicyManager fleetNotificationManager"
+      className="fleetPolicyManager fleetNotificationManager professionalFormManager"
       aria-label="Expression webhook rule manager"
     >
       <div className="fleetPolicyHeader">
@@ -2676,97 +2792,133 @@ function WebhookRuleManager({
         </span>
         <span>{visibleRules.length} rules</span>
       </div>
-      <div className="fleetPolicyGrid notificationGrid webhookRuleGrid">
-        <input
-          aria-label="Webhook rule name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <label className="inlineToggle">
-          <input
-            checked={enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Enabled</span>
-        </label>
-        <input
-          aria-label="Webhook target URL"
-          value={target}
-          onChange={(event) => setTarget(event.target.value)}
-        />
-        <input
-          aria-label="Webhook cooldown seconds"
-          value={cooldownSecs}
-          onChange={(event) => setCooldownSecs(event.target.value)}
-        />
-        <div className="wideField">
-          <SearchExpressionInput
-            agents={agents}
-            ariaLabel="Webhook rule expression"
-            onChange={setExpression}
-            placeholder="interval.30sec && status = stale"
-            value={expression}
-            verification="neutral"
-            verificationMessage={`${agents.length} VPSs`}
-          />
-        </div>
-        <div className="webhookTemplateEditor wideField">
-          <WebhookTemplateEditor
-            onChange={setBodyTemplate}
-            value={bodyTemplate}
-          />
-        </div>
-        <input
-          aria-label="Webhook event kind"
-          value={eventKind}
-          onChange={(event) => setEventKind(event.target.value)}
-        />
-        <input
-          aria-label="Webhook event id"
-          value={eventId}
-          onChange={(event) => setEventId(event.target.value)}
-        />
-        <button type="button" onClick={() => void submit()}>
-          Save
-        </button>
-        <button type="button" onClick={() => void dryRunRule()}>
-          Preview rule
-        </button>
-        <button type="button" onClick={() => void dispatchRules(true)}>
-          Match rules
-        </button>
-        <button type="button" onClick={() => void dispatchRules(false)}>
-          Queue
-        </button>
-        <button type="button" onClick={() => void process(true)}>
-          Preview queue
-        </button>
-        <button type="button" onClick={() => void process(false)}>
-          Deliver
-        </button>
-        <input
-          aria-label="Webhook rotation days"
-          value={rotationDays}
-          onChange={(event) => setRotationDays(event.target.value)}
-        />
-        <select
-          aria-label="Webhook rotation status"
-          value={rotationStatus}
-          onChange={(event) => setRotationStatus(event.target.value)}
+      <div className="consoleFormStack">
+        <ConsoleFormGroup
+          title="Rule definition"
+          description="Bind event predicates to a concrete target; preview the rendered body before queueing deliveries."
+          actions={
+            <>
+              <button className="primaryAction" type="button" onClick={() => void submit()}>
+                Save rule
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void dryRunRule()}>
+                Preview rule
+              </button>
+            </>
+          }
         >
-          <option value="">Any status</option>
-          <option value="delivered">Delivered</option>
-          <option value="failed">Failed</option>
-          <option value="permanently_failed">Permanently failed</option>
-          <option value="queued">Queued</option>
-        </select>
-        <button type="button" onClick={() => void rotate(false)}>
-          Preview rotation
-        </button>
-        <button type="button" onClick={() => void rotate(true)}>
-          Rotate history
-        </button>
+          <ConsoleField label="Rule name" className="fieldWide">
+            <input
+              aria-label="Webhook rule name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Rule state">
+            <label className="inlineToggle borderedToggle">
+              <input
+                checked={enabled}
+                onChange={(event) => setEnabled(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Enabled</span>
+            </label>
+          </ConsoleField>
+          <ConsoleField label="Target URL" className="fieldWide">
+            <input
+              aria-label="Webhook target URL"
+              value={target}
+              onChange={(event) => setTarget(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Cooldown seconds">
+            <input
+              aria-label="Webhook cooldown seconds"
+              value={cooldownSecs}
+              onChange={(event) => setCooldownSecs(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Rule expression" className="fieldFull" hint="Matches event and VPS predicates, for example interval.30sec && tag:edge.">
+            <SearchExpressionInput
+              agents={agents}
+              ariaLabel="Webhook rule expression"
+              onChange={setExpression}
+              placeholder="interval.30sec && status = stale"
+              value={expression}
+              verification="neutral"
+              verificationMessage={`${agents.length} VPSs`}
+            />
+          </ConsoleField>
+          <ConsoleField label="Body template" className="fieldFull" hint="Use supported template variables such as rule, event, and vps fields.">
+            <div className="webhookTemplateEditor">
+              <WebhookTemplateEditor
+                onChange={setBodyTemplate}
+                value={bodyTemplate}
+              />
+            </div>
+          </ConsoleField>
+        </ConsoleFormGroup>
+        <ConsoleFormGroup
+          title="Dispatch, delivery, and retention"
+          description="Operate on saved rules and queued deliveries without mixing lifecycle controls into the rule editor."
+          actions={
+            <>
+              <button className="secondaryAction" type="button" onClick={() => void dispatchRules(true)}>
+                Match rules
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void dispatchRules(false)}>
+                Queue dispatch
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void process(true)}>
+                Preview queue
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void process(false)}>
+                Deliver queued
+              </button>
+              <button className="secondaryAction" type="button" onClick={() => void rotate(false)}>
+                Preview rotation
+              </button>
+              <button className="secondaryAction dangerAction" type="button" onClick={() => void rotate(true)}>
+                Rotate history
+              </button>
+            </>
+          }
+        >
+          <ConsoleField label="Event kind">
+            <input
+              aria-label="Webhook event kind"
+              value={eventKind}
+              onChange={(event) => setEventKind(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Event id" hint="Optional; blank processes the latest matching event set." className="fieldWide">
+            <input
+              aria-label="Webhook event id"
+              value={eventId}
+              onChange={(event) => setEventId(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Rotation age days">
+            <input
+              aria-label="Webhook rotation days"
+              value={rotationDays}
+              onChange={(event) => setRotationDays(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Rotation status">
+            <select
+              aria-label="Webhook rotation status"
+              value={rotationStatus}
+              onChange={(event) => setRotationStatus(event.target.value)}
+            >
+              <option value="">Any status</option>
+              <option value="delivered">Delivered</option>
+              <option value="failed">Failed</option>
+              <option value="permanently_failed">Permanently failed</option>
+              <option value="queued">Queued</option>
+            </select>
+          </ConsoleField>
+        </ConsoleFormGroup>
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       {dryRunPreview && (

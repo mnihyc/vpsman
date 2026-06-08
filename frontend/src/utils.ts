@@ -270,6 +270,8 @@ export function statusClass(status: string): string {
     lower.includes("drift") ||
     lower.includes("timeout") ||
     lower.includes("offline") ||
+    lower.includes("revoked") ||
+    lower.includes("deleted") ||
     lower.includes("unsupported") ||
     lower.includes("ineffective") ||
     lower.includes("missing") ||

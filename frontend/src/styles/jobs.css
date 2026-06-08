@@ -59,7 +59,7 @@
 .releaseRecordForm {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   padding: 18px;
 }
 
@@ -275,6 +275,19 @@
   grid-template-columns: auto minmax(0, 1fr) minmax(92px, 120px);
 }
 
+.terminalOperation {
+  grid-template-columns: auto minmax(220px, 0.8fr) repeat(auto-fit, minmax(150px, 1fr));
+  align-items: end;
+}
+
+.terminalOperation > div {
+  align-self: center;
+}
+
+.terminalOperation .wideField {
+  grid-column: span 2;
+}
+
 .compactOperation label {
   min-width: 0;
 }
@@ -310,8 +323,21 @@
 
 .dispatchControls {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
+}
+
+.dispatchControls label,
+.dispatchControls input,
+.dispatchControls select,
+.dispatchControls textarea {
+  min-width: 0;
+}
+
+.dispatchControls input,
+.dispatchControls select,
+.dispatchControls textarea {
+  width: 100%;
 }
 
 .rowActionGroup {
@@ -1411,7 +1437,7 @@
 .sourceArtifactControls {
   display: grid;
   align-items: end;
-  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.8fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
 }
 
@@ -1437,16 +1463,7 @@
 .rolloutPolicyForm {
   display: grid;
   align-items: end;
-  grid-template-columns:
-    minmax(150px, 1fr)
-    minmax(110px, 0.55fr)
-    minmax(140px, 0.75fr)
-    minmax(112px, 0.55fr)
-    minmax(86px, 0.4fr)
-    minmax(150px, 0.8fr)
-    minmax(86px, 0.4fr)
-    minmax(96px, 0.45fr)
-    auto;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
 }
 
@@ -1821,4 +1838,97 @@
 .privilegeFields,
 .inlinePrivilege {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.releaseRecordForm {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.releaseFormSection {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.releaseFormSectionHeader {
+  display: grid;
+  gap: 3px;
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.releaseFormSectionHeader strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.releaseFormSectionHeader span {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.releaseFormActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.releaseRecordForm input:not([type="checkbox"]):not([type="file"]),
+.releaseRecordForm select,
+.sourceArtifactControls input:not([type="checkbox"]):not([type="file"]),
+.sourceArtifactControls select,
+.handoffModeControl select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  outline: 0;
+  padding: 7px 10px;
+}
+
+.releaseRecordForm input:not([type="checkbox"]):not([type="file"]):focus,
+.releaseRecordForm select:focus,
+.sourceArtifactControls input:not([type="checkbox"]):not([type="file"]):focus,
+.sourceArtifactControls select:focus,
+.handoffModeControl select:focus {
+  border-color: #1a73e8;
+  box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
+}
+
+.releaseRecordForm input[type="file"],
+.sourceArtifactControls input[type="file"] {
+  width: 100%;
+  min-width: 0;
+  border: 1px dashed #c7d0dd;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #3c4043;
+  font-size: 12px;
+  padding: 7px;
+}
+
+.releaseRecordForm input[type="file"]::file-selector-button,
+.sourceArtifactControls input[type="file"]::file-selector-button {
+  margin-right: 8px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #3c4043;
+  font: inherit;
+  padding: 5px 8px;
+}
+
+.releaseRecordForm > .operationNote {
+  grid-template-columns: auto minmax(0, 1fr);
 }

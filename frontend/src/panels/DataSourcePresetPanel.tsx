@@ -433,46 +433,67 @@ export function DataSourcePresetPanel({
         />
         <form className="compactForm presetForm" onSubmit={submitCreate}>
           <strong>Preset definition</strong>
+          <span className="formHint">
+            Create one reusable data-source preset. Scope decides whether it is shared or owned by one VPS.
+          </span>
           <div className="formRow presetFormRow">
-            <select aria-label="Preset domain" onChange={(event) => setCreateDomain(event.target.value)} value={createDomain}>
-              {DATA_SOURCE_DOMAINS.map((domain) => (
-                <option key={domain} value={domain}>
-                  {domain}
-                </option>
-              ))}
-            </select>
-            <input
-              aria-label="Preset name"
-              onChange={(event) => setCreateName(event.target.value)}
-              placeholder="shared:vnstat-json"
-              value={createName}
-            />
-            <select aria-label="Preset scope" onChange={(event) => setCreateScope(event.target.value)} value={createScope}>
-              <option value="shared">shared</option>
-              <option value="vps_local">vps_local</option>
-            </select>
+            <label>
+              <span>Domain</span>
+              <select aria-label="Preset domain" onChange={(event) => setCreateDomain(event.target.value)} value={createDomain}>
+                {DATA_SOURCE_DOMAINS.map((domain) => (
+                  <option key={domain} value={domain}>
+                    {domain}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Name</span>
+              <input
+                aria-label="Preset name"
+                onChange={(event) => setCreateName(event.target.value)}
+                placeholder="shared:vnstat-json"
+                value={createName}
+              />
+            </label>
+            <label>
+              <span>Scope</span>
+              <select aria-label="Preset scope" onChange={(event) => setCreateScope(event.target.value)} value={createScope}>
+                <option value="shared">shared</option>
+                <option value="vps_local">vps_local</option>
+              </select>
+            </label>
           </div>
           {createScope === "vps_local" && (
-            <select aria-label="VPS-local owner" onChange={(event) => setOwnerClientId(event.target.value)} value={ownerClientId}>
-              <option value="">Owner VPS</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {formatVpsName(agent, vpsNameDisplayMode)}
-                </option>
-              ))}
-            </select>
+            <label>
+              <span>Owner VPS</span>
+              <select aria-label="VPS-local owner" onChange={(event) => setOwnerClientId(event.target.value)} value={ownerClientId}>
+                <option value="">Owner VPS</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {formatVpsName(agent, vpsNameDisplayMode)}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
-          <input
-            aria-label="Preset description"
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder="description"
-            value={description}
-          />
-          <textarea
-            aria-label="Preset definition JSON"
-            onChange={(event) => setDefinitionText(event.target.value)}
-            value={definitionText}
-          />
+          <label>
+            <span>Description</span>
+            <input
+              aria-label="Preset description"
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="description"
+              value={description}
+            />
+          </label>
+          <label>
+            <span>Definition JSON</span>
+            <textarea
+              aria-label="Preset definition JSON"
+              onChange={(event) => setDefinitionText(event.target.value)}
+              value={definitionText}
+            />
+          </label>
           <button
             className="secondaryAction"
             disabled={pending || !createName.trim() || (createScope === "vps_local" && !ownerClientId)}
@@ -484,21 +505,30 @@ export function DataSourcePresetPanel({
 
         <form className="compactForm presetForm" onSubmit={submitAssignment}>
           <strong>Assign selected preset</strong>
+          <span className="formHint">
+            Apply one domain preset to a selector-resolved VPS set; preview target count before confirmation.
+          </span>
           <div className="formRow presetFormRow">
-            <select aria-label="Assignment domain" onChange={(event) => changeAssignDomain(event.target.value)} value={assignDomain}>
-              {DATA_SOURCE_DOMAINS.map((domain) => (
-                <option key={domain} value={domain}>
-                  {domain}
-                </option>
-              ))}
-            </select>
-            <select aria-label="Preset" onChange={(event) => setAssignPresetId(event.target.value)} value={effectivePresetId}>
-              {assignablePresets.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
+            <label>
+              <span>Domain</span>
+              <select aria-label="Assignment domain" onChange={(event) => changeAssignDomain(event.target.value)} value={assignDomain}>
+                {DATA_SOURCE_DOMAINS.map((domain) => (
+                  <option key={domain} value={domain}>
+                    {domain}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Preset</span>
+              <select aria-label="Preset" onChange={(event) => setAssignPresetId(event.target.value)} value={effectivePresetId}>
+                {assignablePresets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="targetSelector presetTargetSelector">
             <div className="targetSelectorHeader">
@@ -547,18 +577,24 @@ export function DataSourcePresetPanel({
 
         <form className="compactForm presetForm" onSubmit={previewHotConfig}>
           <strong>Render selected config</strong>
-          <select
-            aria-label="Hot-config preview VPS"
-            onChange={(event) => setRenderClientId(event.target.value)}
-            value={renderClientId}
-          >
-            <option value="">VPS</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {formatVpsName(agent, vpsNameDisplayMode)}
-                </option>
-              ))}
-          </select>
+          <span className="formHint">
+            Preview the generated redacted hot-config patch for one VPS before applying it.
+          </span>
+          <label>
+            <span>Preview VPS</span>
+            <select
+              aria-label="Hot-config preview VPS"
+              onChange={(event) => setRenderClientId(event.target.value)}
+              value={renderClientId}
+            >
+              <option value="">VPS</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {formatVpsName(agent, vpsNameDisplayMode)}
+                  </option>
+                ))}
+            </select>
+          </label>
           <button className="secondaryAction" disabled={pending || !renderClientId} type="submit">
             Render config
           </button>
@@ -572,14 +608,17 @@ export function DataSourcePresetPanel({
             </div>
           )}
           <div className="inlinePrivilege">
-            <input
-              aria-label="Data-source apply timeout"
-              min={1}
-              max={3600}
-              onChange={(event) => setApplyTimeoutSecs(Number(event.target.value))}
-              type="number"
-              value={applyTimeoutSecs}
-            />
+            <label>
+              <span>Apply timeout seconds</span>
+              <input
+                aria-label="Data-source apply timeout"
+                min={1}
+                max={3600}
+                onChange={(event) => setApplyTimeoutSecs(Number(event.target.value))}
+                type="number"
+                value={applyTimeoutSecs}
+              />
+            </label>
           </div>
           <PrivilegeVaultBox
             labelPrefix="Data-source"
@@ -604,36 +643,51 @@ export function DataSourcePresetPanel({
 
         <form className="compactForm presetForm" onSubmit={(event) => event.preventDefault()}>
           <strong>Preset lifecycle</strong>
+          <span className="formHint">
+            Diff, test, clone, or update a saved preset. Updates report affected VPS count before commit.
+          </span>
           <div className="formRow presetFormRow">
-            <select
-              aria-label="Lifecycle preset"
-              onChange={(event) => setLifecyclePresetId(event.target.value)}
-              value={effectiveLifecyclePresetId}
-            >
-              {presets.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
-            <input
-              aria-label="Clone preset name"
-              onChange={(event) => setLifecycleCloneName(event.target.value)}
-              placeholder="shared:copy"
-              value={lifecycleCloneName}
-            />
+            <label>
+              <span>Preset</span>
+              <select
+                aria-label="Lifecycle preset"
+                onChange={(event) => setLifecyclePresetId(event.target.value)}
+                value={effectiveLifecyclePresetId}
+              >
+                {presets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Clone name</span>
+              <input
+                aria-label="Clone preset name"
+                onChange={(event) => setLifecycleCloneName(event.target.value)}
+                placeholder="shared:copy"
+                value={lifecycleCloneName}
+              />
+            </label>
           </div>
-          <input
-            aria-label="Lifecycle preset description"
-            onChange={(event) => setLifecycleDescription(event.target.value)}
-            placeholder="description"
-            value={lifecycleDescription}
-          />
-          <textarea
-            aria-label="Lifecycle preset definition JSON"
-            onChange={(event) => setLifecycleDefinitionText(event.target.value)}
-            value={lifecycleDefinitionText}
-          />
+          <label>
+            <span>Description</span>
+            <input
+              aria-label="Lifecycle preset description"
+              onChange={(event) => setLifecycleDescription(event.target.value)}
+              placeholder="description"
+              value={lifecycleDescription}
+            />
+          </label>
+          <label>
+            <span>Definition JSON</span>
+            <textarea
+              aria-label="Lifecycle preset definition JSON"
+              onChange={(event) => setLifecycleDefinitionText(event.target.value)}
+              value={lifecycleDefinitionText}
+            />
+          </label>
           <div className="formRow presetLifecycleActions">
             <button className="secondaryAction" disabled={pending || !lifecyclePreset} onClick={diffLifecyclePreset} type="button">
               Diff

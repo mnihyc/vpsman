@@ -181,109 +181,140 @@ export function AgentUpdateReleasesPanel({
           <PackageCheck size={18} />
           <div>
             <strong>Record signed release</strong>
-            <span>Stores sanitized metadata only: hashes, channel, and signature evidence</span>
+            <span>Choose one workflow: register HTTPS metadata, or upload a local artifact with the same signature fields.</span>
           </div>
         </div>
-        <label>
-          <span>Name</span>
-          <input aria-label="Release name" onChange={(event) => setReleaseName(event.target.value)} value={releaseName} />
-        </label>
-        <label>
-          <span>Version</span>
-          <input aria-label="Release version" onChange={(event) => setReleaseVersion(event.target.value)} value={releaseVersion} />
-        </label>
-        <label>
-          <span>Channel</span>
-          <input aria-label="Release channel" onChange={(event) => setReleaseChannel(event.target.value)} value={releaseChannel} />
-        </label>
-        <label className="wideField">
-          <span>Artifact URL</span>
-          <input
-            aria-label="Release artifact URL"
-            onChange={(event) => setReleaseArtifactUrl(event.target.value)}
-            placeholder="https://updates.example/vpsman-agent"
-            value={releaseArtifactUrl}
-          />
-        </label>
-        <label className="wideField">
-          <span>SHA-256</span>
-          <input aria-label="Release SHA-256" onChange={(event) => setReleaseSha256Hex(event.target.value)} value={releaseSha256Hex} />
-        </label>
-        <label className="wideField">
-          <span>Signature</span>
-          <input aria-label="Release signature" onChange={(event) => setReleaseSignatureHex(event.target.value)} value={releaseSignatureHex} />
-        </label>
-        <label className="wideField">
-          <span>Signing key</span>
-          <input aria-label="Release signing key" onChange={(event) => setReleaseSigningKeyHex(event.target.value)} value={releaseSigningKeyHex} />
-        </label>
-        <label>
-          <span>Size bytes</span>
-          <input
-            aria-label="Release size bytes"
-            min={1}
-            onChange={(event) => setReleaseSizeBytes(event.target.value)}
-            type="number"
-            value={releaseSizeBytes}
-          />
-        </label>
-        <label className="wideField">
-          <span>Rollback URL</span>
-          <input
-            aria-label="Rollback artifact URL"
-            onChange={(event) => setRollbackArtifactUrl(event.target.value)}
-            placeholder="https://updates.example/vpsman-agent.previous"
-            value={rollbackArtifactUrl}
-          />
-        </label>
-        <label className="wideField">
-          <span>Rollback SHA-256</span>
-          <input aria-label="Rollback SHA-256" onChange={(event) => setRollbackSha256Hex(event.target.value)} value={rollbackSha256Hex} />
-        </label>
-        <label className="wideField">
-          <span>Rollback signature</span>
-          <input
-            aria-label="Rollback signature"
-            onChange={(event) => setRollbackSignatureHex(event.target.value)}
-            value={rollbackSignatureHex}
-          />
-        </label>
-        <label className="wideField">
-          <span>Rollback signing key</span>
-          <input
-            aria-label="Rollback signing key"
-            onChange={(event) => setRollbackSigningKeyHex(event.target.value)}
-            value={rollbackSigningKeyHex}
-          />
-        </label>
-        <label>
-          <span>Rollback size</span>
-          <input
-            aria-label="Rollback size bytes"
-            min={1}
-            onChange={(event) => setRollbackSizeBytes(event.target.value)}
-            type="number"
-            value={rollbackSizeBytes}
-          />
-        </label>
-        <label>
-          <span>Notes</span>
-          <input aria-label="Release notes" onChange={(event) => setReleaseNotes(event.target.value)} value={releaseNotes} />
-        </label>
-        <label>
-          <span>Artifact file</span>
-          <input aria-label="Release artifact file" onChange={(event) => setReleaseUploadFile(event.target.files?.[0] ?? null)} type="file" />
-        </label>
-        <label>
-          <span>Rollback file</span>
-          <input aria-label="Rollback artifact file" onChange={(event) => setRollbackUploadFile(event.target.files?.[0] ?? null)} type="file" />
-        </label>
-        <button className="primaryAction" disabled={releasePending} onClick={recordAgentUpdateRelease} type="button">
-          Record
-        </button>
-        <button className="secondaryAction" disabled={releasePending} onClick={uploadAgentUpdateArtifact} type="button">
-          Upload
-        </button>
+
+        <div className="releaseFormSection releaseIdentitySection">
+          <div className="releaseFormSectionHeader">
+            <strong>Release identity</strong>
+            <span>Human-facing name, semantic version, and rollout channel.</span>
+          </div>
+          <label>
+            <span>Name</span>
+            <input aria-label="Release name" onChange={(event) => setReleaseName(event.target.value)} value={releaseName} />
+          </label>
+          <label>
+            <span>Version</span>
+            <input aria-label="Release version" onChange={(event) => setReleaseVersion(event.target.value)} value={releaseVersion} />
+          </label>
+          <label>
+            <span>Channel</span>
+            <input aria-label="Release channel" onChange={(event) => setReleaseChannel(event.target.value)} value={releaseChannel} />
+          </label>
+          <label>
+            <span>Notes</span>
+            <input aria-label="Release notes" onChange={(event) => setReleaseNotes(event.target.value)} value={releaseNotes} />
+          </label>
+        </div>
+
+        <div className="releaseFormSection releaseArtifactSection">
+          <div className="releaseFormSectionHeader">
+            <strong>Primary artifact</strong>
+            <span>Required for metadata registration; signature fields are also used for local upload.</span>
+          </div>
+          <label className="wideField">
+            <span>Artifact URL</span>
+            <input
+              aria-label="Release artifact URL"
+              onChange={(event) => setReleaseArtifactUrl(event.target.value)}
+              placeholder="https://updates.example/vpsman-agent"
+              value={releaseArtifactUrl}
+            />
+          </label>
+          <label className="wideField">
+            <span>SHA-256</span>
+            <input aria-label="Release SHA-256" onChange={(event) => setReleaseSha256Hex(event.target.value)} value={releaseSha256Hex} />
+          </label>
+          <label className="wideField">
+            <span>Signature</span>
+            <input aria-label="Release signature" onChange={(event) => setReleaseSignatureHex(event.target.value)} value={releaseSignatureHex} />
+          </label>
+          <label className="wideField">
+            <span>Signing key</span>
+            <input aria-label="Release signing key" onChange={(event) => setReleaseSigningKeyHex(event.target.value)} value={releaseSigningKeyHex} />
+          </label>
+          <label>
+            <span>Size bytes</span>
+            <input
+              aria-label="Release size bytes"
+              min={1}
+              onChange={(event) => setReleaseSizeBytes(event.target.value)}
+              type="number"
+              value={releaseSizeBytes}
+            />
+          </label>
+        </div>
+
+        <div className="releaseFormSection releaseArtifactSection">
+          <div className="releaseFormSectionHeader">
+            <strong>Rollback artifact</strong>
+            <span>Optional fallback metadata for safe rollout reversal.</span>
+          </div>
+          <label className="wideField">
+            <span>Rollback URL</span>
+            <input
+              aria-label="Rollback artifact URL"
+              onChange={(event) => setRollbackArtifactUrl(event.target.value)}
+              placeholder="https://updates.example/vpsman-agent.previous"
+              value={rollbackArtifactUrl}
+            />
+          </label>
+          <label className="wideField">
+            <span>Rollback SHA-256</span>
+            <input aria-label="Rollback SHA-256" onChange={(event) => setRollbackSha256Hex(event.target.value)} value={rollbackSha256Hex} />
+          </label>
+          <label className="wideField">
+            <span>Rollback signature</span>
+            <input
+              aria-label="Rollback signature"
+              onChange={(event) => setRollbackSignatureHex(event.target.value)}
+              value={rollbackSignatureHex}
+            />
+          </label>
+          <label className="wideField">
+            <span>Rollback signing key</span>
+            <input
+              aria-label="Rollback signing key"
+              onChange={(event) => setRollbackSigningKeyHex(event.target.value)}
+              value={rollbackSigningKeyHex}
+            />
+          </label>
+          <label>
+            <span>Rollback size</span>
+            <input
+              aria-label="Rollback size bytes"
+              min={1}
+              onChange={(event) => setRollbackSizeBytes(event.target.value)}
+              type="number"
+              value={rollbackSizeBytes}
+            />
+          </label>
+        </div>
+
+        <div className="releaseFormSection releaseUploadSection">
+          <div className="releaseFormSectionHeader">
+            <strong>Local upload</strong>
+            <span>Object-store upload uses the release identity plus signature and signing-key fields above.</span>
+          </div>
+          <label>
+            <span>Artifact file</span>
+            <input aria-label="Release artifact file" onChange={(event) => setReleaseUploadFile(event.target.files?.[0] ?? null)} type="file" />
+          </label>
+          <label>
+            <span>Rollback file</span>
+            <input aria-label="Rollback artifact file" onChange={(event) => setRollbackUploadFile(event.target.files?.[0] ?? null)} type="file" />
+          </label>
+        </div>
+
+        <div className="releaseFormActions">
+          <button className="primaryAction" disabled={releasePending} onClick={recordAgentUpdateRelease} type="button">
+            Record metadata
+          </button>
+          <button className="secondaryAction" disabled={releasePending} onClick={uploadAgentUpdateArtifact} type="button">
+            Upload artifact
+          </button>
+        </div>
         {releaseError && <span className="inlineError">{releaseError}</span>}
       </div>
       <CrudPager

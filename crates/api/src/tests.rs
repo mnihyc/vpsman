@@ -235,6 +235,30 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
         .assign_agent_tag("client-delete", "edge")
         .await
         .is_err());
+    assert!(repo
+        .create_enrollment_token(
+            &CreateEnrollmentTokenRequest {
+                ttl_secs: Some(600),
+                purpose: Some(
+                    crate::repository_enrollment::ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT
+                        .to_string(),
+                ),
+                allowed_client_id: Some("client-delete".to_string()),
+                confirmed_reenrollment: true,
+                preserve_existing_assignments: Some(true),
+                default_tags: Vec::new(),
+                default_display_name: None,
+                unmanaged_update_enabled: None,
+                unmanaged_update_version_url: None,
+                unmanaged_update_interval_secs: None,
+                unmanaged_update_jitter_secs: None,
+                unmanaged_update_activate: None,
+                unmanaged_update_restart_agent: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .is_err());
 
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {

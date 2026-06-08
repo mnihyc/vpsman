@@ -1,5 +1,5 @@
 .accessWorkspace {
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
@@ -49,12 +49,12 @@
 }
 
 .accessWorkspace > .accessOverviewPanel {
-  grid-column: 1 / -1;
+  grid-column: 1;
 }
 
 .accessWorkspace > .accessInspector {
-  grid-column: 2;
-  grid-row: 2 / span 8;
+  grid-column: 1;
+  grid-row: auto;
 }
 
 .accessGrid {
@@ -101,7 +101,36 @@
 }
 
 .accessInspector {
+  display: grid;
+  min-width: 0;
   overflow: hidden;
+}
+
+.accessInspector .sectionHeader.compact {
+  border-top: 1px solid #eef1f6;
+  padding: 14px 18px 8px;
+}
+
+.accessInspector .sideForm {
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  align-items: end;
+  padding: 0 18px 18px;
+}
+
+.accessInspector .sideForm > .wideField,
+.accessInspector .sideForm > .inlineSecret,
+.accessInspector .sideForm > .enrollmentSecret,
+.accessInspector .sideForm > .enrollmentInstallCommand,
+.accessInspector .sideForm > .formNote,
+.accessInspector .sideForm > .privilegeVaultBox {
+  grid-column: 1 / -1;
+}
+
+.accessInspector .sideForm input,
+.accessInspector .sideForm select,
+.accessInspector .sideForm textarea {
+  width: 100%;
+  min-width: 0;
 }
 
 .accessInspector .inlineCheck {
@@ -248,4 +277,18 @@
   color: #5f6368;
   font-size: 0.78rem;
   line-height: 1.35;
+}
+
+.accessInspector .sideForm label:not(.inlineCheck) {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.accessInspector .sideForm label:not(.inlineCheck) > span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
 }

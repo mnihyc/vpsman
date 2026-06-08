@@ -26,6 +26,32 @@ import {
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
 
+function getScopedHeroTitle(view: ActiveView, subpage: string): string {
+  if (view !== "Jobs") {
+    return getHeroTitle(view);
+  }
+  switch (subpage) {
+    case "dispatch":
+      return "Command dispatch";
+    case "files":
+      return "VPS file browser";
+    case "multi_files":
+      return "Multi-file actions";
+    case "updates":
+      return "Agent updates";
+    case "transfers":
+      return "File transfer history";
+    case "terminal":
+      return "Terminal sessions";
+    case "processes":
+      return "Process supervisor";
+    case "approvals":
+      return "Schedule runs";
+    default:
+      return "Job history";
+  }
+}
+
 export function App() {
   const [activeView, setActiveView] = useState<ActiveView>("Dashboard");
   const [activeSubpages, setActiveSubpages] = useState<
@@ -68,7 +94,7 @@ export function App() {
     activeView,
     activeSubpages[activeView],
   );
-  const heroTitle = getHeroTitle(activeView);
+  const heroTitle = getScopedHeroTitle(activeView, activeSubpage);
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
     fleetViews.activeSavedViewId !== null;

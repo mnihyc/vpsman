@@ -76,10 +76,15 @@ nav {
   min-width: 0;
 }
 
-.navItem.active,
 .navItem:hover {
+  background: #f8fafd;
+  color: #202124;
+}
+
+.navItem.active {
   background: #e8f0fe;
   color: #174ea6;
+  font-weight: 700;
 }
 
 .subnavToggle {
@@ -95,10 +100,14 @@ nav {
   cursor: pointer;
 }
 
-.navItemRow.active .subnavToggle,
-.subnavToggle:hover {
-  background: #f1f3f4;
+.navItemRow.active .subnavToggle {
+  background: #e8f0fe;
   color: #174ea6;
+}
+
+.subnavToggle:hover {
+  background: #f8fafd;
+  color: #3c4043;
 }
 
 .navGroup {
@@ -127,10 +136,15 @@ nav {
   text-align: left;
 }
 
-.subnavItem.active,
 .subnavItem:hover {
-  background: #f1f3f4;
+  background: #f8fafd;
+  color: #202124;
+}
+
+.subnavItem.active {
+  background: #e8f0fe;
   color: #174ea6;
+  font-weight: 700;
 }
 
 .content {
@@ -754,9 +768,9 @@ nav {
 }
 
 .consoleHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(260px, max-content) minmax(560px, 1fr);
+  align-items: start;
   gap: 20px;
   padding: 18px 24px;
   border-bottom: 1px solid #dfe3eb;
@@ -767,6 +781,7 @@ nav {
   display: grid;
   gap: 4px;
   min-width: 0;
+  max-width: 460px;
 }
 
 .breadcrumb {
@@ -802,8 +817,14 @@ h2 {
 .quickStats,
 .signalGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(104px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(94px, 1fr));
   gap: 12px;
+  min-width: 0;
+}
+
+.quickStats {
+  justify-self: stretch;
+  width: 100%;
 }
 
 .signalGrid {
@@ -811,7 +832,7 @@ h2 {
 }
 
 .metric {
-  min-width: 104px;
+  min-width: 0;
   border: 1px solid #dfe3eb;
   border-radius: 8px;
   background: #fff;

@@ -309,7 +309,7 @@ async function exerciseExpressionWebhooks(page: Page) {
     "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",
   );
   await manager.getByLabel("Webhook event kind").fill("interval.30sec");
-  await manager.getByRole("button", { name: "Save" }).click();
+  await manager.getByRole("button", { name: "Save rule" }).click();
   await expect(
     manager.locator(".fleetPolicyStatus", { hasText: "webhook rule saved" }),
   ).toBeVisible();

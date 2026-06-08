@@ -744,6 +744,7 @@ impl Repository {
                         hidden_at = COALESCE(hidden_at, now()),
                         hidden_by = COALESCE(hidden_by, $2),
                         hidden_reason = COALESCE($3, hidden_reason),
+                        public_key = ''::bytea,
                         status = 'deleted'
                     WHERE id = $1
                     RETURNING id, hidden_at::text AS deleted_at
