@@ -31,8 +31,9 @@ use crate::{
     routes_dashboard::dashboard_overview,
     routes_discovery::discovery_endpoints,
     routes_enrollment::{
-        claim_enrollment, create_enrollment_token, key_lifecycle_report,
-        list_client_key_revocations, list_enrollment_tokens, revoke_current_client_key,
+        claim_enrollment, create_enrollment_token, get_enrollment_runtime_settings,
+        key_lifecycle_report, list_client_key_revocations, list_enrollment_tokens,
+        revoke_current_client_key, update_enrollment_runtime_settings,
     },
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
@@ -127,6 +128,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/enrollment-tokens",
             get(list_enrollment_tokens).post(create_enrollment_token),
+        )
+        .route(
+            "/api/v1/enrollment-settings",
+            get(get_enrollment_runtime_settings).put(update_enrollment_runtime_settings),
         )
         .route("/api/v1/enrollments/claim", post(claim_enrollment))
         .route(

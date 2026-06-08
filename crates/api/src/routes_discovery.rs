@@ -2,17 +2,20 @@ use axum::{extract::State, Json};
 use ed25519_dalek::SigningKey;
 use vpsman_common::{sign_discovery_document, DiscoveryDocument};
 
-use crate::{state::AppState, state::EnrollmentSettings, unix_now};
+use crate::{error::ApiError, state::AppState, state::EnrollmentSettings, unix_now};
 
 const DISCOVERY_VERSION: u32 = 1;
 const DISCOVERY_TTL_SECS: u64 = 60;
 
-pub(crate) async fn discovery_endpoints(State(state): State<AppState>) -> Json<DiscoveryDocument> {
-    Json(build_discovery_document(
-        &state.enrollment,
+pub(crate) async fn discovery_endpoints(
+    State(state): State<AppState>,
+) -> Result<Json<DiscoveryDocument>, ApiError> {
+    let settings = state.enrollment_settings().await?;
+    Ok(Json(build_discovery_document(
+        &settings,
         unix_now(),
         state.server_signing_key.as_deref(),
-    ))
+    )))
 }
 
 pub(crate) fn build_discovery_document(

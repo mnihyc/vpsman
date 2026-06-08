@@ -11,8 +11,8 @@ use crate::{
     model::{
         ClaimEnrollmentRequest, ClaimEnrollmentResponse, ClientKeyRevocationView,
         CreateClientKeyRevocationRequest, CreateEnrollmentTokenRequest,
-        CreateEnrollmentTokenResponse, EnrollmentTokenView, HistoryQuery, KeyLifecycleReportView,
-        WsEvent,
+        CreateEnrollmentTokenResponse, EnrollmentRuntimeSettingsView, EnrollmentTokenView,
+        HistoryQuery, KeyLifecycleReportView, UpdateEnrollmentRuntimeSettingsRequest, WsEvent,
     },
     repository_enrollment::{
         normalize_enrollment_purpose, normalize_optional_client_id, normalize_tags,
@@ -23,6 +23,7 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
+use vpsman_common::{validate_agent_config_shape, AgentConfig};
 
 pub(crate) async fn list_enrollment_tokens(
     State(state): State<AppState>,
@@ -44,15 +45,45 @@ pub(crate) async fn create_enrollment_token(
         .await?;
     validate_create_enrollment_token(&request)?;
     validate_enrollment_token_policy(&state, &request).await?;
+    let enrollment = state.enrollment_settings().await?;
     Ok((
         StatusCode::CREATED,
         Json(
             state
                 .repo
-                .create_enrollment_token_with_update(&request, &operator, &state.enrollment.update)
+                .create_enrollment_token_with_update(&request, &operator, &enrollment.update)
                 .await?,
         ),
     ))
+}
+
+pub(crate) async fn get_enrollment_runtime_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EnrollmentRuntimeSettingsView>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    Ok(Json(enrollment_settings_view(
+        &state.enrollment_settings().await?,
+    )))
+}
+
+pub(crate) async fn update_enrollment_runtime_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateEnrollmentRuntimeSettingsRequest>,
+) -> Result<Json<EnrollmentRuntimeSettingsView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    let current = state.enrollment_settings().await?;
+    let next = enrollment_settings_from_request(request, current)?;
+    let saved = state
+        .repo
+        .upsert_enrollment_settings(&next, &operator)
+        .await?;
+    Ok(Json(enrollment_settings_view(&saved)))
 }
 
 pub(crate) async fn list_client_key_revocations(
@@ -104,20 +135,18 @@ pub(crate) async fn key_lifecycle_report(
     headers: HeaderMap,
 ) -> Result<Json<KeyLifecycleReportView>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let enrollment = state.enrollment_settings().await?;
     Ok(Json(
         state
             .repo
             .key_lifecycle_report(KeyLifecycleTrustReport {
-                server_ed25519_public_key_configured: state
-                    .enrollment
+                server_ed25519_public_key_configured: enrollment
                     .server_ed25519_public_key_hex
                     .is_some(),
-                discovery_trusted_server_key_count: state
-                    .enrollment
+                discovery_trusted_server_key_count: enrollment
                     .discovery_trusted_server_ed25519_public_keys_hex
                     .len(),
-                gateway_server_public_key_configured: state
-                    .enrollment
+                gateway_server_public_key_configured: enrollment
                     .gateway_server_public_key_hex
                     .is_some(),
             })
@@ -131,7 +160,7 @@ pub(crate) async fn claim_enrollment(
     Json(request): Json<ClaimEnrollmentRequest>,
 ) -> Result<(StatusCode, Json<ClaimEnrollmentResponse>), ApiError> {
     validate_claim_enrollment(&request)?;
-    let mut enrollment = state.enrollment.clone();
+    let mut enrollment = state.enrollment_settings().await?;
     if let Some(country_tag) = country_tag_from_headers(&headers) {
         enrollment.default_country_tag = Some(country_tag);
     }
@@ -269,6 +298,102 @@ fn validate_create_enrollment_token(
         ));
     }
     Ok(())
+}
+
+fn enrollment_settings_view(
+    settings: &crate::state::EnrollmentSettings,
+) -> EnrollmentRuntimeSettingsView {
+    EnrollmentRuntimeSettingsView {
+        tcp_endpoints: settings.tcp_endpoints.clone(),
+        discovery_url: settings.discovery_url.clone(),
+        gateway_server_public_key_hex: settings.gateway_server_public_key_hex.clone(),
+        server_ed25519_public_key_hex: settings.server_ed25519_public_key_hex.clone(),
+        discovery_trusted_server_ed25519_public_keys_hex: settings
+            .discovery_trusted_server_ed25519_public_keys_hex
+            .clone(),
+        gateway_retry_secs: settings.gateway_retry_secs,
+        gateway_connect_timeout_secs: settings.gateway_connect_timeout_secs,
+        telemetry_light_secs: settings.telemetry_light_secs,
+        telemetry_full_secs: settings.telemetry_full_secs,
+        update: settings.update.clone(),
+    }
+}
+
+fn enrollment_settings_from_request(
+    request: UpdateEnrollmentRuntimeSettingsRequest,
+    current: crate::state::EnrollmentSettings,
+) -> Result<crate::state::EnrollmentSettings, ApiError> {
+    let mut next = current;
+    next.tcp_endpoints = request.tcp_endpoints;
+    next.discovery_url = normalized_optional_string(request.discovery_url);
+    next.gateway_server_public_key_hex = normalized_optional_hex32(
+        request.gateway_server_public_key_hex,
+        "gateway_server_public_key_hex",
+    )?;
+    next.discovery_trusted_server_ed25519_public_keys_hex = request
+        .discovery_trusted_server_ed25519_public_keys_hex
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+    next.gateway_retry_secs = request.gateway_retry_secs;
+    next.gateway_connect_timeout_secs = request.gateway_connect_timeout_secs;
+    next.telemetry_light_secs = request.telemetry_light_secs;
+    next.telemetry_full_secs = request.telemetry_full_secs;
+    next.update = request.update;
+    validate_enrollment_settings(&next)?;
+    Ok(next)
+}
+
+fn validate_enrollment_settings(
+    settings: &crate::state::EnrollmentSettings,
+) -> Result<(), ApiError> {
+    let mut candidate = AgentConfig::default();
+    candidate.tcp_endpoints = settings.tcp_endpoints.clone();
+    candidate.discovery_url = settings.discovery_url.clone();
+    candidate
+        .auth
+        .discovery_trusted_server_ed25519_public_keys_hex = settings
+        .discovery_trusted_server_ed25519_public_keys_hex
+        .clone();
+    candidate.auth.gateway_retry_secs = settings.gateway_retry_secs;
+    candidate.auth.gateway_connect_timeout_secs = settings.gateway_connect_timeout_secs;
+    candidate.telemetry_light_secs = settings.telemetry_light_secs;
+    candidate.telemetry_full_secs = settings.telemetry_full_secs;
+    candidate.update = settings.update.clone();
+    validate_agent_config_shape(&candidate)
+        .map_err(|_message| ApiError::bad_request("enrollment_settings_invalid"))?;
+    if let Some(key) = settings.gateway_server_public_key_hex.as_deref() {
+        validate_fixed_hex32(key, "gateway_server_public_key_hex")?;
+    }
+    Ok(())
+}
+
+fn normalized_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalized_optional_hex32(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = normalized_optional_string(value) else {
+        return Ok(None);
+    };
+    let value = value.to_ascii_lowercase();
+    validate_fixed_hex32(&value, field)?;
+    Ok(Some(value))
+}
+
+fn validate_fixed_hex32(value: &str, field: &'static str) -> Result<(), ApiError> {
+    if value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        Ok(())
+    } else {
+        let _ = field;
+        Err(ApiError::bad_request("enrollment_settings_invalid"))
+    }
 }
 
 async fn validate_enrollment_token_policy(

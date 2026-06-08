@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -89,7 +90,7 @@ pub(crate) async fn run_agent(
                 Err(error) => warn!(%error, "gateway endpoint discovery failed"),
             }
         }
-        time::sleep(Duration::from_secs(5)).await;
+        time::sleep(Duration::from_secs(config.auth.gateway_retry_secs.max(1))).await;
     }
 }
 
@@ -100,7 +101,7 @@ async fn connect_and_stream(
     recent_commands: &mut RecentCommandCache,
 ) -> Result<()> {
     info!(%endpoint, "connecting to gateway");
-    let tcp = TcpStream::connect(endpoint).await?;
+    let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
     let mut stream = connect_noise_stream(tcp, config).await?;
 
     let hello = AgentHello {
@@ -243,6 +244,42 @@ async fn connect_and_stream(
                 }
             }
         }
+    }
+}
+
+async fn connect_tcp_endpoint(endpoint: &str, timeout_secs: u64) -> Result<TcpStream> {
+    let mut addrs = tokio::net::lookup_host(endpoint)
+        .await
+        .with_context(|| format!("failed to resolve gateway endpoint {endpoint}"))?
+        .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        anyhow::bail!("gateway endpoint {endpoint} resolved to no addresses");
+    }
+    addrs.sort_by_key(address_family_order);
+
+    let timeout = Duration::from_secs(timeout_secs.clamp(1, 300));
+    let mut last_error = None;
+    for addr in addrs {
+        match time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => {
+                debug!(%endpoint, %addr, %error, "gateway address connect failed");
+                last_error = Some(anyhow::Error::new(error));
+            }
+            Err(error) => {
+                debug!(%endpoint, %addr, "gateway address connect timed out");
+                last_error = Some(anyhow::Error::new(error));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("gateway endpoint {endpoint} failed")))
+}
+
+fn address_family_order(addr: &SocketAddr) -> u8 {
+    if addr.is_ipv4() {
+        0
+    } else {
+        1
     }
 }
 

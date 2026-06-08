@@ -60,6 +60,10 @@ pub struct AgentAuthConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
     pub command_timeout_secs: u64,
+    #[serde(default = "default_agent_gateway_retry_secs")]
+    pub gateway_retry_secs: u64,
+    #[serde(default = "default_agent_gateway_connect_timeout_secs")]
+    pub gateway_connect_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,6 +126,14 @@ pub fn default_agent_unmanaged_update_activate() -> bool {
 
 pub fn default_agent_unmanaged_update_restart_agent() -> bool {
     true
+}
+
+pub fn default_agent_gateway_retry_secs() -> u64 {
+    60
+}
+
+pub fn default_agent_gateway_connect_timeout_secs() -> u64 {
+    10
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -458,6 +470,8 @@ impl Default for AgentAuthConfig {
             server_ed25519_public_key_hex: None,
             discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
             command_timeout_secs: 30,
+            gateway_retry_secs: default_agent_gateway_retry_secs(),
+            gateway_connect_timeout_secs: default_agent_gateway_connect_timeout_secs(),
         }
     }
 }

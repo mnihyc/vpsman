@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Ban, Copy, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
+import { Ban, Copy, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, Save, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
@@ -16,9 +16,12 @@ import type {
   ClientKeyRevocationView,
   CreateEnrollmentTokenRequest,
   CreateEnrollmentTokenResponse,
+  EnrollmentRuntimeSettingsView,
+  EnrollmentServerEndpoint,
   EnrollmentTokenPurpose,
   EnrollmentTokenView,
   KeyLifecycleReportView,
+  UpdateEnrollmentRuntimeSettingsRequest,
 } from "../typesAccess";
 import type { PrivilegeMaterial } from "../privilege";
 import {
@@ -53,8 +56,10 @@ type AccessPanelProps = {
   onRevokeClientKey: (clientId: string, reason: string | null, confirmed: boolean) => Promise<void>;
   onRevokeOperatorSession: (sessionId: string) => Promise<void>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
+  onUpdateEnrollmentSettings: (request: UpdateEnrollmentRuntimeSettingsRequest) => Promise<EnrollmentRuntimeSettingsView>;
   operator: OperatorView | null;
   clientKeyRevocations: ClientKeyRevocationView[];
+  enrollmentSettings: EnrollmentRuntimeSettingsView | null;
   enrollmentTokens: EnrollmentTokenView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
   operatorSessions: OperatorSessionRecord[];
@@ -96,8 +101,10 @@ export function AccessPanel({
   onRevokeClientKey,
   onRevokeOperatorSession,
   onSetupTotp,
+  onUpdateEnrollmentSettings,
   operator,
   clientKeyRevocations,
+  enrollmentSettings,
   enrollmentTokens,
   keyLifecycleReport,
   operatorSessions,
@@ -132,6 +139,22 @@ export function AccessPanel({
   const [tokenUnmanagedUpdateJitterSecs, setTokenUnmanagedUpdateJitterSecs] = useState("86400");
   const [tokenUnmanagedUpdateActivate, setTokenUnmanagedUpdateActivate] = useState(true);
   const [tokenUnmanagedUpdateRestartAgent, setTokenUnmanagedUpdateRestartAgent] = useState(true);
+  const [settingsEndpoints, setSettingsEndpoints] = useState("");
+  const [settingsDiscoveryUrl, setSettingsDiscoveryUrl] = useState("");
+  const [settingsGatewayKey, setSettingsGatewayKey] = useState("");
+  const [settingsTrustedKeys, setSettingsTrustedKeys] = useState("");
+  const [settingsRetrySecs, setSettingsRetrySecs] = useState("60");
+  const [settingsConnectTimeoutSecs, setSettingsConnectTimeoutSecs] = useState("10");
+  const [settingsTelemetryLightSecs, setSettingsTelemetryLightSecs] = useState("15");
+  const [settingsTelemetryFullSecs, setSettingsTelemetryFullSecs] = useState("60");
+  const [settingsUpdateEnabled, setSettingsUpdateEnabled] = useState(true);
+  const [settingsUpdateVersionUrl, setSettingsUpdateVersionUrl] = useState(DEFAULT_UNMANAGED_UPDATE_VERSION_URL);
+  const [settingsUpdateIntervalSecs, setSettingsUpdateIntervalSecs] = useState("86400");
+  const [settingsUpdateJitterSecs, setSettingsUpdateJitterSecs] = useState("86400");
+  const [settingsUpdateActivate, setSettingsUpdateActivate] = useState(true);
+  const [settingsUpdateRestartAgent, setSettingsUpdateRestartAgent] = useState(true);
+  const [settingsPending, setSettingsPending] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [tokenPending, setTokenPending] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [createdToken, setCreatedToken] = useState<CreateEnrollmentTokenResponse | null>(null);
@@ -155,6 +178,18 @@ export function AccessPanel({
     Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10) >= 0 &&
     (!tokenUnmanagedUpdateEnabled || tokenUnmanagedUpdateVersionUrl.trim().length > 0) &&
     (tokenPurpose === "provision" || tokenClientId.trim().length > 0);
+  const canSaveEnrollmentSettings =
+    canManageOperators &&
+    !settingsPending &&
+    settingsEndpoints.trim().length > 0 &&
+    integerInRange(settingsRetrySecs, 1, 3600) &&
+    integerInRange(settingsConnectTimeoutSecs, 1, 300) &&
+    integerInRange(settingsTelemetryLightSecs, 1, 3600) &&
+    integerInRange(settingsTelemetryFullSecs, 1, 3600) &&
+    Number.parseInt(settingsTelemetryFullSecs, 10) >= Number.parseInt(settingsTelemetryLightSecs, 10) &&
+    integerInRange(settingsUpdateIntervalSecs, 300, 604800) &&
+    integerInRange(settingsUpdateJitterSecs, 0, 604800) &&
+    settingsUpdateVersionUrl.trim().length > 0;
   const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const lifecycleNameById = useMemo(
@@ -162,26 +197,53 @@ export function AccessPanel({
     [lifecycleClients, vpsNameDisplayMode],
   );
   const lifecycleClientLabel = (clientId: string | null | undefined) => clientDisplayNameFromMap(clientId, lifecycleNameById);
+  const enrollmentClaimApiUrl = typeof window === "undefined" ? "https://panel.example.com" : window.location.origin;
   const enrollmentInstallRender = useMemo(() => {
-    const origin = typeof window === "undefined" ? "https://panel.example.com" : window.location.origin;
     if (createdToken) {
       return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
-        apiUrl: origin,
+        apiUrl: enrollmentClaimApiUrl,
         installMode: "root",
         token: createdToken.token,
       });
     }
     return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
-      apiUrl: origin,
+      apiUrl: enrollmentClaimApiUrl,
       installMode: "root",
       token: null,
     });
-  }, [createdToken, preferences.enrollment_install_command_template]);
+  }, [createdToken, enrollmentClaimApiUrl, preferences.enrollment_install_command_template]);
   const enrollmentInstallCommand = enrollmentInstallRender.command ?? "";
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
   }, [routeSubpage]);
+
+  useEffect(() => {
+    if (!enrollmentSettings) {
+      return;
+    }
+    setSettingsEndpoints(formatEnrollmentEndpoints(enrollmentSettings.tcp_endpoints));
+    setSettingsDiscoveryUrl(enrollmentSettings.discovery_url ?? "");
+    setSettingsGatewayKey(enrollmentSettings.gateway_server_public_key_hex ?? "");
+    setSettingsTrustedKeys(enrollmentSettings.discovery_trusted_server_ed25519_public_keys_hex.join("\n"));
+    setSettingsRetrySecs(String(enrollmentSettings.gateway_retry_secs));
+    setSettingsConnectTimeoutSecs(String(enrollmentSettings.gateway_connect_timeout_secs));
+    setSettingsTelemetryLightSecs(String(enrollmentSettings.telemetry_light_secs));
+    setSettingsTelemetryFullSecs(String(enrollmentSettings.telemetry_full_secs));
+    setSettingsUpdateEnabled(enrollmentSettings.update.unmanaged_enabled);
+    setSettingsUpdateVersionUrl(enrollmentSettings.update.unmanaged_version_url);
+    setSettingsUpdateIntervalSecs(String(enrollmentSettings.update.unmanaged_interval_secs));
+    setSettingsUpdateJitterSecs(String(enrollmentSettings.update.unmanaged_jitter_secs));
+    setSettingsUpdateActivate(enrollmentSettings.update.unmanaged_activate);
+    setSettingsUpdateRestartAgent(enrollmentSettings.update.unmanaged_restart_agent);
+    setTokenUnmanagedUpdateEnabled(enrollmentSettings.update.unmanaged_enabled);
+    setTokenUnmanagedUpdateVersionUrl(enrollmentSettings.update.unmanaged_version_url);
+    setTokenUnmanagedUpdateIntervalSecs(String(enrollmentSettings.update.unmanaged_interval_secs));
+    setTokenUnmanagedUpdateJitterSecs(String(enrollmentSettings.update.unmanaged_jitter_secs));
+    setTokenUnmanagedUpdateActivate(enrollmentSettings.update.unmanaged_activate);
+    setTokenUnmanagedUpdateRestartAgent(enrollmentSettings.update.unmanaged_restart_agent);
+    setSettingsError(null);
+  }, [enrollmentSettings]);
 
   useEffect(() => {
     setInstallCommandCopied(false);
@@ -312,6 +374,43 @@ export function AccessPanel({
       setTokenError(error instanceof Error ? error.message : "Enrollment token creation failed");
     } finally {
       setTokenPending(false);
+    }
+  }
+
+  async function saveEnrollmentSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSaveEnrollmentSettings) {
+      return;
+    }
+    setSettingsPending(true);
+    setSettingsError(null);
+    try {
+      const request: UpdateEnrollmentRuntimeSettingsRequest = {
+        tcp_endpoints: parseEnrollmentEndpoints(settingsEndpoints),
+        discovery_url: settingsDiscoveryUrl.trim() || null,
+        gateway_server_public_key_hex: settingsGatewayKey.trim() || null,
+        discovery_trusted_server_ed25519_public_keys_hex: parseMultilineList(settingsTrustedKeys),
+        gateway_retry_secs: parseRequiredInteger(settingsRetrySecs, "Retry seconds"),
+        gateway_connect_timeout_secs: parseRequiredInteger(settingsConnectTimeoutSecs, "Connect timeout seconds"),
+        telemetry_light_secs: parseRequiredInteger(settingsTelemetryLightSecs, "Light telemetry seconds"),
+        telemetry_full_secs: parseRequiredInteger(settingsTelemetryFullSecs, "Full telemetry seconds"),
+        update: {
+          trusted_artifact_signing_key_hex: enrollmentSettings?.update.trusted_artifact_signing_key_hex ?? null,
+          unmanaged_enabled: settingsUpdateEnabled,
+          unmanaged_version_url: settingsUpdateVersionUrl.trim(),
+          unmanaged_interval_secs: parseRequiredInteger(settingsUpdateIntervalSecs, "Update interval seconds"),
+          unmanaged_jitter_secs: parseRequiredInteger(settingsUpdateJitterSecs, "Update jitter seconds"),
+          unmanaged_activate: settingsUpdateActivate,
+          unmanaged_restart_agent: settingsUpdateRestartAgent,
+        },
+      };
+      const response = await onUpdateEnrollmentSettings(request);
+      setSettingsEndpoints(formatEnrollmentEndpoints(response.tcp_endpoints));
+      setSettingsError("Enrollment config saved");
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Enrollment config update failed");
+    } finally {
+      setSettingsPending(false);
     }
   }
 
@@ -889,6 +988,176 @@ export function AccessPanel({
           tone="danger"
         />
         <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
+          <h2>Enrollment runtime config</h2>
+          <span>{settingsError ?? (enrollmentSettings ? "Agent connection defaults" : "Loading runtime settings")}</span>
+        </div>
+        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void saveEnrollmentSettings(event)}>
+          <div className="formNote">
+            <strong>Claim API URL</strong>
+            <span>{enrollmentClaimApiUrl} is used by the install command only; agents store gateway endpoints and discovery settings.</span>
+          </div>
+          <label className="wideField">
+            <span>Gateway endpoints</span>
+            <textarea
+              aria-label="Enrollment gateway endpoints"
+              className="enrollmentEndpointEditor"
+              disabled={!canManageOperators || settingsPending}
+              onChange={(event) => setSettingsEndpoints(event.target.value)}
+              placeholder={"primary=gw.example.com:9443=10\nprimary-ipv4=203.0.113.10:9443=10\nprimary-ipv6=[2001:db8::10]:9443=20"}
+              value={settingsEndpoints}
+            />
+          </label>
+          <div className="formNote">
+            <strong>Address resolution</strong>
+            <span>Domain endpoints are resolved with IPv4 tried first, then IPv6. Explicit IPv4/IPv6 fallback can be represented as separate endpoint lines. Agents sleep {settingsRetrySecs || "60"} seconds after a failed endpoint pass.</span>
+          </div>
+          <label>
+            <span>Discovery URL</span>
+            <input
+              aria-label="Enrollment discovery URL"
+              disabled={!canManageOperators || settingsPending}
+              onChange={(event) => setSettingsDiscoveryUrl(event.target.value)}
+              placeholder="https://panel.example.com/.well-known/vpsman/endpoints.json"
+              value={settingsDiscoveryUrl}
+            />
+          </label>
+          <label>
+            <span>Gateway Noise public key</span>
+            <input
+              aria-label="Enrollment gateway Noise public key"
+              disabled={!canManageOperators || settingsPending}
+              onChange={(event) => setSettingsGatewayKey(event.target.value)}
+              placeholder="64 hex characters"
+              value={settingsGatewayKey}
+            />
+          </label>
+          <label>
+            <span>Retry seconds</span>
+            <input
+              aria-label="Enrollment gateway retry seconds"
+              disabled={!canManageOperators || settingsPending}
+              inputMode="numeric"
+              onChange={(event) => setSettingsRetrySecs(event.target.value)}
+              placeholder="60"
+              value={settingsRetrySecs}
+            />
+          </label>
+          <label>
+            <span>Connect timeout seconds</span>
+            <input
+              aria-label="Enrollment gateway connect timeout seconds"
+              disabled={!canManageOperators || settingsPending}
+              inputMode="numeric"
+              onChange={(event) => setSettingsConnectTimeoutSecs(event.target.value)}
+              placeholder="10"
+              value={settingsConnectTimeoutSecs}
+            />
+          </label>
+          <label>
+            <span>Telemetry light seconds</span>
+            <input
+              aria-label="Enrollment telemetry light seconds"
+              disabled={!canManageOperators || settingsPending}
+              inputMode="numeric"
+              onChange={(event) => setSettingsTelemetryLightSecs(event.target.value)}
+              placeholder="15"
+              value={settingsTelemetryLightSecs}
+            />
+          </label>
+          <label>
+            <span>Telemetry full seconds</span>
+            <input
+              aria-label="Enrollment telemetry full seconds"
+              disabled={!canManageOperators || settingsPending}
+              inputMode="numeric"
+              onChange={(event) => setSettingsTelemetryFullSecs(event.target.value)}
+              placeholder="60"
+              value={settingsTelemetryFullSecs}
+            />
+          </label>
+          <label className="wideField">
+            <span>Trusted discovery signing keys</span>
+            <textarea
+              aria-label="Enrollment trusted discovery signing keys"
+              disabled={!canManageOperators || settingsPending}
+              onChange={(event) => setSettingsTrustedKeys(event.target.value)}
+              placeholder="one 64-hex Ed25519 public key per line"
+              value={settingsTrustedKeys}
+            />
+          </label>
+          <div className="formNote">
+            <strong>Server signing public key</strong>
+            <span>{enrollmentSettings?.server_ed25519_public_key_hex ?? "not configured"}</span>
+          </div>
+          <label className="inlineCheck">
+            <input
+              checked={settingsUpdateEnabled}
+              disabled={!canManageOperators || settingsPending}
+              onChange={(event) => setSettingsUpdateEnabled(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Default auto-check updates</span>
+          </label>
+          <label>
+            <span>Default version URL</span>
+            <input
+              aria-label="Enrollment default update version URL"
+              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
+              onChange={(event) => setSettingsUpdateVersionUrl(event.target.value)}
+              placeholder="https://updates.example.com/version.json"
+              value={settingsUpdateVersionUrl}
+            />
+          </label>
+          <label>
+            <span>Default update interval seconds</span>
+            <input
+              aria-label="Enrollment default update interval seconds"
+              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
+              inputMode="numeric"
+              onChange={(event) => setSettingsUpdateIntervalSecs(event.target.value)}
+              placeholder="86400"
+              value={settingsUpdateIntervalSecs}
+            />
+          </label>
+          <label>
+            <span>Default update jitter seconds</span>
+            <input
+              aria-label="Enrollment default update jitter seconds"
+              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
+              inputMode="numeric"
+              onChange={(event) => setSettingsUpdateJitterSecs(event.target.value)}
+              placeholder="86400"
+              value={settingsUpdateJitterSecs}
+            />
+          </label>
+          <label className="inlineCheck">
+            <input
+              checked={settingsUpdateActivate}
+              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
+              onChange={(event) => setSettingsUpdateActivate(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Default activate update</span>
+          </label>
+          <label className="inlineCheck">
+            <input
+              checked={settingsUpdateRestartAgent}
+              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled || !settingsUpdateActivate}
+              onChange={(event) => setSettingsUpdateRestartAgent(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Default restart agent</span>
+          </label>
+          <button className="secondaryAction" disabled={!canSaveEnrollmentSettings} type="submit">
+            <Save size={17} />
+            Save enrollment config
+          </button>
+          <button className="secondaryAction" disabled={settingsPending || loading} onClick={() => void onRefresh()} type="button">
+            <RefreshCw size={17} />
+            Reload config
+          </button>
+        </form>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
           <h2>Create token</h2>
           <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
         </div>
@@ -1150,6 +1419,83 @@ export function AccessPanel({
       </aside>
     </section>
   );
+}
+
+function formatEnrollmentEndpoints(endpoints: EnrollmentServerEndpoint[]): string {
+  return endpoints.map((endpoint) => `${endpoint.label}=${endpoint.tcp_addr}=${endpoint.priority}`).join("\n");
+}
+
+function parseEnrollmentEndpoints(input: string): EnrollmentServerEndpoint[] {
+  const lines = input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    throw new Error("At least one gateway endpoint is required");
+  }
+  if (lines.length > 16) {
+    throw new Error("Gateway endpoints are limited to 16 entries");
+  }
+  return lines.map((line) => {
+    const parts = line.split("=");
+    if (parts.length !== 3) {
+      throw new Error("Gateway endpoints must use label=host:port=priority");
+    }
+    const [label, tcpAddr, priorityText] = parts.map((part) => part.trim());
+    if (!/^[A-Za-z0-9._:-]{1,64}$/.test(label)) {
+      throw new Error(`Endpoint label is invalid: ${label || "(blank)"}`);
+    }
+    validateEndpointAddress(tcpAddr);
+    const priority = parseRequiredInteger(priorityText, "Endpoint priority");
+    if (priority < 0 || priority > 65535) {
+      throw new Error("Endpoint priority must be between 0 and 65535");
+    }
+    return { label, tcp_addr: tcpAddr, priority };
+  });
+}
+
+function validateEndpointAddress(value: string) {
+  if (!value || value.length > 256 || /\s/.test(value)) {
+    throw new Error("Endpoint address must be a host:port without spaces");
+  }
+  let portText = "";
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end <= 1 || value[end + 1] !== ":") {
+      throw new Error("IPv6 endpoints must use [address]:port");
+    }
+    portText = value.slice(end + 2);
+  } else {
+    const separator = value.lastIndexOf(":");
+    if (separator <= 0 || separator === value.length - 1 || value.slice(0, separator).includes(":")) {
+      throw new Error("Endpoint address must be domain:port, IPv4:port, or [IPv6]:port");
+    }
+    portText = value.slice(separator + 1);
+  }
+  const port = parseRequiredInteger(portText, "Endpoint port");
+  if (port < 1 || port > 65535) {
+    throw new Error("Endpoint port must be between 1 and 65535");
+  }
+}
+
+function parseMultilineList(input: string): string[] {
+  return input
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseRequiredInteger(input: string, label: string): number {
+  const value = Number.parseInt(input.trim(), 10);
+  if (!Number.isSafeInteger(value) || String(value) !== input.trim()) {
+    throw new Error(`${label} must be a whole number`);
+  }
+  return value;
+}
+
+function integerInRange(input: string, min: number, max: number): boolean {
+  const value = Number.parseInt(input.trim(), 10);
+  return Number.isSafeInteger(value) && String(value) === input.trim() && value >= min && value <= max;
 }
 
 function parseScopeInput(input: string): string[] {

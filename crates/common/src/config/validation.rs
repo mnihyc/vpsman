@@ -192,6 +192,12 @@ fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
     if !(1..=3600).contains(&config.command_timeout_secs) {
         return Err("command_timeout_secs_out_of_range".to_string());
     }
+    if !(1..=3600).contains(&config.gateway_retry_secs) {
+        return Err("gateway_retry_secs_out_of_range".to_string());
+    }
+    if !(1..=300).contains(&config.gateway_connect_timeout_secs) {
+        return Err("gateway_connect_timeout_secs_out_of_range".to_string());
+    }
     Ok(())
 }
 

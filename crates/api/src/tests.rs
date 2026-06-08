@@ -38,6 +38,82 @@ fn discovery_document_uses_configured_gateway_endpoints() {
 }
 
 #[tokio::test]
+async fn enrollment_runtime_settings_are_persisted_with_live_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    repo.upsert_enrollment_settings(
+        &EnrollmentSettings {
+            tcp_endpoints: vec![
+                vpsman_common::ServerEndpoint {
+                    label: "primary".to_string(),
+                    tcp_addr: "gw.ops.example.com:9443".to_string(),
+                    priority: 10,
+                },
+                vpsman_common::ServerEndpoint {
+                    label: "primary-v6".to_string(),
+                    tcp_addr: "[2001:db8::10]:9443".to_string(),
+                    priority: 20,
+                },
+            ],
+            discovery_url: Some(
+                "https://panel.ops.example.com/.well-known/vpsman/endpoints.json".to_string(),
+            ),
+            gateway_server_public_key_hex: Some("22".repeat(32)),
+            server_ed25519_public_key_hex: Some("ff".repeat(32)),
+            discovery_trusted_server_ed25519_public_keys_hex: vec!["33".repeat(32)],
+            gateway_retry_secs: 60,
+            gateway_connect_timeout_secs: 10,
+            default_country_tag: Some("country:DE".to_string()),
+            ..EnrollmentSettings::default()
+        },
+        &test_operator(),
+    )
+    .await
+    .unwrap();
+
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let state = AppState {
+        repo,
+        events,
+        internal_token: Some("internal-token-at-least-32-characters".to_string()),
+        gateway: GatewayDispatchClient::default(),
+        server_signing_key: None,
+        enrollment: EnrollmentSettings {
+            server_ed25519_public_key_hex: Some("11".repeat(32)),
+            default_country_tag: Some("country:US".to_string()),
+            ..EnrollmentSettings::default()
+        },
+        backup_object_store: None,
+        update_object_store: None,
+        update_artifact_public_base_url: None,
+        update_release_policy: UpdateReleasePolicy::default(),
+        fleet_alert_policy: FleetAlertPolicy::default(),
+        job_output_artifact_min_bytes: 1,
+        require_registered_agent_updates: false,
+    };
+
+    let effective = state.enrollment_settings().await.unwrap();
+    assert_eq!(effective.tcp_endpoints.len(), 2);
+    assert_eq!(
+        effective.tcp_endpoints[0].tcp_addr,
+        "gw.ops.example.com:9443"
+    );
+    assert_eq!(effective.gateway_retry_secs, 60);
+    assert_eq!(effective.gateway_connect_timeout_secs, 10);
+    assert_eq!(
+        effective.gateway_server_public_key_hex,
+        Some("22".repeat(32))
+    );
+    assert_eq!(
+        effective.server_ed25519_public_key_hex,
+        Some("11".repeat(32))
+    );
+    assert_eq!(
+        effective.default_country_tag,
+        Some("country:US".to_string())
+    );
+}
+
+#[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

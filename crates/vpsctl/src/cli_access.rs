@@ -87,6 +87,12 @@ pub(crate) struct EnrollmentTokenCreateCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct EnrollmentSettingsUpdateCommand {
+    #[arg(long = "settings-file")]
+    pub(crate) settings_file: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ReenrollmentTokenCreateCommand {
     #[arg(long)]
     pub(crate) client_id: String,

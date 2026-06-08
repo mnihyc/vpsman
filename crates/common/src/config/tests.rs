@@ -632,6 +632,7 @@ fn rejects_hot_config_identity_and_secret_changes() {
             server_ed25519_public_key_hex: Some("11".repeat(32)),
             discovery_trusted_server_ed25519_public_keys_hex: vec!["12".repeat(32)],
             command_timeout_secs: 30,
+            ..Default::default()
         },
         noise: AgentNoiseConfig {
             mode: AgentNoiseMode::EnrolledIk,

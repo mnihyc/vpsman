@@ -677,6 +677,8 @@ fn test_args() -> Args {
         discovery_url: None,
         gateway_server_public_key_hex: None,
         enrollment_telemetry_light_secs: 15,
+        enrollment_gateway_retry_secs: 60,
+        enrollment_gateway_connect_timeout_secs: 10,
         enrollment_telemetry_full_secs: 60,
         enrollment_default_country: "US".to_string(),
         enrollment_unmanaged_update_enabled: true,

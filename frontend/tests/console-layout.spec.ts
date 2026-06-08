@@ -706,6 +706,69 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   await expect(
     inspector.getByLabel("Enrollment token existing VPS ID"),
   ).toHaveCount(0);
+  await expect(inspector.getByText("Enrollment runtime config")).toBeVisible();
+  await expect(
+    inspector.getByLabel("Enrollment gateway endpoints"),
+  ).toHaveValue(/gw\.ops\.example\.com:9443/);
+  await inspector
+    .getByLabel("Enrollment gateway endpoints")
+    .fill(
+      [
+        "primary=gw-edge.ops.example.com:9443=10",
+        "primary-v4=198.51.100.45:9443=20",
+        "primary-v6=[2001:db8:7::45]:9443=30",
+      ].join("\n"),
+    );
+  await inspector
+    .getByLabel("Enrollment discovery URL")
+    .fill("https://panel.ops.example.com/.well-known/vpsman/endpoints.json");
+  await inspector.getByLabel("Enrollment gateway retry seconds").fill("60");
+  await inspector
+    .getByLabel("Enrollment gateway connect timeout seconds")
+    .fill("10");
+  await inspector
+    .getByLabel("Enrollment default update version URL")
+    .fill("https://updates.example.com/vpsman/stable/version.json");
+  await activate(
+    inspector.getByRole("button", { name: "Save enrollment config" }),
+  );
+  await expect(inspector.getByText("Enrollment config saved")).toBeVisible();
+  const enrollmentSettingsRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { enrollmentSettings: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.enrollmentSettings.at(-1);
+  });
+  expect(enrollmentSettingsRequest).toMatchObject({
+    discovery_url:
+      "https://panel.ops.example.com/.well-known/vpsman/endpoints.json",
+    gateway_connect_timeout_secs: 10,
+    gateway_retry_secs: 60,
+    tcp_endpoints: [
+      {
+        label: "primary",
+        priority: 10,
+        tcp_addr: "gw-edge.ops.example.com:9443",
+      },
+      {
+        label: "primary-v4",
+        priority: 20,
+        tcp_addr: "198.51.100.45:9443",
+      },
+      {
+        label: "primary-v6",
+        priority: 30,
+        tcp_addr: "[2001:db8:7::45]:9443",
+      },
+    ],
+    update: {
+      unmanaged_interval_secs: 86400,
+      unmanaged_version_url:
+        "https://updates.example.com/vpsman/stable/version.json",
+    },
+  });
   await inspector.getByLabel("Enrollment token ttl").fill("1200");
   await inspector.getByLabel("Enrollment default tags").fill("country:JP,edge");
   await inspector

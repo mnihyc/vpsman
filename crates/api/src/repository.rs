@@ -72,6 +72,7 @@ pub(crate) struct MemoryState {
     pub(crate) restore_plans: Arc<RwLock<Vec<RestorePlanView>>>,
     pub(crate) migration_links: Arc<RwLock<Vec<MigrationLinkView>>>,
     pub(crate) enrollment_tokens: Arc<RwLock<Vec<EnrollmentTokenRecord>>>,
+    pub(crate) enrollment_settings: Arc<RwLock<Option<crate::state::EnrollmentSettings>>>,
     pub(crate) client_public_keys: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     pub(crate) client_key_revocations: Arc<RwLock<Vec<ClientKeyRevocationView>>>,
 }

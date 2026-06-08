@@ -1,4 +1,8 @@
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -8,11 +12,43 @@ use vpsman_common::{
     ServerEndpoint,
 };
 
-use crate::http::{http_get, http_post_json};
+use crate::http::{http_get, http_post_json, http_put_json};
 
 pub(crate) fn enrollment_tokens(api_url: &str, token: Option<&str>) -> Result<()> {
     println!("{}", http_get(api_url, "/api/v1/enrollment-tokens", token)?);
     Ok(())
+}
+
+pub(crate) fn enrollment_settings(api_url: &str, token: Option<&str>) -> Result<()> {
+    println!(
+        "{}",
+        http_get(api_url, "/api/v1/enrollment-settings", token)?
+    );
+    Ok(())
+}
+
+pub(crate) fn enrollment_settings_update(
+    api_url: &str,
+    token: Option<&str>,
+    settings_file: PathBuf,
+) -> Result<()> {
+    let raw = fs::read_to_string(&settings_file)
+        .with_context(|| format!("failed to read {}", settings_file.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse JSON from {}", settings_file.display()))?;
+    let value = normalize_enrollment_settings_update_value(value);
+    println!(
+        "{}",
+        http_put_json(api_url, "/api/v1/enrollment-settings", token, &value)?
+    );
+    Ok(())
+}
+
+fn normalize_enrollment_settings_update_value(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.remove("server_ed25519_public_key_hex");
+    }
+    value
 }
 
 pub(crate) struct EnrollmentTokenCreateOptions {
@@ -238,6 +274,8 @@ fn render_agent_config(
                 .discovery_trusted_server_ed25519_public_keys_hex
                 .clone(),
             command_timeout_secs: command_timeout_secs.max(1),
+            gateway_retry_secs: response.gateway_retry_secs.max(1),
+            gateway_connect_timeout_secs: response.gateway_connect_timeout_secs.max(1),
         },
         backup: AgentBackupConfig::default(),
         update: response.update.clone(),
@@ -276,6 +314,8 @@ struct ClaimEnrollmentResponse {
     server_ed25519_public_key_hex: Option<String>,
     #[serde(default)]
     discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
+    gateway_retry_secs: u64,
+    gateway_connect_timeout_secs: u64,
     telemetry_light_secs: u64,
     telemetry_full_secs: u64,
     #[serde(default)]
@@ -285,6 +325,27 @@ struct ClaimEnrollmentResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enrollment_settings_update_removes_read_only_server_signing_key() {
+        let normalized = normalize_enrollment_settings_update_value(serde_json::json!({
+            "server_ed25519_public_key_hex": "11".repeat(32),
+            "gateway_retry_secs": 60,
+            "gateway_connect_timeout_secs": 10,
+            "tcp_endpoints": [{
+                "label": "primary",
+                "tcp_addr": "gw.ops.example.com:9443",
+                "priority": 10,
+            }],
+        }));
+
+        assert!(normalized.get("server_ed25519_public_key_hex").is_none());
+        assert_eq!(normalized["gateway_retry_secs"], 60);
+        assert_eq!(
+            normalized["tcp_endpoints"][0]["tcp_addr"],
+            "gw.ops.example.com:9443"
+        );
+    }
 
     #[test]
     fn renders_enrolled_agent_config_without_server_side_private_key() {
@@ -300,6 +361,8 @@ mod tests {
             "gateway_server_public_key_hex": "11".repeat(32),
             "server_ed25519_public_key_hex": "22".repeat(32),
             "discovery_trusted_server_ed25519_public_keys_hex": ["55".repeat(32)],
+            "gateway_retry_secs": 60,
+            "gateway_connect_timeout_secs": 10,
             "telemetry_light_secs": 15,
             "telemetry_full_secs": 60,
         }))
@@ -324,6 +387,8 @@ mod tests {
             vec!["55".repeat(32)]
         );
         assert_eq!(config.auth.command_timeout_secs, 45);
+        assert_eq!(config.auth.gateway_retry_secs, 60);
+        assert_eq!(config.auth.gateway_connect_timeout_secs, 10);
         assert!(config.tags.is_empty());
         assert!(rendered.contains("client_private_key_hex"));
         assert!(!rendered.contains("enrollment_token"));
@@ -339,6 +404,8 @@ mod tests {
             gateway_server_public_key_hex: None,
             server_ed25519_public_key_hex: None,
             discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
+            gateway_retry_secs: 60,
+            gateway_connect_timeout_secs: 10,
             telemetry_light_secs: 15,
             telemetry_full_secs: 60,
             update: AgentUpdateConfig::default(),

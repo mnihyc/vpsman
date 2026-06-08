@@ -133,6 +133,11 @@
   min-width: 0;
 }
 
+.accessInspector .enrollmentEndpointEditor {
+  min-height: 104px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .accessInspector .inlineCheck {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);

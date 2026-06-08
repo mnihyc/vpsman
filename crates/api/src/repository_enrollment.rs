@@ -1048,6 +1048,8 @@ fn claim_response(
         discovery_trusted_server_ed25519_public_keys_hex: settings
             .discovery_trusted_server_ed25519_public_keys_hex
             .clone(),
+        gateway_retry_secs: settings.gateway_retry_secs,
+        gateway_connect_timeout_secs: settings.gateway_connect_timeout_secs,
         telemetry_light_secs: settings.telemetry_light_secs,
         telemetry_full_secs: settings.telemetry_full_secs,
         update,

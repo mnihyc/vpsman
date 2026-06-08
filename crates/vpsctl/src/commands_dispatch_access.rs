@@ -73,6 +73,14 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_enrollment::enrollment_tokens(api_url, token)?;
             Ok(None)
         }
+        Command::EnrollmentSettings => {
+            commands_enrollment::enrollment_settings(api_url, token)?;
+            Ok(None)
+        }
+        Command::EnrollmentSettingsUpdate(command) => {
+            commands_enrollment::enrollment_settings_update(api_url, token, command.settings_file)?;
+            Ok(None)
+        }
         Command::EnrollmentTokenCreate(command) => {
             commands_enrollment::enrollment_token_create(
                 api_url,

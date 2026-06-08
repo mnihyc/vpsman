@@ -819,10 +819,41 @@ const enrollmentTokens = [
     purpose: "provision",
     requires_existing_client: false,
     token_prefix: "vpsm12345678",
+    unmanaged_update_activate: true,
+    unmanaged_update_enabled: true,
+    unmanaged_update_interval_secs: 86400,
+    unmanaged_update_jitter_secs: 86400,
+    unmanaged_update_restart_agent: true,
+    unmanaged_update_version_url: "https://updates.example.com/vpsman/stable/version.json",
     used_at: null,
     used_by_client_id: null,
   },
 ];
+
+const enrollmentSettings = {
+  discovery_trusted_server_ed25519_public_keys_hex: ["a".repeat(64)],
+  discovery_url: "https://panel.ops.example.com/.well-known/vpsman/endpoints.json",
+  gateway_connect_timeout_secs: 10,
+  gateway_retry_secs: 60,
+  gateway_server_public_key_hex: "b".repeat(64),
+  server_ed25519_public_key_hex: "c".repeat(64),
+  tcp_endpoints: [
+    { label: "primary", priority: 10, tcp_addr: "gw.ops.example.com:9443" },
+    { label: "primary-v4", priority: 20, tcp_addr: "203.0.113.10:9443" },
+    { label: "primary-v6", priority: 30, tcp_addr: "[2001:db8::10]:9443" },
+  ],
+  telemetry_full_secs: 60,
+  telemetry_light_secs: 15,
+  update: {
+    trusted_artifact_signing_key_hex: null,
+    unmanaged_activate: true,
+    unmanaged_enabled: true,
+    unmanaged_interval_secs: 86400,
+    unmanaged_jitter_secs: 86400,
+    unmanaged_restart_agent: true,
+    unmanaged_version_url: "https://updates.example.com/vpsman/stable/version.json",
+  },
+};
 
 const clientKeyRevocations = [
   {
@@ -1582,6 +1613,7 @@ export async function installConsoleApiMock(page: Page) {
       hotConfigRuleTemplatesFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
+      enrollmentSettingsFixture,
       enrollmentTokensFixture,
       keyLifecycleReportFixture,
       fleetAlertNotificationChannelsFixture,
@@ -1609,6 +1641,7 @@ export async function installConsoleApiMock(page: Page) {
     }) => {
       const originalFetch = window.fetch.bind(window);
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
+      let currentEnrollmentSettings = JSON.parse(JSON.stringify(enrollmentSettingsFixture));
       const deletedAgentIds = new Set<string>();
       const visibleAgents = () => agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const requests = {
@@ -1620,6 +1653,7 @@ export async function installConsoleApiMock(page: Page) {
         dataSourcePresetAssignments: [] as unknown[],
         dataSourcePresets: [] as unknown[],
         hotConfigRuleTemplates: [] as unknown[],
+        enrollmentSettings: [] as unknown[],
         enrollmentTokens: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
         fleetAlertNotificationDispatches: [] as unknown[],
@@ -2263,6 +2297,18 @@ export async function installConsoleApiMock(page: Page) {
           ]);
         if (pathname === "/api/v1/enrollment-tokens" && method === "GET")
           return jsonResponse(enrollmentTokensFixture);
+        if (pathname === "/api/v1/enrollment-settings" && method === "GET")
+          return jsonResponse(currentEnrollmentSettings);
+        if (pathname === "/api/v1/enrollment-settings" && method === "PUT") {
+          const body = await readJsonBody(input, init);
+          requests.enrollmentSettings.push(body);
+          currentEnrollmentSettings = {
+            ...(body as Record<string, unknown>),
+            server_ed25519_public_key_hex:
+              currentEnrollmentSettings.server_ed25519_public_key_hex,
+          };
+          return jsonResponse(currentEnrollmentSettings);
+        }
         if (pathname === "/api/v1/client-key-revocations" && method === "GET")
           return jsonResponse(clientKeyRevocationsFixture);
         if (pathname === "/api/v1/key-lifecycle/report" && method === "GET")
@@ -3193,6 +3239,7 @@ export async function installConsoleApiMock(page: Page) {
       hotConfigRuleTemplatesFixture: hotConfigRuleTemplates,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
+      enrollmentSettingsFixture: enrollmentSettings,
       enrollmentTokensFixture: enrollmentTokens,
       keyLifecycleReportFixture: keyLifecycleReport,
       fleetAlertNotificationChannelsFixture: fleetAlertNotificationChannels,

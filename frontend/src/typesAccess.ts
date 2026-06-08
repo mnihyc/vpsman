@@ -1,5 +1,39 @@
 export type EnrollmentTokenPurpose = "provision" | "rebuild_reenrollment";
 
+export type EnrollmentServerEndpoint = {
+  label: string;
+  tcp_addr: string;
+  priority: number;
+};
+
+export type EnrollmentAgentUpdateDefaults = {
+  trusted_artifact_signing_key_hex?: string | null;
+  unmanaged_enabled: boolean;
+  unmanaged_version_url: string;
+  unmanaged_interval_secs: number;
+  unmanaged_jitter_secs: number;
+  unmanaged_activate: boolean;
+  unmanaged_restart_agent: boolean;
+};
+
+export type EnrollmentRuntimeSettingsView = {
+  tcp_endpoints: EnrollmentServerEndpoint[];
+  discovery_url: string | null;
+  gateway_server_public_key_hex: string | null;
+  server_ed25519_public_key_hex: string | null;
+  discovery_trusted_server_ed25519_public_keys_hex: string[];
+  gateway_retry_secs: number;
+  gateway_connect_timeout_secs: number;
+  telemetry_light_secs: number;
+  telemetry_full_secs: number;
+  update: EnrollmentAgentUpdateDefaults;
+};
+
+export type UpdateEnrollmentRuntimeSettingsRequest = Omit<
+  EnrollmentRuntimeSettingsView,
+  "server_ed25519_public_key_hex"
+>;
+
 export type EnrollmentTokenView = {
   id: string;
   token_prefix: string;

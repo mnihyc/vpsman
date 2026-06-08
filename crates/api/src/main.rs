@@ -50,6 +50,7 @@ mod repository_data_source_hot_config;
 mod repository_data_source_presets;
 mod repository_data_source_status;
 mod repository_enrollment;
+mod repository_enrollment_settings;
 mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
@@ -186,6 +187,18 @@ struct Args {
         default_value_t = 15
     )]
     enrollment_telemetry_light_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_GATEWAY_RETRY_SECS",
+        default_value_t = 60
+    )]
+    enrollment_gateway_retry_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_ENROLLMENT_GATEWAY_CONNECT_TIMEOUT_SECS",
+        default_value_t = 10
+    )]
+    enrollment_gateway_connect_timeout_secs: u64,
     #[arg(
         long,
         env = "VPSMAN_ENROLLMENT_TELEMETRY_FULL_SECS",
@@ -387,6 +400,8 @@ async fn main() -> Result<()> {
             .filter(|value| !value.is_empty()),
         server_ed25519_public_key_hex,
         discovery_trusted_server_ed25519_public_keys_hex,
+        gateway_retry_secs: args.enrollment_gateway_retry_secs.clamp(1, 3_600),
+        gateway_connect_timeout_secs: args.enrollment_gateway_connect_timeout_secs.clamp(1, 300),
         telemetry_light_secs: args.enrollment_telemetry_light_secs.max(5),
         telemetry_full_secs: args.enrollment_telemetry_full_secs.max(5),
         default_country_tag: default_country_tag(args.enrollment_default_country.as_str())?,

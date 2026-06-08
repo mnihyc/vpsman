@@ -11,8 +11,10 @@ import type {
   ClientKeyRevocationView,
   CreateEnrollmentTokenRequest,
   CreateEnrollmentTokenResponse,
+  EnrollmentRuntimeSettingsView,
   EnrollmentTokenView,
   KeyLifecycleReportView,
+  UpdateEnrollmentRuntimeSettingsRequest,
 } from "../typesAccess";
 
 export function useAccessData(apiToken: string, onUnauthorized: () => void) {
@@ -20,6 +22,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [operators, setOperators] = useState<OperatorView[]>([]);
   const [operatorSessions, setOperatorSessions] = useState<OperatorSessionRecord[]>([]);
   const [enrollmentTokens, setEnrollmentTokens] = useState<EnrollmentTokenView[]>([]);
+  const [enrollmentSettings, setEnrollmentSettings] = useState<EnrollmentRuntimeSettingsView | null>(null);
   const [clientKeyRevocations, setClientKeyRevocations] = useState<ClientKeyRevocationView[]>([]);
   const [keyLifecycleReport, setKeyLifecycleReport] = useState<KeyLifecycleReportView | null>(null);
   const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionRecord[]>([]);
@@ -33,6 +36,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     setOperators([]);
     setOperatorSessions([]);
     setEnrollmentTokens([]);
+    setEnrollmentSettings(null);
     setClientKeyRevocations([]);
     setKeyLifecycleReport(null);
     setGatewaySessions([]);
@@ -82,6 +86,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         operatorsResult,
         operatorSessionsResult,
         enrollmentTokensResult,
+        enrollmentSettingsResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
       ] = await Promise.allSettled([
@@ -91,6 +96,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           ? apiGet<OperatorSessionRecord[]>("/api/v1/operator-sessions?limit=200", apiToken)
           : Promise.resolve([]),
         nextOperator.role === "admin" ? apiGet<EnrollmentTokenView[]>("/api/v1/enrollment-tokens", apiToken) : Promise.resolve([]),
+        nextOperator.role === "admin" ? apiGet<EnrollmentRuntimeSettingsView>("/api/v1/enrollment-settings", apiToken) : Promise.resolve(null),
         nextOperator.role === "admin"
           ? apiGet<ClientKeyRevocationView[]>("/api/v1/client-key-revocations?limit=200", apiToken)
           : Promise.resolve([]),
@@ -102,6 +108,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         operatorsResult,
         operatorSessionsResult,
         enrollmentTokensResult,
+        enrollmentSettingsResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
       ].some((result) => result.status === "rejected" && isApiUnauthorized(result.reason));
@@ -115,6 +122,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       setOperators(settledValue(operatorsResult, [], "operators", failures));
       setOperatorSessions(settledValue(operatorSessionsResult, [], "operator sessions", failures));
       setEnrollmentTokens(settledValue(enrollmentTokensResult, [], "enrollment tokens", failures));
+      setEnrollmentSettings(settledValue(enrollmentSettingsResult, null, "enrollment settings", failures));
       setClientKeyRevocations(settledValue(clientKeyRevocationsResult, [], "client revocations", failures));
       setKeyLifecycleReport(settledValue(keyLifecycleReportResult, null, "key lifecycle", failures));
       if (failures.length > 0) {
@@ -168,6 +176,28 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           throw error;
         }
         setAccessError(error instanceof Error ? error.message : "Enrollment token creation failed");
+        throw error;
+      }
+    },
+    [apiToken, loadCurrentOperator, onUnauthorized],
+  );
+
+  const updateEnrollmentSettings = useCallback(
+    async (request: UpdateEnrollmentRuntimeSettingsRequest): Promise<EnrollmentRuntimeSettingsView> => {
+      setAccessError(null);
+      try {
+        const response = await apiPut<EnrollmentRuntimeSettingsView>("/api/v1/enrollment-settings", apiToken, request);
+        setEnrollmentSettings(response);
+        await loadCurrentOperator();
+        return response;
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setAccessError("Operator login required");
+          throw error;
+        }
+        setAccessError(error instanceof Error ? error.message : "Enrollment settings update failed");
         throw error;
       }
     },
@@ -315,6 +345,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     createEnrollmentToken,
     confirmTotp,
     disableTotp,
+    enrollmentSettings,
     enrollmentTokens,
     gatewaySessions,
     keyLifecycleReport,
@@ -329,6 +360,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     revokeOperatorSession,
     setAuthenticatedOperator,
     setupTotp,
+    updateEnrollmentSettings,
     updateOperatorPreferences,
   };
 }

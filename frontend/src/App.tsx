@@ -519,9 +519,11 @@ export function App() {
                 onRevokeClientKey={dashboard.revokeClientKey}
                 onRevokeOperatorSession={dashboard.revokeOperatorSession}
                 onSetupTotp={dashboard.setupTotp}
+                onUpdateEnrollmentSettings={dashboard.updateEnrollmentSettings}
                 operator={dashboard.operator}
                 privilegeMaterial={privilegeMaterial}
                 clientKeyRevocations={dashboard.clientKeyRevocations}
+                enrollmentSettings={dashboard.enrollmentSettings}
                 enrollmentTokens={dashboard.enrollmentTokens}
                 keyLifecycleReport={dashboard.keyLifecycleReport}
                 operatorSessions={dashboard.operatorSessions}

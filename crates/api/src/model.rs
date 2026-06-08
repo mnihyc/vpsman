@@ -532,8 +532,39 @@ pub(crate) struct ClaimEnrollmentResponse {
     pub(crate) gateway_server_public_key_hex: Option<String>,
     pub(crate) server_ed25519_public_key_hex: Option<String>,
     pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
+    pub(crate) gateway_retry_secs: u64,
+    pub(crate) gateway_connect_timeout_secs: u64,
     pub(crate) telemetry_light_secs: u64,
     pub(crate) telemetry_full_secs: u64,
+    pub(crate) update: AgentUpdateConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct EnrollmentRuntimeSettingsView {
+    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
+    pub(crate) discovery_url: Option<String>,
+    pub(crate) gateway_server_public_key_hex: Option<String>,
+    pub(crate) server_ed25519_public_key_hex: Option<String>,
+    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
+    pub(crate) gateway_retry_secs: u64,
+    pub(crate) gateway_connect_timeout_secs: u64,
+    pub(crate) telemetry_light_secs: u64,
+    pub(crate) telemetry_full_secs: u64,
+    pub(crate) update: AgentUpdateConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UpdateEnrollmentRuntimeSettingsRequest {
+    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
+    pub(crate) discovery_url: Option<String>,
+    pub(crate) gateway_server_public_key_hex: Option<String>,
+    #[serde(default)]
+    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
+    pub(crate) gateway_retry_secs: u64,
+    pub(crate) gateway_connect_timeout_secs: u64,
+    pub(crate) telemetry_light_secs: u64,
+    pub(crate) telemetry_full_secs: u64,
+    #[serde(default)]
     pub(crate) update: AgentUpdateConfig,
 }
 

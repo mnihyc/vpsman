@@ -13,6 +13,11 @@ pub(crate) fn submit_vty_direct_command(
         "agents" => Ok(Some(http_get(api_url, "/api/v1/agents", token)?)),
         "operators" => Ok(Some(http_get(api_url, "/api/v1/operators", token)?)),
         "enrollment-tokens" => Ok(Some(http_get(api_url, "/api/v1/enrollment-tokens", token)?)),
+        "enrollment-settings" => Ok(Some(http_get(
+            api_url,
+            "/api/v1/enrollment-settings",
+            token,
+        )?)),
         "client-key-revocations" => Ok(Some(http_get(
             api_url,
             "/api/v1/client-key-revocations?limit=50",

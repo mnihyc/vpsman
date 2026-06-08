@@ -140,6 +140,15 @@ CREATE INDEX enrollment_tokens_unused_expires_idx
 CREATE INDEX enrollment_tokens_allowed_client_idx
     ON enrollment_tokens (allowed_client_id, created_at DESC);
 
+CREATE TABLE enrollment_runtime_settings (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    settings JSONB NOT NULL,
+    updated_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT enrollment_runtime_settings_singleton CHECK (id),
+    CONSTRAINT enrollment_runtime_settings_object CHECK (jsonb_typeof(settings) = 'object')
+);
+
 CREATE TABLE gateway_sessions (
     id UUID PRIMARY KEY,
     gateway_id TEXT NOT NULL,
