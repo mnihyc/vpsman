@@ -7,20 +7,22 @@ use vpsman_common::{
 
 use crate::ApiError;
 
-pub(crate) fn validate_terminal_open(
-    session_id: uuid::Uuid,
-    argv: &[String],
-    cwd: Option<&str>,
-    user: Option<&str>,
-    user_policy: vpsman_common::TerminalUserPolicy,
-    cols: u16,
-    rows: u16,
-    idle_timeout_secs: u32,
-    flow_window_bytes: u32,
-) -> Result<(), ApiError> {
-    validate_terminal_session_id(session_id)?;
-    validate_terminal_argv(argv)?;
-    if let Some(cwd) = cwd {
+pub(crate) struct TerminalOpenValidation<'a> {
+    pub(crate) session_id: uuid::Uuid,
+    pub(crate) argv: &'a [String],
+    pub(crate) cwd: Option<&'a str>,
+    pub(crate) user: Option<&'a str>,
+    pub(crate) user_policy: vpsman_common::TerminalUserPolicy,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) idle_timeout_secs: u32,
+    pub(crate) flow_window_bytes: u32,
+}
+
+pub(crate) fn validate_terminal_open(request: TerminalOpenValidation<'_>) -> Result<(), ApiError> {
+    validate_terminal_session_id(request.session_id)?;
+    validate_terminal_argv(request.argv)?;
+    if let Some(cwd) = request.cwd {
         if cwd.len() > 4096
             || !cwd.starts_with('/')
             || cwd.as_bytes().contains(&0)
@@ -29,20 +31,20 @@ pub(crate) fn validate_terminal_open(
             return Err(ApiError::bad_request("terminal_cwd_invalid"));
         }
     }
-    if let Some(user) = user {
+    if let Some(user) = request.user {
         validate_terminal_user(user)?;
     }
-    let _ = user_policy;
-    validate_terminal_dimensions(cols, rows)?;
+    let _ = request.user_policy;
+    validate_terminal_dimensions(request.cols, request.rows)?;
     if !(MIN_TERMINAL_IDLE_TIMEOUT_SECS..=MAX_TERMINAL_IDLE_TIMEOUT_SECS)
-        .contains(&idle_timeout_secs)
+        .contains(&request.idle_timeout_secs)
     {
         return Err(ApiError::bad_request(
             "terminal_idle_timeout_secs_out_of_range",
         ));
     }
     if !(MIN_TERMINAL_FLOW_WINDOW_BYTES..=MAX_TERMINAL_FLOW_WINDOW_BYTES)
-        .contains(&flow_window_bytes)
+        .contains(&request.flow_window_bytes)
     {
         return Err(ApiError::bad_request(
             "terminal_flow_window_bytes_out_of_range",

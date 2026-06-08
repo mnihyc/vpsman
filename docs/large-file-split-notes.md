@@ -1,0 +1,37 @@
+# Large File Split Notes
+
+The recommended source-file threshold is 1,000 lines. It is not a hard limit:
+focused fixtures, integration tests, broad CLI/VTY parsers, and repository
+models may exceed it when role separation is clear. Every source file above
+the recommendation must be documented here with a reason and a next split
+direction. `scripts/audit-large-files.sh` enforces that the current
+recommendation set is documented.
+
+## Current Justifications
+
+| File | Current role | Split direction |
+| --- | --- | --- |
+| `./frontend/src/types.ts` | Shared frontend API model aggregation that still anchors cross-panel type compatibility. | Continue moving domain-specific records into `typesAccess.ts`, `typesFileTransfer.ts`, `typesTerminal.ts`, `typesTopology.ts`, and future focused type modules as panels change. |
+| `./frontend/tests/console-layout.spec.ts` | Broad desktop console workflow regression covering many panel actions with one shared mocked API surface. | Keep only cross-panel smoke flows here; move focused feature workflows into panel-specific specs when adding behavior. |
+| `./frontend/tests/support/consoleLayoutFixtures.ts` | Shared mocked API dataset for the console layout and workflow tests. | Split by domain fixtures once duplicate setup appears: fleet, jobs, topology, access, backups, and data sources. |
+| `./crates/vpsctl/src/cli.rs` | Clap command schema for the full headless CLI vocabulary. | Move newly added command families into existing argument modules such as `cli_access.rs`, `cli_update.rs`, and future domain-specific CLI modules. |
+| `./crates/vpsctl/src/commands_backups.rs` | CLI command helpers for backup policies, retention pruning, artifact upload/handoff, restore, and rollback workflows that share artifact validation and privilege assertion utilities. | Split policy/prune commands, artifact upload/handoff commands, and restore/rollback helpers into focused modules when the next backup or restore behavior lands. |
+| `./crates/vpsctl/src/commands_config.rs` | CLI dispatch helpers for hot-config and data-source configuration workflows. | Split by data-source preset management, hot-config rendering/application, and privilege-gated config dispatch when new behavior lands. |
+| `./crates/vpsctl/src/commands_dispatch_jobs.rs` | CLI dispatch composition for job, file-transfer, terminal, process, schedule, and rollout workflow families. | Keep extracting family dispatchers as each operation family grows; do not add unrelated business rules here. |
+| `./crates/vpsctl/src/commands_inventory.rs` | CLI inventory and preset read/write helpers that share target and query construction. | Split fleet alerts, telemetry, tag, and data-source preset command handlers into named modules as future changes touch them. |
+| `./crates/vpsctl/src/vty.rs` | Interactive VTY composition root that routes command strings to role-separated parser/submitter modules. | Keep new VTY behavior in focused modules, as done for `vty_privilege.rs`; reduce this file by moving help/command-family routing tables out when they change. |
+| `./crates/vpsctl/src/vty_config.rs` | VTY hot-config and data-source preset command parser/submitter with shared privilege-gated config workflows. | Split generic data-source preset lifecycle, selected-preset assignment, and privilege-gated hot-config dispatch helpers into focused VTY modules when config behavior changes next. |
+| `./crates/vpsctl/src/vty_update_rollouts.rs` | VTY rollout parser and submitter coverage for policy, activation, rollback, automation, and control actions. | Split policy, lifecycle, and automation parsers if future rollout behavior expands. |
+| `./crates/vpsctl/src/vty_inventory.rs` | VTY inventory query parsing and API submission for many read-model commands. | Split fleet alerts, telemetry, tag, and data-source read models into separate VTY inventory modules. |
+| `./crates/api/src/job_request.rs` | Central API-side job request validation and payload normalization for many privilege-gated operation families. | Move operation-family validators into focused modules as each operation changes, keeping only shared target/privilege/idempotency validation in this file. |
+| `./crates/api/src/routes_jobs.rs` | Job dispatch and readback routes spanning command execution, file transfer, terminal, process, backup, update, and network operations. | Split operation-specific route helpers into family modules after the next route change; preserve this file as the common dispatch/readback composition layer. |
+| `./crates/api/src/repository_jobs.rs` | In-memory and PostgreSQL job repository logic with target/output/idempotency and operation-specific extraction helpers. | Split target/output persistence and operation-metadata extraction into dedicated repository modules when touching job storage next. |
+| `./crates/api/src/repository_alert_notifications.rs` | Alert notification repository with in-memory and PostgreSQL persistence plus retry/retention helpers. | Split channel policy, notification delivery state, and retention queries when new notification adapters land. |
+| `./crates/api/src/repository_terminal_sessions.rs` | Terminal session repository with durable replay, retention, and PostgreSQL/in-memory implementations. | Split lifecycle, chunk retention, and replay query helpers when terminal streaming/backpressure work expands. |
+| `./crates/api/src/tests_backups.rs` | Integration-style API tests for backup request metadata, encrypted artifact upload, upload sessions, retained-output handoff, restore, rollback, and migration-adjacent backup behavior. | Split artifact upload/session tests, restore/rollback tests, and migration-link backup tests into focused `tests_backup_*` modules when the next backup/restore behavior lands. |
+| `./crates/api/src/tests_data_sources.rs` | Integration-style API tests for data-source preset lifecycle, assignment, hot-config rendering, source-status read models, and runtime object-store readiness. | Split preset lifecycle/hot-config tests from source-status/readiness tests into focused `tests_data_source_*` modules when the next data-source behavior lands. |
+| `./crates/api/src/tests_rollouts.rs` | Integration-style API tests for rollout state, control, activation/rollback, and automation read models. | Move focused policy/lifecycle/automation tests into separate `tests_rollout_*` modules as new cases are added. |
+| `./crates/agent/src/executor_tests.rs` | Agent executor integration tests covering command dispatch, signed command handling, file, terminal, process, and network behavior. | Move new operation-family tests into the existing focused agent test modules instead of expanding this catch-all. |
+| `./crates/agent/src/terminal.rs` | Agent terminal lifecycle, PTY I/O, retention, idle timeout, bounded streaming, and command policy enforcement. | Split PTY lifecycle, stream retention, and command-policy validation if terminal behavior changes again. |
+| `./crates/agent/src/network_status.rs` | Agent runtime tunnel/kernel/Bird2 status collector and parser for the current topology evidence model. | Split kernel probes, Bird2 parsing, and adapter-health correlation if adding more runtime evidence. |
+| `./scripts/smoke-postgres-persistence.sh` | End-to-end PostgreSQL persistence smoke across enrollment, aliases, tags, jobs, backups, transfers, terminal, rollouts, and data-source state. | Keep as the broad persistence spine; move new domain-specific setup/assertions into `scripts/lib-smoke-postgres-*.sh` helpers as they grow. |

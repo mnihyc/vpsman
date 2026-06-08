@@ -253,13 +253,13 @@ fn validate_schedule_definition(request: ScheduleDefinitionRef<'_>) -> Result<()
     if request.cron_expr.split_whitespace().count() != 5 {
         return Err(ApiError::bad_request("schedule_cron_must_be_5_field"));
     }
-    if next_cron_runs(&request.cron_expr, 1).is_err() {
+    if next_cron_runs(request.cron_expr, 1).is_err() {
         return Err(ApiError::bad_request("schedule_cron_invalid"));
     }
     if request.selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request("schedule_targets_required"));
     }
-    parse_selector_expression(&request.selector_expression)
+    parse_selector_expression(request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     if !matches!(
         request.catch_up_policy,

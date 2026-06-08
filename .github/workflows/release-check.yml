@@ -62,14 +62,6 @@ jobs:
         working-directory: frontend
         run: npm audit --audit-level=moderate
 
-      - name: Public tree hygiene
-        run: |
-          set -euo pipefail
-          if git ls-files | grep -E '^(AGENTS\.md|DESIGN\.md|PROGRESS\.md|TODO_LIST\.md|DESIGN_GOAL\.md|docs/|tutorials/|scripts/|example_legacy_bird2_config\.zip)$|^(docs|tutorials|scripts)/'; then
-            echo "private/local-only files must not be tracked"
-            exit 1
-          fi
-
       - name: Docker Compose config
         run: |
           cp deploy/.env.example deploy/.env

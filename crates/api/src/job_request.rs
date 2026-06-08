@@ -23,7 +23,7 @@ use crate::{
     job_files::{file_command_type_label, validate_file_command, validate_inline_file_payload},
     job_terminal::{
         validate_terminal_close, validate_terminal_input, validate_terminal_open,
-        validate_terminal_poll, validate_terminal_resize,
+        validate_terminal_poll, validate_terminal_resize, TerminalOpenValidation,
     },
     model::{BulkResolveRequest, CreateJobRequest},
     unix_now, ApiError,
@@ -204,17 +204,17 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             idle_timeout_secs,
             flow_window_bytes,
             ..
-        } => validate_terminal_open(
-            *session_id,
+        } => validate_terminal_open(TerminalOpenValidation {
+            session_id: *session_id,
             argv,
-            cwd.as_deref(),
-            user.as_deref(),
-            *user_policy,
-            *cols,
-            *rows,
-            *idle_timeout_secs,
-            *flow_window_bytes,
-        ),
+            cwd: cwd.as_deref(),
+            user: user.as_deref(),
+            user_policy: *user_policy,
+            cols: *cols,
+            rows: *rows,
+            idle_timeout_secs: *idle_timeout_secs,
+            flow_window_bytes: *flow_window_bytes,
+        }),
         JobCommand::TerminalInput {
             session_id,
             input_seq: _,

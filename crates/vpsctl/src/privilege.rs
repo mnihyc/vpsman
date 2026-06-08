@@ -60,16 +60,16 @@ pub(crate) fn build_privilege_for_payload_hash(
         "privilege unlock resolved no clients"
     );
     let payload_hash_hex = normalize_sha256_hex(payload_hash_hex)?;
-    let intent = canonical_job_privilege_intent(
+    let intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
         selector_expression,
         command_type,
-        &payload_hash_hex,
-        client_ids,
+        operation_payload_hash: &payload_hash_hex,
+        resolved_targets: client_ids,
         timeout_secs,
         canary_count,
         force_unprivileged,
         privileged,
-    )?;
+    })?;
     let assertion = build_privilege_assertion(&intent, password, salt_hex, ttl_secs)?;
     Ok(BuiltJobPrivilege {
         privilege_assertion: assertion,
@@ -140,22 +140,26 @@ pub(crate) fn build_privilege_for_schedule(
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }
 
+pub(crate) struct DbPrivilegeRequest<'a> {
+    pub(crate) action: &'a str,
+    pub(crate) target: &'a str,
+    pub(crate) selector_expression: Option<&'a str>,
+    pub(crate) resolved_targets: &'a [String],
+    pub(crate) confirmed: bool,
+}
+
 pub(crate) fn build_privilege_for_db(
-    action: &str,
-    target: &str,
-    selector_expression: Option<&str>,
-    resolved_targets: &[String],
-    confirmed: bool,
+    request: DbPrivilegeRequest<'_>,
     password: &str,
     salt_hex: &str,
     ttl_secs: u64,
 ) -> Result<PrivilegeAssertion> {
     let intent = canonical_db_privilege_intent(
-        action,
-        target,
-        selector_expression,
-        resolved_targets,
-        confirmed,
+        request.action,
+        request.target,
+        request.selector_expression,
+        request.resolved_targets,
+        request.confirmed,
     )?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }
@@ -205,17 +209,20 @@ struct DbPrivilegeIntent<'a> {
     confirmed: bool,
 }
 
-fn canonical_job_privilege_intent(
-    selector_expression: &str,
-    command_type: &str,
-    operation_payload_hash: &str,
-    resolved_targets: &[String],
+struct JobPrivilegeIntentInput<'a> {
+    selector_expression: &'a str,
+    command_type: &'a str,
+    operation_payload_hash: &'a str,
+    resolved_targets: &'a [String],
     timeout_secs: u64,
     canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
-) -> Result<String> {
-    let mut resolved_targets = resolved_targets
+}
+
+fn canonical_job_privilege_intent(input: JobPrivilegeIntentInput<'_>) -> Result<String> {
+    let mut resolved_targets = input
+        .resolved_targets
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
@@ -223,14 +230,14 @@ fn canonical_job_privilege_intent(
     Ok(serde_json::to_string(&JobPrivilegeIntent {
         version: 1,
         action: "job.dispatch",
-        selector_expression: selector_expression.trim(),
-        command_type,
-        operation_payload_hash,
+        selector_expression: input.selector_expression.trim(),
+        command_type: input.command_type,
+        operation_payload_hash: input.operation_payload_hash,
         resolved_targets,
-        timeout_secs: timeout_secs.clamp(1, 3600),
-        canary_count,
-        force_unprivileged,
-        privileged,
+        timeout_secs: input.timeout_secs.clamp(1, 3600),
+        canary_count: input.canary_count,
+        force_unprivileged: input.force_unprivileged,
+        privileged: input.privileged,
     })?)
 }
 
@@ -376,16 +383,16 @@ mod tests {
         );
 
         let verifier_key = derive_super_key("correct horse", &[1, 2, 3, 4]);
-        let intent = canonical_job_privilege_intent(
-            "id:client-a || id:client-b",
-            "shell_argv",
-            &payload_hash_hex,
-            &clients,
-            30,
-            None,
-            false,
-            true,
-        )
+        let intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
+            selector_expression: "id:client-a || id:client-b",
+            command_type: "shell_argv",
+            operation_payload_hash: &payload_hash_hex,
+            resolved_targets: &clients,
+            timeout_secs: 30,
+            canary_count: None,
+            force_unprivileged: false,
+            privileged: true,
+        })
         .unwrap();
         assert!(verify_privilege_assertion(
             &verifier_key,

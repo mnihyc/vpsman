@@ -59,7 +59,9 @@ use crate::vty_process::{
     parse_vty_process_supervisor, parse_vty_user_sessions, process_supervisor_inventory_path,
     process_supervisor_usage,
 };
-use crate::vty_schedules::{parse_vty_schedule_create_options, submit_vty_schedule_create};
+use crate::vty_schedules::{
+    parse_vty_schedule_create_options, submit_vty_schedule_create, VtyScheduleCreateRequest,
+};
 use crate::vty_terminal::{is_vty_terminal_command, submit_vty_terminal_command};
 use crate::vty_terminal_sessions::{
     is_vty_terminal_sessions_command, submit_vty_terminal_sessions_command,
@@ -299,16 +301,16 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 }
                 println!(
                     "{}",
-                    submit_vty_schedule_create(
+                    submit_vty_schedule_create(VtyScheduleCreateRequest {
                         api_url,
-                        token.as_deref(),
-                        parts[1],
-                        &cron_expr,
-                        parts[7],
+                        token: token.as_deref(),
+                        name: parts[1],
+                        cron_expr: &cron_expr,
+                        command: parts[7],
                         selection,
-                        &schedule_options,
-                        &privilege_context,
-                    )?
+                        options: &schedule_options,
+                        privilege_context: &privilege_context,
+                    })?
                 );
             }
             command if command.starts_with("job-create ") => {

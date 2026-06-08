@@ -11,7 +11,9 @@ use vpsman_common::{
 use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
 use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
-use crate::privilege::{build_privilege_for_db, load_super_password, load_super_salt_hex};
+use crate::privilege::{
+    build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
+};
 use crate::util::percent_encode_query_value;
 
 #[derive(Debug, Deserialize)]
@@ -457,11 +459,13 @@ pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Re
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let privilege_assertion = build_privilege_for_db(
-        "tag.create",
-        &name,
-        None,
-        &[],
-        true,
+        DbPrivilegeRequest {
+            action: "tag.create",
+            target: &name,
+            selector_expression: None,
+            resolved_targets: &[],
+            confirmed: true,
+        },
         &password,
         &salt_hex,
         300,
@@ -492,11 +496,13 @@ pub(crate) fn agent_tag(
     let salt_hex = load_super_salt_hex(None)?;
     let targets = vec![client_id.clone()];
     let privilege_assertion = build_privilege_for_db(
-        "tag.assign",
-        &tag,
-        None,
-        &targets,
-        true,
+        DbPrivilegeRequest {
+            action: "tag.assign",
+            target: &tag,
+            selector_expression: None,
+            resolved_targets: &targets,
+            confirmed: true,
+        },
         &password,
         &salt_hex,
         300,

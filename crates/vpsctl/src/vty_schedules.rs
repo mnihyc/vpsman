@@ -8,68 +8,72 @@ use crate::{
     vty_jobs::{VtyJobSelection, VtyPrivilegeContext},
 };
 
-pub(crate) fn submit_vty_schedule_create(
-    api_url: &str,
-    token: Option<&str>,
-    name: &str,
-    cron_expr: &str,
-    command: &str,
-    selection: VtyJobSelection,
-    options: &VtyScheduleCreateOptions,
-    privilege_context: &VtyPrivilegeContext,
-) -> Result<String> {
+pub(crate) struct VtyScheduleCreateRequest<'a> {
+    pub(crate) api_url: &'a str,
+    pub(crate) token: Option<&'a str>,
+    pub(crate) name: &'a str,
+    pub(crate) cron_expr: &'a str,
+    pub(crate) command: &'a str,
+    pub(crate) selection: VtyJobSelection,
+    pub(crate) options: &'a VtyScheduleCreateOptions,
+    pub(crate) privilege_context: &'a VtyPrivilegeContext,
+}
+
+pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) -> Result<String> {
     validate_schedule_policy(
-        &options.catch_up_policy,
-        options.catch_up_limit,
-        options.retry_delay_secs,
-        options.max_failures,
+        &request.options.catch_up_policy,
+        request.options.catch_up_limit,
+        request.options.retry_delay_secs,
+        request.options.max_failures,
     )?;
     let operation = JobCommand::Shell {
-        argv: vec![command.to_string()],
+        argv: vec![request.command.to_string()],
         pty: false,
     };
-    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    let selector_expression =
+        selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
     anyhow::ensure!(
         !selector_expression.is_empty(),
         "schedule-create requires at least one target selector"
     );
-    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let target_ids =
+        resolve_schedule_target_ids(request.api_url, request.token, &selector_expression)?;
     let privilege_assertion = build_privilege_for_schedule(
         "schedule.create",
         None,
-        name,
+        request.name,
         &operation,
         "shell_argv",
         &selector_expression,
         &target_ids,
-        cron_expr,
+        request.cron_expr,
         "UTC",
         true,
-        &options.catch_up_policy,
-        options.catch_up_limit,
-        options.retry_delay_secs,
-        options.max_failures,
+        &request.options.catch_up_policy,
+        request.options.catch_up_limit,
+        request.options.retry_delay_secs,
+        request.options.max_failures,
         None,
         false,
-        &privilege_context.password,
-        &privilege_context.salt_hex,
+        &request.privilege_context.password,
+        &request.privilege_context.salt_hex,
         300,
     )?;
     http_post_json(
-        api_url,
+        request.api_url,
         "/api/v1/schedules",
-        token,
+        request.token,
         &serde_json::json!({
-            "name": name,
+            "name": request.name,
             "operation": operation,
             "selector_expression": selector_expression,
-            "cron_expr": cron_expr,
+            "cron_expr": request.cron_expr,
             "timezone": "UTC",
             "enabled": true,
-            "catch_up_policy": &options.catch_up_policy,
-            "catch_up_limit": options.catch_up_limit,
-            "retry_delay_secs": options.retry_delay_secs,
-            "max_failures": options.max_failures,
+            "catch_up_policy": &request.options.catch_up_policy,
+            "catch_up_limit": request.options.catch_up_limit,
+            "retry_delay_secs": request.options.retry_delay_secs,
+            "max_failures": request.options.max_failures,
             "privilege_assertion": privilege_assertion,
         }),
     )
