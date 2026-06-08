@@ -2,10 +2,12 @@ import { Download, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
-import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
   bulkOutcomeSummary,
+  type BulkFailureReason,
+  targetPreflightUnavailable,
   targetRecordFailed,
   type BulkJobProgress,
 } from "../../bulkJobProgress";
@@ -21,7 +23,7 @@ import {
   type FileOperationStatus,
 } from "../../fileBrowser";
 import { parseFileMode } from "../../fileTransfer";
-import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { agentsMatchingExpression } from "../../searchExpression";
 import type {
   AgentView,
@@ -60,11 +62,10 @@ export function MultiFileActionsPanel({
   onLoadOutputs,
   onLoadTargets,
   onOpenJobDetails,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onResolveTargets,
-  proofMaterial,
-  proofTtlSecs,
-  setProofMaterial,
+  privilegeMaterial,
+  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   initialPath: string;
@@ -74,11 +75,10 @@ export function MultiFileActionsPanel({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
-  proofMaterial: ProofMaterial | null;
-  proofTtlSecs: number;
-  setProofMaterial: (value: ProofMaterial | null) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
 }) {
   const [selectorExpression, setSelectorExpression] = useState(() => localStorage.getItem(SELECTOR_STORAGE_KEY) ?? "id:*");
   const [path, setPath] = useState(initialPath || "/");
@@ -129,8 +129,6 @@ export function MultiFileActionsPanel({
     await runPanelAction(setPending, setActionError, async () => {
       const next = await onResolveTargets({
         selector_expression: selectorExpression.trim(),
-        destructive: isBulkActionDestructive(action),
-        confirmed: true,
       });
       setPreview(next);
       localStorage.setItem(SELECTOR_STORAGE_KEY, selectorExpression.trim());
@@ -142,8 +140,6 @@ export function MultiFileActionsPanel({
     await runPanelAction(setPending, setActionError, async () => {
       const resolved = preview ?? (await onResolveTargets({
         selector_expression: selectorExpression.trim(),
-        destructive: isBulkActionDestructive(action),
-        confirmed: true,
       }));
       setPreview(resolved);
       if (resolved.targets.length === 0) {
@@ -227,15 +223,17 @@ export function MultiFileActionsPanel({
   async function executeBulkOperation(confirmation: PendingBulkConfirmation) {
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
-      const built = await buildEnvelopesForOperation({
-        clientIds: confirmation.targets.map((target) => target.id),
+      const targetIds = confirmation.targets.map((target) => target.id);
+      const built = await buildPrivilegeForJobOperation({
+        clientIds: targetIds,
+        commandType: confirmation.operation.type,
         operation: confirmation.operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression: confirmation.selectorExpression,
+        timeoutSecs: BULK_JOB_TIMEOUT_SECS,
       });
       setLastPayloadHash(built.payloadHashHex);
       setLastRunProgress(null);
@@ -256,8 +254,7 @@ export function MultiFileActionsPanel({
           resume_outputs: true,
           cancel_on_disconnect: false,
         },
-        envelope: null,
-        envelopes: built.envelopes,
+        privilege_assertion: built.privilegeAssertion,
       });
       let outputs: JobOutputRecord[] = [];
       let targets: JobTargetRecord[] = [];
@@ -313,13 +310,13 @@ export function MultiFileActionsPanel({
         </button>
       </div>
 
-      {!proofMaterial && (
-        <div className="fileBrowserProofRow">
-          <ProofVaultBox
+      {!privilegeMaterial && (
+        <div className="fileBrowserPrivilegeRow">
+          <PrivilegeVaultBox
             lastPayloadHash={lastPayloadHash}
-            onOpenUnlock={onOpenProofUnlock}
-            onProofMaterialChange={setProofMaterial}
-            proofMaterial={proofMaterial}
+            onOpenUnlock={onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
           />
         </div>
       )}
@@ -364,7 +361,7 @@ export function MultiFileActionsPanel({
           {action === "download_files" && (
             <div className="operationNote compactNote">
               <strong>Download files</strong>
-              <span>Folders download as tar per VPS; Download all returns one tar bundle.</span>
+              <span>Folders download as tar per VPS; the summary action returns one tar bundle.</span>
             </div>
           )}
           {action === "upload_file" && (
@@ -480,7 +477,7 @@ export function MultiFileActionsPanel({
               )}
             </div>
           )}
-          <button className={runBulkActionClass(action)} disabled={pending || !proofMaterial || loading} onClick={() => void prepareBulkOperation()} type="button">
+          <button className={runBulkActionClass(action)} disabled={pending || !privilegeMaterial || loading} onClick={() => void prepareBulkOperation()} type="button">
             <ShieldCheck size={14} />
             <span>{runBulkActionLabel(action)}</span>
           </button>
@@ -495,7 +492,7 @@ export function MultiFileActionsPanel({
             {lastOperation?.type === "file_download" && lastOutputs.length > 0 && (
               <button className="secondaryAction compactAction" onClick={() => void downloadBulkBundle(onDownloadFileBundle, lastJobId, successfulDownloadClientIds(lastSummary))} type="button">
                 <Download size={14} />
-                <span>Download all</span>
+                <span>Download Archive</span>
               </button>
             )}
           </div>
@@ -535,12 +532,6 @@ export function MultiFileActionsPanel({
                         </div>
                       )}
                     </div>
-                  )}
-                  {lastOperation?.type === "file_download" && group.status === "completed" && (
-                    <button className="secondaryAction compactAction" onClick={() => void downloadBulkBundle(onDownloadFileBundle, lastJobId, group.clientIds)} type="button">
-                      <Download size={14} />
-                      <span>Download selected</span>
-                    </button>
                   )}
                   <div className="bulkSummaryClients">
                     {group.clientIds.map((clientId) => (
@@ -726,14 +717,14 @@ function groupBulkOutputs(
     }
     const targetRecord = targetRecordByClient.get(target.id);
     const agent = agentById.get(target.id) ?? target;
-    const unavailable = agent.status !== "connected";
+    const unavailable = targetPreflightUnavailable(agent);
     const state = unavailable ? "unavailable" : targetRecord?.status ?? "pending";
-    const reason = unavailable ? agent.status : targetRecord?.status ?? "waiting_for_output";
-    const label = unavailable ? "Agent unavailable" : "No file status";
+    const reason = unavailable ? agent.status : targetRecord?.message ?? targetRecord?.status ?? "waiting_for_output";
+    const label = unavailable ? "Agent unavailable" : targetRecord?.status ? "Job target status" : "No file status";
     const detail = unavailable
       ? `Matched by selector; agent status ${agent.status}.`
       : targetRecord?.status
-        ? `Job target ${targetRecord.status}; structured file status not retrieved.`
+        ? `Job target ${targetRecord.status}; ${targetRecord.message ?? "structured file status not retrieved"}.`
         : "Waiting for job target or file status.";
     const key = `target:${state}:${reason}`;
     const group = groups.get(key) ?? {
@@ -1123,11 +1114,12 @@ function buildBulkProgress({
   const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
   let completed = 0;
   let failed = 0;
+  const failureReasons: BulkFailureReason[] = [];
   let unavailable = 0;
   for (const target of targets) {
     const status = statusByClient.get(target.id);
     const targetRecord = targetRecordByClient.get(target.id);
-    if (target.status !== "connected" && !status) {
+    if (targetPreflightUnavailable(target) && !status) {
       unavailable += 1;
       continue;
     }
@@ -1136,11 +1128,19 @@ function buildBulkProgress({
         completed += 1;
       } else {
         failed += 1;
+        failureReasons.push({
+          reason: status.reason ?? status.status ?? "file operation failed",
+          target: target.display_name || target.id,
+        });
       }
       continue;
     }
     if (targetRecord && targetRecordFailed(targetRecord.status)) {
       failed += 1;
+      failureReasons.push({
+        reason: targetRecord.message ?? targetRecord.status,
+        target: target.display_name || target.id,
+      });
     }
   }
   const retrieved = Array.from(statusByClient.keys()).filter((clientId) => targets.some((target) => target.id === clientId)).length;
@@ -1151,6 +1151,7 @@ function buildBulkProgress({
     doing,
     expected: targets.length,
     failed,
+    failureReasons,
     jobId,
     retrieved,
     unavailable,
@@ -1186,10 +1187,6 @@ function uploadDestinationPath(path: string, fileName: string): string {
     return normalizeAbsolutePath(`${trimmed}${fileName}`);
   }
   return normalizeAbsolutePath(trimmed);
-}
-
-function isBulkActionDestructive(action: MultiFileAction): boolean {
-  return action !== "download_files";
 }
 
 function usesFileActionPolicy(action: MultiFileAction): boolean {

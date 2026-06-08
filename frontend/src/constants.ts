@@ -6,6 +6,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Server,
+  SlidersHorizontal,
   Settings,
   Tag,
   TerminalSquare,
@@ -22,6 +23,7 @@ export type ConsoleSubpage = {
 export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
   { view: "Dashboard", icon: LayoutDashboard },
   { view: "Fleet", icon: Server },
+  { view: "Config", icon: SlidersHorizontal },
   { view: "Tags", icon: Tag },
   { view: "Jobs", icon: TerminalSquare },
   { view: "Schedules", icon: CalendarClock },
@@ -38,7 +40,7 @@ export const navSections: readonly {
 }[] = [
   {
     label: "Operations",
-    items: navItems.filter((item) => ["Dashboard", "Fleet", "Tags", "Jobs", "Schedules"].includes(item.view)),
+    items: navItems.filter((item) => ["Dashboard", "Fleet", "Config", "Tags", "Jobs", "Schedules"].includes(item.view)),
   },
   {
     label: "Network",
@@ -69,21 +71,28 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "notifications", label: "Notifications", description: "Alert delivery channels and queue processing" },
   ],
   Tags: [
-    { id: "registry", label: "Tag registry", description: "Provider, country, and custom tags" },
-    { id: "targeting", label: "Targeting", description: "Assign tags and preview target sets" },
-    { id: "presets", label: "Data-source presets", description: "Preset definition, assignment, lifecycle, and proofed apply" },
-    { id: "status", label: "Source status", description: "Active data-source selections and health" },
+    { id: "registry", label: "Registry", description: "Provider, country, and custom tag counts" },
+    { id: "assignments", label: "Assignments", description: "VPS-centric tag assignment and removal" },
+    { id: "bulk", label: "Bulk", description: "Selector-based tag add, remove, and delete" },
+  ],
+  Config: [
+    { id: "overview", label: "Overview", description: "Hot config posture, source selections, and recent operations" },
+    { id: "rules", label: "Rules", description: "Rule-card templates and generated patch previews" },
+    { id: "bulk", label: "Bulk apply", description: "Privilege-unlocked bulk hot-config patches by selector" },
+    { id: "single", label: "Single VPS", description: "Redacted full-config read and guarded apply" },
+    { id: "templates", label: "Templates", description: "Data-source preset definition, assignment, and lifecycle" },
+    { id: "status", label: "Status", description: "Active data-source selections and health" },
   ],
   Jobs: [
     { id: "history", label: "History", description: "Command requests, targets, output, and cancellation" },
-    { id: "dispatch", label: "Dispatch", description: "Compose proof-gated commands and terminal actions" },
+    { id: "dispatch", label: "Dispatch", description: "Compose privileged commands and terminal actions" },
     { id: "files", label: "Files", description: "Browse, edit, upload, download, and manage one VPS filesystem" },
     { id: "multi_files", label: "Multi files", description: "Bulk file actions by selector expression and policy" },
     { id: "updates", label: "Updates", description: "Agent releases, rollout policies, and rollout state" },
     { id: "transfers", label: "Transfer history", description: "Source artifacts, handoffs, and resumable transfer sessions" },
     { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
     { id: "processes", label: "Processes", description: "Process supervisor inventory" },
-    { id: "approvals", label: "Approvals", description: "Scheduled privileged approvals and proof vault" },
+    { id: "approvals", label: "Schedule runs", description: "Due schedule jobs and rollout actions" },
   ],
   Schedules: [
     { id: "registry", label: "Schedule registry", description: "Server-side schedules and due-run records" },
@@ -91,7 +100,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   Topology: [
     { id: "graph", label: "Graph", description: "Observed topology graph and tunnel plan summary" },
     { id: "plans", label: "Tunnel plans", description: "Saved tunnel plans and plan authoring" },
-    { id: "apply", label: "Apply / rollback", description: "Proof-gated tunnel apply, rollback, status, probes, and speed tests" },
+    { id: "apply", label: "Apply / rollback", description: "Privilege-unlocked tunnel apply, rollback, status, probes, and speed tests" },
     { id: "promotion", label: "Promotion", description: "Promote observed tunnels into adapter contracts" },
     { id: "evidence", label: "Evidence", description: "Network trends, observations, and retained plan output" },
     { id: "ospf", label: "OSPF", description: "OSPF update recommendations and cost apply" },
@@ -112,7 +121,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "operators", label: "Operators", description: "Operator accounts, sessions, and TOTP" },
     { id: "clients", label: "VPS keys", description: "Enrollment tokens and client key lifecycle" },
     { id: "gateway", label: "Gateway", description: "Gateway sessions and control-plane stream state" },
-    { id: "proof", label: "Proof vault", description: "Proof vault and rotation records" },
+    { id: "privilege", label: "Privilege unlock", description: "Local privilege unlock and vault controls" },
   ],
   Preferences: [
     {
@@ -142,7 +151,9 @@ export function subpageDescription(view: ActiveView, subpage: string): string {
 
 export const emptySummary: FleetSummary = {
   total: 0,
-  connected: 0,
+  online: 0,
+  offline: 0,
+  stale: 0,
   warnings: 0,
   running_jobs: 0,
 };

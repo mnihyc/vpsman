@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Activity, AlertTriangle, Bell, Boxes, Gauge, Network, Server, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, Bell, Boxes, Clock3, Gauge, LockKeyhole, Network, RefreshCw, Server, Trash2 } from "lucide-react";
+import { bulkOutcomeSummary, targetPreflightUnavailable, waitForBulkJobTargets, type BulkJobProgress } from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { FailureReasonGroups } from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { formatVpsName, runPanelAction, type VpsNameDisplayMode } from "../utils";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
+import { selectorExpressionForClientIds } from "../searchExpression";
+import {
+  decodeOutputPreview,
+  formatCompactTime,
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+  type VpsNameDisplayMode,
+} from "../utils";
 import type {
   AgentView,
+  CreateJobRequest,
+  CreateJobResponse,
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
@@ -21,6 +35,9 @@ import type {
   FleetSummary,
   DeleteAgentRequest,
   DeleteAgentResponse,
+  JobOperation,
+  JobOutputRecord,
+  JobTargetRecord,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
@@ -40,8 +57,13 @@ export function FleetWorkspace({
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
   lastLiveEvent,
+  onCreateJob,
   onDispatchFleetAlertNotifications,
   onDeleteAgent,
+  onLoadJobOutputs,
+  onLoadJobTargets,
+  onOpenJobDetails,
+  onOpenPrivilegeUnlock,
   onProcessFleetAlertNotifications,
   onSelectAgent,
   onUpdateAgentAlias,
@@ -54,6 +76,7 @@ export function FleetWorkspace({
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
+  privilegeMaterial,
   wsState,
 }: {
   activeSubpage: string;
@@ -65,10 +88,15 @@ export function FleetWorkspace({
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
   lastLiveEvent: string;
+  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
   onDeleteAgent: (clientId: string, request: DeleteAgentRequest) => Promise<DeleteAgentResponse>;
+  onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenPrivilegeUnlock: () => void;
   onProcessFleetAlertNotifications: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -85,6 +113,7 @@ export function FleetWorkspace({
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
+  privilegeMaterial: PrivilegeMaterial | null;
   wsState: string;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -95,6 +124,12 @@ export function FleetWorkspace({
   const [deletePromptOpen, setDeletePromptOpen] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [interfacePending, setInterfacePending] = useState(false);
+  const [interfaceError, setInterfaceError] = useState<string | null>(null);
+  const [interfaceProgress, setInterfaceProgress] = useState<BulkJobProgress | null>(null);
+  const [interfaceSnapshot, setInterfaceSnapshot] = useState<NetworkInterfacesSnapshot | null>(null);
+  const [interfaceJobId, setInterfaceJobId] = useState<string | null>(null);
+  const [interfacePayloadHash, setInterfacePayloadHash] = useState<string | null>(null);
   const selectedTags = selectedAgent?.tags ?? [];
   const isNetworkManaged = selectedTags.some((tag) => ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()));
   const latestRollups = useMemo(() => latestTelemetryRollupsByClient(telemetryRollups), [telemetryRollups]);
@@ -123,16 +158,49 @@ export function FleetWorkspace({
         size: 300,
         minSize: 220,
         sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
-        searchValue: (agent) => `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id} ${agent.status}`,
+        searchValue: (agent) =>
+          `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id} ${agent.status} ${agent.registration_ip ?? ""} ${agent.last_ip ?? ""}`,
         cell: (agent) => (
           <span className="instance">
             <Server size={17} />
             <span>
               <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-              <ConsoleStatusBadge tone={agent.status === "connected" ? "ok" : "warning"}>
+              <ConsoleStatusBadge tone={agent.status === "online" ? "ok" : "warning"}>
                 {agent.status}
               </ConsoleStatusBadge>
             </span>
+          </span>
+        ),
+      },
+      {
+        id: "registration_ip",
+        header: "Reg IP",
+        size: 135,
+        minSize: 110,
+        sortValue: (agent) => agent.registration_ip ?? "",
+        searchValue: (agent) => agent.registration_ip ?? "",
+        cell: (agent) => <span className="monoValue">{agent.registration_ip ?? "unknown"}</span>,
+      },
+      {
+        id: "last_ip",
+        header: "Last IP",
+        size: 135,
+        minSize: 110,
+        sortValue: (agent) => agent.last_ip ?? "",
+        searchValue: (agent) => agent.last_ip ?? "",
+        cell: (agent) => <span className="monoValue">{agent.last_ip ?? "unknown"}</span>,
+      },
+      {
+        id: "last_seen",
+        header: "Last seen",
+        size: 150,
+        minSize: 125,
+        sortValue: (agent) => normalizedLastSeenSort(agent.last_seen_at),
+        searchValue: (agent) => formatLastSeen(agent.last_seen_at),
+        cell: (agent) => (
+          <span className="historyPrimary">
+            <strong>{formatLastSeen(agent.last_seen_at)}</strong>
+            {!agent.last_seen_at && <small>after enrollment</small>}
           </span>
         ),
       },
@@ -183,6 +251,11 @@ export function FleetWorkspace({
     setAliasError(null);
     setDeletePromptOpen(false);
     setDeleteError(null);
+    setInterfaceError(null);
+    setInterfaceProgress(null);
+    setInterfaceSnapshot(null);
+    setInterfaceJobId(null);
+    setInterfacePayloadHash(null);
   }, [selectedAgent?.display_name, selectedAgent?.id]);
 
   async function submitAlias(event: FormEvent<HTMLFormElement>) {
@@ -218,6 +291,64 @@ export function FleetWorkspace({
       });
       setDeletePromptOpen(false);
       onSelectAgent(null);
+    });
+  }
+
+  async function refreshSelectedInterfaces() {
+    await runPanelAction(setInterfacePending, setInterfaceError, async () => {
+      if (!selectedAgent) {
+        throw new Error("Select a VPS");
+      }
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
+      }
+      const operation: JobOperation = { type: "network_interfaces" };
+      const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
+      const builtPrivilege = await buildPrivilegeForJobOperation({
+        clientIds: [selectedAgent.id],
+        commandType: "network_interfaces",
+        operation,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: 30,
+      });
+      setInterfacePayloadHash(builtPrivilege.payloadHashHex);
+      setInterfaceSnapshot(null);
+      setInterfaceProgress({
+        accepted: 0,
+        completed: 0,
+        doing: 0,
+        expected: 1,
+        failed: 0,
+        jobId: "",
+        retrieved: 0,
+        unavailable: targetPreflightUnavailable(selectedAgent) ? 1 : 0,
+      });
+      const job = await onCreateJob({
+        argv: [],
+        selector_expression: selectorExpression,
+        command: "network_interfaces",
+        confirmed: false,
+        destructive: false,
+        operation,
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: builtPrivilege.privilegeAssertion,
+        timeout_secs: 30,
+      });
+      setInterfaceJobId(job.job_id);
+      const progress = await waitForBulkJobTargets(job.job_id, onLoadJobTargets, {
+        acceptedTargets: job.accepted_targets,
+        onProgress: setInterfaceProgress,
+        targets: [selectedAgent],
+      });
+      setInterfaceProgress(progress.progress);
+      const outputs = await onLoadJobOutputs(job.job_id);
+      const snapshot = parseNetworkInterfacesSnapshot(outputs);
+      if (!snapshot) {
+        throw new Error("No network interface snapshot returned");
+      }
+      setInterfaceSnapshot(snapshot);
     });
   }
 
@@ -260,7 +391,7 @@ export function FleetWorkspace({
           empty={
             <div className="emptyState">
               <Server size={22} />
-              <strong>{scopeActive ? "No VPS match this view" : "No agents connected"}</strong>
+              <strong>{scopeActive ? "No VPS match this view" : "No agents online"}</strong>
               <span>{apiError ?? (scopeActive ? "Adjust or clear the saved fleet view." : "Waiting for enrolled VPS agents to report in.")}</span>
             </div>
           }
@@ -420,13 +551,25 @@ export function FleetWorkspace({
               />
               <DetailLine icon={<Server size={18} />} label="Status" value={selectedAgent?.status ?? "No target"} />
               <DetailLine icon={<Boxes size={18} />} label="Client ID" value={selectedAgent?.id ?? "No VPS selected"} mono />
+              <DetailLine
+                icon={<Clock3 size={18} />}
+                label="Last seen"
+                value={formatLastSeenDetail(selectedAgent?.last_seen_at)}
+              />
+              <DetailLine
+                icon={<Network size={18} />}
+                label="Registration IP"
+                value={selectedAgent?.registration_ip ?? "unknown"}
+                mono
+              />
+              <DetailLine icon={<Network size={18} />} label="Last IP" value={selectedAgent?.last_ip ?? "unknown"} mono />
               <DetailLine icon={<Boxes size={18} />} label="Country" value={countryLabel(selectedCountry)} />
               <DetailLine icon={<Boxes size={18} />} label="Provider" value={selectedProvider || "unset"} />
               <DetailLine icon={<Gauge size={18} />} label="Privilege" value={formatPrivilege(selectedCapabilities)} />
               <DetailLine
                 icon={<Gauge size={18} />}
                 label="Fleet position"
-                value={selectedAgent ? `${summary.connected} connected / ${summary.total} total` : "No VPS selected"}
+                value={selectedAgent ? `${summary.online} online / ${summary.total} total` : "No VPS selected"}
               />
             </>
           )}
@@ -451,7 +594,7 @@ export function FleetWorkspace({
             <>
               <DetailLine icon={<Gauge size={18} />} label="Running jobs" value={String(summary.running_jobs)} />
               <DetailLine icon={<Server size={18} />} label="Target" value={selectedAgent?.id ?? "No VPS selected"} mono />
-              <DetailLine icon={<Activity size={18} />} label="Proof state" value="Local unlock required" />
+              <DetailLine icon={<Activity size={18} />} label="Privilege state" value="Local unlock required" />
             </>
           )}
           {activeDetailTab === "Network" && (
@@ -463,6 +606,19 @@ export function FleetWorkspace({
                 value={formatTunnelCapability(selectedCapabilities)}
               />
               <DetailLine icon={<Boxes size={18} />} label="Tags" value={selectedDisplayTags.join(", ") || "untagged"} />
+              <NetworkInterfacesPanel
+                error={interfaceError}
+                jobId={interfaceJobId}
+                onOpenJobDetails={onOpenJobDetails}
+                onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                onRefresh={() => void refreshSelectedInterfaces()}
+                payloadHash={interfacePayloadHash}
+                pending={interfacePending}
+                progress={interfaceProgress}
+                privilegeReady={Boolean(privilegeMaterial)}
+                selectedAgent={selectedAgent}
+                snapshot={interfaceSnapshot}
+              />
               <TunnelList tunnels={selectedTunnels} />
               <NetworkRateList rates={selectedNetworkRates} rollup={selectedRollup} />
               <DetailLine icon={<Activity size={18} />} label="Tunnel apply" value="Observe and plan" />
@@ -621,6 +777,34 @@ function displayTags(tags: string[]): string[] {
     .filter((tag) => !/^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag))
     .filter((tag) => !/^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag))
     .sort((left, right) => left.localeCompare(right));
+}
+
+function formatLastSeen(value: string | null | undefined): string {
+  const normalized = normalizeAgentTimestamp(value);
+  return normalized ? formatCompactTime(normalized) : "never seen";
+}
+
+function formatLastSeenDetail(value: string | null | undefined): string {
+  const normalized = normalizeAgentTimestamp(value);
+  return normalized ? formatTime(normalized) : "never seen after enrollment";
+}
+
+function normalizedLastSeenSort(value: string | null | undefined): string {
+  return normalizeAgentTimestamp(value) ?? "";
+}
+
+function normalizeAgentTimestamp(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^\d{10}$/.test(trimmed)) {
+    return new Date(Number(trimmed) * 1000).toISOString();
+  }
+  if (/^\d{13}$/.test(trimmed)) {
+    return new Date(Number(trimmed)).toISOString();
+  }
+  return trimmed;
 }
 
 async function copyText(value: string) {
@@ -1054,6 +1238,185 @@ function formatBytes(value: number) {
     unit += 1;
   }
   return `${next >= 10 || unit === 0 ? Math.round(next) : next.toFixed(1)} ${units[unit]}`;
+}
+
+type NetworkInterfacesSnapshot = {
+  type: "network_interfaces";
+  client_id?: string;
+  observed_unix?: number;
+  interface_count?: number;
+  address_source?: { status?: string; error?: string | null };
+  sysfs_source?: { status?: string; error?: string | null };
+  counter_source?: { status?: string };
+  interfaces: NetworkInterfaceSnapshotRecord[];
+};
+
+type NetworkInterfaceSnapshotRecord = {
+  name: string;
+  ifindex?: number;
+  operstate?: string;
+  mtu?: number;
+  mac?: string;
+  link_type?: number;
+  flags?: string[];
+  addresses?: NetworkInterfaceAddressRecord[];
+  rx_bytes?: number;
+  tx_bytes?: number;
+  metadata_sources?: string[];
+};
+
+type NetworkInterfaceAddressRecord = {
+  family: string;
+  address: string;
+  prefix_len?: number;
+  scope?: string;
+};
+
+function NetworkInterfacesPanel({
+  error,
+  jobId,
+  onOpenJobDetails,
+  onOpenPrivilegeUnlock,
+  onRefresh,
+  payloadHash,
+  pending,
+  progress,
+  privilegeReady,
+  selectedAgent,
+  snapshot,
+}: {
+  error: string | null;
+  jobId: string | null;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenPrivilegeUnlock: () => void;
+  onRefresh: () => void;
+  payloadHash: string | null;
+  pending: boolean;
+  progress: BulkJobProgress | null;
+  privilegeReady: boolean;
+  selectedAgent: AgentView | null;
+  snapshot: NetworkInterfacesSnapshot | null;
+}) {
+  const online = selectedAgent?.status === "online";
+  const status =
+    error ??
+    (pending
+      ? "Refreshing"
+      : progress
+        ? bulkOutcomeSummary(progress)
+        : snapshot
+          ? `${snapshot.interfaces.length} interface${snapshot.interfaces.length === 1 ? "" : "s"}`
+          : privilegeReady
+            ? "No snapshot"
+            : "Privilege locked");
+  const observed =
+    typeof snapshot?.observed_unix === "number"
+      ? formatCompactTime(new Date(snapshot.observed_unix * 1000).toISOString())
+      : null;
+  return (
+    <div className="timeline networkInterfacesPanel">
+      <Network size={18} />
+      <div>
+        <strong>Host interfaces</strong>
+        <span>
+          {status}
+          {observed ? `; seen ${observed}` : ""}
+          {payloadHash ? `; payload ${payloadHash.slice(0, 12)}` : ""}
+        </span>
+        <div className="interfaceActions">
+          <button
+            className="secondaryAction compactAction"
+            disabled={pending || !selectedAgent || !privilegeReady || !online}
+            onClick={onRefresh}
+            type="button"
+          >
+            <RefreshCw size={15} />
+            Refresh interfaces
+          </button>
+          {!privilegeReady && (
+            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+              <LockKeyhole size={15} />
+              Unlock privilege
+            </button>
+          )}
+          {jobId && onOpenJobDetails && (
+            <button className="secondaryAction compactAction" onClick={() => onOpenJobDetails(jobId)} type="button">
+              Job {shortId(jobId)}
+            </button>
+          )}
+        </div>
+        {progress && <FailureReasonGroups reasons={progress.failureReasons ?? []} />}
+        {snapshot && <NetworkInterfaceList snapshot={snapshot} />}
+      </div>
+    </div>
+  );
+}
+
+function NetworkInterfaceList({ snapshot }: { snapshot: NetworkInterfacesSnapshot }) {
+  if (snapshot.interfaces.length === 0) {
+    return <span>No interfaces returned</span>;
+  }
+  return (
+    <div className="networkInterfaceList">
+      {snapshot.interfaces
+        .slice()
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((networkInterface) => (
+          <div className="networkInterfaceRow" key={networkInterface.name}>
+            <strong>{networkInterface.name}</strong>
+            <span>{interfaceStateSummary(networkInterface)}</span>
+            <span>{interfaceAddressSummary(networkInterface)}</span>
+            <span>{interfaceTrafficSummary(networkInterface)}</span>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function interfaceStateSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
+  const state = networkInterface.operstate ?? (networkInterface.flags?.includes("up") ? "up" : "unknown");
+  const mtu = typeof networkInterface.mtu === "number" ? `mtu ${networkInterface.mtu}` : "mtu unknown";
+  const mac = networkInterface.mac ? `mac ${networkInterface.mac}` : "mac unknown";
+  return `${state}; ${mtu}; ${mac}`;
+}
+
+function interfaceAddressSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
+  const addresses = networkInterface.addresses ?? [];
+  if (addresses.length === 0) {
+    return "no IPs reported";
+  }
+  return addresses
+    .map((address) => `${address.family} ${address.address}${typeof address.prefix_len === "number" ? `/${address.prefix_len}` : ""}`)
+    .join(", ");
+}
+
+function interfaceTrafficSummary(networkInterface: NetworkInterfaceSnapshotRecord) {
+  const rxBytes = typeof networkInterface.rx_bytes === "number" ? networkInterface.rx_bytes : 0;
+  const txBytes = typeof networkInterface.tx_bytes === "number" ? networkInterface.tx_bytes : 0;
+  return `RX ${formatBytes(rxBytes)} / TX ${formatBytes(txBytes)}`;
+}
+
+function parseNetworkInterfacesSnapshot(outputs: JobOutputRecord[]): NetworkInterfacesSnapshot | null {
+  const snapshots = outputs
+    .filter((output) => output.stream === "status" && output.data_base64)
+    .map((output) => {
+      try {
+        const value = JSON.parse(decodeOutputPreview(output.data_base64)) as unknown;
+        return isNetworkInterfacesSnapshot(value) ? value : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is NetworkInterfacesSnapshot => value !== null);
+  return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
+}
+
+function isNetworkInterfacesSnapshot(value: unknown): value is NetworkInterfacesSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Partial<NetworkInterfacesSnapshot>;
+  return record.type === "network_interfaces" && Array.isArray(record.interfaces);
 }
 
 function NetworkRateList({

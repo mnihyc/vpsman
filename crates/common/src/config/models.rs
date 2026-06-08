@@ -56,7 +56,6 @@ pub struct AgentNoiseConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentAuthConfig {
-    pub proof_key_hex: Option<String>,
     pub server_ed25519_public_key_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
@@ -456,7 +455,6 @@ fn default_execution_process_proc_root() -> String {
 impl Default for AgentAuthConfig {
     fn default() -> Self {
         Self {
-            proof_key_hex: None,
             server_ed25519_public_key_hex: None,
             discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
             command_timeout_secs: 30,

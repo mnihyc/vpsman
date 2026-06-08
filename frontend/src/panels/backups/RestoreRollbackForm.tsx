@@ -3,34 +3,32 @@ import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
 
 type RestoreRollbackFormProps = {
+  confirmationOpen: boolean;
   forceUnprivileged: boolean;
   onForceUnprivilegedChange: (value: boolean) => void;
   onRestoreJobIdChange: (value: string) => void;
-  onRestoreRollbackConfirmedChange: (value: boolean) => void;
   onRestoreRollbackTimeoutSecsChange: (value: number) => void;
   onRunRestoreRollback: () => void;
   onTargetClientIdChange: (value: string) => void;
   pending: boolean;
-  proofReady: boolean;
+  privilegeReady: boolean;
   restoreJobId: string;
-  restoreRollbackConfirmed: boolean;
   restoreRollbackTimeoutSecs: number;
   targetAgent: AgentView | null;
   targetClientId: string;
 };
 
 export function RestoreRollbackForm({
+  confirmationOpen,
   forceUnprivileged,
   onForceUnprivilegedChange,
   onRestoreJobIdChange,
-  onRestoreRollbackConfirmedChange,
   onRestoreRollbackTimeoutSecsChange,
   onRunRestoreRollback,
   onTargetClientIdChange,
   pending,
-  proofReady,
+  privilegeReady,
   restoreJobId,
-  restoreRollbackConfirmed,
   restoreRollbackTimeoutSecs,
   targetAgent,
   targetClientId,
@@ -71,14 +69,6 @@ export function RestoreRollbackForm({
             value={restoreRollbackTimeoutSecs}
           />
         </label>
-        <label className="checkLine">
-          <input
-            checked={restoreRollbackConfirmed}
-            onChange={(event) => onRestoreRollbackConfirmedChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Confirmed restore rollback</span>
-        </label>
         <TargetImpactPreview
           forceUnprivileged={forceUnprivileged}
           mode="restore"
@@ -94,15 +84,17 @@ export function RestoreRollbackForm({
           />
           <span>Force unprivileged best effort</span>
         </label>
-        <button
-          className="secondaryAction dangerAction"
-          disabled={pending || !proofReady || !restoreJobId || !targetClientId}
-          onClick={onRunRestoreRollback}
-          type="button"
-        >
-          <RotateCcw size={17} />
-          Rollback restore
-        </button>
+        {!confirmationOpen && (
+          <button
+            className="secondaryAction dangerAction"
+            disabled={pending || !privilegeReady || !restoreJobId || !targetClientId}
+            onClick={onRunRestoreRollback}
+            type="button"
+          >
+            <RotateCcw size={17} />
+            Rollback restore
+          </button>
+        )}
       </form>
     </>
   );

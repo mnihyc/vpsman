@@ -12,8 +12,8 @@ export async function installTransferJobApiMock(page: Page) {
     let transferJobCounter = 0;
     const downloadFixtureBytes = new TextEncoder().encode("resumable browser download payload");
     const selectorAgents = [
-      { display_name: "edge-sfo-01", id: "agent-sfo-01", status: "connected", tags: ["provider:alpha", "country:US", "edge"] },
-      { display_name: "core-fra-02", id: "agent-fra-02", status: "connected", tags: ["country:DE", "bgp", "bird2"] },
+      { display_name: "edge-sfo-01", id: "agent-sfo-01", status: "online", tags: ["provider:alpha", "country:US", "edge"] },
+      { display_name: "core-fra-02", id: "agent-fra-02", status: "online", tags: ["country:DE", "bgp", "bird2"] },
       { display_name: "backup-nyc-03", id: "agent-nyc-03", status: "stale", tags: ["country:US"] },
     ];
     type SelectorAgent = (typeof selectorAgents)[number];
@@ -177,8 +177,10 @@ export async function installTransferJobApiMock(page: Page) {
       return ids.length > 0 ? ids : ["agent-sfo-01"];
     };
     const selectorAgentById = new Map(selectorAgents.map((agent) => [agent.id, agent]));
-    const connectedClientIds = (clientIds: string[]) =>
-      clientIds.filter((clientId) => selectorAgentById.get(clientId)?.status === "connected");
+    const onlineClientIds = (clientIds: string[]) =>
+      clientIds.filter((clientId) => selectorAgentById.get(clientId)?.status === "online");
+    const dispatchableClientIds = (clientIds: string[]) =>
+      clientIds.filter((clientId) => selectorAgentById.get(clientId)?.status !== "offline");
 
     const jsonResponse = (body: unknown) =>
       Promise.resolve(
@@ -237,13 +239,16 @@ export async function installTransferJobApiMock(page: Page) {
       const outputClientSet = new Set(outputClientIds);
       dynamicJobTargets[jobId] = clientIds.map((clientId) => {
         const completed = outputClientSet.has(clientId);
+        const agentStatus = selectorAgentById.get(clientId)?.status;
+        const stale = agentStatus === "stale";
         return {
           client_id: clientId,
           completed_at: "2026-05-31T10:11:00Z",
-          exit_code: completed ? 0 : null,
+          exit_code: completed ? 0 : stale ? 2 : null,
           job_id: jobId,
-          started_at: completed ? "2026-05-31T10:10:59Z" : null,
-          status: completed ? "completed" : "dispatch_failed",
+          message: completed ? "completed" : stale ? "stale: file operation command version mismatch" : "agent offline",
+          started_at: completed || stale ? "2026-05-31T10:10:59Z" : null,
+          status: completed ? "completed" : stale ? "failed" : "dispatch_failed",
         };
       });
     };
@@ -389,7 +394,7 @@ export async function installTransferJobApiMock(page: Page) {
       };
       const operation = request.operation;
       const selectedClientIds = clientIdsFromSelector(request.selector_expression);
-      const clientIds = connectedClientIds(selectedClientIds);
+      const clientIds = onlineClientIds(selectedClientIds);
       if (!operation?.type) {
         return;
       }
@@ -586,12 +591,12 @@ export async function installTransferJobApiMock(page: Page) {
           const selectedClientIds = clientIdsFromSelector(
             (body as { selector_expression?: string } | null)?.selector_expression,
           );
-          const outputClientIds = connectedClientIds(selectedClientIds);
+          const outputClientIds = selectedClientIds.filter((clientId) => selectorAgentById.get(clientId)?.status === "online");
           const status = outputClientIds.length === selectedClientIds.length ? "completed" : "partially_completed";
           createDynamicJob(jobId, operationType, selectedClientIds.length, status);
           await createFileBrowserOutputs(jobId, body);
           createDynamicJobTargets(jobId, selectedClientIds, outputClientIds);
-          return jsonResponse({ accepted_targets: outputClientIds.length, job_id: jobId, status: "accepted" });
+          return jsonResponse({ accepted_targets: dispatchableClientIds(selectedClientIds).length, job_id: jobId, status: "accepted" });
         }
         if (operationType?.startsWith("file_transfer_")) {
           const requests = (window as unknown as { __vpsmanTestRequests?: { jobs: unknown[] } }).__vpsmanTestRequests;

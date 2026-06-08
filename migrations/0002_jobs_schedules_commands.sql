@@ -1,19 +1,23 @@
 CREATE TABLE schedules (
     id UUID PRIMARY KEY,
     actor_id UUID REFERENCES operators(id),
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     operation JSONB NOT NULL,
     selector_expression TEXT NOT NULL,
-    interval_secs BIGINT NOT NULL CHECK (interval_secs BETWEEN 1 AND 31536000),
+    cron_expr TEXT NOT NULL DEFAULT '0 * * * *',
+    timezone TEXT NOT NULL DEFAULT 'UTC',
     next_run_at TIMESTAMPTZ NOT NULL,
     last_run_at TIMESTAMPTZ,
+    deferred_until TIMESTAMPTZ,
     catch_up_policy TEXT NOT NULL DEFAULT 'skip_missed',
     catch_up_limit INTEGER NOT NULL DEFAULT 1,
     retry_delay_secs BIGINT NOT NULL DEFAULT 300,
     max_failures INTEGER NOT NULL DEFAULT 3,
     failure_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    deleted_at TIMESTAMPTZ,
+    deleted_by UUID REFERENCES operators(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT schedules_catch_up_policy_check
@@ -25,14 +29,22 @@ CREATE TABLE schedules (
     CONSTRAINT schedules_max_failures_check
         CHECK (max_failures BETWEEN 1 AND 100),
     CONSTRAINT schedules_failure_count_check
-        CHECK (failure_count >= 0)
+        CHECK (failure_count >= 0),
+    CONSTRAINT schedules_timezone_utc CHECK (timezone = 'UTC'),
+    CONSTRAINT schedules_cron_expr_not_empty CHECK (length(trim(cron_expr)) > 0)
 );
 
 CREATE INDEX schedules_due_idx
-    ON schedules (enabled, next_run_at);
+    ON schedules (enabled, next_run_at, deferred_until)
+    WHERE deleted_at IS NULL;
 
 CREATE INDEX schedules_policy_due_idx
-    ON schedules (enabled, next_run_at, catch_up_policy);
+    ON schedules (enabled, next_run_at, catch_up_policy)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX schedules_visible_name_idx
+    ON schedules (name, id)
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE jobs (
     id UUID PRIMARY KEY,
@@ -50,7 +62,7 @@ CREATE TABLE jobs (
     completed_at TIMESTAMPTZ
 );
 
-CREATE INDEX jobs_scheduled_approval_idx
+CREATE INDEX jobs_scheduled_source_idx
     ON jobs (status, source_schedule_id)
     WHERE source_schedule_id IS NOT NULL;
 
@@ -62,6 +74,7 @@ CREATE TABLE job_targets (
     job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     status TEXT NOT NULL,
+    message TEXT,
     exit_code INTEGER,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,

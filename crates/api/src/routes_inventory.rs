@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 
@@ -9,17 +9,20 @@ use crate::{
     error::ApiError,
     model::{
         AgentView, AssignDataSourcePresetRequest, AssignTagRequest, BulkResolveRequest,
-        BulkResolveResponse, CloneDataSourcePresetRequest, CreateDataSourcePresetRequest,
-        CreateTagRequest, DataSourceHotConfigQuery, DataSourceHotConfigView,
-        DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
+        BulkResolveResponse, BulkTagMutationRequest, CloneDataSourcePresetRequest,
+        CreateDataSourcePresetRequest, CreateTagRequest, DataSourceHotConfigQuery,
+        DataSourceHotConfigView, DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
         DataSourcePresetDiffRequest, DataSourcePresetDiffView, DataSourcePresetQuery,
         DataSourcePresetTestView, DataSourcePresetView, DataSourceStatusQuery,
-        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse, FleetSummary,
-        GatewaySessionView, HistoryQuery, TagView, TelemetryNetworkRateQuery,
-        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery,
-        TelemetryTunnelView, TestDataSourcePresetRequest, UpdateAgentAliasRequest,
-        UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse, WsEvent,
+        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse, DeleteTagRequest,
+        FleetSummary, GatewaySessionView, HistoryQuery, HotConfigRuleTemplateRenderView,
+        HotConfigRuleTemplateView, RenderHotConfigRuleTemplateRequest, TagMutationResponse,
+        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
+        TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
+        UpdateDataSourcePresetResponse, UpsertHotConfigRuleTemplateRequest, WsEvent,
     },
+    privilege::{verify_privilege_intent, DbPrivilegeIntent},
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -30,6 +33,7 @@ const MAX_PRESET_DESCRIPTION_BYTES: usize = 1024;
 const MAX_PRESET_DEFINITION_BYTES: usize = 16 * 1024;
 const MAX_PRESET_ARGV_ITEMS: usize = 32;
 const MAX_PRESET_ARG_BYTES: usize = 512;
+const MAX_RULE_TEMPLATE_BODY_BYTES: usize = 16 * 1024;
 
 pub(crate) async fn fleet_summary(
     State(state): State<AppState>,
@@ -183,6 +187,64 @@ pub(crate) async fn list_data_source_presets(
             .list_data_source_presets(query.domain.as_deref())
             .await?,
     ))
+}
+
+pub(crate) async fn list_hot_config_rule_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HotConfigRuleTemplateView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(state.repo.list_hot_config_rule_templates().await?))
+}
+
+pub(crate) async fn upsert_hot_config_rule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpsertHotConfigRuleTemplateRequest>,
+) -> Result<Json<HotConfigRuleTemplateView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
+        .await?;
+    validate_hot_config_rule_template(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .upsert_hot_config_rule_template(&request, &operator)
+            .await
+            .map_err(hot_config_rule_template_error)?,
+    ))
+}
+
+pub(crate) async fn render_hot_config_rule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<RenderHotConfigRuleTemplateRequest>,
+) -> Result<Json<HotConfigRuleTemplateRenderView>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(
+        state
+            .repo
+            .render_hot_config_rule_template(template_id, &request)
+            .await
+            .map_err(hot_config_rule_template_error)?,
+    ))
+}
+
+pub(crate) async fn delete_hot_config_rule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
+        .await?;
+    state
+        .repo
+        .delete_hot_config_rule_template(template_id)
+        .await
+        .map_err(hot_config_rule_template_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn create_data_source_preset(
@@ -360,8 +422,83 @@ pub(crate) async fn create_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
+    }
     validate_persisted_tag_name(&request.name)?;
+    let targets = Vec::<String>::new();
+    let intent = DbPrivilegeIntent::new("tag.create", &request.name, None, &targets, true);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     Ok(Json(state.repo.create_tag(request).await?))
+}
+
+pub(crate) async fn bulk_mutate_tags(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkTagMutationRequest>,
+) -> Result<Json<TagMutationResponse>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
+    }
+    validate_persisted_tag_name(&request.tag)?;
+    validate_bulk_selector_expression(&request.selector_expression)?;
+    let resolved_targets = state
+        .repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: request.selector_expression.clone(),
+        })
+        .await?
+        .targets
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let action = match request.action {
+        crate::model::BulkTagMutationAction::Add => "tag.bulk_add",
+        crate::model::BulkTagMutationAction::Remove => "tag.bulk_remove",
+    };
+    let intent = DbPrivilegeIntent::new(
+        action,
+        &request.tag,
+        Some(&request.selector_expression),
+        &resolved_targets,
+        request.confirmed,
+    );
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    Ok(Json(state.repo.bulk_mutate_tags(&request).await?))
+}
+
+pub(crate) async fn delete_tag(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+    Json(request): Json<DeleteTagRequest>,
+) -> Result<Json<TagMutationResponse>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
+    }
+    validate_persisted_tag_name(&tag)?;
+    let affected_targets = state
+        .repo
+        .list_tags()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.name == tag)
+        .map(|tag| {
+            tag.clients
+                .into_iter()
+                .map(|client| client.id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let intent = DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
 }
 
 fn validate_create_data_source_preset(
@@ -371,6 +508,45 @@ fn validate_create_data_source_preset(
     validate_preset_name(&request.name)?;
     validate_data_source_preset_scope(&request.scope, request.owner_client_id.as_deref())?;
     validate_data_source_preset_candidate(&request.description, &request.definition)
+}
+
+fn validate_hot_config_rule_template(
+    request: &UpsertHotConfigRuleTemplateRequest,
+) -> Result<(), ApiError> {
+    for value in [
+        request.name.as_str(),
+        request.category.as_str(),
+        request.domain.as_str(),
+        request.description.as_str(),
+    ] {
+        if value.trim().is_empty() || value.len() > 512 {
+            return Err(ApiError::bad_request("hot_config_rule_template_invalid"));
+        }
+    }
+    if request.raw_generator_body.trim().is_empty()
+        || request.raw_generator_body.len() > MAX_RULE_TEMPLATE_BODY_BYTES
+    {
+        return Err(ApiError::bad_request(
+            "hot_config_rule_template_body_invalid",
+        ));
+    }
+    if !request.field_schema.is_object() || !request.docs_metadata.is_object() {
+        return Err(ApiError::bad_request(
+            "hot_config_rule_template_metadata_invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn hot_config_rule_template_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("not_found") {
+        ApiError::not_found("hot_config_rule_template_not_found")
+    } else if message.contains("builtin_immutable") {
+        ApiError::conflict("hot_config_rule_template_builtin_immutable")
+    } else {
+        ApiError::from(error)
+    }
 }
 
 fn validate_clone_data_source_preset(
@@ -567,7 +743,13 @@ pub(crate) async fn assign_agent_tag(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("tag_mutation_confirmation_required"));
+    }
     validate_persisted_tag_name(&request.tag)?;
+    let targets = vec![client_id.clone()];
+    let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     Ok(Json(
         state
             .repo

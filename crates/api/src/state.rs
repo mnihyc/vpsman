@@ -453,16 +453,6 @@ fn enrich_update_status_rows(
             .iter()
             .filter(|rollout| rollout.failed_count > 0)
             .count();
-        let activation_delegation_ready_count: i32 = client_rollouts
-            .iter()
-            .flat_map(|rollout| rollout.activation_delegations.iter())
-            .map(|delegation| delegation.ready_count)
-            .sum();
-        let rollback_delegation_ready_count: i32 = client_rollouts
-            .iter()
-            .flat_map(|rollout| rollout.rollback_delegations.iter())
-            .map(|delegation| delegation.ready_count)
-            .sum();
         let runtime_evidence = json!({
             "workflow": "agent_update_releases",
             "rollout_workflow": "agent_update_rollout",
@@ -474,8 +464,6 @@ fn enrich_update_status_rows(
             "rollout_count": rollout_count,
             "active_rollout_count": active_rollout_count,
             "failed_rollout_count": failed_rollout_count,
-            "delegated_activation_ready_count": activation_delegation_ready_count,
-            "delegated_rollback_ready_count": rollback_delegation_ready_count,
             "continuous_status": false,
         });
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);

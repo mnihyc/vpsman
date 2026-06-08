@@ -24,7 +24,14 @@ impl Repository {
                     return Ok(());
                 }
                 upsert_memory_gateway_session(memory, event, "active", None).await;
-                set_memory_agent_status(memory, &event.client_id, "connected").await;
+                set_memory_agent_status(
+                    memory,
+                    &event.client_id,
+                    "online",
+                    event.remote_ip.as_deref(),
+                    false,
+                )
+                .await;
                 Ok(())
             }
             Self::Postgres(pool) => {
@@ -67,9 +74,18 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
-                    "UPDATE clients SET status = 'connected', last_seen_at = now() WHERE id = $1 AND hidden_at IS NULL",
+                    r#"
+                    UPDATE clients
+                    SET
+                        status = CASE WHEN status = 'stale' THEN status ELSE 'online' END,
+                        registration_ip = COALESCE(registration_ip, $2::inet),
+                        last_ip = COALESCE($2::inet, last_ip),
+                        last_seen_at = now()
+                    WHERE id = $1 AND hidden_at IS NULL
+                    "#,
                 )
                 .bind(&event.client_id)
+                .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
@@ -88,7 +104,14 @@ impl Repository {
                 if !memory_has_active_other_session(memory, &event.client_id, event.session_id)
                     .await
                 {
-                    set_memory_agent_status(memory, &event.client_id, "disconnected").await;
+                    set_memory_agent_status(
+                        memory,
+                        &event.client_id,
+                        "offline",
+                        event.remote_ip.as_deref(),
+                        false,
+                    )
+                    .await;
                 }
                 Ok(())
             }
@@ -118,7 +141,11 @@ impl Repository {
                 sqlx::query(
                     r#"
                     UPDATE clients
-                    SET status = 'disconnected', last_seen_at = now()
+                    SET
+                        status = CASE WHEN status = 'stale' THEN status ELSE 'offline' END,
+                        registration_ip = COALESCE(registration_ip, $3::inet),
+                        last_ip = COALESCE($3::inet, last_ip),
+                        last_seen_at = now()
                     WHERE id = $1
                       AND hidden_at IS NULL
                       AND NOT EXISTS (
@@ -132,6 +159,7 @@ impl Repository {
                 )
                 .bind(&event.client_id)
                 .bind(event.session_id)
+                .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
@@ -251,7 +279,13 @@ async fn memory_has_active_other_session(
     })
 }
 
-async fn set_memory_agent_status(memory: &MemoryState, client_id: &str, status: &str) {
+async fn set_memory_agent_status(
+    memory: &MemoryState,
+    client_id: &str,
+    status: &str,
+    remote_ip: Option<&str>,
+    override_stale: bool,
+) {
     if memory.hidden_clients.read().await.contains(client_id) {
         return;
     }
@@ -262,7 +296,16 @@ async fn set_memory_agent_status(memory: &MemoryState, client_id: &str, status: 
         .iter_mut()
         .find(|agent| agent.id == client_id)
     {
-        agent.status = status.to_string();
+        if override_stale || agent.status != "stale" {
+            agent.status = status.to_string();
+        }
+        if agent.registration_ip.is_none() {
+            agent.registration_ip = remote_ip.map(str::to_string);
+        }
+        if let Some(remote_ip) = remote_ip {
+            agent.last_ip = Some(remote_ip.to_string());
+        }
+        agent.last_seen_at = Some(unix_now().to_string());
     }
 }
 
@@ -277,6 +320,7 @@ mod tests {
             client_id: client_id.to_string(),
             session_id,
             noise_public_key_hex: Some("ab".repeat(32)),
+            remote_ip: Some("203.0.113.10".to_string()),
             reason: None,
         }
     }
@@ -290,8 +334,14 @@ mod tests {
         memory.agents.write().await.push(AgentView {
             id: "client-a".to_string(),
             display_name: "client-a".to_string(),
-            status: "unknown".to_string(),
+            status: "offline".to_string(),
             tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: Default::default(),
         });
         let older = uuid::Uuid::new_v4();
@@ -307,15 +357,20 @@ mod tests {
         ended.reason = Some("replaced".to_string());
         repo.record_gateway_session_ended(&ended).await.unwrap();
 
-        assert_eq!(memory.agents.read().await[0].status.as_str(), "connected");
+        assert_eq!(memory.agents.read().await[0].status.as_str(), "online");
+        assert_eq!(
+            memory.agents.read().await[0].registration_ip.as_deref(),
+            Some("203.0.113.10")
+        );
+        assert_eq!(
+            memory.agents.read().await[0].last_ip.as_deref(),
+            Some("203.0.113.10")
+        );
         assert_eq!(repo.list_gateway_sessions(10).await.unwrap().len(), 2);
 
         repo.record_gateway_session_ended(&session_event("client-a", newer))
             .await
             .unwrap();
-        assert_eq!(
-            memory.agents.read().await[0].status.as_str(),
-            "disconnected"
-        );
+        assert_eq!(memory.agents.read().await[0].status.as_str(), "offline");
     }
 }

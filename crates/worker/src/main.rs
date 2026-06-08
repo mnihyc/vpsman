@@ -1,16 +1,24 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::Parser;
+use croner::Cron;
+use ed25519_dalek::SigningKey;
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Row};
 use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use vpsman_common::payload_hash;
+use vpsman_common::{
+    job_command_protocol_version, payload_hash, sign_command_envelope, CommandEnvelope,
+    CommandOutput, GatewayCommandDispatch, GatewayCommandDispatchResult, JobCommand, JobRequest,
+    OutputStream, MAX_COMMAND_SIGNATURE_AGE_SECS,
+};
 
 mod alert_notifications;
 mod backup_policy_retention;
+mod build_info;
 mod rollout_automation;
 mod worker_leases;
 
@@ -111,6 +119,18 @@ struct Args {
     backup_policy_prune_delete_objects: bool,
     #[arg(long, env = "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR")]
     backup_policy_prune_object_store_dir: Option<PathBuf>,
+    #[arg(long, env = "VPSMAN_WORKER_GATEWAY_CONTROL_URL")]
+    schedule_gateway_control_url: Option<String>,
+    #[arg(long, env = "VPSMAN_WORKER_INTERNAL_TOKEN")]
+    schedule_internal_token: Option<String>,
+    #[arg(long, env = "VPSMAN_WORKER_SERVER_SIGNING_KEY_HEX")]
+    schedule_server_signing_key_hex: Option<String>,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
+        default_value_t = 30
+    )]
+    schedule_command_timeout_secs: u64,
 }
 
 #[tokio::main]
@@ -123,6 +143,11 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        server_build_number = build_info::server_build_number(),
+        "worker build metadata"
+    );
     let Some(postgres_url) = args.postgres_url.as_deref() else {
         warn!("VPSMAN_POSTGRES_URL is not configured; worker cannot process durable queues");
         if args.once {
@@ -158,10 +183,22 @@ async fn main() -> Result<()> {
         args.backup_policy_prune_delete_objects,
         args.backup_policy_prune_object_store_dir.clone(),
     );
+    let schedule_dispatch_config = ScheduleDispatchConfig::new(
+        args.schedule_gateway_control_url.clone(),
+        args.schedule_internal_token.clone(),
+        args.schedule_server_signing_key_hex.clone(),
+        args.schedule_command_timeout_secs,
+    )?;
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
-        let schedules_processed =
-            process_due_schedules_if_leader(&pool, 25, &worker_id, args.worker_lease_secs).await?;
+        let schedules_processed = process_due_schedules_if_leader(
+            &pool,
+            25,
+            &worker_id,
+            args.worker_lease_secs,
+            &schedule_dispatch_config,
+        )
+        .await?;
         let alert_notifications = process_alert_notifications_if_leader(
             &pool,
             alert_notification_config,
@@ -203,7 +240,15 @@ async fn main() -> Result<()> {
     let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
     loop {
         ticker.tick().await;
-        match process_due_schedules_if_leader(&pool, 25, &worker_id, args.worker_lease_secs).await {
+        match process_due_schedules_if_leader(
+            &pool,
+            25,
+            &worker_id,
+            args.worker_lease_secs,
+            &schedule_dispatch_config,
+        )
+        .await
+        {
             Ok(processed) => {
                 if processed > 0 {
                     info!(processed, "processed due schedules");
@@ -336,6 +381,7 @@ async fn process_due_schedules_if_leader(
     limit: i64,
     worker_id: &str,
     lease_secs: i32,
+    dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<usize> {
     let acquired = acquire_worker_lease(pool, "schedules", worker_id, lease_secs).await?;
     if !acquired {
@@ -345,16 +391,23 @@ async fn process_due_schedules_if_leader(
         );
         return Ok(0);
     }
-    process_due_schedules(pool, limit).await
+    process_due_schedules(pool, limit, dispatch_config).await
 }
 
-async fn process_due_schedules(pool: &PgPool, limit: i64) -> Result<usize> {
+async fn process_due_schedules(
+    pool: &PgPool,
+    limit: i64,
+    dispatch_config: &ScheduleDispatchConfig,
+) -> Result<usize> {
     let mut tx = pool.begin().await?;
     let due_count: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)
         FROM schedules
-        WHERE enabled = TRUE AND next_run_at <= now()
+        WHERE enabled = TRUE
+          AND deleted_at IS NULL
+          AND next_run_at <= now()
+          AND (deferred_until IS NULL OR deferred_until <= now())
         "#,
     )
     .fetch_one(&mut *tx)
@@ -363,7 +416,10 @@ async fn process_due_schedules(pool: &PgPool, limit: i64) -> Result<usize> {
         r#"
         SELECT id
         FROM schedules
-        WHERE enabled = TRUE AND next_run_at <= now()
+        WHERE enabled = TRUE
+          AND deleted_at IS NULL
+          AND next_run_at <= now()
+          AND (deferred_until IS NULL OR deferred_until <= now())
         ORDER BY next_run_at, id
         LIMIT $1
         FOR UPDATE SKIP LOCKED
@@ -383,41 +439,43 @@ async fn process_due_schedules(pool: &PgPool, limit: i64) -> Result<usize> {
 
     let mut materialized = 0_usize;
     for schedule_id in schedule_ids {
-        materialized += process_due_schedule(pool, schedule_id).await?;
+        materialized += process_due_schedule(pool, schedule_id, dispatch_config).await?;
     }
     Ok(materialized)
 }
 
-async fn process_due_schedule(pool: &PgPool, schedule_id: Uuid) -> Result<usize> {
+async fn process_due_schedule(
+    pool: &PgPool,
+    schedule_id: Uuid,
+    dispatch_config: &ScheduleDispatchConfig,
+) -> Result<usize> {
     let result: Result<usize> = async {
         let mut tx = pool.begin().await?;
         let Some(row) = sqlx::query(
-        r#"
+            r#"
         SELECT
             id,
             actor_id,
             name,
             operation,
-            target_clients,
-            target_tags,
-            interval_secs,
+            selector_expression,
+            cron_expr,
+            EXTRACT(EPOCH FROM next_run_at)::BIGINT AS next_run_at_unix,
             catch_up_policy,
             catch_up_limit,
             retry_delay_secs,
             max_failures,
             failure_count,
-            last_error,
-            GREATEST(
-                1,
-                FLOOR(EXTRACT(EPOCH FROM (now() - next_run_at)) / GREATEST(interval_secs, 1))::bigint + 1
-            ) AS due_occurrences
+            last_error
         FROM schedules
         WHERE id = $1
           AND enabled = TRUE
+          AND deleted_at IS NULL
           AND next_run_at <= now()
+          AND (deferred_until IS NULL OR deferred_until <= now())
         FOR UPDATE SKIP LOCKED
         "#,
-    )
+        )
         .bind(schedule_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -430,9 +488,9 @@ async fn process_due_schedule(pool: &PgPool, schedule_id: Uuid) -> Result<usize>
             actor_id: row.try_get("actor_id")?,
             name: row.try_get("name")?,
             operation: row.try_get::<SqlJson<Value>, _>("operation")?.0,
-            target_clients: row.try_get("target_clients")?,
-            target_tags: row.try_get("target_tags")?,
-            interval_secs: row.try_get("interval_secs")?,
+            selector_expression: row.try_get("selector_expression")?,
+            cron_expr: row.try_get("cron_expr")?,
+            next_run_at_unix: row.try_get("next_run_at_unix")?,
             catch_up_policy: row.try_get("catch_up_policy")?,
             catch_up_limit: row.try_get("catch_up_limit")?,
             retry_delay_secs: row.try_get("retry_delay_secs")?,
@@ -440,13 +498,23 @@ async fn process_due_schedule(pool: &PgPool, schedule_id: Uuid) -> Result<usize>
             failure_count: row.try_get("failure_count")?,
             last_error: row.try_get("last_error")?,
         };
-        let due_occurrences = row.try_get("due_occurrences")?;
+        let due_occurrences = calculate_due_occurrences(&schedule, Utc::now())?;
         let run_count = catch_up_run_count(&schedule, due_occurrences);
+        let mut dispatches = Vec::new();
         for run_index in 0..run_count {
-            materialize_due_schedule(&mut tx, &schedule, run_index, run_count).await?;
+            if let Some(dispatch) =
+                materialize_due_schedule(&mut tx, &schedule, run_index, run_count).await?
+            {
+                dispatches.push(dispatch);
+            }
         }
         advance_schedule_after_success(&mut tx, &schedule, run_count).await?;
         tx.commit().await?;
+        for dispatch in dispatches {
+            if let Err(error) = dispatch_scheduled_run(pool, dispatch_config, dispatch).await {
+                warn!(%error, schedule_id = %schedule.id, "scheduled command dispatch failed");
+            }
+        }
         Ok(run_count as usize)
     }
     .await;
@@ -465,9 +533,9 @@ struct DueSchedule {
     actor_id: Option<Uuid>,
     name: String,
     operation: Value,
-    target_clients: Vec<String>,
-    target_tags: Vec<String>,
-    interval_secs: i64,
+    selector_expression: String,
+    cron_expr: String,
+    next_run_at_unix: i64,
     catch_up_policy: String,
     catch_up_limit: i32,
     retry_delay_secs: i64,
@@ -476,15 +544,80 @@ struct DueSchedule {
     last_error: Option<String>,
 }
 
+#[derive(Clone)]
+struct ScheduledDispatch {
+    job_id: Uuid,
+    schedule_id: Uuid,
+    actor_id: Option<Uuid>,
+    operation: JobCommand,
+    command_hash: String,
+    targets: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ScheduleDispatchConfig {
+    gateway_control_url: Option<String>,
+    internal_token: Option<String>,
+    signing_key: Option<SigningKey>,
+    timeout_secs: u64,
+    http: reqwest::Client,
+}
+
+impl ScheduleDispatchConfig {
+    fn new(
+        gateway_control_url: Option<String>,
+        internal_token: Option<String>,
+        server_signing_key_hex: Option<String>,
+        timeout_secs: u64,
+    ) -> Result<Self> {
+        let signing_key = server_signing_key_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(decode_server_signing_key)
+            .transpose()?;
+        Ok(Self {
+            gateway_control_url: gateway_control_url
+                .map(|value| value.trim_end_matches('/').to_string())
+                .filter(|value| !value.is_empty()),
+            internal_token: internal_token
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            signing_key,
+            timeout_secs: timeout_secs.clamp(1, 3600),
+            http: reqwest::Client::new(),
+        })
+    }
+
+    fn configured(&self) -> bool {
+        self.gateway_control_url.is_some()
+            && self.internal_token.is_some()
+            && self.signing_key.is_some()
+    }
+}
+
+#[derive(Debug)]
+struct ScheduledTargetOutcome {
+    client_id: String,
+    status: String,
+    exit_code: Option<i32>,
+    command_version: Option<u16>,
+    accepted: bool,
+    message: String,
+    outputs: Vec<CommandOutput>,
+}
+
 async fn materialize_due_schedule(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
     run_index: i64,
     run_count: i64,
-) -> Result<()> {
+) -> Result<Option<ScheduledDispatch>> {
     let targets = resolve_schedule_targets(tx, schedule).await?;
     let operation_bytes = serde_json::to_vec(&schedule.operation)?;
     let command_hash = payload_hash(&operation_bytes);
+    let operation: JobCommand = serde_json::from_value(schedule.operation.clone())
+        .context("scheduled operation is not a valid job command")?;
     let operation_type = schedule
         .operation
         .get("type")
@@ -494,7 +627,7 @@ async fn materialize_due_schedule(
     let status = if targets.is_empty() {
         "schedule_no_targets"
     } else {
-        "approval_required"
+        "dispatching"
     };
     sqlx::query(
         r#"
@@ -508,7 +641,10 @@ async fn materialize_due_schedule(
     )
     .bind(job_id)
     .bind(schedule.actor_id)
-    .bind(format!("scheduled_{operation_type}"))
+    .bind(format!(
+        "scheduled_{}",
+        scheduled_command_type_label(&operation, operation_type)
+    ))
     .bind(status)
     .bind(targets.len() as i32)
     .bind(&command_hash)
@@ -520,13 +656,13 @@ async fn materialize_due_schedule(
     for client_id in &targets {
         sqlx::query(
             r#"
-            INSERT INTO job_targets (job_id, client_id, status)
-            VALUES ($1, $2, $3)
+            INSERT INTO job_targets (job_id, client_id, status, message)
+            VALUES ($1, $2, $3, NULL)
             "#,
         )
         .bind(job_id)
         .bind(client_id)
-        .bind("approval_required")
+        .bind("queued")
         .execute(&mut **tx)
         .await?;
     }
@@ -544,7 +680,7 @@ async fn materialize_due_schedule(
     .bind(if targets.is_empty() {
         "schedule.due_no_targets"
     } else {
-        "schedule.due_approval_required"
+        "schedule.due_dispatching"
     })
     .bind(format!("schedule:{}", schedule.id))
     .bind(&command_hash)
@@ -554,8 +690,7 @@ async fn materialize_due_schedule(
         "operation_type": operation_type,
         "job_id": job_id,
         "resolved_targets": &targets,
-        "target_clients": &schedule.target_clients,
-        "target_tags": &schedule.target_tags,
+        "selector_expression": &schedule.selector_expression,
         "catch_up_policy": &schedule.catch_up_policy,
         "catch_up_run_index": run_index + 1,
         "catch_up_run_count": run_count,
@@ -563,11 +698,562 @@ async fn materialize_due_schedule(
         "max_failures": schedule.max_failures,
         "failure_count_before_run": schedule.failure_count,
         "last_error_before_run": &schedule.last_error,
-        "reason": "server cannot generate fresh super-password proof; operator approval is required before dispatch",
+        "reason": "saved schedule intent was previously privilege-unlocked; worker automation is dispatching through private gateway control",
     }))
     .execute(&mut **tx)
     .await?;
+    if targets.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ScheduledDispatch {
+            job_id,
+            schedule_id: schedule.id,
+            actor_id: schedule.actor_id,
+            operation,
+            command_hash,
+            targets,
+        }))
+    }
+}
+
+async fn dispatch_scheduled_run(
+    pool: &PgPool,
+    config: &ScheduleDispatchConfig,
+    dispatch: ScheduledDispatch,
+) -> Result<()> {
+    if !config.configured() {
+        let outcomes = dispatch
+            .targets
+            .iter()
+            .map(|client_id| ScheduledTargetOutcome {
+                client_id: client_id.clone(),
+                status: "dispatch_failed".to_string(),
+                exit_code: None,
+                command_version: None,
+                accepted: false,
+                message: "worker schedule gateway dispatch is not configured".to_string(),
+                outputs: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        record_scheduled_dispatch_outcomes(pool, &dispatch, outcomes).await?;
+        return Ok(());
+    }
+    let signing_key = config
+        .signing_key
+        .as_ref()
+        .context("worker schedule signing key is not configured")?;
+    let mut outcomes = Vec::new();
+    for client_id in &dispatch.targets {
+        let envelope = signed_schedule_envelope(client_id, &dispatch.command_hash, signing_key);
+        let request = JobRequest {
+            job_id: dispatch.job_id,
+            command_version: job_command_protocol_version(&dispatch.operation),
+            command: dispatch.operation.clone(),
+            envelope,
+            timeout_secs: config.timeout_secs,
+        };
+        let result = dispatch_schedule_command(config, client_id, request).await;
+        outcomes.push(match result {
+            Ok(result) => scheduled_outcome_from_gateway(result),
+            Err(error) => ScheduledTargetOutcome {
+                client_id: client_id.clone(),
+                status: "dispatch_failed".to_string(),
+                exit_code: None,
+                command_version: None,
+                accepted: false,
+                message: error.to_string(),
+                outputs: Vec::new(),
+            },
+        });
+    }
+    record_scheduled_dispatch_outcomes(pool, &dispatch, outcomes).await
+}
+
+fn signed_schedule_envelope(
+    client_id: &str,
+    command_hash: &str,
+    signing_key: &SigningKey,
+) -> CommandEnvelope {
+    let now = Utc::now().timestamp().max(0) as u64;
+    let mut envelope = CommandEnvelope {
+        command_id: Uuid::new_v4(),
+        scope: format!("client:{client_id}"),
+        payload_hash_hex: command_hash.to_string(),
+        signed_unix: now,
+        expires_unix: now.saturating_add(MAX_COMMAND_SIGNATURE_AGE_SECS),
+        server_signature: Vec::new(),
+    };
+    envelope.server_signature = sign_command_envelope(signing_key, &envelope);
+    envelope
+}
+
+async fn dispatch_schedule_command(
+    config: &ScheduleDispatchConfig,
+    client_id: &str,
+    request: JobRequest,
+) -> Result<GatewayCommandDispatchResult> {
+    let url = format!(
+        "{}/internal/v1/gateway/command",
+        config
+            .gateway_control_url
+            .as_deref()
+            .context("worker schedule gateway control URL is not configured")?
+    );
+    let response = config
+        .http
+        .post(url)
+        .bearer_auth(
+            config
+                .internal_token
+                .as_deref()
+                .context("worker schedule internal token is not configured")?,
+        )
+        .json(&GatewayCommandDispatch {
+            client_id: client_id.to_string(),
+            request,
+        })
+        .send()
+        .await
+        .with_context(|| format!("failed to dispatch scheduled command to {client_id}"))?;
+    let status = response.status();
+    let body = response.bytes().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "gateway control returned {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    serde_json::from_slice(&body).context("failed to decode gateway scheduled dispatch result")
+}
+
+fn scheduled_outcome_from_gateway(result: GatewayCommandDispatchResult) -> ScheduledTargetOutcome {
+    if !result.accepted {
+        let message =
+            target_message_from_outputs(&result.outputs, &result.message, "rejected_by_agent");
+        return ScheduledTargetOutcome {
+            client_id: result.client_id,
+            status: "rejected_by_agent".to_string(),
+            exit_code: None,
+            command_version: Some(result.command_version),
+            accepted: false,
+            message,
+            outputs: result.outputs,
+        };
+    }
+    let final_output = result.outputs.iter().rev().find(|output| output.done);
+    let exit_code = final_output.and_then(|output| output.exit_code);
+    let status = if final_output.is_some_and(output_indicates_timeout) {
+        "timed_out"
+    } else if final_output.is_some_and(output_indicates_canceled) {
+        "canceled"
+    } else {
+        match exit_code {
+            Some(0) => "completed",
+            Some(_) => "failed",
+            None => "accepted",
+        }
+    };
+    let message = if target_status_needs_reason(status) {
+        target_message_from_outputs(&result.outputs, &result.message, status)
+    } else {
+        result.message
+    };
+    ScheduledTargetOutcome {
+        client_id: result.client_id,
+        status: status.to_string(),
+        exit_code,
+        command_version: Some(result.command_version),
+        accepted: true,
+        message,
+        outputs: result.outputs,
+    }
+}
+
+fn scheduled_protocol_mismatch_reason(
+    outcome: &ScheduledTargetOutcome,
+    expected_command_version: u16,
+) -> Option<String> {
+    if outcome
+        .command_version
+        .is_some_and(|seen| seen < expected_command_version)
+    {
+        return Some("agent_returned_lower_command_version".to_string());
+    }
+    if outcome.message == "unsupported_command_version" {
+        return Some("agent_rejected_unsupported_command_version".to_string());
+    }
+    outcome.outputs.iter().find_map(|output| {
+        if output.stream != OutputStream::Status {
+            return None;
+        }
+        let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
+        let kind = value.get("type").and_then(serde_json::Value::as_str)?;
+        if kind == "unsupported_command_version" {
+            return Some("agent_rejected_unsupported_command_version".to_string());
+        }
+        let response_version = value
+            .get("command_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u16::try_from(version).ok())?;
+        (response_version < expected_command_version)
+            .then(|| "agent_returned_lower_command_version".to_string())
+    })
+}
+
+async fn mark_scheduled_agent_stale(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch: &ScheduledDispatch,
+    outcome: &ScheduledTargetOutcome,
+    reason: &str,
+) -> Result<()> {
+    let prior = sqlx::query(
+        r#"
+        SELECT status, internal_build_number
+        FROM clients
+        WHERE id = $1 AND hidden_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(&outcome.client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    let from_status: String = prior.try_get("status")?;
+    let internal_build_number = prior.try_get::<i64, _>("internal_build_number")?.max(1);
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET
+            status = 'stale',
+            stale_since = COALESCE(stale_since, now()),
+            stale_reason = $2,
+            stale_build_number = COALESCE(stale_build_number, internal_build_number)
+        WHERE id = $1 AND hidden_at IS NULL
+        "#,
+    )
+    .bind(&outcome.client_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    if from_status != "stale" {
+        let metadata = serde_json::json!({
+            "reason": reason,
+            "schedule_id": dispatch.schedule_id,
+            "job_id": dispatch.job_id,
+            "client_id": outcome.client_id,
+            "command_type": scheduled_command_type_label(&dispatch.operation, "unknown"),
+            "internal_build_number": internal_build_number,
+            "response_command_version": outcome.command_version,
+            "message": outcome.message,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO client_status_history (
+                id, client_id, from_status, to_status, reason, metadata
+            )
+            VALUES ($1, $2, $3, 'stale', $4, $5)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&outcome.client_id)
+        .bind(&from_status)
+        .bind(reason)
+        .bind(metadata.clone())
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, 'agent.status_stale', $2, $3, $4)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("client:{}", outcome.client_id))
+        .bind(&dispatch.command_hash)
+        .bind(metadata)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
+}
+
+async fn record_scheduled_dispatch_outcomes(
+    pool: &PgPool,
+    dispatch: &ScheduledDispatch,
+    outcomes: Vec<ScheduledTargetOutcome>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let mut statuses = Vec::new();
+    for outcome in &outcomes {
+        statuses.push(outcome.status.clone());
+        let stale_reason = scheduled_protocol_mismatch_reason(
+            outcome,
+            job_command_protocol_version(&dispatch.operation),
+        );
+        let message = if let Some(reason) = stale_reason.as_deref() {
+            stale_target_message(&outcome.message, reason)
+        } else {
+            outcome.message.clone()
+        };
+        if let Some(reason) = stale_reason {
+            mark_scheduled_agent_stale(&mut tx, dispatch, outcome, &reason).await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE job_targets
+            SET
+                status = $3,
+                message = $4,
+                exit_code = $5,
+                started_at = COALESCE(started_at, now()),
+                completed_at = CASE
+                    WHEN $3 IN ('completed', 'failed', 'timed_out', 'canceled', 'rejected_by_agent', 'dispatch_failed') THEN now()
+                    ELSE completed_at
+                END
+            WHERE job_id = $1 AND client_id = $2
+            "#,
+        )
+        .bind(dispatch.job_id)
+        .bind(&outcome.client_id)
+        .bind(&outcome.status)
+        .bind(&message)
+        .bind(outcome.exit_code)
+        .execute(&mut *tx)
+        .await?;
+        for (seq, output) in outcome.outputs.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO job_outputs (job_id, client_id, seq, stream, data, exit_code, done)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (job_id, client_id, seq) DO UPDATE
+                SET stream = EXCLUDED.stream,
+                    data = EXCLUDED.data,
+                    exit_code = EXCLUDED.exit_code,
+                    done = EXCLUDED.done
+                "#,
+            )
+            .bind(dispatch.job_id)
+            .bind(&outcome.client_id)
+            .bind(seq as i32)
+            .bind(output_stream_name(output.stream))
+            .bind(&output.data)
+            .bind(output.exit_code)
+            .bind(output.done)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(dispatch.actor_id)
+        .bind("schedule.target_result")
+        .bind(format!(
+            "job:{}:client:{}",
+            dispatch.job_id, outcome.client_id
+        ))
+        .bind(&dispatch.command_hash)
+        .bind(serde_json::json!({
+            "schedule_id": dispatch.schedule_id,
+            "job_id": dispatch.job_id,
+            "client_id": outcome.client_id,
+            "status": outcome.status,
+            "accepted": outcome.accepted,
+            "message": message,
+        }))
+        .execute(&mut *tx)
+        .await?;
+    }
+    let job_status = aggregate_job_status(&statuses, dispatch.targets.len());
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = $2, completed_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(dispatch.job_id)
+    .bind(job_status)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+fn stale_target_message(message: &str, reason: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.to_ascii_lowercase().contains("stale") {
+        return trimmed.to_string();
+    }
+    if trimmed.is_empty() || trimmed == reason {
+        return format!("stale: {reason}");
+    }
+    format!("stale: {reason}; {trimmed}")
+}
+
+fn target_status_needs_reason(status: &str) -> bool {
+    !matches!(status, "accepted" | "completed")
+}
+
+fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status: &str) -> String {
+    if let Some(message) = outputs.iter().rev().find_map(status_output_message) {
+        return message;
+    }
+    let trimmed = fallback.trim();
+    if trimmed.is_empty() || trimmed == "accepted" {
+        status.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn status_output_message(output: &CommandOutput) -> Option<String> {
+    if output.stream != OutputStream::Status {
+        return None;
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
+    status_value_message(&value)
+}
+
+fn status_value_message(value: &serde_json::Value) -> Option<String> {
+    let kind = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let primary = ["message", "error", "reason", "hint", "status"]
+        .iter()
+        .find_map(|field| {
+            value
+                .get(*field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    match (kind, primary) {
+        (Some(kind), Some(primary)) if kind != primary => Some(format!("{kind}: {primary}")),
+        (Some(kind), _) => Some(kind.to_string()),
+        (_, Some(primary)) => Some(primary.to_string()),
+        _ => None,
+    }
+}
+
+fn output_indicates_canceled(output: &CommandOutput) -> bool {
+    if output.stream != OutputStream::Status {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.data)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|kind| kind == "command_canceled")
+}
+
+fn output_indicates_timeout(output: &CommandOutput) -> bool {
+    if output.stream != OutputStream::Status {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.data)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|kind| kind == "command_timeout")
+}
+
+fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'static str {
+    let completed = target_statuses
+        .iter()
+        .filter(|status| status.as_str() == "completed")
+        .count();
+    if target_count > 0 && completed == target_count {
+        return "completed";
+    }
+    if completed > 0 {
+        return "partially_completed";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "accepted")
+    {
+        return "accepted";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "timed_out")
+    {
+        return "timed_out";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "canceled")
+    {
+        return "canceled";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
+    {
+        return "failed";
+    }
+    "dispatch_failed"
+}
+
+fn output_stream_name(stream: OutputStream) -> &'static str {
+    match stream {
+        OutputStream::Stdout => "stdout",
+        OutputStream::Stderr => "stderr",
+        OutputStream::Pty => "pty",
+        OutputStream::Status => "status",
+    }
+}
+
+fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
+    match command {
+        JobCommand::Shell { pty: true, .. } => "shell_pty",
+        JobCommand::Shell { .. } => "shell_argv",
+        JobCommand::ShellScript { .. } => "shell_script",
+        JobCommand::Backup { .. } => "backup",
+        JobCommand::Restore { .. } => "restore",
+        JobCommand::RestoreRollback { .. } => "restore_rollback",
+        JobCommand::NetworkApply { .. } => "network_apply",
+        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
+        JobCommand::NetworkRollback { .. } => "network_rollback",
+        JobCommand::NetworkStatus { .. } => "network_status",
+        JobCommand::NetworkInterfaces => "network_interfaces",
+        JobCommand::NetworkProbe { .. } => "network_probe",
+        JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
+        JobCommand::UpdateAgent { .. } => "agent_update",
+        JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
+        JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
+        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
+        _ => fallback,
+    }
+    .to_string()
+}
+
+fn decode_server_signing_key(value: &str) -> Result<SigningKey> {
+    let bytes = hex::decode(value.trim()).context("invalid worker server signing key hex")?;
+    let bytes: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("worker server signing key must be 32 bytes"))?;
+    Ok(SigningKey::from_bytes(&bytes))
 }
 
 async fn advance_schedule_after_success(
@@ -575,15 +1261,13 @@ async fn advance_schedule_after_success(
     schedule: &DueSchedule,
     run_count: i64,
 ) -> Result<()> {
+    let next_run_at = next_run_after_success(schedule, run_count, Utc::now())?;
     sqlx::query(
         r#"
         UPDATE schedules
         SET
             last_run_at = now(),
-            next_run_at = CASE
-                WHEN $3 = 'skip_missed' THEN now() + ($2 * interval '1 second')
-                ELSE next_run_at + (($4::bigint * $2)::text || ' seconds')::interval
-            END,
+            next_run_at = to_timestamp($2),
             failure_count = 0,
             last_error = NULL,
             updated_at = now()
@@ -591,9 +1275,7 @@ async fn advance_schedule_after_success(
         "#,
     )
     .bind(schedule.id)
-    .bind(schedule.interval_secs)
-    .bind(&schedule.catch_up_policy)
-    .bind(run_count)
+    .bind(next_run_at.timestamp() as f64)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -677,6 +1359,54 @@ fn catch_up_run_count(schedule: &DueSchedule, due_occurrences: i64) -> i64 {
     }
 }
 
+fn calculate_due_occurrences(schedule: &DueSchedule, now: DateTime<Utc>) -> Result<i64> {
+    if schedule.catch_up_policy != "run_all_limited" {
+        return Ok(1);
+    }
+    let current = date_time_from_unix(schedule.next_run_at_unix)?;
+    let cron = Cron::from_str(&schedule.cron_expr)
+        .with_context(|| format!("invalid cron expression for schedule {}", schedule.id))?;
+    let mut count = 1_i64;
+    let max_count = i64::from(schedule.catch_up_limit.clamp(1, 25));
+    for run in cron.iter_after(current) {
+        if run > now || count >= max_count {
+            break;
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn next_run_after_success(
+    schedule: &DueSchedule,
+    run_count: i64,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let cron = Cron::from_str(&schedule.cron_expr)
+        .with_context(|| format!("invalid cron expression for schedule {}", schedule.id))?;
+    let mut cursor = if schedule.catch_up_policy == "skip_missed" {
+        now
+    } else {
+        date_time_from_unix(schedule.next_run_at_unix)?
+    };
+    let steps = if schedule.catch_up_policy == "skip_missed" {
+        1
+    } else {
+        run_count.max(1)
+    };
+    for _ in 0..steps {
+        cursor = cron
+            .iter_after(cursor)
+            .next()
+            .context("cron expression produced no future run")?;
+    }
+    Ok(cursor)
+}
+
+fn date_time_from_unix(timestamp: i64) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(timestamp, 0).context("invalid schedule timestamp")
+}
+
 fn truncate_schedule_error(error: &str) -> String {
     error.chars().take(1024).collect()
 }
@@ -685,34 +1415,328 @@ async fn resolve_schedule_targets(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
 ) -> Result<Vec<String>> {
+    let expression = parse_selector_expression(&schedule.selector_expression)
+        .map_err(anyhow::Error::msg)?
+        .context("schedule selector expression is empty")?;
     let rows = sqlx::query(
         r#"
-        WITH explicit_targets AS (
-            SELECT unnest($1::TEXT[]) AS client_id
-        ),
-        tag_targets AS (
-            SELECT ct.client_id
-            FROM client_tags ct
-            JOIN tags t ON t.id = ct.tag_id
-            WHERE t.name = ANY($2::TEXT[])
-        )
-        SELECT DISTINCT client_id
-        FROM (
-            SELECT client_id FROM explicit_targets
-            UNION ALL
-            SELECT client_id FROM tag_targets
-        ) targets
-        WHERE client_id IN (SELECT id FROM clients)
-        ORDER BY client_id
+        SELECT
+            c.id,
+            c.display_name,
+            c.status,
+            COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), ARRAY[]::TEXT[]) AS tags
+        FROM clients c
+        LEFT JOIN client_tags ct ON ct.client_id = c.id
+        LEFT JOIN tags t ON t.id = ct.tag_id
+        WHERE c.hidden_at IS NULL
+        GROUP BY c.id, c.display_name, c.status
+        ORDER BY c.id
         "#,
     )
-    .bind(&schedule.target_clients)
-    .bind(&schedule.target_tags)
     .fetch_all(&mut **tx)
     .await?;
-    rows.into_iter()
-        .map(|row| row.try_get("client_id").map_err(Into::into))
-        .collect()
+    let mut targets = Vec::new();
+    for row in rows {
+        let client = SelectorClient {
+            id: row.try_get("id")?,
+            display_name: row.try_get("display_name")?,
+            status: row.try_get("status")?,
+            tags: row.try_get("tags")?,
+        };
+        if selector_client_matches(&client, &expression) {
+            targets.push(client.id);
+        }
+    }
+    Ok(targets)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SelectorExpr {
+    Term(SelectorTerm),
+    And(Box<SelectorExpr>, Box<SelectorExpr>),
+    Or(Box<SelectorExpr>, Box<SelectorExpr>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SelectorTerm {
+    namespace: Option<String>,
+    value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TokenKind {
+    And,
+    LeftParen,
+    Or,
+    RightParen,
+    Term(String),
+}
+
+#[derive(Clone, Debug)]
+struct SelectorClient {
+    id: String,
+    display_name: String,
+    status: String,
+    tags: Vec<String>,
+}
+
+fn parse_selector_expression(input: &str) -> Result<Option<SelectorExpr>, String> {
+    let tokens = tokenize_selector_expression(input)?;
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let mut parser = SelectorParser {
+        tokens,
+        position: 0,
+    };
+    let expression = parser.parse_or()?;
+    if parser.peek().is_some() {
+        return Err("unexpected token after expression".to_string());
+    }
+    Ok(Some(expression))
+}
+
+fn selector_client_matches(client: &SelectorClient, expression: &SelectorExpr) -> bool {
+    match expression {
+        SelectorExpr::Term(term) => selector_client_matches_term(client, term),
+        SelectorExpr::And(left, right) => {
+            selector_client_matches(client, left) && selector_client_matches(client, right)
+        }
+        SelectorExpr::Or(left, right) => {
+            selector_client_matches(client, left) || selector_client_matches(client, right)
+        }
+    }
+}
+
+fn tokenize_selector_expression(input: &str) -> Result<Vec<TokenKind>, String> {
+    let mut tokens = Vec::new();
+    let chars = input.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let (_, character) = chars[index];
+        if character.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if character == '(' {
+            tokens.push(TokenKind::LeftParen);
+            index += 1;
+            continue;
+        }
+        if character == ')' {
+            tokens.push(TokenKind::RightParen);
+            index += 1;
+            continue;
+        }
+        if character == '&' && chars.get(index + 1).is_some_and(|(_, next)| *next == '&') {
+            tokens.push(TokenKind::And);
+            index += 2;
+            continue;
+        }
+        if character == '|' && chars.get(index + 1).is_some_and(|(_, next)| *next == '|') {
+            tokens.push(TokenKind::Or);
+            index += 2;
+            continue;
+        }
+        if character == '&' || character == '|' {
+            return Err("use && or || for boolean operators".to_string());
+        }
+        let start = chars[index].0;
+        let mut end = input.len();
+        let mut cursor = index;
+        while cursor < chars.len() {
+            let (byte_index, current) = chars[cursor];
+            if current.is_whitespace() || matches!(current, '(' | ')' | '&' | '|') {
+                end = byte_index;
+                break;
+            }
+            cursor += 1;
+        }
+        let raw = input[start..end].trim();
+        if raw.is_empty() {
+            index = cursor;
+            continue;
+        }
+        tokens.push(match raw.to_ascii_lowercase().as_str() {
+            "and" => TokenKind::And,
+            "or" => TokenKind::Or,
+            _ => TokenKind::Term(raw.to_string()),
+        });
+        index = cursor;
+    }
+    Ok(tokens)
+}
+
+struct SelectorParser {
+    tokens: Vec<TokenKind>,
+    position: usize,
+}
+
+impl SelectorParser {
+    fn parse_or(&mut self) -> Result<SelectorExpr, String> {
+        let mut expression = self.parse_and()?;
+        while self.consume_or() {
+            let right = self.parse_and()?;
+            expression = SelectorExpr::Or(Box::new(expression), Box::new(right));
+        }
+        Ok(expression)
+    }
+
+    fn parse_and(&mut self) -> Result<SelectorExpr, String> {
+        let mut expression = self.parse_primary()?;
+        loop {
+            if self.consume_and() {
+                let right = self.parse_primary()?;
+                expression = SelectorExpr::And(Box::new(expression), Box::new(right));
+                continue;
+            }
+            if self.next_starts_primary() {
+                let right = self.parse_primary()?;
+                expression = SelectorExpr::And(Box::new(expression), Box::new(right));
+                continue;
+            }
+            break;
+        }
+        Ok(expression)
+    }
+
+    fn parse_primary(&mut self) -> Result<SelectorExpr, String> {
+        match self.advance() {
+            Some(TokenKind::Term(raw)) => parse_selector_term(raw).map(SelectorExpr::Term),
+            Some(TokenKind::LeftParen) => {
+                let expression = self.parse_or()?;
+                if !matches!(self.advance(), Some(TokenKind::RightParen)) {
+                    return Err("missing closing parenthesis".to_string());
+                }
+                Ok(expression)
+            }
+            Some(TokenKind::And | TokenKind::Or) => {
+                Err("operator is missing a left operand".to_string())
+            }
+            Some(TokenKind::RightParen) => Err("unexpected closing parenthesis".to_string()),
+            None => Err("expression is incomplete".to_string()),
+        }
+    }
+
+    fn consume_and(&mut self) -> bool {
+        if matches!(self.peek(), Some(TokenKind::And)) {
+            self.position += 1;
+            return true;
+        }
+        false
+    }
+
+    fn consume_or(&mut self) -> bool {
+        if matches!(self.peek(), Some(TokenKind::Or)) {
+            self.position += 1;
+            return true;
+        }
+        false
+    }
+
+    fn next_starts_primary(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(TokenKind::Term(_)) | Some(TokenKind::LeftParen)
+        )
+    }
+
+    fn advance(&mut self) -> Option<TokenKind> {
+        let token = self.tokens.get(self.position)?.clone();
+        self.position += 1;
+        Some(token)
+    }
+
+    fn peek(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.position)
+    }
+}
+
+fn parse_selector_term(raw: String) -> Result<SelectorTerm, String> {
+    if let Some(separator) = raw.find(':') {
+        if separator == 0 {
+            return Err("selector namespace is empty".to_string());
+        }
+        if separator == raw.len() - 1 {
+            return Err("selector value is empty".to_string());
+        }
+        return Ok(SelectorTerm {
+            namespace: Some(raw[..separator].to_ascii_lowercase()),
+            value: raw[separator + 1..].to_string(),
+        });
+    }
+    Ok(SelectorTerm {
+        namespace: None,
+        value: raw,
+    })
+}
+
+fn selector_client_matches_term(client: &SelectorClient, term: &SelectorTerm) -> bool {
+    match term.namespace.as_deref() {
+        Some("id") => selector_value_matches(&client.id, &term.value, false),
+        Some("name") => selector_value_matches(&client.display_name, &term.value, false),
+        Some("tag") => client
+            .tags
+            .iter()
+            .any(|tag| selector_value_matches(tag, &term.value, false)),
+        Some("provider") => client
+            .tags
+            .iter()
+            .any(|tag| selector_value_matches(tag, &format!("provider:{}", term.value), false)),
+        Some("country") | Some("region") => client
+            .tags
+            .iter()
+            .any(|tag| selector_value_matches(tag, &format!("country:{}", term.value), false)),
+        Some("status") => selector_value_matches(&client.status, &term.value, false),
+        Some(_) => false,
+        None => {
+            selector_value_matches(&client.id, &term.value, true)
+                || selector_value_matches(&client.display_name, &term.value, true)
+        }
+    }
+}
+
+fn selector_value_matches(value: &str, pattern: &str, allow_contains: bool) -> bool {
+    let value = value.to_ascii_lowercase();
+    let pattern = pattern.to_ascii_lowercase();
+    if pattern.contains('*') || pattern.contains('?') {
+        selector_glob_matches(&value, &pattern)
+    } else if allow_contains {
+        value.contains(&pattern)
+    } else {
+        value == pattern
+    }
+}
+
+fn selector_glob_matches(value: &str, pattern: &str) -> bool {
+    let value = value.as_bytes();
+    let pattern = pattern.as_bytes();
+    let mut value_index = 0;
+    let mut pattern_index = 0;
+    let mut star_index: Option<usize> = None;
+    let mut star_value_index = 0;
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            value_index += 1;
+            pattern_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_value_index = value_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            star_value_index += 1;
+            value_index = star_value_index;
+        } else {
+            return false;
+        }
+    }
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 #[cfg(test)]
@@ -725,9 +1749,9 @@ mod schedule_tests {
             actor_id: None,
             name: "test".to_string(),
             operation: serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
-            target_clients: Vec::new(),
-            target_tags: vec!["edge".to_string()],
-            interval_secs: 60,
+            selector_expression: "tag:edge".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            next_run_at_unix: 1_800_000_000,
             catch_up_policy: policy.to_string(),
             catch_up_limit: limit,
             retry_delay_secs: 300,
@@ -762,8 +1786,44 @@ mod schedule_tests {
     }
 
     #[test]
+    fn schedule_cron_catch_up_counts_missed_runs() {
+        let schedule = schedule_with_policy("run_all_limited", 4);
+        let now = date_time_from_unix(schedule.next_run_at_unix + 180).unwrap();
+        assert_eq!(calculate_due_occurrences(&schedule, now).unwrap(), 4);
+    }
+
+    #[test]
+    fn schedule_cron_next_run_advances_from_policy_cursor() {
+        let mut schedule = schedule_with_policy("run_once", 1);
+        let now = date_time_from_unix(schedule.next_run_at_unix + 3600).unwrap();
+        assert_eq!(
+            next_run_after_success(&schedule, 1, now)
+                .unwrap()
+                .timestamp(),
+            schedule.next_run_at_unix + 60
+        );
+
+        schedule.catch_up_policy = "skip_missed".to_string();
+        assert!(next_run_after_success(&schedule, 1, now).unwrap() > now);
+    }
+
+    #[test]
     fn schedule_error_is_bounded() {
         let error = "x".repeat(1200);
         assert_eq!(truncate_schedule_error(&error).len(), 1024);
+    }
+
+    #[test]
+    fn schedule_selector_expression_matches_clients() {
+        let expression = parse_selector_expression("provider:alpha && (country:US || id:edge-b)")
+            .unwrap()
+            .unwrap();
+        let client = SelectorClient {
+            id: "edge-a".to_string(),
+            display_name: "edge-a".to_string(),
+            status: "online".to_string(),
+            tags: vec!["provider:alpha".to_string(), "country:US".to_string()],
+        };
+        assert!(selector_client_matches(&client, &expression));
     }
 }

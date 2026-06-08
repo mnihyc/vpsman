@@ -79,10 +79,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 token,
                 commands_enrollment::EnrollmentTokenCreateOptions {
                     ttl_secs: command.ttl_secs,
-                    purpose: command.purpose,
-                    allowed_client_id: command.allowed_client_id,
-                    confirmed_reenrollment: command.confirmed_reenrollment,
-                    preserve_existing_assignments: command.preserve_existing_assignments,
                     default_tags: command.default_tags,
                     default_display_name: command.default_display_name,
                     unmanaged_update_enabled: command.unmanaged_update_enabled,
@@ -134,15 +130,10 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_enrollment::key_lifecycle_report(api_url, token)?;
             Ok(None)
         }
-        Command::SuperPasswordRotations(command) => {
-            commands_auth::super_password_rotations(api_url, token, command.limit)?;
-            Ok(None)
-        }
         Command::EnrollClaim(command) => {
             commands_enrollment::enroll_claim(
                 api_url,
                 command.token,
-                command.client_id,
                 command.client_public_key_hex,
             )?;
             Ok(None)
@@ -151,9 +142,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_enrollment::enroll_config(
                 api_url,
                 command.token,
-                command.client_id,
-                command.password_env,
-                command.super_salt_hex,
                 command.command_timeout_secs,
                 command.output_file,
             )?;
@@ -473,9 +461,10 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.client_id,
                 command.password_env,
                 command.super_salt_hex,
-                command.proof_ttl_secs,
+                command.privilege_ttl_secs,
                 command.timeout_secs,
                 command.confirmed,
+                command.force_unprivileged,
             )?;
             Ok(None)
         }
@@ -494,14 +483,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             Ok(None)
         }
         Command::BulkResolve(command) => {
-            commands_inventory::bulk_resolve(
-                api_url,
-                token,
-                command.clients,
-                command.tags,
-                command.destructive,
-                command.confirmed,
-            )?;
+            commands_inventory::bulk_resolve(api_url, token, command.clients, command.tags)?;
             Ok(None)
         }
         Command::Schedules => {
@@ -518,8 +500,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.pty,
                 command.clients,
                 command.tags,
-                command.interval_secs,
-                command.start_at_unix,
+                command.cron_expr,
                 command.disabled,
                 command.catch_up_policy,
                 command.catch_up_limit,
@@ -528,18 +509,50 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::ScheduleDispatch(command) => {
-            commands_schedules::schedule_dispatch(
+        Command::ScheduleUpdate(command) => {
+            commands_schedules::schedule_update(
                 api_url,
                 token,
-                command.job_id,
-                command.password_env,
-                command.super_salt_hex,
-                command.proof_ttl_secs,
-                command.timeout_secs,
-                command.force_unprivileged,
-                command.confirmed,
+                command.schedule_id,
+                command.name,
+                command.command,
+                command.argv,
+                command.pty,
+                command.clients,
+                command.tags,
+                command.cron_expr,
+                command.disabled,
+                command.catch_up_policy,
+                command.catch_up_limit,
+                command.retry_delay_secs,
+                command.max_failures,
             )?;
+            Ok(None)
+        }
+        Command::ScheduleEnable(command) => {
+            commands_schedules::schedule_enable(api_url, token, command.schedule_id)?;
+            Ok(None)
+        }
+        Command::ScheduleDisable(command) => {
+            commands_schedules::schedule_disable(api_url, token, command.schedule_id)?;
+            Ok(None)
+        }
+        Command::ScheduleDefer(command) => {
+            commands_schedules::schedule_defer(
+                api_url,
+                token,
+                command.schedule_id,
+                command.deferred_until,
+                command.reason,
+            )?;
+            Ok(None)
+        }
+        Command::ScheduleApplyNow(command) => {
+            commands_schedules::schedule_apply_now(api_url, token, command.schedule_id)?;
+            Ok(None)
+        }
+        Command::ScheduleDelete(command) => {
+            commands_schedules::schedule_delete(api_url, token, command.schedule_id)?;
             Ok(None)
         }
         other => Ok(Some(other)),

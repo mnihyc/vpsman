@@ -1,4 +1,5 @@
 import { ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
+import { targetPreflightUnavailable } from "../bulkJobProgress";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type { AgentView } from "../types";
 import { formatVpsName, type VpsNameDisplayMode } from "../utils";
@@ -11,7 +12,7 @@ export type TargetImpactMode =
   | "root_network_mutation";
 
 type TargetImpactGroup = {
-  key: "ready" | "degraded" | "forced" | "observation_only" | "unsupported";
+  key: "ready" | "stale" | "degraded" | "forced" | "observation_only" | "unavailable" | "unsupported";
   label: string;
   agents: AgentView[];
 };
@@ -19,23 +20,18 @@ type TargetImpactGroup = {
 export function TargetImpactPreview({
   emptyText = "Preview or select targets to classify capability impact",
   forceUnprivileged = false,
-  minCommandProtocolVersion = 1,
   mode,
   targets,
   title = "Target impact",
 }: {
   emptyText?: string;
   forceUnprivileged?: boolean;
-  minCommandProtocolVersion?: number;
   mode: TargetImpactMode;
   targets: AgentView[];
   title?: string;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const groups = buildTargetImpactGroups(targets, mode, forceUnprivileged);
-  const legacyProtocolTargets = targets.filter(
-    (target) => (target.capabilities.command_protocol_version ?? 1) < minCommandProtocolVersion,
-  );
   const attentionCount = groups
     .filter((group) => group.key !== "ready")
     .reduce((count, group) => count + group.agents.length, 0);
@@ -59,7 +55,7 @@ export function TargetImpactPreview({
                 <strong>{group.agents.length}</strong>
                 <span>{group.label}</span>
               </div>
-          <small>{formatAgentNames(group.agents, vpsNameDisplayMode)}</small>
+              <TargetImpactChips agents={group.agents} mode={vpsNameDisplayMode} />
             </div>
           ))}
         </div>
@@ -67,14 +63,8 @@ export function TargetImpactPreview({
       {attentionCount > 0 && (
         <p className="targetImpactHint">
           {forceUnprivileged
-            ? "Forced targets will be dispatched as proof-gated best effort."
-            : "Degraded, observation-only, and unsupported targets need operator review before dispatch."}
-        </p>
-      )}
-      {legacyProtocolTargets.length > 0 && (
-        <p className="targetImpactHint">
-          {legacyProtocolTargets.length} target{legacyProtocolTargets.length === 1 ? "" : "s"} need command protocol{" "}
-          {minCommandProtocolVersion}+ before this operation will run.
+            ? "Forced targets will be dispatched as privilege-unlocked best effort."
+            : "Non-ready targets selected."}
         </p>
       )}
     </section>
@@ -90,7 +80,7 @@ export function targetImpactModeForDispatch(mode: string): TargetImpactMode {
   ) {
     return "agent_update";
   }
-  if (mode === "auth_rotate" || mode === "hot_config" || mode === "backup") {
+  if (mode === "hot_config" || mode === "backup") {
     return "agent_update";
   }
   return "generic";
@@ -111,6 +101,8 @@ function buildTargetImpactGroups(
     forced: [],
     observation_only: [],
     ready: [],
+    stale: [],
+    unavailable: [],
     unsupported: [],
   };
   for (const target of targets) {
@@ -123,6 +115,8 @@ function buildTargetImpactGroups(
   }
   return [
     { key: "ready", label: "Ready", agents: groups.ready },
+    { key: "stale", label: "Stale", agents: groups.stale },
+    { key: "unavailable", label: "Unavailable", agents: groups.unavailable },
     { key: "degraded", label: "Would degrade", agents: groups.degraded },
     { key: "forced", label: "Forced best effort", agents: groups.forced },
     { key: "observation_only", label: "Observation only", agents: groups.observation_only },
@@ -131,6 +125,12 @@ function buildTargetImpactGroups(
 }
 
 function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpactGroup["key"] {
+  if (targetPreflightUnavailable(target)) {
+    return "unavailable";
+  }
+  if (target.status === "stale") {
+    return "stale";
+  }
   if (mode === "generic") {
     return target.capabilities.privilege_mode === "unknown" ? "observation_only" : "ready";
   }
@@ -158,20 +158,33 @@ function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpact
       : "unsupported";
 }
 
-function formatAgentNames(agents: AgentView[], mode: VpsNameDisplayMode): string {
+function TargetImpactChips({ agents, mode }: { agents: AgentView[]; mode: VpsNameDisplayMode }) {
   if (agents.length === 0) {
-    return "No targets";
+    return <small>No targets</small>;
   }
-  const visible = agents.slice(0, 3).map((agent) => formatVpsName(agent, mode));
+  const visible = agents.slice(0, 4);
   const remaining = agents.length - visible.length;
-  return remaining > 0 ? `${visible.join(", ")} +${remaining}` : visible.join(", ");
+  return (
+    <div className="targetChipList impactTargetChips">
+      {visible.map((agent) => (
+        <span className="targetChip" key={agent.id} title={agent.id}>
+          {formatVpsName(agent, mode)}
+        </span>
+      ))}
+      {remaining > 0 && (
+        <span className="targetChip mutedChip" title={agents.slice(visible.length).map((agent) => agent.id).join("\n")}>
+          +{remaining} more
+        </span>
+      )}
+    </div>
+  );
 }
 
 function impactIcon(key: TargetImpactGroup["key"]) {
   if (key === "ready") {
     return <ShieldCheck size={16} />;
   }
-  if (key === "observation_only") {
+  if (key === "observation_only" || key === "unavailable") {
     return <ShieldQuestion size={16} />;
   }
   return <ShieldAlert size={16} />;

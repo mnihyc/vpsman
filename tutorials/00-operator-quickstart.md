@@ -40,7 +40,7 @@ cargo run -p vpsctl -- login --username admin --password-env VPSMAN_OPERATOR_PAS
 export VPSMAN_API_TOKEN=<operator_token>
 ```
 
-Keep privileged proof material local:
+Keep privilege unlock material local:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
@@ -48,7 +48,9 @@ export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
 ```
 
 The API token authenticates the operator. The super password and salt are used
-locally to build scoped proofs for privileged work.
+locally to build request-bound privilege assertions. The API forwards those
+assertions to the private gateway for verification and never receives the
+plaintext super password.
 
 ## 3. Enroll One VPS
 
@@ -56,18 +58,19 @@ Create an enrollment token:
 
 ```sh
 cargo run -p vpsctl -- enrollment-token-create \
-  --allowed-client-id edge-01 \
+  --default-display-name edge-01 \
   --default-tags edge \
-  --ttl-secs 3600 \
-  --purpose provision
+  --ttl-secs 3600
 ```
 
-Install the agent on the VPS using the enrollment token and the gateway
-endpoint from `02-enroll-agents.md`. After it connects:
+Install the agent on the VPS using the one-line installer from
+`02-enroll-agents.md` or the Access panel. After it connects, copy the assigned
+client ID from `agents`:
 
 ```sh
 cargo run -p vpsctl -- agents
 cargo run -p vpsctl -- gateway-sessions
+export EDGE_CLIENT_ID=<assigned_client_id>
 ```
 
 ## 4. Organize And Inspect
@@ -76,9 +79,9 @@ cargo run -p vpsctl -- gateway-sessions
 cargo run -p vpsctl -- tag-create --name edge
 cargo run -p vpsctl -- tag-create --name provider:provider-a
 cargo run -p vpsctl -- tag-create --name region:sfo
-cargo run -p vpsctl -- agent-tag --client-id edge-01 --tag edge
-cargo run -p vpsctl -- agent-tag --client-id edge-01 --tag provider:provider-a
-cargo run -p vpsctl -- agent-tag --client-id edge-01 --tag region:sfo
+cargo run -p vpsctl -- agent-tag --client-id "$EDGE_CLIENT_ID" --tag edge
+cargo run -p vpsctl -- agent-tag --client-id "$EDGE_CLIENT_ID" --tag provider:provider-a
+cargo run -p vpsctl -- agent-tag --client-id "$EDGE_CLIENT_ID" --tag region:sfo
 cargo run -p vpsctl -- summary
 cargo run -p vpsctl -- fleet-alerts
 ```
@@ -90,10 +93,10 @@ targets before bulk work:
 cargo run -p vpsctl -- bulk-resolve --tags edge,provider:provider-a,region:sfo
 ```
 
-## 5. Run A Proof-Gated Command
+## 5. Run A Privileged Command
 
 ```sh
-cargo run -p vpsctl -- job-create --command uptime --clients edge-01 --confirmed
+cargo run -p vpsctl -- job-create --command uptime --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- jobs --limit 10
 cargo run -p vpsctl -- job-follow <job_uuid> --max-polls 60
 ```
@@ -101,17 +104,17 @@ cargo run -p vpsctl -- job-follow <job_uuid> --max-polls 60
 For interactive work:
 
 ```sh
-cargo run -p vpsctl -- terminal-open --argv /bin/sh --clients edge-01 --confirmed
+cargo run -p vpsctl -- terminal-open --argv /bin/sh --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- terminal-input \
   --session-id <session_uuid> \
   --input-seq 1 \
   --text "uname -a\n" \
-  --clients edge-01 \
+  --clients "$EDGE_CLIENT_ID" \
   --confirmed
 cargo run -p vpsctl -- terminal-poll \
   --session-id <session_uuid> \
   --replay-from-seq 1 \
-  --clients edge-01 \
+  --clients "$EDGE_CLIENT_ID" \
   --confirmed
 ```
 
@@ -121,8 +124,8 @@ Use presets instead of editing hardcoded commands per VPS:
 
 ```sh
 cargo run -p vpsctl -- data-source-presets --domain telemetry_metrics_source
-cargo run -p vpsctl -- data-source-status --client-id edge-01
-cargo run -p vpsctl -- data-source-hot-config --client-id edge-01 --format toml
+cargo run -p vpsctl -- data-source-status --client-id "$EDGE_CLIENT_ID"
+cargo run -p vpsctl -- data-source-hot-config --client-id "$EDGE_CLIENT_ID" --format toml
 ```
 
 Assign shared presets to tags or explicit clients, and reserve VPS-local presets
@@ -131,8 +134,8 @@ for machine-specific custom commands.
 ## 7. Back Up And Restore
 
 ```sh
-cargo run -p vpsctl -- backup-request --client-id edge-01 --paths /etc/hostname --confirmed
-cargo run -p vpsctl -- backup-run --paths /etc/hostname --clients edge-01 --confirmed
+cargo run -p vpsctl -- backup-request --client-id "$EDGE_CLIENT_ID" --paths /etc/hostname --confirmed
+cargo run -p vpsctl -- backup-run --paths /etc/hostname --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- backup-artifacts
 ```
 
@@ -141,7 +144,7 @@ Create a restore plan before changing a rebuilt VPS:
 ```sh
 cargo run -p vpsctl -- restore-plan \
   --source-backup-request-id <backup_request_uuid> \
-  --target-client-id edge-01 \
+  --target-client-id "$EDGE_CLIENT_ID" \
   --paths /etc/hostname \
   --destination-root /restore \
   --confirmed
@@ -162,7 +165,7 @@ Use this loop while managing 20+ VPSs:
 
 1. Inspect `summary`, `agents`, `fleet-alerts`, and `gateway-sessions`.
 2. Resolve exact targets with `bulk-resolve`.
-3. Dispatch through panel, CLI, or VTY with confirmation and local proof.
+3. Dispatch through panel, CLI, or VTY with confirmation and local privilege unlock.
 4. Observe `jobs`, `job-targets`, `job-outputs`, and alerts.
 5. Recover with rollback commands, re-enrollment tokens, or data-source preset
    changes instead of manual per-host edits.

@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::SigningKey;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -14,9 +14,8 @@ use tokio::{
 };
 use uuid::Uuid;
 use vpsman_common::{
-    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_proof, AgentHello,
-    CommandEnvelope, CommandOutput, GatewayCommandDispatch, GatewayCommandDispatchResult,
-    JobCommand, OutputStream,
+    encode_json, payload_hash, AgentHello, CommandEnvelope, CommandOutput, GatewayCommandDispatch,
+    GatewayCommandDispatchResult, JobCommand, OutputStream,
 };
 
 use crate::{
@@ -26,9 +25,8 @@ use crate::{
         AuthContext, BackupArtifactHandoffRequest, BackupArtifactUploadChunkRequest,
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
         BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
-        CreateBackupRequest, CreateJobRequest, DispatchScheduledJobRequest, JobHistoryView,
-        JobOutputView, JobTargetView, OperatorView, RecordBackupArtifactMetadataRequest,
-        ScheduledJobDispatchRecord, UploadBackupArtifactRequest,
+        CreateBackupRequest, CreateJobRequest, JobHistoryView, JobOutputView, JobTargetView,
+        OperatorView, RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest,
     },
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
@@ -43,7 +41,7 @@ use crate::{
         validate_backup_artifact_metadata_request, validate_create_backup_policy_request,
         validate_create_backup_request,
     },
-    routes_jobs::{create_job, dispatch_scheduled_job},
+    routes_jobs::create_job,
     state::{AppState, EnrollmentSettings},
     unix_now,
 };
@@ -59,7 +57,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_backup_request(&missing_scope)
@@ -75,7 +73,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_backup_request(&relative_path)
@@ -91,7 +89,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         recipient_public_key_hex: None,
         confirmed: false,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_backup_request(&unconfirmed)
@@ -112,8 +110,8 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
         retention_days: Some(30),
         keep_last: Some(7),
         rotation_generation: Some("keyring/v2".to_string()),
-        interval_secs: 3600,
-        start_at_unix: None,
+        cron_expr: "0 3 * * *".to_string(),
+        timezone: "UTC".to_string(),
         enabled: true,
         catch_up_policy: "skip_missed".to_string(),
         catch_up_limit: 1,
@@ -262,10 +260,9 @@ async fn backup_job_dispatch_requires_confirmation() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let error = create_job(
@@ -294,7 +291,8 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     state.gateway =
-        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
+        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
+            .with_test_privilege_auto_approve();
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[31_u8; 32])));
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
@@ -312,14 +310,9 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(command_envelope_for_job(
-            Uuid::new_v4(),
-            "client-a",
-            &operation,
-        )),
-        envelopes: HashMap::new(),
     };
 
     let (status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(request))
@@ -382,7 +375,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("operator-requested".to_string()),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
     let (_, Json(manual_backup)) =
         create_backup_request(State(request_state), HeaderMap::new(), Json(manual_request))
@@ -397,7 +390,8 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         spawn_backup_gateway_once(encrypted_artifact_bytes("client-a")).await;
     let mut state = test_state(repo.clone());
     state.gateway =
-        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
+        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
+            .with_test_privilege_auto_approve();
     state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[33_u8; 32])));
     let job_request = CreateJobRequest {
         selector_expression: "id:client-a".to_string(),
@@ -410,14 +404,9 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(command_envelope_for_job(
-            Uuid::new_v4(),
-            "client-a",
-            &operation,
-        )),
-        envelopes: HashMap::new(),
     };
 
     let (_status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(job_request))
@@ -434,105 +423,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
 }
 
 #[tokio::test]
-async fn scheduled_backup_dispatch_auto_records_request_and_object_artifact() {
-    let repo = Repository::Memory(MemoryState::default());
-    seed_backup_agent(&repo).await;
-    let memory = match &repo {
-        Repository::Memory(memory) => memory.clone(),
-        Repository::Postgres(_) => unreachable!("test uses memory repository"),
-    };
-    let job_id = Uuid::new_v4();
-    let operation = JobCommand::Backup {
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: true,
-        recipient_public_key_hex: Some("d".repeat(64)),
-    };
-    let payload = encode_json(&operation).unwrap();
-    let command_hash = payload_hash(&payload);
-    memory.jobs.write().await.push(JobHistoryView {
-        id: job_id,
-        actor_id: Some(Uuid::nil()),
-        command_type: "scheduled_backup".to_string(),
-        privileged: true,
-        status: "approval_required".to_string(),
-        target_count: 1,
-        payload_hash: command_hash.clone(),
-        created_at: unix_now().to_string(),
-        completed_at: None,
-    });
-    memory.job_targets.write().await.push(JobTargetView {
-        job_id,
-        client_id: "client-a".to_string(),
-        status: "approval_required".to_string(),
-        exit_code: None,
-        started_at: None,
-        completed_at: None,
-    });
-    memory.scheduled_jobs.write().await.insert(
-        job_id,
-        ScheduledJobDispatchRecord {
-            job_id,
-            source_schedule_id: Some(Uuid::new_v4()),
-            actor_id: Some(Uuid::nil()),
-            command_type: "scheduled_backup".to_string(),
-            operation: operation.clone(),
-            payload_hash: command_hash.clone(),
-            targets: vec!["client-a".to_string()],
-        },
-    );
-    let object_root = std::env::temp_dir().join(format!(
-        "vpsman-api-scheduled-backup-auto-record-{}",
-        Uuid::new_v4()
-    ));
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
-    let (gateway_url, gateway_task) = spawn_backup_gateway_once(artifact_bytes.clone()).await;
-    let mut state = test_state_with_store(
-        repo.clone(),
-        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
-    );
-    state.gateway =
-        GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()));
-    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[32_u8; 32])));
-    let request = DispatchScheduledJobRequest {
-        confirmed: true,
-        timeout_secs: Some(30),
-        force_unprivileged: false,
-        envelope: Some(command_envelope_for_job(job_id, "client-a", &operation)),
-        envelopes: HashMap::new(),
-    };
-
-    let (status, Json(response)) =
-        dispatch_scheduled_job(State(state), HeaderMap::new(), Path(job_id), Json(request))
-            .await
-            .unwrap();
-    let dispatch = gateway_task.await.unwrap();
-    let backups = repo.list_backup_requests(10).await.unwrap();
-    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
-
-    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.status, "completed");
-    assert_eq!(dispatch.client_id, "client-a");
-    assert_eq!(
-        encode_json(&dispatch.request.command).unwrap(),
-        encode_json(&operation).unwrap()
-    );
-    assert_eq!(backups.len(), 1);
-    assert_eq!(backups[0].payload_hash, command_hash);
-    assert_eq!(backups[0].status, "artifact_metadata_recorded");
-    assert_eq!(backups[0].artifact_id, Some(artifacts[0].id));
-    assert_eq!(artifacts[0].sha256_hex, payload_hash(&artifact_bytes));
-    assert_eq!(
-        tokio::fs::read(object_root.join(&artifacts[0].object_key))
-            .await
-            .unwrap(),
-        artifact_bytes
-    );
-
-    let _ = tokio::fs::remove_dir_all(object_root).await;
-}
-
-#[tokio::test]
-async fn backup_request_records_metadata_and_audit_after_proof_envelope() {
+async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -543,6 +434,7 @@ async fn backup_request_records_metadata_and_audit_after_proof_envelope() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -556,7 +448,7 @@ async fn backup_request_records_metadata_and_audit_after_proof_envelope() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
 
     let (status, Json(view)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
@@ -570,9 +462,9 @@ async fn backup_request_records_metadata_and_audit_after_proof_envelope() {
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
     assert_eq!(view.status, "requested_metadata_only");
-    assert_eq!(view.proof_scope, "client:client-a");
-    assert!(view.proof_command_id.is_some());
-    assert!(view.proof_expires_unix.is_some());
+    assert_eq!(view.signed_command_scope, "client:client-a");
+    assert!(view.signed_command_id.is_some());
+    assert!(view.signed_command_expires_unix.is_none());
     assert!(view.artifact_id.is_none());
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].id, view.id);
@@ -598,8 +490,8 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         retention_days: Some(45),
         keep_last: Some(12),
         rotation_generation: Some("keyring/v2".to_string()),
-        interval_secs: 3600,
-        start_at_unix: Some(unix_now()),
+        cron_expr: "0 3 * * *".to_string(),
+        timezone: "UTC".to_string(),
         enabled: true,
         catch_up_policy: "run_once".to_string(),
         catch_up_limit: 1,
@@ -630,6 +522,9 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert_eq!(view.retention_days, 45);
     assert_eq!(view.keep_last, 12);
     assert_eq!(view.rotation_generation.as_deref(), Some("keyring/v2"));
+    assert_eq!(view.cron_expr, "0 3 * * *");
+    assert_eq!(view.timezone, "UTC");
+    assert_eq!(view.next_runs.len(), 5);
     assert_eq!(policies.len(), 1);
     assert_eq!(policies[0].schedule_id, view.schedule_id);
     assert_eq!(schedules.len(), 1);
@@ -668,8 +563,8 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
-            interval_secs: 3600,
-            start_at_unix: Some(unix_now()),
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
             enabled: true,
             catch_up_policy: "skip_missed".to_string(),
             catch_up_limit: 1,
@@ -777,6 +672,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -790,7 +686,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
     let (_, Json(backup)) =
         create_backup_request(State(state.clone()), HeaderMap::new(), Json(request))
@@ -1197,6 +1093,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
             status: "completed".to_string(),
+            message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
             completed_at: Some(unix_now().to_string()),
@@ -1287,6 +1184,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
             status: "completed".to_string(),
+            message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
             completed_at: Some(unix_now().to_string()),
@@ -1383,7 +1281,7 @@ async fn backup_artifact_handoff_requires_confirmation_and_source() {
 }
 
 #[tokio::test]
-async fn backup_request_rejects_missing_or_mismatched_proof_envelope() {
+async fn backup_request_requires_privilege_gateway_verification() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -1394,6 +1292,7 @@ async fn backup_request_rejects_missing_or_mismatched_proof_envelope() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -1406,76 +1305,17 @@ async fn backup_request_rejects_missing_or_mismatched_proof_envelope() {
         recipient_public_key_hex: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     let missing_error = create_backup_request(
-        State(test_state(repo.clone())),
+        State(test_state_without_privilege(repo)),
         HeaderMap::new(),
         Json(missing),
     )
     .await
     .unwrap_err();
-    assert_eq!(missing_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(missing_error.code, "backup_proof_required");
-
-    let mut mismatched_envelope = backup_envelope("client-a", &["/etc/issue"], false);
-    mismatched_envelope.scope = "client:client-a".to_string();
-    let mismatched = CreateBackupRequest {
-        client_id: "client-a".to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: false,
-        recipient_public_key_hex: None,
-        confirmed: true,
-        note: None,
-        envelope: Some(mismatched_envelope),
-    };
-    let mismatched_error = create_backup_request(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(mismatched),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(mismatched_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(mismatched_error.code, "invalid_backup_proof_envelope");
-    let rejected_audits = repo.list_audit_logs(10).await.unwrap();
-    assert_eq!(rejected_audits.len(), 2);
-    assert!(rejected_audits
-        .iter()
-        .all(|audit| audit.action == "backup.rejected_authorization_required"));
-
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "client-a".to_string(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-    let mut expired_envelope = backup_envelope("client-a", &["/etc/hostname"], false);
-    expired_envelope.proof.as_mut().unwrap().expires_unix = unix_now().saturating_sub(1);
-    let expired = CreateBackupRequest {
-        client_id: "client-a".to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: false,
-        recipient_public_key_hex: None,
-        confirmed: true,
-        note: None,
-        envelope: Some(expired_envelope),
-    };
-    let expired_error =
-        create_backup_request(State(test_state(repo)), HeaderMap::new(), Json(expired))
-            .await
-            .unwrap_err();
-    assert_eq!(expired_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(expired_error.code, "invalid_backup_proof_envelope");
+    assert_eq!(missing_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(missing_error.code, "gateway_control_url_missing");
 }
 
 fn test_state(repo: Repository) -> AppState {
@@ -1484,7 +1324,7 @@ fn test_state(repo: Repository) -> AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
         enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
@@ -1494,6 +1334,13 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+    }
+}
+
+fn test_state_without_privilege(repo: Repository) -> AppState {
+    AppState {
+        gateway: GatewayDispatchClient::default(),
+        ..test_state(repo)
     }
 }
 
@@ -1516,6 +1363,7 @@ async fn seed_backup_agent(repo: &Repository) {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -1534,7 +1382,7 @@ async fn create_test_backup_request(
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
     let (_, Json(backup)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
         .await
@@ -1558,13 +1406,30 @@ async fn seed_policy_backup_artifact(
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some(format!("policy artifact {label}")),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
-    let envelope = request.envelope.clone().unwrap();
+    let command = JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        recipient_public_key_hex: request
+            .recipient_public_key_hex
+            .clone()
+            .map(|value| value.to_ascii_lowercase()),
+    };
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let now = unix_now();
+    let envelope = CommandEnvelope {
+        command_id: Uuid::new_v4(),
+        scope: format!("client:{}", request.client_id),
+        payload_hash_hex: command_hash.clone(),
+        signed_unix: now,
+        expires_unix: now.saturating_add(300),
+        server_signature: Vec::new(),
+    };
     let backup = repo
         .record_backup_request_with_source(
             &request,
-            &envelope.payload_hash_hex,
+            &command_hash,
             &envelope,
             &operator,
             BackupRequestStatus::RequestedMetadataOnly,
@@ -1654,40 +1519,6 @@ fn encrypted_artifact_bytes_with_ciphertext(client_id: &str, ciphertext: &[u8]) 
     .unwrap()
 }
 
-fn backup_envelope(client_id: &str, paths: &[&str], include_config: bool) -> CommandEnvelope {
-    let command = JobCommand::Backup {
-        paths: paths.iter().map(|path| (*path).to_string()).collect(),
-        include_config,
-        recipient_public_key_hex: None,
-    };
-    command_envelope_for_job(Uuid::new_v4(), client_id, &command)
-}
-
-fn command_envelope_for_job(
-    command_id: Uuid,
-    client_id: &str,
-    command: &JobCommand,
-) -> CommandEnvelope {
-    let payload_hash_hex = payload_hash(&encode_json(&command).unwrap());
-    let scope = format!("client:{client_id}");
-    let super_key = derive_super_key("correct horse", b"backup-test");
-    let proof = sign_privilege_proof(
-        &super_key,
-        command_id,
-        &scope,
-        &payload_hash_hex,
-        &random_nonce(),
-        unix_now() + 60,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex,
-        proof: Some(proof),
-        server_signature: Vec::new(),
-    }
-}
-
 async fn spawn_backup_gateway_once(
     artifact_bytes: Vec<u8>,
 ) -> (String, tokio::task::JoinHandle<GatewayCommandDispatch>) {
@@ -1708,6 +1539,7 @@ async fn spawn_backup_gateway_once(
         let body = serde_json::to_vec(&GatewayCommandDispatchResult {
             client_id: dispatch.client_id.clone(),
             job_id: dispatch.request.job_id,
+            command_version: 1,
             accepted: true,
             message: "ok".to_string(),
             outputs: vec![

@@ -149,6 +149,7 @@ async fn promote_telemetry_tunnel_rejects_non_import_candidate() {
 async fn seed_tunnel_telemetry(repo: &Repository, tunnel: RuntimeTunnelStat) {
     repo.record_telemetry(&GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
+        remote_ip: None,
         telemetry: TelemetryEnvelope {
             client_id: "left-a".to_string(),
             metrics: AgentMetrics {

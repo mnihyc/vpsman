@@ -12,7 +12,7 @@ export VPSMAN_API_URL=https://panel.example.com
 export VPSMAN_API_TOKEN=<operator_token>
 ```
 
-Set local privileged proof material only when dispatching privileged work:
+Set local privilege unlock material only when dispatching privileged work:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
@@ -37,7 +37,6 @@ cargo run -p vpsctl -- --output json agents
 cargo run -p vpsctl -- --output json jobs --limit 20
 cargo run -p vpsctl -- --output json terminal-sessions --limit 20
 cargo run -p vpsctl -- --output json file-transfers --limit 20
-cargo run -p vpsctl -- --output json super-password-rotations --limit 20
 cargo run -p vpsctl -- --output pretty-json tunnel-plan --name edge-a-b --interface-name gre-ab --kind gre --left-client-id edge-a --right-client-id edge-b --left-underlay 203.0.113.10 --right-underlay 203.0.113.20 --address-pool-cidr 10.255.0.0/30 --bandwidth 100m --latency-ms 20
 ```
 
@@ -72,14 +71,14 @@ disable
 quit
 ```
 
-`enable` validates local proof material. It does not send the plaintext super
-password to the API. `show privilege` confirms whether local proof material is
+`enable` loads local privilege material. It does not send the plaintext super
+password to the API. `show privilege` confirms whether local unlock material is
 loaded without printing the password or salt. `show capabilities` lists
-read-only, proof-gated, root-sensitive, and `--force-unprivileged` command
+read-only, privilege-gated, root-sensitive, and `--force-unprivileged` command
 families. `show degraded-policy` explains how normal-user agents report
 `degraded_unprivileged` by default and when best-effort forced execution is
-explicitly available. `disable` clears local proof material for the current VTY
-session and returns the prompt to `vpsman>`.
+explicitly available. `disable` clears local privilege material for the current
+VTY session and returns the prompt to `vpsman>`.
 
 ## Useful VTY Commands
 
@@ -87,7 +86,6 @@ session and returns the prompt to `vpsman>`.
 enrollment-tokens
 reenrollment-token-create --client-id edge-01 --confirmed
 key-lifecycle-report
-super-password-rotations --limit 20
 client-key-revocations
 client-key-revoke --client-id edge-01 --reason rebuilt --confirmed
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action mute --muted-for-secs 14400 --reason maintenance --confirmed
@@ -116,8 +114,8 @@ agent-update-release-latest --name vpsman-agent --channel stable
 agent-update-artifact-upload --name vpsman-agent --version 0.1.1 --artifact-file ./target/vpsman-agent --signing-seed-hex <seed> --rollback-artifact-file ./target/vpsman-agent.previous --stream --confirmed
 agent-update-rollout-control --rollout-id <uuid> --pause --pause-reason maintenance --confirmed
 agent-update-rollout-control --rollout-id <uuid> --resume --health-gate heartbeat_verified --confirmed
-agent-update-rollout-delegate-activation --rollout-id <uuid> --proof-ttl-secs 3600 --restart-agent --force-unprivileged --confirmed
-agent-update-rollout-delegate-rollback --rollout-id <uuid> --proof-ttl-secs 3600 --force-unprivileged --confirmed
+agent-update-rollout-activate --rollout-id <uuid> --batch-size 2 --restart-agent --confirmed
+agent-update-rollout-rollback --rollout-id <uuid> --confirmed
 ```
 
 ## Headless Operating Pattern
@@ -125,26 +123,18 @@ agent-update-rollout-delegate-rollback --rollout-id <uuid> --proof-ttl-secs 3600
 1. Inspect: `summary`, `agents`, `fleet-alerts`, `gateway-sessions`.
 2. Resolve targets: `bulk-resolve`, inner `id:<client_id>` or
    `name:<display_name>` selectors, explicit `tag:<name>`, or bare tag names.
-3. Dispatch: proof-gated command with confirmation for destructive work.
+3. Dispatch: privilege-gated command with confirmation for destructive work.
 4. Observe: `jobs`, `job-targets`, `job-outputs`, `job-follow`.
 5. Recover: `job-cancel`, `restore-rollback`, `agent-update-rollback`, or
    `tunnel-rollback` as appropriate.
 
 For rollout control, use `agent-update-rollout-control` in normal VTY mode
-because it updates server-side metadata only. Activation, immediate rollback,
-delegated activation, and delegated rollback proof creation still need
-privileged proof through `enable` or explicit CLI proof material. Delegated
-activation stores scoped proof envelopes for the exact rollout artifact and
-lets the API dispatch only when the worker recommends `operator_activate_batch`
-for a still-completed target. Delegated rollback stores only scoped proof
-envelopes and lets the API dispatch the frozen rollback command if the rollout
-target later becomes `heartbeat_timeout` or `activation_failed`.
-`agent-update-rollouts` includes delegation summary arrays with ready,
-dispatching, dispatched, expired, and failed counts plus proof expiry windows.
-Renew expired proofs by re-running the same delegate command with a fresh proof
-TTL. Use `--force-unprivileged` only for a known normal-user agent where the
-operator deliberately wants a best-effort activation or rollback attempt; the
-flag is dispatch policy, not a server-editable proof payload.
+because it updates server-side metadata only. Activation and rollback need
+privilege unlock through `enable` or explicit CLI unlock environment. The
+worker records recommendations and heartbeat timeout evidence; operators still
+submit the activation or rollback command that the private gateway verifies.
+Use `--force-unprivileged` only for a known normal-user agent where the
+operator deliberately wants a best-effort activation or rollback attempt.
 
 Headless notification delivery has two paths. Use
 `fleet-alert-notification-process` for an immediate reviewed run from CLI/VTY,

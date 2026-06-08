@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::state::UpdateReleasePolicy;
 use crate::*;
@@ -98,6 +98,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -122,10 +123,9 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let state = AppState {
         repo: repo.clone(),

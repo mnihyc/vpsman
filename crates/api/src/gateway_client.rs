@@ -7,13 +7,16 @@ use tokio::{
 };
 use vpsman_common::{
     GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
-    GatewayCommandDispatchResult, JobRequest,
+    GatewayCommandDispatchResult, GatewayPrivilegeVerification, GatewayPrivilegeVerificationResult,
+    JobRequest, PrivilegeAssertion,
 };
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GatewayDispatchClient {
     control_url: Option<String>,
     internal_token: Option<String>,
+    #[cfg(test)]
+    test_privilege_auto_approve: bool,
 }
 
 impl GatewayDispatchClient {
@@ -25,11 +28,46 @@ impl GatewayDispatchClient {
             internal_token: internal_token
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
+            #[cfg(test)]
+            test_privilege_auto_approve: false,
         }
     }
 
     pub(crate) fn configured(&self) -> bool {
         self.control_url.is_some()
+    }
+
+    pub(crate) fn privilege_configured(&self) -> bool {
+        self.control_url.is_some() || {
+            #[cfg(test)]
+            {
+                self.test_privilege_auto_approve
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_privilege_auto_approve() -> Self {
+        Self {
+            control_url: None,
+            internal_token: None,
+            test_privilege_auto_approve: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_privilege_auto_approve(mut self) -> Self {
+        self.test_privilege_auto_approve = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_privilege_auto_approves(&self) -> bool {
+        self.test_privilege_auto_approve
     }
 
     pub(crate) async fn dispatch(
@@ -70,6 +108,33 @@ impl GatewayDispatchClient {
                 job_id,
                 reason: reason.map(str::to_string),
             },
+            self.internal_token.as_deref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn verify_privilege(
+        &self,
+        intent: String,
+        assertion: PrivilegeAssertion,
+    ) -> Result<GatewayPrivilegeVerificationResult> {
+        #[cfg(test)]
+        if self.test_privilege_auto_approve {
+            let _ = (intent, assertion);
+            return Ok(GatewayPrivilegeVerificationResult {
+                approved: true,
+                intent_hash_hex: "test-auto-approved".to_string(),
+                message: "test privilege auto-approved".to_string(),
+            });
+        }
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/privilege/verify",
+            &GatewayPrivilegeVerification { intent, assertion },
             self.internal_token.as_deref(),
         )
         .await

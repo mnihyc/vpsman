@@ -160,12 +160,6 @@ pub(crate) async fn claim_enrollment(
         EnrollmentClaimOutcome::UsedToken => {
             Err(ApiError::conflict("enrollment_token_already_used"))
         }
-        EnrollmentClaimOutcome::ProvisionClientIdSupplied => Err(ApiError::bad_request(
-            "provision_enrollment_client_id_must_not_be_supplied",
-        )),
-        EnrollmentClaimOutcome::TokenClientMismatch => {
-            Err(ApiError::conflict("enrollment_token_client_mismatch"))
-        }
         EnrollmentClaimOutcome::ExistingClientRequiresReenrollmentToken => Err(ApiError::conflict(
             "existing_client_requires_reenrollment_token",
         )),
@@ -305,9 +299,6 @@ async fn validate_enrollment_token_policy(
 fn validate_claim_enrollment(request: &ClaimEnrollmentRequest) -> Result<(), ApiError> {
     if request.token.trim().is_empty() {
         return Err(ApiError::bad_request("enrollment_token_required"));
-    }
-    if let Some(client_id) = request.client_id.as_deref() {
-        validate_client_id(client_id)?;
     }
     if request.client_public_key_hex.len() != 64
         || !request

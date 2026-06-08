@@ -7,6 +7,8 @@ export function TerminalOperationControls({
   terminalCloseReason,
   terminalCols,
   terminalCwd,
+  terminalUser,
+  terminalUserPolicy,
   terminalFlowWindowBytes,
   terminalIdleTimeoutSecs,
   terminalInputSeq,
@@ -19,6 +21,8 @@ export function TerminalOperationControls({
   setTerminalCloseReason,
   setTerminalCols,
   setTerminalCwd,
+  setTerminalUser,
+  setTerminalUserPolicy,
   setTerminalFlowWindowBytes,
   setTerminalIdleTimeoutSecs,
   setTerminalInputSeq,
@@ -32,6 +36,8 @@ export function TerminalOperationControls({
   terminalCloseReason: string;
   terminalCols: number;
   terminalCwd: string;
+  terminalUser: string;
+  terminalUserPolicy: "fail" | "fallback";
   terminalFlowWindowBytes: number;
   terminalIdleTimeoutSecs: number;
   terminalInputSeq: number;
@@ -44,6 +50,8 @@ export function TerminalOperationControls({
   setTerminalCloseReason: (value: string) => void;
   setTerminalCols: (value: number) => void;
   setTerminalCwd: (value: string) => void;
+  setTerminalUser: (value: string) => void;
+  setTerminalUserPolicy: (value: "fail" | "fallback") => void;
   setTerminalFlowWindowBytes: (value: number) => void;
   setTerminalIdleTimeoutSecs: (value: number) => void;
   setTerminalInputSeq: (value: number) => void;
@@ -57,7 +65,7 @@ export function TerminalOperationControls({
       <TerminalSquare size={18} />
       <div>
         <strong>Terminal session</strong>
-        <span>Proof-gated open/input/poll/resize/close controls</span>
+        <span>Privilege-unlocked open/input/poll/resize/close controls</span>
       </div>
       <label>
         <span>Action</span>
@@ -100,6 +108,26 @@ export function TerminalOperationControls({
               placeholder="/root"
               value={terminalCwd}
             />
+          </label>
+          <label>
+            <span>User</span>
+            <input
+              aria-label="Terminal user"
+              onChange={(event) => setTerminalUser(event.target.value)}
+              placeholder="agent user"
+              value={terminalUser}
+            />
+          </label>
+          <label>
+            <span>User policy</span>
+            <select
+              aria-label="Terminal user policy"
+              onChange={(event) => setTerminalUserPolicy(event.target.value as "fail" | "fallback")}
+              value={terminalUserPolicy}
+            >
+              <option value="fail">fail</option>
+              <option value="fallback">fallback</option>
+            </select>
           </label>
           <label>
             <span>Idle secs</span>

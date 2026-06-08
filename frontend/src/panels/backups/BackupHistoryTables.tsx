@@ -128,6 +128,19 @@ function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
       cell: (policy) => `${policy.retention_days}d / ${policy.keep_last} kept`,
     },
     {
+      id: "cron",
+      header: "Cron",
+      size: 120,
+      sortValue: (policy) => policy.cron_expr,
+      searchValue: (policy) => `${policy.cron_expr} ${policy.timezone}`,
+      cell: (policy) => (
+        <span className="historyPrimary">
+          <strong>{policy.cron_expr}</strong>
+          <small>{policy.timezone}</small>
+        </span>
+      ),
+    },
+    {
       id: "nextRun",
       header: "Next run",
       size: 170,
@@ -164,6 +177,7 @@ function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
             <strong>{policy.name}</strong>
             <span>{policyScopeLabel(policy)}</span>
             <span>{policyTargetLabel(policy)}</span>
+            <span>{policy.cron_expr} UTC</span>
             <span>{policy.retention_days}d retention</span>
           </div>
         )}
@@ -498,7 +512,7 @@ function RestorePlansTable({
   return (
     <GridSection
       title="Restore plans"
-      summary="Proof-gated metadata plans, not executed restores"
+      summary="Privilege-unlocked metadata plans, not executed restores"
     >
       <ConsoleDataGrid
         actions={[

@@ -191,7 +191,7 @@ fn build_ospf_update_plan(
         status,
         confidence: recommendation.confidence.clone(),
         requires_approval: recommendation.cost_delta != 0,
-        proof_required: recommendation.cost_delta != 0,
+        privilege_required: recommendation.cost_delta != 0,
         mutation_mode: "reviewed_plan_only".to_string(),
         approval_scope: vec![
             format!("client:{}", recommendation.left_client_id),

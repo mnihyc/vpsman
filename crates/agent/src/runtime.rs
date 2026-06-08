@@ -8,19 +8,20 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
+#[cfg(test)]
+use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
-    decode_json, decode_noise_key_hex, encode_json, maybe_compress_payload, payload_hash,
-    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode,
-    CommandOutput, Frame, JobAck, JobCancelRequest, JobCommand, JobRequest, MessageKind,
-    NoiseFrameStream, OutputStream, PrivilegeReplayCache, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput, CURRENT_COMMAND_PROTOCOL_VERSION,
-    MIN_COMMAND_PROTOCOL_VERSION,
+    decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
+    job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
+    AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode, CommandOutput, Frame, JobAck,
+    JobCancelRequest, JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
+    PrivilegeReplayCache, ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
     backup::{execute_backup_command, BackupCommandInput},
     config_update::{
-        apply_data_source_config_patch, apply_hot_config_update, rotate_auth_proof_key,
+        apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
     },
     discovery::{endpoint_candidates, refresh_discovery_endpoints},
     executor::{authorize_job, execute_job_command_with_config_and_output_sink},
@@ -105,6 +106,7 @@ async fn connect_and_stream(
     let hello = AgentHello {
         client_id: config.client_id.clone(),
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        internal_build_number: crate::build_info::agent_build_number(),
         os_release: config
             .telemetry
             .os_release_file
@@ -124,7 +126,12 @@ async fn connect_and_stream(
     if !server_hello.accepted {
         anyhow::bail!("server rejected agent: {}", server_hello.message);
     }
-    info!(server_id = %server_hello.server_id, "gateway accepted agent");
+    info!(
+        server_id = %server_hello.server_id,
+        server_version = %server_hello.server_version,
+        server_build_number = server_hello.server_build_number,
+        "gateway accepted agent"
+    );
 
     let mut seq = 2_u64;
     let mut replay_cache = PrivilegeReplayCache::default();
@@ -353,7 +360,6 @@ fn agent_capabilities() -> AgentCapabilitySnapshot {
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
-        command_protocol_version: CURRENT_COMMAND_PROTOCOL_VERSION,
         unprivileged_hint: (!root).then(|| {
             "agent is not running as root; root-only network, update, restore, and limit operations may report ineffective or require forced best-effort mode".to_string()
         }),
@@ -493,11 +499,14 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let request: JobRequest = decode_json(&frame.decoded_payload()?)?;
     let request_payload_hash = command_payload_hash(&request.command)?;
     if !command_supports_requested_protocol(&request.command, request.command_version) {
+        let current_command_protocol_version = job_command_protocol_version(&request.command);
+        let min_command_protocol_version =
+            job_command_min_supported_protocol_version(&request.command);
         warn!(
             job_id = %request.job_id,
             command_version = request.command_version,
-            current_command_protocol_version = CURRENT_COMMAND_PROTOCOL_VERSION,
-            min_command_protocol_version = MIN_COMMAND_PROTOCOL_VERSION,
+            current_command_protocol_version,
+            min_command_protocol_version,
             "rejected command with unsupported protocol version"
         );
         recent_commands.remember(request.job_id, request_payload_hash);
@@ -506,6 +515,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             frame.stream_id,
             seq,
             request.job_id,
+            &request.command,
             request.command_version,
         )
         .await?;
@@ -602,8 +612,26 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         .timeout_secs
         .clamp(1, config.auth.command_timeout_secs.max(1));
 
-    if let JobCommand::HotConfig { toml } = &request.command {
-        let result = apply_hot_config_update(request.job_id, config, config_path, toml);
+    if let JobCommand::ConfigRead = &request.command {
+        let result = read_redacted_config(request.job_id, config, config_path);
+        recent_commands.remember(request.job_id, request_payload_hash);
+        send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
+        return Ok(true);
+    }
+    if let JobCommand::HotConfig {
+        toml,
+        preserve_redacted,
+        base_config_sha256_hex,
+    } = &request.command
+    {
+        let result = apply_hot_config_update(
+            request.job_id,
+            config,
+            config_path,
+            toml,
+            preserve_redacted.unwrap_or(false),
+            base_config_sha256_hex.as_deref(),
+        );
         recent_commands.remember(request.job_id, request_payload_hash);
         send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
         return Ok(true);
@@ -614,23 +642,6 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
         return Ok(true);
     }
-    if let JobCommand::AuthProofKeyRotate {
-        new_proof_key_hex,
-        rotation_generation,
-    } = &request.command
-    {
-        let result = rotate_auth_proof_key(
-            request.job_id,
-            config,
-            config_path,
-            new_proof_key_hex,
-            rotation_generation.as_deref(),
-        );
-        recent_commands.remember(request.job_id, request_payload_hash);
-        send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
-        return Ok(true);
-    }
-
     let job_id = request.job_id;
     let stream_id = frame.stream_id;
     let task_config = config.clone();
@@ -679,16 +690,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
 }
 
 fn command_supports_requested_protocol(command: &JobCommand, command_version: u16) -> bool {
-    if matches!(
-        command,
-        JobCommand::UpdateAgent { .. }
-            | JobCommand::AgentUpdateCheck { .. }
-            | JobCommand::AgentUpdateActivate { .. }
-            | JobCommand::AgentUpdateRollback { .. }
-    ) {
-        return command_version >= MIN_COMMAND_PROTOCOL_VERSION;
-    }
-    (MIN_COMMAND_PROTOCOL_VERSION..=CURRENT_COMMAND_PROTOCOL_VERSION).contains(&command_version)
+    let min = job_command_min_supported_protocol_version(command);
+    let current = job_command_protocol_version(command);
+    (min..=current).contains(&command_version)
 }
 
 async fn send_unsupported_command_version(
@@ -696,8 +700,11 @@ async fn send_unsupported_command_version(
     stream_id: u32,
     seq: &mut u64,
     job_id: uuid::Uuid,
+    command: &JobCommand,
     command_version: u16,
 ) -> Result<()> {
+    let current_command_protocol_version = job_command_protocol_version(command);
+    let min_command_protocol_version = job_command_min_supported_protocol_version(command);
     let ack = JobAck {
         job_id,
         accepted: true,
@@ -710,8 +717,8 @@ async fn send_unsupported_command_version(
         "status": "rejected",
         "job_id": job_id,
         "command_version": command_version,
-        "current_command_protocol_version": CURRENT_COMMAND_PROTOCOL_VERSION,
-        "min_command_protocol_version": MIN_COMMAND_PROTOCOL_VERSION,
+        "current_command_protocol_version": current_command_protocol_version,
+        "min_command_protocol_version": min_command_protocol_version,
         "reason": "agent_binary_does_not_support_requested_command_protocol",
     });
     let output = CommandOutput {
@@ -735,9 +742,9 @@ async fn execute_authorized_command(
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
 ) -> Result<Vec<CommandOutput>> {
     match &request.command {
-        JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. }
-        | JobCommand::AuthProofKeyRotate { .. } => {
+        JobCommand::ConfigRead
+        | JobCommand::HotConfig { .. }
+        | JobCommand::DataSourceConfigPatch { .. } => {
             anyhow::bail!("config updates must run on the main agent task")
         }
         JobCommand::Backup {
@@ -1135,16 +1142,20 @@ mod tests {
     }
 
     #[test]
-    fn command_protocol_keeps_update_path_reachable_for_future_versions() {
+    fn command_protocol_rejects_future_update_commands() {
         let command = JobCommand::AgentUpdateCheck {
             version_url: None,
             activate: true,
             restart_agent: true,
         };
 
-        assert!(command_supports_requested_protocol(
+        assert!(!command_supports_requested_protocol(
             &command,
             CURRENT_COMMAND_PROTOCOL_VERSION + 10
+        ));
+        assert!(command_supports_requested_protocol(
+            &command,
+            CURRENT_COMMAND_PROTOCOL_VERSION
         ));
         assert!(!command_supports_requested_protocol(&command, 0));
     }

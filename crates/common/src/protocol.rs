@@ -4,8 +4,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AgentMetrics, CommandEnvelope, FilePushChunk, ProtocolError, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelPlan,
+    AgentMetrics, CommandEnvelope, FilePushChunk, PrivilegeAssertion, ProtocolError,
+    TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
 };
 
 pub const NETWORK_SPEED_TEST_MIN_DURATION_SECS: u8 = 1;
@@ -31,6 +31,17 @@ pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
 pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -110,6 +121,14 @@ pub fn default_terminal_flow_window_bytes() -> u32 {
     64 * 1024
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalUserPolicy {
+    #[default]
+    Fail,
+    Fallback,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RestoreRollbackFile {
     pub archive_path: String,
@@ -148,8 +167,6 @@ pub struct AgentCapabilitySnapshot {
     pub can_manage_runtime_tunnels: bool,
     #[serde(default)]
     pub can_apply_process_limits: bool,
-    #[serde(default = "default_command_protocol_version")]
-    pub command_protocol_version: u16,
     #[serde(default)]
     pub unprivileged_hint: Option<String>,
 }
@@ -162,7 +179,6 @@ impl Default for AgentCapabilitySnapshot {
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
-            command_protocol_version: CURRENT_COMMAND_PROTOCOL_VERSION,
             unprivileged_hint: None,
         }
     }
@@ -172,6 +188,8 @@ impl Default for AgentCapabilitySnapshot {
 pub struct AgentHello {
     pub client_id: String,
     pub agent_version: String,
+    #[serde(default = "default_internal_build_number")]
+    pub internal_build_number: u64,
     pub os_release: String,
     pub arch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +201,9 @@ pub struct AgentHello {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServerHello {
     pub server_id: String,
+    pub server_version: String,
+    #[serde(default = "default_internal_build_number")]
+    pub server_build_number: u64,
     pub accepted: bool,
     pub message: String,
     pub telemetry_light_secs: u64,
@@ -199,12 +220,16 @@ pub struct TelemetryEnvelope {
 pub struct GatewayAgentHelloIngest {
     pub gateway_id: String,
     pub noise_public_key_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ip: Option<String>,
     pub hello: AgentHello,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayTelemetryIngest {
     pub gateway_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ip: Option<String>,
     pub telemetry: TelemetryEnvelope,
 }
 
@@ -230,6 +255,8 @@ pub struct GatewaySessionLifecycleIngest {
     pub client_id: String,
     pub session_id: Uuid,
     pub noise_public_key_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ip: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -247,9 +274,24 @@ pub struct GatewayCommandCancel {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerification {
+    pub intent: String,
+    pub assertion: PrivilegeAssertion,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayPrivilegeVerificationResult {
+    pub approved: bool,
+    pub intent_hash_hex: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayCommandDispatchResult {
     pub client_id: String,
     pub job_id: Uuid,
+    #[serde(default = "default_command_protocol_version")]
+    pub command_version: u16,
     pub accepted: bool,
     pub message: String,
     pub outputs: Vec<CommandOutput>,
@@ -277,6 +319,17 @@ pub fn default_command_protocol_version() -> u16 {
     CURRENT_COMMAND_PROTOCOL_VERSION
 }
 
+pub fn default_internal_build_number() -> u64 {
+    1
+}
+
+pub fn parse_build_number(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(default_internal_build_number)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobCancelRequest {
     pub job_id: Uuid,
@@ -298,6 +351,10 @@ pub enum JobCommand {
         argv: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(default)]
+        user_policy: TerminalUserPolicy,
         cols: u16,
         rows: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,16 +384,16 @@ pub enum JobCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    ConfigRead,
     HotConfig {
         toml: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preserve_redacted: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_config_sha256_hex: Option<String>,
     },
     DataSourceConfigPatch {
         toml: String,
-    },
-    AuthProofKeyRotate {
-        new_proof_key_hex: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rotation_generation: Option<String>,
     },
     #[serde(rename = "agent_update", alias = "update_agent")]
     UpdateAgent {
@@ -620,6 +677,7 @@ pub enum JobCommand {
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
     },
+    NetworkInterfaces,
     NetworkProbe {
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
@@ -635,6 +693,121 @@ pub enum JobCommand {
         port: u16,
         connect_timeout_ms: u16,
     },
+}
+
+pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
+    match command {
+        JobCommand::Shell { .. } => SHELL_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ShellScript { .. } => SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION,
+        JobCommand::TerminalOpen { .. }
+        | JobCommand::TerminalInput { .. }
+        | JobCommand::TerminalPoll { .. }
+        | JobCommand::TerminalResize { .. }
+        | JobCommand::TerminalClose { .. } => TERMINAL_COMMAND_PROTOCOL_VERSION,
+        JobCommand::FilePull { .. }
+        | JobCommand::FilePush { .. }
+        | JobCommand::FilePushChunked { .. }
+        | JobCommand::FileTransferStart { .. }
+        | JobCommand::FileTransferChunk { .. }
+        | JobCommand::FileTransferCommit { .. }
+        | JobCommand::FileTransferAbort { .. }
+        | JobCommand::FileTransferDownloadStart { .. }
+        | JobCommand::FileTransferDownloadChunk { .. }
+        | JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::FileDownload { .. }
+        | JobCommand::FileArchiveTar { .. } => FILE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ConfigRead
+        | JobCommand::HotConfig { .. }
+        | JobCommand::DataSourceConfigPatch { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. } => AGENT_UPDATE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::UserSessions => USER_SESSIONS_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ProcessList { .. }
+        | JobCommand::ProcessStart { .. }
+        | JobCommand::ProcessStop { .. }
+        | JobCommand::ProcessRestart { .. }
+        | JobCommand::ProcessStatus { .. }
+        | JobCommand::ProcessLogs { .. } => PROCESS_COMMAND_PROTOCOL_VERSION,
+        JobCommand::Backup { .. } => BACKUP_COMMAND_PROTOCOL_VERSION,
+        JobCommand::Restore { .. } | JobCommand::RestoreRollback { .. } => {
+            RESTORE_COMMAND_PROTOCOL_VERSION
+        }
+        JobCommand::NetworkApply { .. }
+        | JobCommand::NetworkOspfCostUpdate { .. }
+        | JobCommand::NetworkRollback { .. }
+        | JobCommand::NetworkStatus { .. }
+        | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkProbe { .. }
+        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+    }
+}
+
+pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
+    match command {
+        JobCommand::Shell { .. }
+        | JobCommand::ShellScript { .. }
+        | JobCommand::TerminalOpen { .. }
+        | JobCommand::TerminalInput { .. }
+        | JobCommand::TerminalPoll { .. }
+        | JobCommand::TerminalResize { .. }
+        | JobCommand::TerminalClose { .. }
+        | JobCommand::ConfigRead
+        | JobCommand::HotConfig { .. }
+        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::FilePull { .. }
+        | JobCommand::FilePush { .. }
+        | JobCommand::FilePushChunked { .. }
+        | JobCommand::FileTransferStart { .. }
+        | JobCommand::FileTransferChunk { .. }
+        | JobCommand::FileTransferCommit { .. }
+        | JobCommand::FileTransferAbort { .. }
+        | JobCommand::FileTransferDownloadStart { .. }
+        | JobCommand::FileTransferDownloadChunk { .. }
+        | JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::FileDownload { .. }
+        | JobCommand::FileArchiveTar { .. }
+        | JobCommand::UserSessions
+        | JobCommand::ProcessList { .. }
+        | JobCommand::ProcessStart { .. }
+        | JobCommand::ProcessStop { .. }
+        | JobCommand::ProcessRestart { .. }
+        | JobCommand::ProcessStatus { .. }
+        | JobCommand::ProcessLogs { .. }
+        | JobCommand::Backup { .. }
+        | JobCommand::Restore { .. }
+        | JobCommand::RestoreRollback { .. }
+        | JobCommand::NetworkApply { .. }
+        | JobCommand::NetworkOspfCostUpdate { .. }
+        | JobCommand::NetworkRollback { .. }
+        | JobCommand::NetworkStatus { .. }
+        | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkProbe { .. }
+        | JobCommand::NetworkSpeedTest { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -748,7 +921,33 @@ pub fn decode_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T, ProtocolErr
 
 #[cfg(test)]
 mod tests {
-    use super::JobCommand;
+    use super::{parse_build_number, JobCommand, ServerHello};
+
+    #[test]
+    fn parses_positive_build_numbers_with_default_fallback() {
+        assert_eq!(parse_build_number(Some("42")), 42);
+        assert_eq!(parse_build_number(Some(" 7 ")), 7);
+        assert_eq!(parse_build_number(Some("0")), 1);
+        assert_eq!(parse_build_number(Some("not-a-number")), 1);
+        assert_eq!(parse_build_number(None), 1);
+    }
+
+    #[test]
+    fn server_hello_carries_server_version_and_build_number() {
+        let hello = ServerHello {
+            server_id: "gateway-a".to_string(),
+            server_version: "0.1.0".to_string(),
+            server_build_number: 1001,
+            accepted: true,
+            message: "accepted".to_string(),
+            telemetry_light_secs: 15,
+            telemetry_full_secs: 60,
+        };
+
+        let encoded = serde_json::to_value(&hello).unwrap();
+        assert_eq!(encoded["server_version"], "0.1.0");
+        assert_eq!(encoded["server_build_number"], 1001);
+    }
 
     #[test]
     fn serializes_agent_update_with_canonical_name_and_accepts_legacy_alias() {

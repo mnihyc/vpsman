@@ -1,4 +1,5 @@
 import type { ActiveView, JsonValue, OperatorPreferences, WsEvent } from "./types";
+import { DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE } from "./enrollmentInstallCommand";
 
 export function parseWsEvent(value: unknown): WsEvent | null {
   if (typeof value !== "string") {
@@ -43,6 +44,8 @@ export function getHeroTitle(view: ActiveView): string {
       return "Dashboard";
     case "Fleet":
       return "Fleet overview";
+    case "Config":
+      return "Config";
     case "Jobs":
       return "Job history";
     case "Schedules":
@@ -64,6 +67,8 @@ export function getHeroCopy(view: ActiveView): string {
       return "Recent command requests and authorization outcomes";
     case "Schedules":
       return "Server-side schedule registry and due-run records";
+    case "Config":
+      return "Rule-card hot config, data-source presets, and guarded full-config edits";
     case "Audit":
       return "Operator and security events from the control plane";
     case "Tags":
@@ -95,6 +100,7 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  enrollment_install_command_template: DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
   language: "en",
   sidebar_subpanel_default: "active",
   timezone: null,

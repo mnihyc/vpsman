@@ -38,8 +38,14 @@ async fn dashboard_overview_aggregates_memory_state() {
             AgentView {
                 id: "edge-a".to_string(),
                 display_name: "Edge A".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["provider:alpha".to_string(), "country:US".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
@@ -47,13 +53,18 @@ async fn dashboard_overview_aggregates_memory_state() {
                 display_name: "Edge B".to_string(),
                 status: "stale".to_string(),
                 tags: vec!["country:US".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
-                    command_protocol_version: 1,
                     unprivileged_hint: Some("agent is running without root".to_string()),
                 },
             },
@@ -83,6 +94,7 @@ async fn dashboard_overview_aggregates_memory_state() {
             job_id,
             client_id: "edge-a".to_string(),
             status: "running".to_string(),
+            message: None,
             exit_code: None,
             started_at: Some(now.clone()),
             completed_at: None,
@@ -112,7 +124,7 @@ async fn dashboard_overview_aggregates_memory_state() {
     assert_eq!(view.group_by, "labels");
     assert_eq!(view.scope.kind, "all");
     assert_eq!(view.summary.total, 2);
-    assert_eq!(view.summary.connected, 1);
+    assert_eq!(view.summary.online, 1);
     assert_eq!(view.summary.stale, 1);
     assert_eq!(view.operations.stale_agents, 1);
     assert_eq!(view.operations.running_jobs, 1);
@@ -166,30 +178,48 @@ async fn dashboard_overview_supports_scope_and_group_by() {
             AgentView {
                 id: "edge-a".to_string(),
                 display_name: "Edge A".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec![
                     "provider:alpha".to_string(),
                     "country:US".to_string(),
                     "edge".to_string(),
                 ],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
                 id: "edge-b".to_string(),
                 display_name: "Edge B".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec![
                     "provider:alpha".to_string(),
                     "country:DE".to_string(),
                     "edge".to_string(),
                 ],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
                 id: "core-c".to_string(),
                 display_name: "Core C".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["provider:beta".to_string(), "country:US".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
         ]);
@@ -244,8 +274,14 @@ async fn dashboard_overview_supports_all_window_with_available_data_start() {
         memory.agents.write().await.push(AgentView {
             id: "edge-a".to_string(),
             display_name: "Edge A".to_string(),
-            status: "connected".to_string(),
+            status: "online".to_string(),
             tags: vec!["provider:alpha".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: AgentCapabilitySnapshot::default(),
         });
         memory.telemetry_rollups.write().await.extend([
@@ -375,9 +411,9 @@ fn dashboard_test_backup(
         include_config: false,
         status: status.as_str().to_string(),
         payload_hash: "bb".repeat(32),
-        proof_scope: format!("client:{client_id}"),
-        proof_command_id: None,
-        proof_expires_unix: None,
+        signed_command_scope: format!("client:{client_id}"),
+        signed_command_id: None,
+        signed_command_expires_unix: None,
         artifact_id: None,
         source_job_id: None,
         source_schedule_id: None,

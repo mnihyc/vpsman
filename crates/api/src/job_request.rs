@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use vpsman_common::{
-    backend_config_proof_payload, payload_hash, render_tunnel_endpoint_backend_config,
-    render_tunnel_endpoint_config, sign_command_envelope, validate_agent_config_shape,
-    validate_data_source_config_patch_section, validate_runtime_topology_intent,
-    validate_runtime_tunnel_control, verify_update_artifact_signature, AgentConfig,
-    CommandEnvelope, JobCommand, ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile,
-    TunnelConfigBackend, CURRENT_COMMAND_PROTOCOL_VERSION, MAX_AGENT_HOT_CONFIG_BYTES,
-    MAX_SHELL_SCRIPT_BYTES, MIN_COMMAND_PROTOCOL_VERSION,
+    backend_config_signature_payload,
+    job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
+    job_command_protocol_version as common_job_command_protocol_version, payload_hash,
+    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, sign_command_envelope,
+    validate_agent_config_shape, validate_data_source_config_patch_section,
+    validate_runtime_topology_intent, validate_runtime_tunnel_control,
+    verify_update_artifact_signature, AgentConfig, CommandEnvelope, JobCommand,
+    ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend,
+    MAX_AGENT_HOT_CONFIG_BYTES, MAX_COMMAND_SIGNATURE_AGE_SECS, MAX_SHELL_SCRIPT_BYTES,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -23,7 +25,7 @@ use crate::{
         validate_terminal_close, validate_terminal_input, validate_terminal_open,
         validate_terminal_poll, validate_terminal_resize,
     },
-    model::{BulkResolveRequest, CreateJobRequest, DispatchScheduledJobRequest},
+    model::{BulkResolveRequest, CreateJobRequest},
     unix_now, ApiError,
 };
 
@@ -37,8 +39,6 @@ impl CreateJobRequest {
     pub(crate) fn target_selection(&self) -> BulkResolveRequest {
         BulkResolveRequest {
             selector_expression: self.selector_expression.trim().to_string(),
-            destructive: self.destructive,
-            confirmed: self.confirmed,
         }
     }
 
@@ -70,73 +70,41 @@ impl CreateJobRequest {
         }
     }
 
-    fn unsigned_envelope_for_target(
-        &self,
-        client_id: &str,
-        resolved_target_count: usize,
-    ) -> Option<CommandEnvelope> {
-        self.envelopes.get(client_id).cloned().or_else(|| {
-            if resolved_target_count == 1 {
-                self.envelope.clone()
-            } else {
-                None
-            }
-        })
-    }
-
     pub(crate) fn signed_envelopes_for_targets(
         &self,
         targets: &[String],
         command_hash: &str,
         signing_key: &SigningKey,
     ) -> Result<HashMap<String, CommandEnvelope>> {
-        let mut signed = HashMap::new();
-        for client_id in targets {
-            let mut envelope = self
-                .unsigned_envelope_for_target(client_id, targets.len())
-                .with_context(|| format!("missing command envelope for {client_id}"))?;
-            validate_unsigned_command_envelope(&envelope, client_id, command_hash)?;
-            envelope.server_signature.clear();
-            envelope.server_signature = sign_command_envelope(signing_key, &envelope);
-            signed.insert(client_id.clone(), envelope);
-        }
-        Ok(signed)
+        Ok(signed_envelopes_for_targets(
+            targets,
+            command_hash,
+            signing_key,
+        ))
     }
 }
 
-impl DispatchScheduledJobRequest {
-    fn unsigned_envelope_for_target(
-        &self,
-        client_id: &str,
-        resolved_target_count: usize,
-    ) -> Option<CommandEnvelope> {
-        self.envelopes.get(client_id).cloned().or_else(|| {
-            if resolved_target_count == 1 {
-                self.envelope.clone()
-            } else {
-                None
-            }
-        })
+fn signed_envelopes_for_targets(
+    targets: &[String],
+    command_hash: &str,
+    signing_key: &SigningKey,
+) -> HashMap<String, CommandEnvelope> {
+    let now = unix_now();
+    let expires_unix = now.saturating_add(MAX_COMMAND_SIGNATURE_AGE_SECS);
+    let mut signed = HashMap::new();
+    for client_id in targets {
+        let mut envelope = CommandEnvelope {
+            command_id: uuid::Uuid::new_v4(),
+            scope: format!("client:{client_id}"),
+            payload_hash_hex: command_hash.to_string(),
+            signed_unix: now,
+            expires_unix,
+            server_signature: Vec::new(),
+        };
+        envelope.server_signature = sign_command_envelope(signing_key, &envelope);
+        signed.insert(client_id.clone(), envelope);
     }
-
-    pub(crate) fn signed_envelopes_for_targets(
-        &self,
-        targets: &[String],
-        command_hash: &str,
-        signing_key: &SigningKey,
-    ) -> Result<HashMap<String, CommandEnvelope>> {
-        let mut signed = HashMap::new();
-        for client_id in targets {
-            let mut envelope = self
-                .unsigned_envelope_for_target(client_id, targets.len())
-                .with_context(|| format!("missing command envelope for {client_id}"))?;
-            validate_unsigned_command_envelope(&envelope, client_id, command_hash)?;
-            envelope.server_signature.clear();
-            envelope.server_signature = sign_command_envelope(signing_key, &envelope);
-            signed.insert(client_id.clone(), envelope);
-        }
-        Ok(signed)
-    }
+    signed
 }
 
 pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
@@ -175,9 +143,9 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
         | JobCommand::FileArchiveTar { .. } => {
             unreachable!("file command labels are handled by job_files")
         }
+        JobCommand::ConfigRead => "config_read",
         JobCommand::HotConfig { .. } => "hot_config",
         JobCommand::DataSourceConfigPatch { .. } => "data_source_config_patch",
-        JobCommand::AuthProofKeyRotate { .. } => "auth_proof_key_rotate",
         JobCommand::UpdateAgent { .. } => "agent_update",
         JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
         JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
@@ -196,23 +164,18 @@ pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
         JobCommand::NetworkRollback { .. } => "network_rollback",
         JobCommand::NetworkStatus { .. } => "network_status",
+        JobCommand::NetworkInterfaces => "network_interfaces",
         JobCommand::NetworkProbe { .. } => "network_probe",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
     }
 }
 
 pub(crate) fn job_command_protocol_version(_command: &JobCommand) -> u16 {
-    CURRENT_COMMAND_PROTOCOL_VERSION
+    common_job_command_protocol_version(_command)
 }
 
-pub(crate) fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
-    match command {
-        JobCommand::UpdateAgent { .. }
-        | JobCommand::AgentUpdateCheck { .. }
-        | JobCommand::AgentUpdateActivate { .. }
-        | JobCommand::AgentUpdateRollback { .. } => MIN_COMMAND_PROTOCOL_VERSION,
-        _ => MIN_COMMAND_PROTOCOL_VERSION,
-    }
+pub(crate) fn job_command_min_supported_protocol_version(_command: &JobCommand) -> u16 {
+    common_job_command_min_supported_protocol_version(_command)
 }
 
 pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError> {
@@ -234,6 +197,8 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             session_id,
             argv,
             cwd,
+            user,
+            user_policy,
             cols,
             rows,
             idle_timeout_secs,
@@ -243,6 +208,8 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             *session_id,
             argv,
             cwd.as_deref(),
+            user.as_deref(),
+            *user_policy,
             *cols,
             *rows,
             *idle_timeout_secs,
@@ -316,14 +283,24 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             }
             Ok(())
         }
-        JobCommand::HotConfig { toml } => validate_hot_config_document(toml),
+        JobCommand::ConfigRead => Ok(()),
+        JobCommand::HotConfig {
+            toml,
+            preserve_redacted: _,
+            base_config_sha256_hex,
+        } => {
+            validate_hot_config_document(toml)?;
+            if let Some(base_config_sha256_hex) = base_config_sha256_hex {
+                validate_sha256_hex(
+                    base_config_sha256_hex,
+                    "hot_config_base_config_sha256_invalid",
+                )?;
+            }
+            Ok(())
+        }
         JobCommand::DataSourceConfigPatch { toml } => {
             validate_data_source_config_patch_document(toml)
         }
-        JobCommand::AuthProofKeyRotate {
-            new_proof_key_hex,
-            rotation_generation,
-        } => validate_auth_proof_key_rotate(new_proof_key_hex, rotation_generation.as_deref()),
         JobCommand::UpdateAgent {
             artifact_url,
             sha256_hex,
@@ -421,6 +398,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             "network_status_plan_must_be_observe_plan",
             "network_status_plan_invalid",
         ),
+        JobCommand::NetworkInterfaces => Ok(()),
         JobCommand::NetworkProbe {
             plan,
             side,
@@ -606,25 +584,6 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
     Ok(())
 }
 
-fn validate_auth_proof_key_rotate(
-    new_proof_key_hex: &str,
-    rotation_generation: Option<&str>,
-) -> Result<(), ApiError> {
-    validate_hex32(new_proof_key_hex, "auth_proof_key_rotate_key_invalid")?;
-    if let Some(rotation_generation) = rotation_generation {
-        let value = rotation_generation.trim();
-        if value.is_empty()
-            || value.len() > 128
-            || value.chars().any(|character| character.is_control())
-        {
-            return Err(ApiError::bad_request(
-                "auth_proof_key_rotate_generation_invalid",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_post_restore_argv(argv: &[String]) -> Result<(), ApiError> {
     if argv.is_empty() {
         return Ok(());
@@ -685,7 +644,7 @@ fn validate_network_apply_operation(
         return Err(ApiError::bad_request("network_apply_config_hash_required"));
     }
     if let Some(config_sha256_hex) = config_sha256_hex {
-        let expected = payload_hash(&backend_config_proof_payload(&backend_config));
+        let expected = payload_hash(&backend_config_signature_payload(&backend_config));
         if expected != normalize_sha256(config_sha256_hex)? {
             return Err(ApiError::bad_request("network_apply_config_hash_mismatch"));
         }
@@ -1063,42 +1022,6 @@ fn is_localhost_http_authority(rest: &str) -> bool {
 
 fn is_hex_len(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-}
-
-pub(crate) fn validate_unsigned_command_envelope(
-    envelope: &CommandEnvelope,
-    client_id: &str,
-    command_hash: &str,
-) -> Result<()> {
-    let expected_scope = format!("client:{client_id}");
-    if envelope.scope != expected_scope {
-        return Err(anyhow!(
-            "command envelope scope mismatch: expected {expected_scope}, got {}",
-            envelope.scope
-        ));
-    }
-    if envelope.payload_hash_hex != command_hash {
-        return Err(anyhow!("command envelope payload hash mismatch"));
-    }
-    if !is_sha256_hex(&envelope.payload_hash_hex) {
-        return Err(anyhow!(
-            "command envelope payload hash is not valid sha256 hex"
-        ));
-    }
-    let proof = envelope
-        .proof
-        .as_ref()
-        .ok_or_else(|| anyhow!("command envelope is missing proof"))?;
-    if proof.expires_unix < unix_now() {
-        return Err(anyhow!("command envelope proof is expired"));
-    }
-    if !is_fixed_hex(&proof.nonce_hex, 32) {
-        return Err(anyhow!("command envelope proof nonce is not 16-byte hex"));
-    }
-    if !is_fixed_hex(&proof.proof_hex, 64) {
-        return Err(anyhow!("command envelope proof is not 32-byte hex"));
-    }
-    Ok(())
 }
 
 fn is_sha256_hex(value: &str) -> bool {

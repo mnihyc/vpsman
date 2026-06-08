@@ -1,6 +1,8 @@
 export type FleetSummary = {
   total: number;
-  connected: number;
+  online: number;
+  offline: number;
+  stale: number;
   warnings: number;
   running_jobs: number;
 };
@@ -105,7 +107,8 @@ export type DashboardFilterOptionRecord = {
 
 export type DashboardSummaryRecord = {
   total: number;
-  connected: number;
+  online: number;
+  offline: number;
   stale: number;
   warnings: number;
   running_jobs: number;
@@ -206,7 +209,8 @@ export type DashboardLabelClusterRecord = {
   kind: string;
   query: string | null;
   total: number;
-  connected: number;
+  online: number;
+  offline: number;
   stale: number;
   warnings: number;
   running_jobs: number;
@@ -386,6 +390,12 @@ export type AgentView = {
   display_name: string;
   status: string;
   tags: string[];
+  registration_ip?: string | null;
+  last_ip?: string | null;
+  last_seen_at?: string | null;
+  internal_build_number?: number;
+  stale_since?: string | null;
+  stale_reason?: string | null;
   capabilities: AgentCapabilitySnapshot;
 };
 
@@ -406,7 +416,6 @@ export type AgentCapabilitySnapshot = {
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
-  command_protocol_version?: number;
   unprivileged_hint?: string | null;
 };
 
@@ -539,6 +548,7 @@ export type OperatorPreferences = {
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
   bulk_output_compare_mode: JobOutputCompareMode;
+  enrollment_install_command_template: string;
 };
 
 export type OperatorSessionRecord = {
@@ -579,20 +589,6 @@ export type JobHistoryRecord = {
   privileged: boolean;
   status: string;
   target_count: number;
-  payload_hash: string;
-  created_at: string;
-  completed_at: string | null;
-};
-
-export type AuthProofRotationHistoryRecord = {
-  job_id: string;
-  actor_id: string | null;
-  status: string;
-  target_count: number;
-  completed_count: number;
-  failed_count: number;
-  pending_count: number;
-  rotation_generation: string | null;
   payload_hash: string;
   created_at: string;
   completed_at: string | null;
@@ -669,7 +665,9 @@ export type ScheduleRecord = {
   command_type: string;
   operation: JobOperation;
   selector_expression: string;
-  interval_secs: number;
+  cron_expr: string;
+  timezone: "UTC" | string;
+  next_runs: string[];
   catch_up_policy: string;
   catch_up_limit: number;
   retry_delay_secs: number;
@@ -678,7 +676,10 @@ export type ScheduleRecord = {
   last_error: string | null;
   next_run_at: string;
   last_run_at: string | null;
+  deferred_until: string | null;
+  deleted_at: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 export type TunnelKind = "gre" | "ipip" | "sit" | "fou" | "openvpn" | "wireguard" | "tun_tap" | "custom";
@@ -868,6 +869,7 @@ export type JobTargetRecord = {
   job_id: string;
   client_id: string;
   status: string;
+  message?: string | null;
   exit_code: number | null;
   started_at: string | null;
   completed_at: string | null;
@@ -954,8 +956,6 @@ export type AgentUpdateRolloutRecord = {
   automation_blocker: string | null;
   automation_targets: string[];
   automation_updated_at: string | null;
-  activation_delegations: AgentUpdateActivationDelegationRecord[];
-  rollback_delegations: AgentUpdateRollbackDelegationRecord[];
   targets: AgentUpdateRolloutTargetRecord[];
   created_at: string;
   updated_at: string;
@@ -995,59 +995,6 @@ export type AgentUpdateRolloutControlRequest = {
   paused?: boolean;
   pause_reason?: string | null;
   automation_health_gate?: string | null;
-};
-
-export type AgentUpdateRollbackDelegationRequest = {
-  confirmed: boolean;
-  rollback_sha256_hex?: string | null;
-  force_unprivileged?: boolean;
-  envelopes: Record<string, CommandEnvelope>;
-};
-
-export type AgentUpdateActivationDelegationRequest = {
-  confirmed: boolean;
-  restart_agent: boolean;
-  force_unprivileged?: boolean;
-  envelopes: Record<string, CommandEnvelope>;
-};
-
-export type AgentUpdateRollbackDelegationRecord = {
-  rollout_id: string;
-  action: string;
-  rollback_sha256_hex: string | null;
-  force_unprivileged: boolean;
-  payload_hash: string;
-  target_count: number;
-  ready_count: number;
-  dispatching_count: number;
-  dispatched_count: number;
-  expired_count: number;
-  failed_count: number;
-  proof_expires_unix_min: number | null;
-  proof_expires_unix_max: number | null;
-  dispatch_job_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type AgentUpdateActivationDelegationRecord = {
-  rollout_id: string;
-  action: string;
-  staged_sha256_hex: string;
-  restart_agent: boolean;
-  force_unprivileged: boolean;
-  payload_hash: string;
-  target_count: number;
-  ready_count: number;
-  dispatching_count: number;
-  dispatched_count: number;
-  expired_count: number;
-  failed_count: number;
-  proof_expires_unix_min: number | null;
-  proof_expires_unix_max: number | null;
-  dispatch_job_id: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type AgentUpdateReleaseRecord = {
@@ -1223,7 +1170,7 @@ export type NetworkOspfUpdatePlanRecord = {
   status: string;
   confidence: string;
   requires_approval: boolean;
-  proof_required: boolean;
+  privilege_required: boolean;
   mutation_mode: string;
   approval_scope: string[];
   evidence: NetworkOspfUpdateEvidenceRecord;
@@ -1232,17 +1179,19 @@ export type NetworkOspfUpdatePlanRecord = {
   change_summary: string;
 };
 
-export type PrivilegeProof = {
+export type PrivilegeAssertion = {
   nonce_hex: string;
+  issued_unix: number;
   expires_unix: number;
-  proof_hex: string;
+  assertion_hex: string;
 };
 
 export type CommandEnvelope = {
   command_id: string;
   scope: string;
   payload_hash_hex: string;
-  proof: PrivilegeProof | null;
+  signed_unix: number;
+  expires_unix: number;
   server_signature: number[];
 };
 
@@ -1254,6 +1203,8 @@ export type JobOperation =
       session_id: string;
       argv: string[];
       cwd: string | null;
+      user?: string | null;
+      user_policy?: "fail" | "fallback";
       cols: number;
       rows: number;
       replay_from_seq?: number;
@@ -1265,7 +1216,13 @@ export type JobOperation =
   | { type: "terminal_resize"; session_id: string; cols: number; rows: number }
   | { type: "terminal_close"; session_id: string; reason?: string }
   | { type: "file_pull"; path: string }
-  | { type: "hot_config"; toml: string }
+  | { type: "config_read" }
+  | {
+      type: "hot_config";
+      toml: string;
+      preserve_redacted?: boolean | null;
+      base_config_sha256_hex?: string | null;
+    }
   | { type: "data_source_config_patch"; toml: string }
   | {
       type: "agent_update";
@@ -1277,7 +1234,6 @@ export type JobOperation =
   | { type: "agent_update_activate"; staged_sha256_hex: string; restart_agent?: boolean }
   | { type: "agent_update_rollback"; rollback_sha256_hex?: string }
   | { type: "agent_update_check"; version_url?: string; activate?: boolean; restart_agent?: boolean }
-  | { type: "auth_proof_key_rotate"; new_proof_key_hex: string; rotation_generation?: string }
   | {
       type: "file_push";
       path: string;
@@ -1428,6 +1384,7 @@ export type JobOperation =
       plan: TunnelPlan;
       side: TunnelEndpointSide;
     }
+  | { type: "network_interfaces" }
   | {
       type: "network_probe";
       plan: TunnelPlan;
@@ -1480,10 +1437,9 @@ export type CreateJobRequest = {
   canary_count?: number | null;
   force_unprivileged?: boolean;
   privileged: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
   idempotency_key?: string | null;
   reconnect_policy?: JsonValue | null;
-  envelope: CommandEnvelope | null;
-  envelopes: Record<string, CommandEnvelope>;
 };
 
 export type CreateJobResponse = {
@@ -1505,25 +1461,30 @@ export type CancelJobResponse = {
   cancel_requested_targets: number;
 };
 
-export type DispatchScheduledJobRequest = {
-  confirmed: boolean;
-  timeout_secs: number;
-  force_unprivileged?: boolean;
-  envelope: CommandEnvelope | null;
-  envelopes: Record<string, CommandEnvelope>;
-};
-
 export type CreateScheduleRequest = {
   name: string;
   operation: JobOperation;
   selector_expression: string;
-  interval_secs: number;
-  start_at_unix: number | null;
+  cron_expr: string;
+  timezone: "UTC";
   enabled: boolean;
   catch_up_policy: string;
   catch_up_limit: number;
   retry_delay_secs: number;
   max_failures: number;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type UpdateScheduleRequest = CreateScheduleRequest;
+
+export type SchedulePrivilegeMutationRequest = {
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type DeferScheduleRequest = {
+  deferred_until: string;
+  reason?: string | null;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type BackupPolicyRecord = {
@@ -1537,7 +1498,9 @@ export type BackupPolicyRecord = {
   retention_days: number;
   keep_last: number;
   rotation_generation: string | null;
-  interval_secs: number;
+  cron_expr: string;
+  timezone: "UTC" | string;
+  next_runs: string[];
   catch_up_policy: string;
   catch_up_limit: number;
   retry_delay_secs: number;
@@ -1559,8 +1522,8 @@ export type CreateBackupPolicyRequest = {
   retention_days?: number | null;
   keep_last?: number | null;
   rotation_generation?: string | null;
-  interval_secs: number;
-  start_at_unix?: number | null;
+  cron_expr: string;
+  timezone: "UTC";
   enabled: boolean;
   catch_up_policy: string;
   catch_up_limit: number;
@@ -1579,9 +1542,9 @@ export type BackupRequestRecord = {
   include_config: boolean;
   status: string;
   payload_hash: string;
-  proof_scope: string;
-  proof_command_id: string | null;
-  proof_expires_unix: number | null;
+  signed_command_scope: string;
+  signed_command_id: string | null;
+  signed_command_expires_unix: number | null;
   artifact_id: string | null;
   source_job_id: string | null;
   source_schedule_id: string | null;
@@ -1634,7 +1597,7 @@ export type CreateBackupRequest = {
   recipient_public_key_hex?: string | null;
   confirmed: boolean;
   note: string | null;
-  envelope: CommandEnvelope;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type UploadBackupArtifactRequest = {
@@ -1697,9 +1660,9 @@ export type RestorePlanRecord = {
   destination_root: string | null;
   status: string;
   payload_hash: string;
-  proof_scope: string;
-  proof_command_id: string | null;
-  proof_expires_unix: number | null;
+  signed_command_scope: string;
+  signed_command_id: string | null;
+  signed_command_expires_unix: number | null;
   note: string | null;
   created_at: string;
 };
@@ -1727,7 +1690,7 @@ export type CreateRestorePlanRequest = {
   destination_root: string | null;
   confirmed: boolean;
   note: string | null;
-  envelope: CommandEnvelope;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type CreateMigrationLinkRequest = {
@@ -1738,8 +1701,6 @@ export type CreateMigrationLinkRequest = {
 
 export type JobTargetSelection = {
   selector_expression: string;
-  destructive: boolean;
-  confirmed: boolean;
 };
 
 export type JsonValue = JsonValue[] | boolean | null | number | string | { [key: string]: JsonValue };
@@ -1816,6 +1777,24 @@ export type HistoryExportRecord = {
 export type TagView = {
   name: string;
   clients: AgentView[];
+};
+
+export type BulkTagMutationRequest = {
+  action: "add" | "remove";
+  tag: string;
+  selector_expression: string;
+  confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type TagMutationResponse = {
+  tag: string;
+  action: string;
+  target_count: number;
+  changed_count: number;
+  skipped_count: number;
+  affected: AgentView[];
+  confirmation_required: boolean;
 };
 
 export type DataSourcePresetRecord = {
@@ -1951,16 +1930,55 @@ export type DataSourceHotConfigResponse = {
   generated_at: string;
 };
 
+export type HotConfigRuleTemplateRecord = {
+  id: string;
+  name: string;
+  category: string;
+  domain: string;
+  description: string;
+  field_schema: JsonValue;
+  raw_generator_body: string;
+  docs_metadata: JsonValue;
+  built_in: boolean;
+  actor_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UpsertHotConfigRuleTemplateRequest = {
+  id?: string | null;
+  name: string;
+  category: string;
+  domain: string;
+  description: string;
+  field_schema: JsonValue;
+  raw_generator_body: string;
+  docs_metadata: JsonValue;
+};
+
+export type HotConfigRuleTemplateRenderRequest = {
+  values: JsonValue;
+};
+
+export type HotConfigRuleTemplateRenderResponse = {
+  template_id: string;
+  name: string;
+  toml: string;
+  patch: JsonValue;
+  affected_sections: string[];
+  docs_metadata: JsonValue;
+  generated_at: string;
+};
+
 export type BulkResolveResponse = {
   targets: AgentView[];
   target_count: number;
-  destructive: boolean;
-  confirmation_required: boolean;
 };
 
 export type ActiveView =
   | "Dashboard"
   | "Fleet"
+  | "Config"
   | "Tags"
   | "Jobs"
   | "Schedules"

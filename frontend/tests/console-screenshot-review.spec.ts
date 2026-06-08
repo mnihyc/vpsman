@@ -4,15 +4,21 @@ import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 
 const desktopViews = [
-  { heading: "Dashboard", view: "Dashboard" },
-  { heading: "Fleet overview", view: "Fleet" },
-  { heading: "Tags management", view: "Tags" },
-  { heading: "Job history", view: "Jobs" },
-  { heading: "Schedules", view: "Schedules" },
-  { heading: "Topology management", view: "Topology" },
-  { heading: "Backups management", view: "Backups" },
-  { heading: "Audit log", view: "Audit" },
-  { heading: "Access management", view: "Access" },
+  { heading: "Dashboard", id: "dashboard", view: "Dashboard" },
+  { heading: "Fleet overview", id: "fleet", view: "Fleet" },
+  { heading: "Config", id: "config-overview", view: "Config" },
+  { heading: "Config", id: "config-rules", subpage: "Rules", view: "Config" },
+  { heading: "Config", id: "config-bulk", subpage: "Bulk apply", view: "Config" },
+  { heading: "Config", id: "config-single", subpage: "Single VPS", view: "Config" },
+  { heading: "Tags management", id: "tags-registry", view: "Tags" },
+  { heading: "Tags management", id: "tags-assignments", subpage: "Assignments", view: "Tags" },
+  { heading: "Tags management", id: "tags-bulk", subpage: "Bulk", view: "Tags" },
+  { heading: "Job history", id: "jobs", view: "Jobs" },
+  { heading: "Schedules", id: "schedules", view: "Schedules" },
+  { heading: "Topology management", id: "topology", view: "Topology" },
+  { heading: "Backups management", id: "backups", view: "Backups" },
+  { heading: "Audit log", id: "audit", view: "Audit" },
+  { heading: "Access management", id: "access", view: "Access" },
 ] as const;
 
 test.beforeEach(async ({ page }) => {
@@ -36,14 +42,16 @@ test("captures main console screenshots for regression review", async ({
 
   for (const entry of views) {
     if (entry.view !== "Dashboard") {
+      const nav = page.getByRole("navigation", { name: "Primary console navigation" });
       await activate(
-        page
-          .getByRole("navigation", { name: "Primary console navigation" })
-          .getByRole("button", {
-            name: entry.view,
-            exact: true,
-          }),
+        nav.getByRole("button", {
+          name: entry.view,
+          exact: true,
+        }),
       );
+      if ("subpage" in entry) {
+        await activate(nav.getByRole("button", { name: entry.subpage, exact: true }));
+      }
     }
     await expect(
       page
@@ -69,7 +77,7 @@ test("captures main console screenshots for regression review", async ({
 
     const screenshotPath = join(
       projectDir,
-      `${entry.view.toLowerCase()}-${testInfo.project.name}.png`,
+      `${entry.id}-${testInfo.project.name}.png`,
     );
     const screenshot = await page.screenshot({
       fullPage: true,
@@ -85,6 +93,7 @@ test("captures main console screenshots for regression review", async ({
       horizontal_overflow_px: layout.horizontalOverflowPx,
       project: testInfo.project.name,
       screenshot: screenshotPath,
+      subpage: "subpage" in entry ? entry.subpage : null,
       view: entry.view,
       visible_text_length: layout.visibleTextLength,
     });

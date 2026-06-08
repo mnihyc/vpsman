@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyRound, PackageCheck, PauseCircle, PlayCircle, ShieldCheck } from "lucide-react";
+import { PackageCheck, PauseCircle, PlayCircle, ShieldCheck } from "lucide-react";
 import { CrudPager } from "../../components/CrudPager";
 import type {
   AgentUpdateRolloutControlRequest,
@@ -7,77 +7,16 @@ import type {
   AgentUpdateRolloutRecord,
   CreateAgentUpdateRolloutPolicyRequest,
 } from "../../types";
-import type { ProofMaterial } from "../../proof";
+import type { PrivilegeMaterial } from "../../privilege";
 import { formatTime, shortHash, shortId, statusClass } from "../../utils";
-
-type DelegationSummary = {
-  target_count: number;
-  ready_count: number;
-  dispatching_count: number;
-  dispatched_count: number;
-  expired_count: number;
-  failed_count: number;
-  proof_expires_unix_min: number | null;
-  proof_expires_unix_max: number | null;
-  force_unprivileged?: boolean;
-  updated_at: string;
-};
-
-function latestDelegation<T extends DelegationSummary>(summaries: T[] | undefined): T | null {
-  if (!summaries || summaries.length === 0) {
-    return null;
-  }
-  return [...summaries].sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
-}
-
-function delegationStatus(summary: DelegationSummary | null): string {
-  if (!summary) {
-    return "none";
-  }
-  if (summary.ready_count > 0) {
-    return `${summary.ready_count}/${summary.target_count} ready`;
-  }
-  if (summary.dispatching_count > 0) {
-    return `${summary.dispatching_count}/${summary.target_count} dispatching`;
-  }
-  if (summary.dispatched_count > 0) {
-    return `${summary.dispatched_count}/${summary.target_count} dispatched`;
-  }
-  if (summary.expired_count > 0) {
-    return `${summary.expired_count}/${summary.target_count} expired`;
-  }
-  if (summary.failed_count > 0) {
-    return `${summary.failed_count}/${summary.target_count} failed`;
-  }
-  return `${summary.target_count} recorded`;
-}
-
-function delegationTitle(summary: DelegationSummary | null): string | undefined {
-  if (!summary) {
-    return undefined;
-  }
-  const expiry =
-    summary.proof_expires_unix_min === null
-      ? "no expiry"
-      : new Date(summary.proof_expires_unix_min * 1000).toLocaleString();
-  const policy = summary.force_unprivileged ? "; forced unprivileged attempt" : "";
-  return `Ready ${summary.ready_count}, dispatching ${summary.dispatching_count}, dispatched ${summary.dispatched_count}, expired ${summary.expired_count}, failed ${summary.failed_count}; earliest expiry ${expiry}${policy}`;
-}
-
-function delegationActionLabel(summary: DelegationSummary | null, delegateLabel: string, renewLabel: string): string {
-  if (summary && summary.ready_count === 0 && (summary.expired_count > 0 || summary.failed_count > 0)) {
-    return renewLabel;
-  }
-  return delegateLabel;
-}
 
 function canOneClickAdvance(
   rollout: AgentUpdateRolloutRecord,
-  proofMaterial: ProofMaterial | null,
+  privilegeMaterial: PrivilegeMaterial | null,
 ): boolean {
   const targets = rollout.targets ?? [];
   const hasCompletedTargets = targets.some((target) => target.status === "completed");
-  return hasCompletedTargets && Boolean(proofMaterial);
+  return hasCompletedTargets && Boolean(privilegeMaterial);
 }
 
 export function AgentUpdateRolloutsPanel({
@@ -89,16 +28,12 @@ export function AgentUpdateRolloutsPanel({
   onActivateBatch,
   onControlRollout,
   onCreatePolicy,
-  onDelegateActivation,
-  onDelegateRollback,
   onForceUnprivilegedChange,
   onRefresh,
   onRollbackTargets,
   onRestartAgentChange,
   onBatchSizeChange,
-  onProofTtlSecsChange,
-  proofMaterial,
-  proofTtlSecs,
+  privilegeMaterial,
   forceUnprivileged,
   policies,
   restartAgent,
@@ -112,16 +47,12 @@ export function AgentUpdateRolloutsPanel({
   onActivateBatch: (rollout: AgentUpdateRolloutRecord) => void;
   onControlRollout: (rollout: AgentUpdateRolloutRecord, request: AgentUpdateRolloutControlRequest) => void;
   onCreatePolicy: (request: CreateAgentUpdateRolloutPolicyRequest) => Promise<AgentUpdateRolloutPolicyRecord>;
-  onDelegateActivation: (rollout: AgentUpdateRolloutRecord) => void;
-  onDelegateRollback: (rollout: AgentUpdateRolloutRecord) => void;
   onForceUnprivilegedChange: (value: boolean) => void;
   onRefresh: () => void;
   onRollbackTargets: (rollout: AgentUpdateRolloutRecord) => void;
   onBatchSizeChange: (value: number) => void;
-  onProofTtlSecsChange: (value: number) => void;
   onRestartAgentChange: (value: boolean) => void;
-  proofMaterial: ProofMaterial | null;
-  proofTtlSecs: number;
+  privilegeMaterial: PrivilegeMaterial | null;
   forceUnprivileged: boolean;
   policies: AgentUpdateRolloutPolicyRecord[];
   restartAgent: boolean;
@@ -259,17 +190,6 @@ export function AgentUpdateRolloutsPanel({
             value={batchSize}
           />
         </label>
-        <label>
-          <span>Proof TTL</span>
-          <input
-            aria-label="Rollout proof TTL seconds"
-            max={3600}
-            min={15}
-            onChange={(event) => onProofTtlSecsChange(Number(event.target.value))}
-            type="number"
-            value={proofTtlSecs}
-          />
-        </label>
         <label className="checkLine inlineCheck">
           <input checked={restartAgent} onChange={(event) => onRestartAgentChange(event.target.checked)} type="checkbox" />
           <span>Restart agent after activation</span>
@@ -295,7 +215,7 @@ export function AgentUpdateRolloutsPanel({
           <div className="emptyState">
             <ShieldCheck size={22} />
             <strong>No rollout records</strong>
-            <span>Proof-gated agent-update dispatches create staged rollout records here.</span>
+            <span>Privilege-unlocked agent-update dispatches create staged rollout records here.</span>
           </div>
         }
       >
@@ -313,8 +233,6 @@ export function AgentUpdateRolloutsPanel({
             {rolloutRows.map((rollout) => {
               const automationTargets = rollout.automation_targets ?? [];
               const rolloutTargets = rollout.targets ?? [];
-              const activationDelegation = latestDelegation(rollout.activation_delegations);
-              const rollbackDelegation = latestDelegation(rollout.rollback_delegations);
               return (
                 <div className="historyRow rolloutGrid" key={rollout.id}>
               <span className="historyPrimary">
@@ -343,21 +261,13 @@ export function AgentUpdateRolloutsPanel({
                   gate {rollout.automation_health_gate}
                   {rollout.automation_lease_owner ? `, leased by ${rollout.automation_lease_owner}` : ""}
                 </small>
-                <small title={delegationTitle(activationDelegation)}>
-                  act proof {delegationStatus(activationDelegation)}
-                  {activationDelegation?.force_unprivileged ? ", forced" : ""}
-                </small>
-                <small title={delegationTitle(rollbackDelegation)}>
-                  roll proof {delegationStatus(rollbackDelegation)}
-                  {rollbackDelegation?.force_unprivileged ? ", forced" : ""}
-                </small>
               </span>
               <span className="monoValue">{shortHash(rollout.artifact_sha256_hex)}</span>
               <span>{formatTime(rollout.updated_at)}</span>
               <span className="rowActions">
                 <button
                   className="secondaryAction compactAction"
-                  disabled={actionPending || !proofMaterial || !rolloutTargets.some((target) => target.status === "completed")}
+                  disabled={actionPending || !privilegeMaterial || !rolloutTargets.some((target) => target.status === "completed")}
                   onClick={() => onActivateBatch(rollout)}
                   type="button"
                 >
@@ -366,15 +276,9 @@ export function AgentUpdateRolloutsPanel({
                 </button>
                 <button
                   className="secondaryAction compactAction"
-                  disabled={actionPending || !canOneClickAdvance(rollout, proofMaterial)}
-                  onClick={() => {
-                    if ((activationDelegation?.ready_count ?? 0) > 0 && proofMaterial) {
-                      onActivateBatch(rollout);
-                    } else {
-                      onDelegateActivation(rollout);
-                    }
-                  }}
-                  title="Advance this rollout using delegated proof when available, or record activation proof first"
+                  disabled={actionPending || !canOneClickAdvance(rollout, privilegeMaterial)}
+                  onClick={() => onActivateBatch(rollout)}
+                  title="Advance this rollout with a local privilege unlock"
                   type="button"
                 >
                   <PackageCheck size={14} />
@@ -384,7 +288,7 @@ export function AgentUpdateRolloutsPanel({
                   className="secondaryAction compactAction"
                   disabled={
                     actionPending ||
-                    !proofMaterial ||
+                    !privilegeMaterial ||
                     !rolloutTargets.some(
                       (target) =>
                         target.status === "activation_pending_restart" ||
@@ -398,26 +302,6 @@ export function AgentUpdateRolloutsPanel({
                 >
                   <ShieldCheck size={14} />
                   <span>Rollback</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={actionPending || !proofMaterial || rolloutTargets.length === 0}
-                  onClick={() => onDelegateActivation(rollout)}
-                  title="Delegate activation proof escrow"
-                  type="button"
-                >
-                  <KeyRound size={14} />
-                  <span>{delegationActionLabel(activationDelegation, "Delegate act.", "Renew act.")}</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={actionPending || !proofMaterial || rolloutTargets.length === 0}
-                  onClick={() => onDelegateRollback(rollout)}
-                  title="Delegate rollback proof escrow"
-                  type="button"
-                >
-                  <KeyRound size={14} />
-                  <span>{delegationActionLabel(rollbackDelegation, "Delegate roll.", "Renew roll.")}</span>
                 </button>
                 <select
                   aria-label={`Rollout ${shortId(rollout.id)} health gate`}

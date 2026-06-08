@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::{extract::State, http::HeaderMap, Json};
 use serde::Serialize;
 use vpsman_common::{
@@ -38,6 +40,7 @@ pub(crate) async fn ingest_agent_hello(
     Json(event): Json<GatewayAgentHelloIngest>,
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
+    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     state.repo.upsert_agent_hello(&event).await?;
     state.publish(WsEvent::AgentUpdated {
         client_id: event.hello.client_id,
@@ -91,6 +94,7 @@ pub(crate) async fn ingest_telemetry(
     Json(event): Json<GatewayTelemetryIngest>,
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
+    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     let client_id = event.telemetry.client_id.clone();
     let observed_unix = event.telemetry.metrics.observed_unix;
     let gateway_id = event.gateway_id.clone();
@@ -205,6 +209,17 @@ fn validate_gateway_session_event(event: &GatewaySessionLifecycleIngest) -> Resu
         {
             return Err(ApiError::bad_request("invalid_gateway_session_key"));
         }
+    }
+    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
+    Ok(())
+}
+
+fn validate_gateway_remote_ip(remote_ip: Option<&str>) -> Result<(), ApiError> {
+    let Some(remote_ip) = remote_ip else {
+        return Ok(());
+    };
+    if remote_ip.len() > 64 || remote_ip.parse::<IpAddr>().is_err() {
+        return Err(ApiError::bad_request("invalid_gateway_remote_ip"));
     }
     Ok(())
 }

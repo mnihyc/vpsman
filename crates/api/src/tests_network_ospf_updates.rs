@@ -120,7 +120,7 @@ async fn builds_reviewed_ospf_update_plan_from_observed_recommendation() {
         expected_cost as i32 - plan.recommended_ospf_cost as i32
     );
     assert!(update_plan.requires_approval);
-    assert!(update_plan.proof_required);
+    assert!(update_plan.privilege_required);
     assert_eq!(
         update_plan.approval_scope,
         vec!["client:left-a".to_string(), "client:right-b".to_string()]

@@ -17,13 +17,14 @@ USER_SYSTEMD_DIR=""
 usage() {
   cat <<'USAGE'
 Usage:
+  Copyable one-line root install:
+    curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE=root VPSMAN_ENROLLMENT_API_URL=https://panel.example.com VPSMAN_ENROLLMENT_TOKEN=<token> bash
+
   Root privileged install:
     curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env \
       VPSMAN_INSTALL_MODE=root \
       VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
       VPSMAN_ENROLLMENT_TOKEN=<token> \
-      VPSMAN_SUPER_PASSWORD=<local-super-password> \
-      VPSMAN_SUPER_SALT_HEX=<64-hex-salt> \
       bash
 
   Unprivileged user install:
@@ -33,8 +34,6 @@ Usage:
       VPSMAN_INSTALL_MODE=unprivileged \
       VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
       VPSMAN_ENROLLMENT_TOKEN=<token> \
-      VPSMAN_SUPER_PASSWORD=<local-super-password> \
-      VPSMAN_SUPER_SALT_HEX=<64-hex-salt> \
       bash
 
 Required values may also be entered interactively when running from a TTY.
@@ -48,7 +47,7 @@ Environment:
   VPSMAN_INSTALL_ROOT       Root-mode binary install root, default: /opt/vpsman
   VPSMAN_AGENT_CONFIG       Root-mode agent config path, default: /etc/vpsman/agent.toml
   VPSMAN_AGENT_SERVICE      systemd unit name, default: vpsman-agent
-  VPSMAN_COMMAND_TIMEOUT_SECS  Proof-gated command timeout in rendered config
+  VPSMAN_COMMAND_TIMEOUT_SECS  Command timeout in rendered config
   VPSMAN_SKIP_SERVICE=1     Install binary/config only; do not write/start systemd
 
 Root mode writes:
@@ -342,11 +341,6 @@ configure_paths
 
 resolve_enrollment_api_url
 prompt_secret VPSMAN_ENROLLMENT_TOKEN "Enrollment token"
-prompt_secret VPSMAN_SUPER_PASSWORD "Local super password for this agent"
-prompt_secret VPSMAN_SUPER_SALT_HEX "Shared super-password salt hex"
-
-[[ "$VPSMAN_SUPER_SALT_HEX" =~ ^[0-9A-Fa-f]{64}$ ]] \
-  || die "VPSMAN_SUPER_SALT_HEX must be exactly 64 hex characters"
 
 require_tool uname
 require_tool sha256sum
@@ -390,8 +384,6 @@ log "claiming enrollment token and rendering agent config"
   --api-url "$ENROLLMENT_API_URL" \
   enroll-config \
   --token "$VPSMAN_ENROLLMENT_TOKEN" \
-  --password-env VPSMAN_SUPER_PASSWORD \
-  --super-salt-hex "$VPSMAN_SUPER_SALT_HEX" \
   --command-timeout-secs "$COMMAND_TIMEOUT_SECS" \
   --output-file "$tmp_dir/agent.toml"
 tmp_config="$tmp_dir/agent.toml"

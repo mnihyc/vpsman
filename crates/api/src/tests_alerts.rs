@@ -4,11 +4,17 @@ use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 #[tokio::test]
 async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
-    let connected = AgentView {
+    let online = AgentView {
         id: "edge-a".to_string(),
         display_name: "Edge A".to_string(),
-        status: "connected".to_string(),
+        status: "online".to_string(),
         tags: vec!["bgp".to_string()],
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        stale_since: None,
+        stale_reason: None,
         capabilities: AgentCapabilitySnapshot::default(),
     };
     let stale = AgentView {
@@ -16,19 +22,24 @@ async fn fleet_alerts_derive_actionable_current_status() {
         display_name: "Edge B".to_string(),
         status: "stale".to_string(),
         tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        stale_since: None,
+        stale_reason: None,
         capabilities: AgentCapabilitySnapshot {
             privilege_mode: AgentPrivilegeMode::Unprivileged,
             effective_uid: Some(1000),
             can_attempt_privileged_ops: true,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
-            command_protocol_version: 1,
             unprivileged_hint: Some("agent is running without root".to_string()),
         },
     };
     let backup_job = Uuid::new_v4();
     if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.extend([connected, stale]);
+        memory.agents.write().await.extend([online, stale]);
         memory
             .telemetry_tunnels
             .write()
@@ -88,6 +99,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             job_id: backup_job,
             client_id: "edge-b".to_string(),
             status: "degraded_unprivileged".to_string(),
+            message: None,
             exit_code: None,
             started_at: Some("105".to_string()),
             completed_at: Some("110".to_string()),
@@ -123,8 +135,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
                 automation_blocker: Some("heartbeat timed out".to_string()),
                 automation_targets: vec!["edge-a".to_string()],
                 automation_updated_at: Some("120".to_string()),
-                activation_delegations: Vec::new(),
-                rollback_delegations: Vec::new(),
                 targets: vec![AgentUpdateRolloutTargetView {
                     client_id: "edge-a".to_string(),
                     status: "heartbeat_timeout".to_string(),
@@ -186,15 +196,27 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
             AgentView {
                 id: "edge-a".to_string(),
                 display_name: "Edge A".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["edge".to_string(), "provider:provider-a".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
                 id: "edge-b".to_string(),
                 display_name: "Edge B".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: Vec::new(),
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
         ]);
@@ -303,6 +325,12 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
             display_name: "Edge Muted".to_string(),
             status: "stale".to_string(),
             tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: AgentCapabilitySnapshot::default(),
         });
     }
@@ -428,13 +456,25 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 display_name: "Edge A".to_string(),
                 status: "stale".to_string(),
                 tags: vec!["edge".to_string(), "provider:provider-a".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
             AgentView {
                 id: "core-a".to_string(),
                 display_name: "Core A".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["core".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
             },
         ]);

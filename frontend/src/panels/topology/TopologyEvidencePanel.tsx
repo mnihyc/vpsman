@@ -392,7 +392,7 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
           ? "pending"
           : "recorded";
   const delta = plan.cost_delta === 0 ? "unchanged" : plan.cost_delta > 0 ? `+${plan.cost_delta}` : String(plan.cost_delta);
-  const proof = plan.proof_required ? "proof-gated" : "read-only";
+  const privilegeState = plan.privilege_required ? "privilege-unlocked" : "read-only";
   return {
     id: plan.plan_id,
     planName: plan.plan_name,
@@ -401,7 +401,7 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
     metric: `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost}`,
     metricDetail: `${delta}; ${plan.confidence}`,
     target: plan.requires_approval ? "approval required" : "no action",
-    targetDetail: `${proof}; ${plan.approval_scope.join(", ")}`,
+    targetDetail: `${privilegeState}; ${plan.approval_scope.join(", ")}`,
     latestObservedAt: plan.evidence.latest_observed_at,
   };
 }

@@ -1,7 +1,6 @@
 import { useCallback, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
-  AuthProofRotationHistoryRecord,
   GatewaySessionRecord,
   OperatorPreferences,
   OperatorSessionRecord,
@@ -24,7 +23,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [clientKeyRevocations, setClientKeyRevocations] = useState<ClientKeyRevocationView[]>([]);
   const [keyLifecycleReport, setKeyLifecycleReport] = useState<KeyLifecycleReportView | null>(null);
   const [gatewaySessions, setGatewaySessions] = useState<GatewaySessionRecord[]>([]);
-  const [proofRotations, setProofRotations] = useState<AuthProofRotationHistoryRecord[]>([]);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [accessLoading, setAccessLoading] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
@@ -38,7 +36,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     setClientKeyRevocations([]);
     setKeyLifecycleReport(null);
     setGatewaySessions([]);
-    setProofRotations([]);
     setPreferencesError(null);
   }
 
@@ -87,7 +84,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         enrollmentTokensResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
-        proofRotationsResult,
       ] = await Promise.allSettled([
         apiGet<GatewaySessionRecord[]>("/api/v1/gateway-sessions?limit=200", apiToken),
         nextOperator.role === "admin" ? apiGet<OperatorView[]>("/api/v1/operators", apiToken) : Promise.resolve([]),
@@ -99,9 +95,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           ? apiGet<ClientKeyRevocationView[]>("/api/v1/client-key-revocations?limit=200", apiToken)
           : Promise.resolve([]),
         nextOperator.role === "admin" ? apiGet<KeyLifecycleReportView>("/api/v1/key-lifecycle/report", apiToken) : Promise.resolve(null),
-        nextOperator.role === "admin"
-          ? apiGet<AuthProofRotationHistoryRecord[]>("/api/v1/auth/proof-rotations?limit=200", apiToken)
-          : Promise.resolve([]),
       ]);
       const failures: string[] = [];
       const unauthorized = [
@@ -111,7 +104,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         enrollmentTokensResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
-        proofRotationsResult,
       ].some((result) => result.status === "rejected" && isApiUnauthorized(result.reason));
       if (unauthorized) {
         onUnauthorized();
@@ -125,7 +117,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       setEnrollmentTokens(settledValue(enrollmentTokensResult, [], "enrollment tokens", failures));
       setClientKeyRevocations(settledValue(clientKeyRevocationsResult, [], "client revocations", failures));
       setKeyLifecycleReport(settledValue(keyLifecycleReportResult, null, "key lifecycle", failures));
-      setProofRotations(settledValue(proofRotationsResult, [], "proof rotations", failures));
       if (failures.length > 0) {
         setAccessError(`Some access records unavailable: ${failures.join(", ")}`);
       }
@@ -334,7 +325,6 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     operatorSessions,
     preferencesError,
     preferencesSaving,
-    proofRotations,
     revokeClientKey,
     revokeOperatorSession,
     setAuthenticatedOperator,

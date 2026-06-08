@@ -28,10 +28,10 @@ Examples:
 
 ```sh
 vpsctl bulk-resolve --tags id:edge-01
-vpsctl bulk-resolve --tags provider:alpha,country:US --confirmed
+vpsctl bulk-resolve --tags provider:alpha,country:US
 vpsctl job-create --command uptime --tags name:edge-a,role:edge --confirmed
 ```
 
-`client:<id>` is not an operator target selector. Internal audit and proof
-records may still render scopes as `client:<id>` because those records identify
-a concrete VPS after resolution.
+`client:<id>` is not an operator target selector. Internal audit and signed
+command records may still render scopes as `client:<id>` because those records
+identify a concrete VPS after resolution.

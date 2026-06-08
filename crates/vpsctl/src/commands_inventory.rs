@@ -8,8 +8,10 @@ use vpsman_common::{
     validate_data_source_config_patch_section, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
+use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
 use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
+use crate::privilege::{build_privilege_for_db, load_super_password, load_super_salt_hex};
 use crate::util::percent_encode_query_value;
 
 #[derive(Debug, Deserialize)]
@@ -452,6 +454,18 @@ pub(crate) fn tags(api_url: &str, token: Option<&str>) -> Result<()> {
 }
 
 pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Result<()> {
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let privilege_assertion = build_privilege_for_db(
+        "tag.create",
+        &name,
+        None,
+        &[],
+        true,
+        &password,
+        &salt_hex,
+        300,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -460,6 +474,8 @@ pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Re
             token,
             &serde_json::json!({
                 "name": name,
+                "confirmed": true,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -472,6 +488,19 @@ pub(crate) fn agent_tag(
     client_id: String,
     tag: String,
 ) -> Result<()> {
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let targets = vec![client_id.clone()];
+    let privilege_assertion = build_privilege_for_db(
+        "tag.assign",
+        &tag,
+        None,
+        &targets,
+        true,
+        &password,
+        &salt_hex,
+        300,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -480,6 +509,8 @@ pub(crate) fn agent_tag(
             token,
             &serde_json::json!({
                 "tag": tag,
+                "confirmed": true,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -491,8 +522,6 @@ pub(crate) fn bulk_resolve(
     token: Option<&str>,
     clients: Vec<String>,
     tags: Vec<String>,
-    destructive: bool,
-    confirmed: bool,
 ) -> Result<()> {
     println!(
         "{}",
@@ -501,10 +530,7 @@ pub(crate) fn bulk_resolve(
             "/api/v1/bulk/resolve",
             token,
             &serde_json::json!({
-                "clients": clients,
-                "tags": tags,
-                "destructive": destructive,
-                "confirmed": confirmed
+                "selector_expression": selector_expression_from_targets(&clients, &tags),
             }),
         )?
     );
@@ -756,9 +782,10 @@ pub(crate) fn data_source_hot_config_apply(
     client_id: String,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
+    force_unprivileged: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         confirmed,
@@ -786,10 +813,10 @@ pub(crate) fn data_source_hot_config_apply(
             tags: &[],
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
-            force_unprivileged: false,
+            force_unprivileged,
         })?
     );
     Ok(())
@@ -1315,8 +1342,7 @@ pub(crate) fn data_source_preset_assign(
             &serde_json::json!({
                 "domain": options.domain,
                 "preset_id": preset_id,
-                "clients": options.clients,
-                "tags": options.tags,
+                "selector_expression": selector_expression_from_targets(&options.clients, &options.tags),
                 "confirmed": options.confirmed,
             }),
         )?

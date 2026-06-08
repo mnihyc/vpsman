@@ -60,6 +60,9 @@ export async function apiPost<T = JsonValue>(path: string, apiToken: string, bod
   if (!response.ok) {
     throw await apiErrorFromResponse(response);
   }
+  if (response.status === 204) {
+    return undefined as T;
+  }
   return (await response.json()) as T;
 }
 
@@ -124,13 +127,20 @@ export async function apiGetBlob(path: string, apiToken: string): Promise<Blob> 
   return await response.blob();
 }
 
-export async function apiDelete<T = JsonValue>(path: string, apiToken: string): Promise<T> {
-  const response = await fetch(path, { method: "DELETE", headers: buildAuthHeaders(apiToken) });
+export async function apiDelete<T = JsonValue>(path: string, apiToken: string, body?: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "DELETE",
+    headers: body === undefined ? buildAuthHeaders(apiToken) : buildJsonHeaders(apiToken),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
   if (!response.ok) {
     throw await apiErrorFromResponse(response);
+  }
+  if (response.status === 204) {
+    return undefined as T;
   }
   return (await response.json()) as T;
 }

@@ -1,4 +1,4 @@
-import { Activity, DatabaseBackup, Download, KeyRound, PackageCheck, Settings2, Upload } from "lucide-react";
+import { Activity, DatabaseBackup, Download, PackageCheck, Settings2, Upload } from "lucide-react";
 import { FILE_TRANSFER_CHUNK_BYTES, MAX_CHUNKED_FILE_PUSH_BYTES } from "../../fileTransfer";
 import {
   COMMAND_ARGV_PLACEHOLDER,
@@ -33,7 +33,6 @@ export function OperationModeTabs({
     { label: "Resumable upload", mode: "file_transfer_upload" },
     { label: "Resumable download", mode: "file_transfer_download" },
     { label: "Hot config", mode: "hot_config" },
-    { label: "Proof rotate", mode: "auth_rotate" },
     { label: "Update", mode: "agent_update" },
     { label: "Check update", mode: "agent_update_check" },
     { label: "Activate", mode: "agent_update_activate" },
@@ -83,6 +82,8 @@ export function JobOperationEditor({
   terminalCloseReason,
   terminalCols,
   terminalCwd,
+  terminalUser,
+  terminalUserPolicy,
   terminalFlowWindowBytes,
   terminalIdleTimeoutSecs,
   terminalInputSeq,
@@ -107,9 +108,6 @@ export function JobOperationEditor({
   hotConfigToml,
   mode,
   processLimit,
-  rotationGeneration,
-  rotationPassword,
-  rotationSaltHex,
   setBackupIncludeConfig,
   setBackupPathsText,
   setCommandText,
@@ -120,6 +118,8 @@ export function JobOperationEditor({
   setTerminalCloseReason,
   setTerminalCols,
   setTerminalCwd,
+  setTerminalUser,
+  setTerminalUserPolicy,
   setTerminalFlowWindowBytes,
   setTerminalIdleTimeoutSecs,
   setTerminalInputSeq,
@@ -143,9 +143,6 @@ export function JobOperationEditor({
   setFileTransferUploadSourceKind,
   setHotConfigToml,
   setProcessLimit,
-  setRotationGeneration,
-  setRotationPassword,
-  setRotationSaltHex,
   setSupervisorAction,
   setSupervisorArgv,
   setSupervisorCwd,
@@ -191,6 +188,8 @@ export function JobOperationEditor({
   terminalCloseReason: string;
   terminalCols: number;
   terminalCwd: string;
+  terminalUser: string;
+  terminalUserPolicy: "fail" | "fallback";
   terminalFlowWindowBytes: number;
   terminalIdleTimeoutSecs: number;
   terminalInputSeq: number;
@@ -215,9 +214,6 @@ export function JobOperationEditor({
   hotConfigToml: string;
   mode: DispatchMode;
   processLimit: number;
-  rotationGeneration: string;
-  rotationPassword: string;
-  rotationSaltHex: string;
   setBackupIncludeConfig: (value: boolean) => void;
   setBackupPathsText: (value: string) => void;
   setCommandText: (value: string) => void;
@@ -228,6 +224,8 @@ export function JobOperationEditor({
   setTerminalCloseReason: (value: string) => void;
   setTerminalCols: (value: number) => void;
   setTerminalCwd: (value: string) => void;
+  setTerminalUser: (value: string) => void;
+  setTerminalUserPolicy: (value: "fail" | "fallback") => void;
   setTerminalFlowWindowBytes: (value: number) => void;
   setTerminalIdleTimeoutSecs: (value: number) => void;
   setTerminalInputSeq: (value: number) => void;
@@ -251,9 +249,6 @@ export function JobOperationEditor({
   setFileTransferUploadSourceKind: (value: "local-file" | "source-artifact") => void;
   setHotConfigToml: (value: string) => void;
   setProcessLimit: (value: number) => void;
-  setRotationGeneration: (value: string) => void;
-  setRotationPassword: (value: string) => void;
-  setRotationSaltHex: (value: string) => void;
   setSupervisorAction: (value: SupervisorAction) => void;
   setSupervisorArgv: (value: string) => void;
   setSupervisorCwd: (value: string) => void;
@@ -338,6 +333,8 @@ export function JobOperationEditor({
         setTerminalCloseReason={setTerminalCloseReason}
         setTerminalCols={setTerminalCols}
         setTerminalCwd={setTerminalCwd}
+        setTerminalUser={setTerminalUser}
+        setTerminalUserPolicy={setTerminalUserPolicy}
         setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
         setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
         setTerminalInputSeq={setTerminalInputSeq}
@@ -350,6 +347,8 @@ export function JobOperationEditor({
         terminalCloseReason={terminalCloseReason}
         terminalCols={terminalCols}
         terminalCwd={terminalCwd}
+        terminalUser={terminalUser}
+        terminalUserPolicy={terminalUserPolicy}
         terminalFlowWindowBytes={terminalFlowWindowBytes}
         terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
         terminalInputSeq={terminalInputSeq}
@@ -381,7 +380,7 @@ export function JobOperationEditor({
         <Upload size={18} />
         <div>
           <strong>File push</strong>
-          <span>Proof-gated, chunk-hashed, atomic agent write up to {MAX_CHUNKED_FILE_PUSH_BYTES} bytes</span>
+          <span>Privilege-unlocked, chunk-hashed, atomic agent write up to {MAX_CHUNKED_FILE_PUSH_BYTES} bytes</span>
         </div>
         <label className="wideField">
           <span>Source file</span>
@@ -633,7 +632,7 @@ export function JobOperationEditor({
         <Settings2 size={18} />
         <div>
           <strong>Agent config</strong>
-          <span>Versioned TOML, proof-gated, rollback file on agent</span>
+          <span>Versioned TOML, privilege-unlocked, rollback file on agent</span>
         </div>
         <label className="wideField">
           <span>TOML</span>
@@ -655,7 +654,7 @@ export function JobOperationEditor({
         <Activity size={18} />
         <div>
           <strong>Process snapshot</strong>
-          <span>Proof-gated process source sorted by RSS</span>
+          <span>Privilege-unlocked process source sorted by RSS</span>
         </div>
         <label>
           <span>Limit</span>
@@ -666,47 +665,6 @@ export function JobOperationEditor({
             onChange={(event) => setProcessLimit(Number(event.target.value))}
             type="number"
             value={processLimit}
-          />
-        </label>
-      </div>
-    );
-  }
-
-  if (mode === "auth_rotate") {
-    return (
-      <div className="operationNote compactOperation">
-        <KeyRound size={18} />
-        <div>
-          <strong>Super-password rotation</strong>
-          <span>Derives the next proof key locally and applies it to selected agents</span>
-        </div>
-        <label className="wideField">
-          <span>New super password</span>
-          <input
-            aria-label="New super password"
-            autoComplete="new-password"
-            onChange={(event) => setRotationPassword(event.target.value)}
-            placeholder="new proof password"
-            type="password"
-            value={rotationPassword}
-          />
-        </label>
-        <label className="wideField">
-          <span>New salt hex</span>
-          <input
-            aria-label="New proof salt hex"
-            onChange={(event) => setRotationSaltHex(event.target.value)}
-            placeholder="64 hex characters recommended"
-            value={rotationSaltHex}
-          />
-        </label>
-        <label className="wideField">
-          <span>Generation</span>
-          <input
-            aria-label="Proof rotation generation"
-            onChange={(event) => setRotationGeneration(event.target.value)}
-            placeholder="2026-q2-rotation"
-            value={rotationGeneration}
           />
         </label>
       </div>

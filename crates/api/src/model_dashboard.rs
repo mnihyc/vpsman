@@ -71,7 +71,8 @@ pub(crate) struct DashboardFilterOptionView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DashboardSummaryView {
     pub(crate) total: usize,
-    pub(crate) connected: usize,
+    pub(crate) online: usize,
+    pub(crate) offline: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,
@@ -190,7 +191,8 @@ pub(crate) struct DashboardLabelClusterView {
     pub(crate) kind: String,
     pub(crate) query: Option<String>,
     pub(crate) total: usize,
-    pub(crate) connected: usize,
+    pub(crate) online: usize,
+    pub(crate) offline: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,

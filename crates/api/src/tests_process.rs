@@ -1,16 +1,12 @@
 use super::*;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{extract::State, http::HeaderMap, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_proof,
-    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, CommandEnvelope, JobCommand,
-    ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
+    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand, ProcessResourceLimits,
+    ProcessRestartPolicy, ProcessRunPolicy,
 };
 
 use crate::{
@@ -37,10 +33,9 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "process_start");
@@ -95,10 +90,9 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     request.job_command().unwrap();
@@ -127,10 +121,9 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let error = request.job_command().unwrap_err();
@@ -158,10 +151,9 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(
@@ -180,7 +172,7 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
 }
 
 #[tokio::test]
-async fn process_start_with_limits_degrades_unprivileged_target_without_gateway() {
+async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_verification() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -191,13 +183,13 @@ async fn process_start_with_limits_degrades_unprivileged_target_without_gateway(
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
-                    command_protocol_version: 1,
                     unprivileged_hint: Some("running as normal user".to_string()),
                 },
             },
@@ -216,7 +208,6 @@ async fn process_start_with_limits_degrades_unprivileged_target_without_gateway(
             ..ProcessResourceLimits::default()
         },
     };
-    let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
         selector_expression: "id:client-a".to_string(),
         destructive: false,
@@ -228,14 +219,15 @@ async fn process_start_with_limits_degrades_unprivileged_target_without_gateway(
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(test_command_envelope("client-a", &command_hash)),
-        envelopes: HashMap::new(),
     };
 
     let (status, Json(response)) = create_job(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state_with_signing_key_and_privilege_auto_approve(
+            repo.clone(),
+        )),
         HeaderMap::new(),
         Json(request),
     )
@@ -279,23 +271,9 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
     }
 }
 
-fn test_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let proof_key = derive_super_key("correct horse", &[1, 2, 3, 4]);
-    let proof = sign_privilege_proof(
-        &proof_key,
-        command_id,
-        &scope,
-        command_hash,
-        &random_nonce(),
-        unix_now() + 300,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex: command_hash.to_string(),
-        proof: Some(proof),
-        server_signature: Vec::new(),
+fn test_state_with_signing_key_and_privilege_auto_approve(repo: Repository) -> AppState {
+    AppState {
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
+        ..test_state_with_signing_key(repo)
     }
 }

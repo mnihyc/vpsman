@@ -112,10 +112,10 @@ fn derive_status(
     tunnels: &[TelemetryTunnelView],
 ) -> (String, String, serde_json::Value) {
     let domain = preset.domain.as_str();
-    if agent.status != "connected" {
+    if agent.status != "online" {
         return (
             "agent_offline".to_string(),
-            "selected preset exists, but the agent is not currently connected".to_string(),
+            "selected preset exists, but the agent is not currently online".to_string(),
             json!({
                 "agent_status": agent.status,
                 "continuous_status": false,
@@ -126,7 +126,7 @@ fn derive_status(
     match domain {
         "telemetry_metrics_source" => (
             "selected".to_string(),
-            "agent is connected; telemetry source is selected in agent config".to_string(),
+            "agent is online; telemetry source is selected in agent config".to_string(),
             json!({
                 "agent_status": agent.status,
                 "continuous_status": true,
@@ -142,7 +142,7 @@ fn derive_status(
         "process_supervisor_policy" => process_supervisor_policy_status(agent, preset, source_kind),
         "backup_object_store" | "update_artifact_source" => (
             "selected_workflow".to_string(),
-            "preset is selected; status is produced when the related proof-gated workflow runs"
+            "preset is selected; status is produced when the related privilege-gated workflow runs"
                 .to_string(),
             json!({
                 "agent_status": agent.status,
@@ -181,7 +181,7 @@ fn latency_probe_status(
             "continuous_status": false,
             "workflow": "network_probe",
             "command_types": ["network_probe"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "configured_ping_argv": configured_ping,
             "sample_status": "on_demand",
@@ -204,7 +204,7 @@ fn speed_test_status(
             "continuous_status": false,
             "workflow": "network_speed_test",
             "command_types": ["network_speed_test"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "configured_adapter_argv": configured_adapter,
             "requires_two_endpoints": true,
@@ -242,7 +242,7 @@ fn process_inventory_status(
                 "process_restart",
                 "process_stop"
             ],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "custom_command_configured": custom_command,
             "snapshot_status": "on_demand",
@@ -271,7 +271,7 @@ fn user_session_inventory_status(
             "continuous_status": false,
             "workflow": "user_session_inventory",
             "command_types": ["user_sessions"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "custom_command_configured": configured_command,
             "snapshot_status": "on_demand",
@@ -310,13 +310,13 @@ fn command_execution_policy_status(
         .unwrap_or_default();
     (
         "ready_on_demand".to_string(),
-        "command execution policy is selected for proof-gated argv, shell-script, terminal, and inventory workflows"
+        "command execution policy is selected for privilege-gated argv, shell-script, terminal, and inventory workflows"
             .to_string(),
         json!({
             "continuous_status": false,
             "workflow": "command_execution",
             "command_types": ["shell_argv", "shell_script", "shell_pty", "terminal_open", "user_sessions"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "shell_script_argv_len": shell_argv_len,
             "working_directory_configured": preset.definition.get("working_directory").is_some(),
             "environment_policy": environment_policy,
@@ -348,7 +348,7 @@ fn process_supervisor_policy_status(
             "continuous_status": false,
             "workflow": "process_supervisor",
             "command_types": ["process_start", "process_status", "process_logs", "process_restart", "process_stop"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "restart_policy_source": preset.definition.get("restart_policy_source").and_then(serde_json::Value::as_str).unwrap_or("process_run_policy"),
             "limit_source": preset.definition.get("limit_source").and_then(serde_json::Value::as_str).unwrap_or("agent_capability_snapshot"),
@@ -373,7 +373,7 @@ fn restore_path_mapping_status(
             "continuous_status": false,
             "workflow": "restore_migration",
             "command_types": ["restore_run", "restore_rollback", "migration_run"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "mapping_mode": preset.definition.get("mapping_mode").and_then(serde_json::Value::as_str).unwrap_or("explicit_paths"),
             "supports_agent_local_archive": preset.definition.get("supports_agent_local_archive").and_then(serde_json::Value::as_bool).unwrap_or(false),
@@ -395,7 +395,7 @@ fn update_restart_policy_status(
             "continuous_status": false,
             "workflow": "agent_update_activation",
             "command_types": ["agent_update_activate", "agent_update_rollback"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "restart_method": preset.definition.get("restart_method").and_then(serde_json::Value::as_str).unwrap_or("agent_configured"),
             "fallback": preset.definition.get("fallback").and_then(serde_json::Value::as_str).unwrap_or("manual_supervisor"),
@@ -416,7 +416,7 @@ fn update_rollback_heartbeat_status(
             "continuous_status": false,
             "workflow": "agent_update_rollout",
             "command_types": ["agent_update", "agent_update_activate", "agent_update_rollback"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "health_gate": preset.definition.get("health_gate").and_then(serde_json::Value::as_str).unwrap_or("heartbeat_verified"),
             "heartbeat_source": preset.definition.get("source").and_then(serde_json::Value::as_str).unwrap_or("agent_update_heartbeat"),
@@ -437,7 +437,7 @@ fn traffic_limit_status_source_status(
             "continuous_status": true,
             "workflow": "runtime_traffic_limits",
             "command_types": ["network_apply", "network_status", "tunnel_speed_test"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "status_source": preset.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("network_status_and_telemetry"),
         }),
@@ -457,7 +457,7 @@ fn routing_daemon_adapter_status(
             "continuous_status": false,
             "workflow": "network_routing",
             "command_types": ["network_status", "network_ospf_cost_update"],
-            "proof_gated": true,
+            "privilege_gated": true,
             "source_kind": source_kind,
             "provider": preset.definition.get("provider").and_then(serde_json::Value::as_str).unwrap_or("bird2"),
             "status_source": preset.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("bird2_status"),

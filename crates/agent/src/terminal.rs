@@ -17,7 +17,7 @@ use tokio::{
 };
 use vpsman_common::{
     AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy, CommandOutput,
-    JobCommand, OutputStream, TerminalStreamOutput, MAX_TERMINAL_INPUT_BYTES,
+    JobCommand, OutputStream, TerminalStreamOutput, TerminalUserPolicy, MAX_TERMINAL_INPUT_BYTES,
     MAX_TERMINAL_REASON_BYTES,
 };
 
@@ -70,6 +70,8 @@ async fn execute_terminal_command_inner(
             session_id,
             argv,
             cwd,
+            user,
+            user_policy,
             cols,
             rows,
             replay_from_seq,
@@ -82,6 +84,8 @@ async fn execute_terminal_command_inner(
                 session_id: *session_id,
                 argv,
                 cwd: cwd.as_deref(),
+                user: user.as_deref(),
+                user_policy: *user_policy,
                 cols: *cols,
                 rows: *rows,
                 replay_from_seq: *replay_from_seq,
@@ -118,6 +122,8 @@ struct TerminalOpenInput<'a> {
     session_id: uuid::Uuid,
     argv: &'a [String],
     cwd: Option<&'a str>,
+    user: Option<&'a str>,
+    user_policy: TerminalUserPolicy,
     cols: u16,
     rows: u16,
     replay_from_seq: Option<u64>,
@@ -144,6 +150,7 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         .cwd
         .or(input.config.execution.working_directory.as_deref());
     validate_terminal_cwd(effective_cwd)?;
+    let user_resolution = resolve_terminal_user(input.user, input.user_policy)?;
     let registry = registry();
     if let Some(handle) = registry.get_handle(input.session_id).await {
         handle.update_stream_sender(input.stream_tx).await;
@@ -195,6 +202,10 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         command.current_dir(cwd);
     }
     apply_terminal_environment(input.config, &mut command);
+    if let Some(identity) = user_resolution.identity {
+        command.uid(identity.uid);
+        command.gid(identity.gid);
+    }
     command.kill_on_drop(true);
     command.process_group(0);
     command.stdin(pty.stdin);
@@ -263,6 +274,11 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
             "session_id": input.session_id,
             "argv": input.argv,
             "cwd": effective_cwd,
+            "requested_user": input.user,
+            "user_policy": input.user_policy,
+            "user_resolution": user_resolution.status,
+            "resolved_uid": user_resolution.identity.map(|identity| identity.uid),
+            "resolved_gid": user_resolution.identity.map(|identity| identity.gid),
             "environment_policy": input.config.execution.environment_policy,
             "pty_policy": input.config.execution.pty_policy,
             "cols": input.cols,
@@ -275,6 +291,84 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         ),
         Some(0),
     ))
+}
+
+#[derive(Clone, Copy)]
+struct TerminalIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+struct TerminalUserResolution {
+    identity: Option<TerminalIdentity>,
+    status: &'static str,
+}
+
+fn resolve_terminal_user(
+    user: Option<&str>,
+    policy: TerminalUserPolicy,
+) -> Result<TerminalUserResolution> {
+    let Some(user) = user.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(TerminalUserResolution {
+            identity: None,
+            status: "agent_user",
+        });
+    };
+    let Some(identity) = lookup_passwd_user(user)? else {
+        return terminal_user_unavailable(policy, "requested_terminal_user_not_found");
+    };
+    let current_uid = unsafe { libc::geteuid() } as u32;
+    if current_uid == identity.uid {
+        return Ok(TerminalUserResolution {
+            identity: None,
+            status: "requested_user_already_effective",
+        });
+    }
+    if current_uid != 0 {
+        return terminal_user_unavailable(policy, "agent_not_root_for_terminal_user_switch");
+    }
+    Ok(TerminalUserResolution {
+        identity: Some(identity),
+        status: "requested_user",
+    })
+}
+
+fn terminal_user_unavailable(
+    policy: TerminalUserPolicy,
+    reason: &'static str,
+) -> Result<TerminalUserResolution> {
+    match policy {
+        TerminalUserPolicy::Fail => anyhow::bail!(reason),
+        TerminalUserPolicy::Fallback => Ok(TerminalUserResolution {
+            identity: None,
+            status: reason,
+        }),
+    }
+}
+
+fn lookup_passwd_user(user: &str) -> Result<Option<TerminalIdentity>> {
+    let passwd = std::fs::read_to_string("/etc/passwd").context("failed to read /etc/passwd")?;
+    for line in passwd.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.split(':');
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        if name != user {
+            continue;
+        }
+        let _password = parts.next();
+        let Some(uid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+            anyhow::bail!("requested_terminal_user_uid_invalid");
+        };
+        let Some(gid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+            anyhow::bail!("requested_terminal_user_gid_invalid");
+        };
+        return Ok(Some(TerminalIdentity { uid, gid }));
+    }
+    Ok(None)
 }
 
 fn apply_terminal_environment(config: &AgentConfig, command: &mut tokio::process::Command) {

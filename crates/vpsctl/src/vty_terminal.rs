@@ -5,7 +5,7 @@ use vpsman_common::{
     default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, JobCommand,
 };
 
-use crate::vty_jobs::{vty_submit_operation, VtyJobSelection, VtyProofContext};
+use crate::vty_jobs::{vty_submit_operation, VtyJobSelection, VtyPrivilegeContext};
 
 pub(crate) fn is_vty_terminal_command(command: &str) -> bool {
     command.starts_with("terminal-open ")
@@ -18,7 +18,7 @@ pub(crate) fn is_vty_terminal_command(command: &str) -> bool {
 pub(crate) fn submit_vty_terminal_command(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     command: &str,
 ) -> Result<String> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
@@ -30,7 +30,7 @@ pub(crate) fn submit_vty_terminal_command(
     vty_submit_operation(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         parsed.command_label,
         &parsed.operation,
         parsed.selection,
@@ -122,6 +122,8 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
             session_id: session_id.unwrap_or_else(Uuid::new_v4),
             argv,
             cwd,
+            user: None,
+            user_policy: vpsman_common::TerminalUserPolicy::Fail,
             cols,
             rows,
             replay_from_seq,

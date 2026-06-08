@@ -101,10 +101,11 @@ fn connect_tcp(parsed: &ParsedDiscoveryUrl) -> Result<StdTcpStream> {
 
 fn send_http_get(stream: &mut impl Write, parsed: &ParsedDiscoveryUrl) -> Result<()> {
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: vpsman-agent/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: vpsman-agent/{} build/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         parsed.path_and_query,
         parsed.host_header(),
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        crate::build_info::AGENT_BUILD_NUMBER
     );
     stream.write_all(request.as_bytes())?;
     stream.flush()?;

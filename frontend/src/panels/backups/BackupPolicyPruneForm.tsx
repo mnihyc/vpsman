@@ -4,10 +4,9 @@ import type { BackupPolicyPruneResponse, BackupPolicyRecord } from "../../types"
 import { shortId } from "../../utils";
 
 type BackupPolicyPruneFormProps = {
-  confirmed: boolean;
+  confirmationOpen: boolean;
   dryRun: boolean;
   metadataOnly: boolean;
-  onConfirmedChange: (value: boolean) => void;
   onDryRunChange: (value: boolean) => void;
   onMetadataOnlyChange: (value: boolean) => void;
   onScheduleIdChange: (value: string) => void;
@@ -19,10 +18,9 @@ type BackupPolicyPruneFormProps = {
 };
 
 export function BackupPolicyPruneForm({
-  confirmed,
+  confirmationOpen,
   dryRun,
   metadataOnly,
-  onConfirmedChange,
   onDryRunChange,
   onMetadataOnlyChange,
   onScheduleIdChange,
@@ -69,10 +67,6 @@ export function BackupPolicyPruneForm({
           <input checked={metadataOnly} onChange={(event) => onMetadataOnlyChange(event.target.checked)} type="checkbox" />
           <span>Metadata only</span>
         </label>
-        <label className="checkLine">
-          <input checked={confirmed} onChange={(event) => onConfirmedChange(event.target.checked)} type="checkbox" />
-          <span>Confirmed</span>
-        </label>
         {result && totals && (
           <div className="backupScopeList">
             <span>{result.dry_run ? "dry run" : "applied"}</span>
@@ -81,10 +75,12 @@ export function BackupPolicyPruneForm({
             <span>{totals.objects} object{totals.objects === 1 ? "" : "s"}</span>
           </div>
         )}
-        <button className={dryRun ? "secondaryAction" : "dangerAction"} disabled={pending || (!dryRun && !confirmed)} type="submit">
-          {dryRun ? <SearchCheck size={17} /> : <Scissors size={17} />}
-          {dryRun ? "Preview prune" : "Prune artifacts"}
-        </button>
+        {!confirmationOpen && (
+          <button className={dryRun ? "secondaryAction" : "dangerAction"} disabled={pending} type="submit">
+            {dryRun ? <SearchCheck size={17} /> : <Scissors size={17} />}
+            {dryRun ? "Preview prune" : "Prune artifacts"}
+          </button>
+        )}
       </form>
     </>
   );

@@ -24,7 +24,7 @@ import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
   FILE_BROWSER_LIST_LIMIT,
@@ -45,7 +45,7 @@ import {
   type FileBrowserEntry,
 } from "../../fileBrowser";
 import { base64ToBytes, parseFileMode } from "../../fileTransfer";
-import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { agentsMatchingExpression } from "../../searchExpression";
 import type {
   AgentView,
@@ -86,20 +86,18 @@ export function FileBrowserPanel({
   onCreateJob,
   onLoadOutputs,
   onOpenMultiFiles,
-  onOpenProofUnlock,
-  proofMaterial,
-  proofTtlSecs,
-  setProofMaterial,
+  onOpenPrivilegeUnlock,
+  privilegeMaterial,
+  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onOpenMultiFiles?: (path: string) => void;
-  onOpenProofUnlock: () => void;
-  proofMaterial: ProofMaterial | null;
-  proofTtlSecs: number;
-  setProofMaterial: (value: ProofMaterial | null) => void;
+  onOpenPrivilegeUnlock: () => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
 }) {
   const saved = readBrowserState();
   const [targetExpression, setTargetExpression] = useState(saved.targetExpression || (agents[0]?.id ? `id:${agents[0].id}` : ""));
@@ -142,13 +140,13 @@ export function FileBrowserPanel({
   const targetMatches = useMemo(() => agentsMatchingExpression(agents, targetExpression), [agents, targetExpression]);
   const selectedAgent = targetMatches.length === 1 ? targetMatches[0] : null;
   const selectedEntry = metadataByPath[selectedPath];
-  const locationCommandDisabled = !selectedEntry || pending || !proofMaterial;
-  const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !proofMaterial;
+  const locationCommandDisabled = !selectedEntry || pending || !privilegeMaterial;
+  const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
   const editorDirty = editorContent !== editorSavedContent;
   const currentEntries = entriesByPath[currentPath] ?? [];
   const staleMessage = staleDirectoryPath ? `Directory ${staleDirectoryPath} changed; refresh to update listing` : null;
   const targetSummary = targetExpression.trim() ? `${targetMatches.length}/${agents.length} targets` : "No target selector";
-  const summary = actionError ?? actionMessage ?? staleMessage ?? (proofMaterial ? `${targetSummary} · ${currentEntries.length} entries loaded` : "Locked");
+  const summary = actionError ?? actionMessage ?? staleMessage ?? (privilegeMaterial ? `${targetSummary} · ${currentEntries.length} entries loaded` : "Locked");
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
   const editorStatusText = actionError ?? (actionMessage ? `${actionMessage}${staleDirectoryPath ? " · refresh available" : ""}` : staleMessage) ?? editorStateText;
 
@@ -169,15 +167,17 @@ export function FileBrowserPanel({
     if (!selectedAgent) {
       throw new Error("Choose a VPS first");
     }
-    if (!proofMaterial) {
-      throw new Error("Proof is locked");
+    if (!privilegeMaterial) {
+      throw new Error("Privilege unlock is locked");
     }
-    const built = await buildEnvelopesForOperation({
+    const timeoutSecs = operation.type === "file_download" ? 90 : 30;
+    const built = await buildPrivilegeForJobOperation({
       clientIds: [selectedAgent.id],
+      commandType: operation.type,
       operation,
-      proofTtlSecs,
-      superPassword: proofMaterial.superPassword,
-      superSaltHex: proofMaterial.superSaltHex,
+      privilegeMaterial,
+      selectorExpression: targetExpression.trim(),
+      timeoutSecs,
     });
     setLastPayloadHash(built.payloadHashHex);
     const destructive = mutatesFileSystem(operation);
@@ -188,7 +188,7 @@ export function FileBrowserPanel({
       command: operation.type,
       argv: [],
       operation,
-      timeout_secs: operation.type === "file_download" ? 90 : 30,
+      timeout_secs: timeoutSecs,
       canary_count: null,
       force_unprivileged: false,
       privileged: true,
@@ -198,8 +198,7 @@ export function FileBrowserPanel({
         resume_outputs: true,
         cancel_on_disconnect: false,
       },
-      envelope: null,
-      envelopes: built.envelopes,
+      privilege_assertion: built.privilegeAssertion,
     });
     const outputs = await waitForOutputs(job.job_id, onLoadOutputs, options.expectedType);
     return { job, outputs };
@@ -558,24 +557,24 @@ export function FileBrowserPanel({
         </div>
       </div>
 
-      {!proofMaterial && (
-        <div className="fileBrowserProofRow">
-          <ProofVaultBox
+      {!privilegeMaterial && (
+        <div className="fileBrowserPrivilegeRow">
+          <PrivilegeVaultBox
             lastPayloadHash={lastPayloadHash}
-            onOpenUnlock={onOpenProofUnlock}
-            onProofMaterialChange={setProofMaterial}
-            proofMaterial={proofMaterial}
+            onOpenUnlock={onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
           />
         </div>
       )}
 
       <div className="filePathBar">
-        <button className="iconButton" disabled={pending || currentPath === "/" || !proofMaterial} onClick={() => void loadDirectory(parentPath(currentPath))} title="Parent directory" type="button">
+        <button className="iconButton" disabled={pending || currentPath === "/" || !privilegeMaterial} onClick={() => void loadDirectory(parentPath(currentPath))} title="Parent directory" type="button">
           <ChevronRight className="rotate180" size={15} />
         </button>
         <button
           className="secondaryAction compactAction pathRefreshAction"
-          disabled={pending || loading || !proofMaterial}
+          disabled={pending || loading || !privilegeMaterial}
           onClick={() => void loadDirectory(staleDirectoryPath ?? pathInput)}
           title={staleDirectoryPath ? `Refresh changed directory ${staleDirectoryPath}` : "Refresh directory"}
           type="button"
@@ -612,10 +611,10 @@ export function FileBrowserPanel({
       <div className="fileBrowserWorkspace">
         <aside className="fileTreePane">
           <div className="fileTreeToolbar">
-            <button className="secondaryAction compactAction" disabled={pending || !proofMaterial} onClick={() => void loadDirectory("/")} type="button">
+            <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial} onClick={() => void loadDirectory("/")} type="button">
               /
             </button>
-            <button className="secondaryAction compactAction" disabled={!selectedPath || pending || !proofMaterial} onClick={() => void downloadSelected()} type="button">
+            <button className="secondaryAction compactAction" disabled={!selectedPath || pending || !privilegeMaterial} onClick={() => void downloadSelected()} type="button">
               <Download size={13} />
               <span>Download</span>
             </button>
@@ -665,7 +664,7 @@ export function FileBrowserPanel({
                 <span>Mode</span>
                 <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
               </label>
-              <button className="primaryAction" disabled={!editorPath || !editorDirty || pending || !proofMaterial} onClick={() => void saveEditor()} type="button">
+              <button className="primaryAction" disabled={!editorPath || !editorDirty || pending || !privilegeMaterial} onClick={() => void saveEditor()} type="button">
                 <Save size={14} />
                 <span>Save</span>
               </button>
@@ -761,7 +760,7 @@ export function FileBrowserPanel({
                   </select>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !uploadFile || !proofMaterial} onClick={() => void uploadSelectedFile()} type="button">
+                  <button className="secondaryAction" disabled={pending || !uploadFile || !privilegeMaterial} onClick={() => void uploadSelectedFile()} type="button">
                     <Upload size={14} />
                     <span>Upload file</span>
                   </button>
@@ -818,7 +817,7 @@ export function FileBrowserPanel({
                   </label>
                 )}
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !proofMaterial} onClick={() => void submitCreate()} type="button">
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={() => void submitCreate()} type="button">
                     {createType === "file" ? <FilePlus2 size={14} /> : <FolderPlus size={14} />}
                     <span>{createType === "file" ? "Write text" : "Create folder"}</span>
                   </button>
@@ -842,7 +841,7 @@ export function FileBrowserPanel({
                   />
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !selectedPath || !proofMaterial} onClick={renameSelected} type="button">
+                  <button className="secondaryAction" disabled={pending || !selectedPath || !privilegeMaterial} onClick={renameSelected} type="button">
                     <Scissors size={14} />
                     <span>Move path</span>
                   </button>
@@ -866,7 +865,7 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !proofMaterial} onClick={chmodSelected} type="button">Apply chmod</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Apply chmod</button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
               </section>
@@ -893,7 +892,7 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !proofMaterial} onClick={chownSelected} type="button">Apply chown</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Apply chown</button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
               </section>

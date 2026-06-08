@@ -7,21 +7,22 @@ export async function activate(locator: Locator) {
 export async function openConsoleSubpage(page: Page, view: string, subpage: string) {
   const nav = page.getByRole("navigation", { name: "Primary console navigation" });
   await activate(nav.getByRole("button", { name: view, exact: true }));
-  const subpageButton = nav.getByRole("button", { name: subpage, exact: true });
+  const subpageGroup = nav.getByLabel(`${view} sections`);
+  const subpageButton = subpageGroup.getByRole("button", { name: subpage, exact: true });
   if ((await subpageButton.count()) > 0) {
     await activate(subpageButton);
   }
 }
 
-export async function unlockProofFromTop(page: Page) {
+export async function unlockPrivilegeFromTop(page: Page) {
   const topbar = page.locator(".topbar");
-  if ((await topbar.getByRole("button", { name: "Lock proof" }).count()) > 0) {
+  if ((await topbar.getByRole("button", { name: "Lock privilege" }).count()) > 0) {
     return;
   }
-  await activate(topbar.getByRole("button", { name: "Open proof unlock" }));
-  await expect(page.getByRole("heading", { name: "Proof unlock" })).toBeVisible();
+  await activate(topbar.getByRole("button", { name: "Open privilege unlock" }));
+  await expect(page.getByRole("heading", { name: "Privilege unlock" })).toBeVisible();
   await page.getByLabel("Super password").fill("local-super-password");
   await page.getByLabel("Super salt hex").fill("00112233445566778899aabbccddeeff");
-  await activate(page.getByRole("button", { name: "Use proof" }));
-  await expect(topbar.getByRole("button", { name: "Lock proof" })).toBeVisible();
+  await activate(page.getByRole("button", { name: "Unlock privilege" }));
+  await expect(topbar.getByRole("button", { name: "Lock privilege" })).toBeVisible();
 }

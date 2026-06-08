@@ -1,5 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Network, Save, ShieldCheck } from "lucide-react";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
   buildRuntimeControl,
@@ -43,7 +44,6 @@ type AdapterPromotionForm = {
   topologyStaleText: string;
   topologyRoutesText: string;
   topologyStaleRoutesText: string;
-  confirmed: boolean;
 };
 
 export function TopologyPromotionPanel({
@@ -90,10 +90,10 @@ export function TopologyPromotionPanel({
     topologyStaleText: "",
     topologyRoutesText: "",
     topologyStaleRoutesText: "",
-    confirmed: false,
   });
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [adapterConfirmationOpen, setAdapterConfirmationOpen] = useState(false);
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const importCandidates = useMemo(
@@ -121,7 +121,7 @@ export function TopologyPromotionPanel({
     promoteForm.local_underlay.trim() &&
     promoteForm.peer_underlay.trim() &&
     promoteForm.address_pool_cidr.trim();
-  const adapterPromotionReady = selectedObservedPlan && adapterForm.statusArgv.trim() && adapterForm.confirmed;
+  const adapterPromotionReady = selectedObservedPlan && adapterForm.statusArgv.trim();
   const status =
     actionError ??
     `${importCandidates.length} telemetry imports / ${observedPlans.length} observed plans`;
@@ -136,17 +136,18 @@ export function TopologyPromotionPanel({
     });
   }
 
-  async function submitAdapterPromotion(event: FormEvent<HTMLFormElement>) {
+  function submitAdapterPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setAdapterConfirmationOpen(true);
+  }
+
+  async function executeAdapterPromotion() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!selectedObservedPlan) {
         throw new Error("Select an observed tunnel plan");
       }
       if (!adapterForm.statusArgv.trim()) {
         throw new Error("Adapter status argv is required");
-      }
-      if (!adapterForm.confirmed) {
-        throw new Error("Adapter promotion requires confirmation");
       }
       const runtimeTopology = buildRuntimeTopology({
         version: adapterForm.topologyVersion,
@@ -188,6 +189,23 @@ export function TopologyPromotionPanel({
         <Network size={20} />
       </div>
       <div className="dispatchControls">
+        <ConfirmationPrompt
+          confirmLabel="Promote adapter"
+          detail="Confirm promoting the observed tunnel plan into an externally managed runtime adapter."
+          items={[
+            { label: "Plan", value: selectedObservedPlan?.name ?? "none" },
+            { label: "Runtime", value: "external_managed_adapter" },
+            { label: "Status argv", value: adapterForm.statusArgv.trim() || "missing" },
+          ]}
+          onCancel={() => setAdapterConfirmationOpen(false)}
+          onConfirm={() => {
+            setAdapterConfirmationOpen(false);
+            void executeAdapterPromotion();
+          }}
+          open={adapterConfirmationOpen}
+          pending={pending}
+          title="Promote tunnel adapter"
+        />
         <form className="dispatchForm" onSubmit={submitTelemetryPromotion}>
           <div className="sectionHeader compactHeader">
             <div>
@@ -424,18 +442,12 @@ export function TopologyPromotionPanel({
               onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
             />
           </label>
-          <label className="inlineCheck">
-            <input
-              checked={adapterForm.confirmed}
-              onChange={(event) => setAdapterField("confirmed", event.target.checked)}
-              type="checkbox"
-            />
-            <span>Confirmed</span>
-          </label>
-          <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
-            <ShieldCheck size={17} />
-            Promote adapter
-          </button>
+          {!adapterConfirmationOpen && (
+            <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
+              <ShieldCheck size={17} />
+              Promote adapter
+            </button>
+          )}
         </form>
       </div>
     </section>

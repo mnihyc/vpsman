@@ -7,7 +7,7 @@ import {
   sha256Hex,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -38,9 +38,15 @@ async function confirmVisiblePrompt(page: import("@playwright/test").Page, label
   await activate(prompt.getByRole("button", { name: label }));
 }
 
-async function unlockProofFor(page: import("@playwright/test").Page, view: string, subpage: string) {
-  await unlockProofFromTop(page);
+async function unlockPrivilegeFor(page: import("@playwright/test").Page, view: string, subpage: string) {
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, view, subpage);
+}
+
+function expectPrivilegeAssertion(request: unknown) {
+  expect((request as { envelope?: unknown }).envelope).toBeUndefined();
+  expect((request as { envelopes?: unknown }).envelopes).toBeUndefined();
+  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
 }
 
 async function openFleetFromDashboard(page: import("@playwright/test").Page) {
@@ -122,6 +128,9 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await expect(page.getByRole("heading", { name: "Preferences", exact: true })).toBeVisible();
     await page.getByLabel("Name display").selectOption("name");
     await page.getByLabel("Bulk output comparison default").selectOption("text");
+    await page
+      .getByLabel("Enrollment install command template")
+      .fill("env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
     await page.getByRole("button", { name: "Save preferences" }).click();
     const savedPreferences = await page.evaluate(() => {
       const requests = (window as unknown as { __vpsmanTestRequests: { operatorPreferences: unknown[] } }).__vpsmanTestRequests;
@@ -129,6 +138,8 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     });
     expect(savedPreferences).toMatchObject({
       bulk_output_compare_mode: "text",
+      enrollment_install_command_template:
+        "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
       vps_name_display_mode: "name",
     });
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
@@ -137,17 +148,22 @@ test("renders an operational cloud-console fleet workspace", async ({ page }, te
     await nav.getByRole("button", { name: "Preferences", exact: true }).click();
     await page.getByLabel("Name display").selectOption("name_id_suffix");
     await page.getByLabel("Bulk output comparison default").selectOption("binary");
+    await page
+      .getByLabel("Enrollment install command template")
+      .fill(
+        "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
+      );
     await page.getByRole("button", { name: "Save preferences" }).click();
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
   }
-  await expect(page.locator(".consoleHeader").getByText("2 connected / 3 total")).toBeVisible();
+  await expect(page.locator(".consoleHeader").getByText("2 online / 3 total")).toBeVisible();
   await expect(page.getByText("VPS instances")).toBeVisible();
   await expect(page.getByLabel("Fleet alerts")).toHaveCount(0);
   if (testInfo.project.name.includes("desktop")) {
     await openConsoleSubpage(page, "Fleet", "Alerts");
     await expect(page.getByLabel("Fleet alerts")).toBeVisible();
     await expect(page.getByText("Tunnel adapter status failed")).toBeVisible();
-    await expect(page.getByText("Agent is not connected")).toBeVisible();
+    await expect(page.getByText("Agent is not online")).toBeVisible();
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
@@ -187,7 +203,7 @@ test("deletes a VPS through a styled in-panel confirmation", async ({ page }, te
   await activate(page.locator(".deleteVpsControls").getByRole("button", { name: "Delete VPS" }));
   await activate(prompt.getByRole("button", { name: "Delete VPS" }));
   await expect(fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })).toHaveCount(0);
-  await expect(page.locator(".consoleHeader").getByText("2 connected / 2 total")).toBeVisible();
+  await expect(page.locator(".consoleHeader").getByText("2 online / 2 total")).toBeVisible();
 
   const deleteRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { agentDeletes: unknown[] } }).__vpsmanTestRequests;
@@ -208,7 +224,7 @@ test("clears browser-local console selections without deleting vault records", a
   await page.getByLabel("Dashboard chart point density").selectOption("dense");
   await page.evaluate(() => {
     window.localStorage.setItem("vpsman.authVault", "preserved-auth");
-    window.localStorage.setItem("vpsman.proofVault", "preserved-proof");
+    window.localStorage.setItem("vpsman.privilegeVault", "preserved-privilege");
     window.localStorage.setItem("vpsman.sidebarSubpanels", JSON.stringify({ state: { Jobs: true } }));
     window.localStorage.setItem("vpsman.grid.example", JSON.stringify({ pageSize: 50 }));
   });
@@ -225,14 +241,14 @@ test("clears browser-local console selections without deleting vault records", a
     authVault: window.localStorage.getItem("vpsman.authVault"),
     dashboardPreferences: window.localStorage.getItem("vpsman.dashboardPreferences"),
     grid: window.localStorage.getItem("vpsman.grid.example"),
-    proofVault: window.localStorage.getItem("vpsman.proofVault"),
+    privilegeVault: window.localStorage.getItem("vpsman.privilegeVault"),
     sidebarSubpanels: window.localStorage.getItem("vpsman.sidebarSubpanels"),
   }));
   expect(storage).toMatchObject({
     authVault: "preserved-auth",
     dashboardPreferences: null,
     grid: null,
-    proofVault: "preserved-proof",
+    privilegeVault: "preserved-privilege",
     sidebarSubpanels: null,
   });
 });
@@ -304,11 +320,11 @@ test("keeps console layout usable on desktop and mobile widths", async ({ page }
   }
 });
 
-test("manages data-source preset assignments from the tags view", async ({ page }, testInfo) => {
+test("manages data-source preset assignments from the config view", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "dense preset management is covered in the desktop console layout");
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Tags", "Source status");
+  await openConsoleSubpage(page, "Config", "Status");
 
   const panel = page.locator(".dataSourcePresetPanel");
   const activeSourcesSearchField = panel.getByRole("combobox", { name: "Active sources search field" });
@@ -328,7 +344,7 @@ test("manages data-source preset assignments from the tags view", async ({ page 
   await expect(panel.locator(".sourceStatusSection .historyRow").filter({ hasText: "shared:vnstat-json" })).toBeVisible();
   await activeSourcesSearch.fill("");
 
-  await openConsoleSubpage(page, "Tags", "Data-source presets");
+  await openConsoleSubpage(page, "Config", "Templates");
   const presetPanel = page.locator(".dataSourcePresetPanel");
   const presetRegistrySearchField = presetPanel.getByRole("combobox", { name: "Preset registry search field" });
   const presetRegistrySearch = presetPanel.getByRole("searchbox", { name: "Preset registry search" });
@@ -349,6 +365,8 @@ test("manages data-source preset assignments from the tags view", async ({ page 
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
   await expect(presetPanel.getByText("2/3 matching VPSs")).toBeVisible();
   await activate(presetPanel.getByRole("button", { name: "Assign preset" }));
+  await expect(presetPanel.getByText("Assign data-source preset")).toBeVisible();
+  await confirmVisiblePrompt(page, "Confirm");
 
   const request = await page.evaluate(() => {
     const requests = (window as unknown as {
@@ -357,10 +375,43 @@ test("manages data-source preset assignments from the tags view", async ({ page 
     return requests.dataSourcePresetAssignments.at(-1);
   });
   expect(request).toMatchObject({
-    confirmed: false,
+    confirmed: true,
     domain: "runtime_traffic_accounting_source",
     preset_id: "11111111-1111-4111-8111-111111111111",
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
+  });
+});
+
+test("creates a cron schedule from a command template with target preview", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "dense schedule composition is covered in the desktop console layout");
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Schedules", "Schedule registry");
+  await unlockPrivilegeFor(page, "Schedules", "Schedule registry");
+
+  await activate(page.getByRole("button", { name: "Expand Create schedule" }));
+  await page.getByLabel("Schedule command template").selectOption("46464646-5656-4789-8abc-defdefdefdef");
+  await page.getByLabel("Schedule cron expression").fill("*/15 * * * *");
+  await page.getByLabel("Schedule target expression").fill("country:US");
+  await expect(page.getByText("2 matching VPSs")).toBeVisible();
+  await expect(page.getByText(/UTC schedule, displayed in browser timezone/)).toBeVisible();
+  await expect(page.getByText(/2 targets; edge-health-check/)).toBeVisible();
+  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await expect(page.getByText("Confirm schedule")).toBeVisible();
+  await activate(page.locator(".confirmationPrompt").getByRole("button", { name: "Save schedule" }));
+
+  const request = await page.evaluate(() => {
+    const requests = (window as unknown as {
+      __vpsmanTestRequests: { schedules: unknown[] };
+    }).__vpsmanTestRequests;
+    return requests.schedules.at(-1);
+  });
+  expect(request).toMatchObject({
+    cron_expr: "*/15 * * * *",
+    name: "edge-health-check schedule",
+    operation: { argv: ["uptime"], pty: false, type: "shell" },
+    selector_expression: "country:US",
+    timezone: "UTC",
   });
 });
 
@@ -368,7 +419,17 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   test.skip(testInfo.project.name.includes("mobile"), "dense access administration is covered in the desktop console layout");
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Open proof unlock" }));
+  await openConsoleSubpage(page, "Preferences", "Operator");
+  await page
+    .getByLabel("Enrollment install command template")
+    .fill("env URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await expect(page.getByText("Enrollment install command template must include {TOKEN}")).toBeVisible();
+  await page
+    .getByLabel("Enrollment install command template")
+    .fill("env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await activate(page.getByRole("button", { name: "Open privilege unlock" }));
   await activate(page.getByRole("tab", { name: "VPS clients" }));
 
   await expect(page.getByRole("heading", { name: "Enrollment tokens" })).toBeVisible();
@@ -378,8 +439,15 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   await inspector.getByLabel("Enrollment token ttl").fill("1200");
   await inspector.getByLabel("Enrollment default tags").fill("country:JP,edge");
   await inspector.getByLabel("Enrollment default display name").fill("edge-tokyo-04");
+  await expect(inspector.getByText("Create token to generate command")).toBeVisible();
+  await expect(inspector.getByRole("button", { name: "Copy enrollment install command" })).toHaveCount(0);
   await activate(inspector.getByRole("button", { name: "Create token" }));
-  await expect(inspector.getByText("vpsm_provision_token_secret")).toBeVisible();
+  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText("vpsm_provision_token_secret");
+  await expect(inspector.getByText("Root install command")).toBeVisible();
+  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("TOKEN='vpsm_provision_token_secret'");
+  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("MODE='root'");
+  await expect(inspector.locator(".enrollmentInstallCommand code")).not.toContainText("{TOKEN}");
+  await expect(inspector.getByRole("button", { name: "Copy enrollment install command" })).toBeVisible();
   await expect(inspector.getByText("Name edge-tokyo-04")).toBeVisible();
   await expect(inspector.getByText("11111111-2222-4333-8444-555555555555")).toHaveCount(0);
   const provisionRequest = await page.evaluate(() => {
@@ -402,10 +470,14 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   await inspector.getByLabel("Enrollment token existing VPS ID").fill("agent-sfo-01");
   await inspector.getByLabel("Enrollment token ttl").fill("900");
   await inspector.getByLabel("Enrollment default tags").fill("rebuilt,provider:alpha");
-  await checkControl(inspector.getByLabel("Confirm rebuild"));
+  await inspector.getByLabel("Enrollment default display name").fill("edge-sfo-01-rebuild");
   await activate(inspector.getByRole("button", { name: "Rebuild token" }));
+  await expect(inspector.getByLabel("Create rebuild token")).toBeVisible();
+  await activate(inspector.getByLabel("Create rebuild token").getByRole("button", { name: "Create rebuild token" }));
 
-  await expect(inspector.getByText("vpsm_rebuild_token_secret")).toBeVisible();
+  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText("vpsm_rebuild_token_secret");
+  await expect(inspector.locator(".enrollmentInstallCommand code")).toContainText("TOKEN='vpsm_rebuild_token_secret'");
+  await expect(inspector.locator(".enrollmentInstallCommand code")).not.toContainText("{TOKEN}");
   const request = await page.evaluate(() => {
     const requests = (window as unknown as {
       __vpsmanTestRequests: { enrollmentTokens: unknown[] };
@@ -535,8 +607,9 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({ pag
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
   await adapterForm.getByLabel("Topology version", { exact: true }).fill("adapter:ovpn42");
   await adapterForm.getByLabel("Desired interfaces", { exact: true }).fill("ovpn42");
-  await checkControl(adapterForm.getByLabel("Confirmed"));
   await activate(adapterForm.getByRole("button", { name: "Promote adapter" }));
+  await expect(promotionPanel.getByText("Promote tunnel adapter")).toBeVisible();
+  await confirmVisiblePrompt(page, "Promote adapter");
 
   const request = await page.evaluate(() => {
     const requests = (window as unknown as {
@@ -589,21 +662,21 @@ test("shows grouped execution summaries for job output details", async ({ page }
   expect(comparisonRequest).toMatchObject({ mode: "text" });
 });
 
-test("generates local proof envelopes before dispatching a privileged job", async ({ page }, testInfo) => {
+test("generates local privilege assertions before dispatching a privileged job", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "privileged dispatch flow is covered in the desktop console layout");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   await expect(page.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
-  await unlockProofFor(page, "Jobs", "Dispatch");
+  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   const topbar = page.locator(".topbar");
-  await expect(topbar.getByRole("button", { name: "Lock proof" })).toBeVisible();
-  await activate(topbar.getByRole("button", { name: "Lock proof" }));
-  await expect(topbar.getByRole("button", { name: "Open proof unlock" })).toBeVisible();
+  await expect(topbar.getByRole("button", { name: "Lock privilege" })).toBeVisible();
+  await activate(topbar.getByRole("button", { name: "Lock privilege" }));
+  await expect(topbar.getByRole("button", { name: "Open privilege unlock" })).toBeVisible();
   await expect(page.locator(".commandComposer").getByLabel("Super password")).toHaveCount(0);
   await expect(page.locator(".commandComposer").getByRole("button", { name: "Unlock" })).toBeVisible();
-  await unlockProofFor(page, "Jobs", "Dispatch");
+  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
 
   await page.getByLabel("Command argv").fill("/usr/bin/uptime");
   const targetExpression = page.getByLabel("Bulk target selector expression");
@@ -629,23 +702,21 @@ test("generates local proof envelopes before dispatching a privileged job", asyn
   expect(request).toMatchObject({
     argv: ["/usr/bin/uptime"],
     selector_expression: "id:agent-sfo-01",
-    command: "/usr/bin/uptime",
-    envelope: null,
+    command: "shell_argv",
     operation: { argv: ["/usr/bin/uptime"], pty: false, type: "shell" },
     privileged: true,
   });
-  const envelopes = (request as { envelopes: Record<string, { proof: { proof_hex: string } }> }).envelopes;
-  expect(envelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
 });
 
-test("dispatches terminal session control operations with local proof", async ({ page }, testInfo) => {
+test("dispatches terminal session control operations with local privilege unlock", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "terminal control dispatch is covered in the desktop job composer");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await unlockProofFor(page, "Jobs", "Dispatch");
+  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   await activate(composer.getByRole("button", { name: "Terminal" }));
   await composer.getByLabel("Terminal argv").fill("/bin/sh -l");
   await composer.getByLabel("Terminal cwd").fill("/root");
@@ -663,7 +734,7 @@ test("dispatches terminal session control operations with local proof", async ({
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     selector_expression: "id:agent-sfo-01",
-    command: "terminal_session",
+    command: "terminal_open",
     operation: {
       argv: ["/bin/sh", "-l"],
       cols: 100,
@@ -674,8 +745,7 @@ test("dispatches terminal session control operations with local proof", async ({
     privileged: true,
   });
   expect((request as { operation: { session_id: string } }).operation.session_id).toMatch(/[0-9a-f-]{36}/);
-  const envelopes = (request as { envelopes: Record<string, { proof: { proof_hex: string } }> }).envelopes;
-  expect(envelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expect((request as { privilege_assertion?: { assertion_hex?: string } }).privilege_assertion?.assertion_hex).toMatch(/^[0-9a-f]+$/);
 });
 
 test("previews degraded update targets and sends explicit force override", async ({ page }, testInfo) => {
@@ -684,23 +754,23 @@ test("previews degraded update targets and sends explicit force override", async
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
-  await unlockProofFor(page, "Jobs", "Dispatch");
+  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   await activate(page.getByRole("button", { name: "Update", exact: true }));
   await page.getByLabel("Agent update artifact URL").fill("https://updates.example/vpsman-agent");
   await page.getByLabel("Agent update SHA-256").fill("a".repeat(64));
   await page.locator(".commandComposer").getByLabel("Bulk target selector expression").fill("id:agent-nyc-03");
-  await checkControl(page.locator(".commandComposer").getByLabel("Confirmed"));
   await activate(page.getByRole("button", { name: "Preview" }));
 
   const impact = page.locator(".commandComposer .targetImpactPreview");
   await expect(impact.getByText("1 target / agent update")).toBeVisible();
-  await expect(impact.getByText("Would degrade")).toBeVisible();
+  await expect(impact.getByText("Stale")).toBeVisible();
   await expect(impact.getByText("backup-nyc-03")).toBeVisible();
 
   await checkControl(page.getByLabel("Force unprivileged job best effort"));
-  await expect(impact.getByText("Forced best effort")).toBeVisible();
+  await expect(impact.getByText("Stale")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
-  await expect(page.getByText(/1 unavailable/)).toBeVisible();
+  await expect(page.getByLabel("Execution result").getByText(/failed on 1 VPS/)).toBeVisible();
+  await expect(page.getByLabel("Failed target reasons").getByText(/stale: agent rejected agent_update command_version 3/)).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -728,69 +798,6 @@ test("previews degraded update targets and sends explicit force override", async
   });
 });
 
-test("cancels pending scheduled approval jobs from the console", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "job cancellation controls are covered in the desktop console layout");
-
-  await page.addInitScript(() => {
-    const pendingJobId = "55555555-aaaa-4bbb-8ccc-dddddddddddd";
-    const previousFetch = window.fetch.bind(window);
-    let canceled = false;
-    const response = (body: unknown) =>
-      Promise.resolve(
-        new Response(JSON.stringify(body), {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        }),
-      );
-    const job = () => ({
-      actor_id: null,
-      command_type: "scheduled_shell_argv",
-      completed_at: canceled ? "2026-05-31T10:12:00Z" : null,
-      created_at: "2026-05-31T10:11:00Z",
-      id: pendingJobId,
-      payload_hash: "5".repeat(64),
-      privileged: true,
-      status: canceled ? "canceled" : "approval_required",
-      target_count: 1,
-    });
-    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = input instanceof Request ? input.url : String(input);
-      const pathname = new URL(url, window.location.href).pathname;
-      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-      if (pathname === "/api/v1/jobs" && method === "GET") {
-        return response([job()]);
-      }
-      if (pathname === `/api/v1/jobs/${pendingJobId}/cancel` && method === "POST") {
-        const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
-        const requests = (window as unknown as { __vpsmanTestRequests: { jobCancels?: unknown[] } }).__vpsmanTestRequests;
-        requests.jobCancels = [...(requests.jobCancels ?? []), body];
-        canceled = true;
-        return response({
-          canceled: true,
-          canceled_targets: 1,
-          cancel_requested_targets: 0,
-          job_id: pendingJobId,
-          status: "canceled",
-        });
-      }
-      return previousFetch(input, init);
-    };
-  });
-
-  await page.goto("/");
-  await activate(page.getByRole("button", { name: "Jobs", exact: true }));
-  await expect(page.getByText("approval required")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Cancel pending job" }));
-  await expect(page.getByText("canceled", { exact: true })).toBeVisible();
-  const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobCancels: unknown[] } }).__vpsmanTestRequests;
-    return requests.jobCancels.at(-1);
-  });
-  expect(request).toMatchObject({
-    confirmed: true,
-    reason: "Canceled from panel while status was approval_required",
-  });
-});
 
 test("requests active in-flight job cancellation from the console", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "active job cancellation controls are covered in the desktop console layout");
@@ -866,39 +873,28 @@ test("prepares backup artifacts server-side before dispatching executable restor
   await openConsoleSubpage(page, "Backups", "Restore");
 
   await expect(page.getByRole("heading", { name: "Restore operations" })).toBeVisible();
-  await unlockProofFor(page, "Backups", "Restore");
-  await expect(page.locator(".topbar").getByRole("button", { name: "Lock proof" })).toBeVisible();
+  await unlockPrivilegeFor(page, "Backups", "Restore");
+  await expect(page.locator(".topbar").getByRole("button", { name: "Lock privilege" })).toBeVisible();
 
   await page.getByLabel("Restore source backup request").selectOption(backupId);
   await page.getByLabel("Restore target client").selectOption("agent-fra-02");
   await page.getByLabel("Restore destination root").fill("/restore");
-  await checkControl(page.getByLabel("Confirmed metadata plan"));
   await activate(page.getByRole("button", { name: "Plan restore" }));
+  await expect(page.getByLabel("Create restore plan")).toBeVisible();
+  await activate(page.getByLabel("Create restore plan").getByRole("button", { name: "Confirm" }));
   await expect(page.getByText(/Restore cccccccc planned_metadata_only/)).toBeVisible();
   const restorePlanRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { restorePlans: unknown[] } }).__vpsmanTestRequests;
     return requests.restorePlans.at(-1);
   });
-  const expectedPlanOperation = {
-    type: "restore",
-    source_backup_request_id: backupId,
-    paths: ["/etc/hostname"],
-    include_config: false,
-    destination_root: "/restore",
-    archive_base64: null,
-    archive_size_bytes: null,
-    archive_sha256_hex: null,
-  };
   expect(restorePlanRequest).toMatchObject({
     destination_root: "/restore",
-    envelope: {
-      payload_hash_hex: sha256Hex(new TextEncoder().encode(JSON.stringify(expectedPlanOperation))),
-    },
     include_config: false,
     paths: ["/etc/hostname"],
     source_backup_request_id: backupId,
     target_client_id: "agent-fra-02",
   });
+  expectPrivilegeAssertion(restorePlanRequest);
   await page.getByLabel("Restore artifact file").setInputFiles({
     buffer: Buffer.from(JSON.stringify(fixture.artifact)),
     mimeType: "application/json",
@@ -906,8 +902,9 @@ test("prepares backup artifacts server-side before dispatching executable restor
   });
   await page.getByLabel("Backup private key hex").fill(privateKeyHex);
   await page.getByLabel("Restore timeout seconds").fill("120");
-  await checkControl(page.getByLabel("Confirmed executable restore"));
   await activate(page.getByRole("button", { name: "Run restore" }));
+  await expect(page.getByLabel("Run restore")).toBeVisible();
+  await activate(page.getByLabel("Run restore").getByRole("button", { name: "Confirm" }));
 
   await expect(page.getByText(/Restore job 11111111 accepted/)).toBeVisible();
   const prepareRequest = await page.evaluate(() => {
@@ -946,8 +943,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
   });
   const operation = (request as { operation: { archive_base64: string } }).operation;
   expect(operation.archive_base64).toBe(Buffer.from(fixture.archiveBytes).toString("base64"));
-  const envelopes = (request as { envelopes: Record<string, { proof: { proof_hex: string } }> }).envelopes;
-  expect(envelopes["agent-fra-02"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(request);
 
   const restoreJobId = "11111111-2222-4333-8444-555555555555";
   const restoreStatusBase64 = Buffer.from(
@@ -995,8 +991,9 @@ test("prepares backup artifacts server-side before dispatching executable restor
   await expect(page.getByLabel("Restore rollback source job id")).toHaveValue(restoreJobId);
   await expect(page.getByLabel("Restore rollback target VPS ID")).toHaveValue("agent-fra-02");
   await page.getByLabel("Restore rollback timeout seconds").fill("45");
-  await checkControl(page.getByLabel("Confirmed restore rollback"));
   await activate(page.getByRole("button", { name: "Rollback restore" }));
+  await expect(page.getByLabel("Rollback restore")).toBeVisible();
+  await activate(page.getByLabel("Rollback restore").getByRole("button", { name: "Confirm" }));
   await expect(page.getByText(/Restore rollback job 11111111 accepted/)).toBeVisible();
   const rollbackRequest = await page.evaluate(() => {
     const requests = (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }).__vpsmanTestRequests;
@@ -1037,8 +1034,9 @@ test("promotes retained backup output into a stored artifact", async ({ page }, 
 
   await page.getByLabel("Artifact backup request").selectOption(backupId);
   await page.getByLabel("Backup artifact handoff source job ID").fill(sourceJobId);
-  await checkControl(page.getByLabel("Confirmed retained output promotion"));
   await activate(page.getByRole("button", { name: "Promote retained output" }));
+  await expect(page.getByLabel("Promote retained output")).toBeVisible();
+  await activate(page.getByLabel("Promote retained output").getByRole("button", { name: "Confirm" }));
 
   await expect(page.getByText(/Artifact dddddddd uploaded/)).toBeVisible();
   const handoffRequest = await page.evaluate(() => {
@@ -1052,17 +1050,17 @@ test("promotes retained backup output into a stored artifact", async ({ page }, 
   });
 });
 
-test("dispatches topology network apply, rollback, status, probe, and speed test with local proof", async ({
+test("dispatches topology network apply, rollback, status, probe, and speed test with local privilege unlock", async ({
   page,
 }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "network apply proof flow is covered in the desktop console layout");
+  test.skip(testInfo.project.name.includes("mobile"), "network apply privilege unlock flow is covered in the desktop console layout");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Topology", "Apply / rollback");
 
   await expect(page.getByRole("heading", { name: "Network apply" })).toBeVisible();
-  await unlockProofFor(page, "Topology", "Apply / rollback");
-  await expect(page.locator(".topbar").getByRole("button", { name: "Lock proof" })).toBeVisible();
+  await unlockPrivilegeFor(page, "Topology", "Apply / rollback");
+  await expect(page.locator(".topbar").getByRole("button", { name: "Lock privilege" })).toBeVisible();
 
   await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network apply endpoint side").selectOption("left");
@@ -1120,9 +1118,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(operation.bird2_sha256_hex).toBe(
     sha256Hex(new TextEncoder().encode(tunnelPlans[0].plan.bird2_interface_snippet)),
   );
-  const envelopes = (request as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }).envelopes;
-  expect(envelopes["agent-sfo-01"].payload_hash_hex).toBe(sha256Hex(new TextEncoder().encode(JSON.stringify(operation))));
-  expect(envelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(request);
 
   await activate(page.getByRole("button", { name: "Rollback side" }));
   await confirmVisiblePrompt(page, "Rollback side");
@@ -1146,14 +1142,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     timeout_secs: 90,
   });
-  const rollbackOperation = (rollbackRequest as { operation: { type: string; plan: unknown; side: string } }).operation;
-  const rollbackEnvelopes = (
-    rollbackRequest as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }
-  ).envelopes;
-  expect(rollbackEnvelopes["agent-sfo-01"].payload_hash_hex).toBe(
-    sha256Hex(new TextEncoder().encode(JSON.stringify(rollbackOperation))),
-  );
-  expect(rollbackEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(rollbackRequest);
 
   await activate(page.getByRole("button", { name: "Inspect side" }));
   await confirmVisiblePrompt(page, "Inspect side");
@@ -1177,14 +1166,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     timeout_secs: 90,
   });
-  const statusOperation = (statusRequest as { operation: { type: string; plan: unknown; side: string } }).operation;
-  const statusEnvelopes = (
-    statusRequest as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }
-  ).envelopes;
-  expect(statusEnvelopes["agent-sfo-01"].payload_hash_hex).toBe(
-    sha256Hex(new TextEncoder().encode(JSON.stringify(statusOperation))),
-  );
-  expect(statusEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(statusRequest);
 
   await page.getByLabel("Network probe count").fill("4");
   await page.getByLabel("Network probe interval milliseconds").fill("700");
@@ -1212,16 +1194,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     timeout_secs: 90,
   });
-  const probeOperation = (
-    probeRequest as { operation: { type: string; plan: unknown; side: string; count: number; interval_ms: number } }
-  ).operation;
-  const probeEnvelopes = (
-    probeRequest as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }
-  ).envelopes;
-  expect(probeEnvelopes["agent-sfo-01"].payload_hash_hex).toBe(
-    sha256Hex(new TextEncoder().encode(JSON.stringify(probeOperation))),
-  );
-  expect(probeEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(probeRequest);
 
   await page.getByLabel("Network speed test duration seconds").fill("5");
   await page.getByLabel("Network speed test max mebibytes").fill("8");
@@ -1255,32 +1228,11 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     timeout_secs: 90,
   });
-  const speedOperation = (
-    speedRequest as {
-      operation: {
-        connect_timeout_ms: number;
-        duration_secs: number;
-        max_bytes: number;
-        plan: unknown;
-        port: number;
-        rate_limit_kbps: number;
-        server_side: string;
-        type: string;
-      };
-    }
-  ).operation;
-  const speedEnvelopes = (
-    speedRequest as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }
-  ).envelopes;
-  const speedPayloadHash = sha256Hex(new TextEncoder().encode(JSON.stringify(speedOperation)));
-  expect(speedEnvelopes["agent-sfo-01"].payload_hash_hex).toBe(speedPayloadHash);
-  expect(speedEnvelopes["agent-fra-02"].payload_hash_hex).toBe(speedPayloadHash);
-  expect(speedEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
-  expect(speedEnvelopes["agent-fra-02"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(speedRequest);
 
   await openConsoleSubpage(page, "Topology", "OSPF");
   await expect(page.getByRole("heading", { name: "OSPF cost apply" })).toBeVisible();
-  await unlockProofFor(page, "Topology", "OSPF");
+  await unlockPrivilegeFor(page, "Topology", "OSPF");
   await page.getByLabel("OSPF update plan").selectOption(ospfUpdatePlans[0].plan_id);
   await page.getByLabel("OSPF update endpoint side").selectOption("left");
   await page.getByLabel("OSPF update timeout seconds").fill("45");
@@ -1327,13 +1279,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   expect(ospfOperation.bird2_sha256_hex).toBe(
     sha256Hex(new TextEncoder().encode(ospfUpdatePlans[0].proposed_left_bird2_interface_snippet)),
   );
-  const ospfEnvelopes = (
-    ospfRequest as { envelopes: Record<string, { payload_hash_hex: string; proof: { proof_hex: string } }> }
-  ).envelopes;
-  expect(ospfEnvelopes["agent-sfo-01"].payload_hash_hex).toBe(
-    sha256Hex(new TextEncoder().encode(JSON.stringify(ospfOperation))),
-  );
-  expect(ospfEnvelopes["agent-sfo-01"].proof.proof_hex).toMatch(/^[0-9a-f]+$/);
+  expectPrivilegeAssertion(ospfRequest);
   await expect(page.getByLabel("Execution result").last()).toBeVisible();
   await activate(page.getByRole("button", { name: "Open job details" }).last());
   await expect(page.getByRole("heading", { level: 1, name: "Job history" })).toBeVisible();

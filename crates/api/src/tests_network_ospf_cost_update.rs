@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
     payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentHello, BandwidthTier,
@@ -77,6 +77,7 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -105,10 +106,9 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),

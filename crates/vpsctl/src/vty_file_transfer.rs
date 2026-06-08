@@ -16,7 +16,7 @@ use crate::{
         execute_file_transfer_download, FileTransferDownloadMultiTargetPolicy,
         FileTransferDownloadPlan,
     },
-    vty_jobs::{VtyJobSelection, VtyProofContext},
+    vty_jobs::{VtyJobSelection, VtyPrivilegeContext},
 };
 
 pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTransferUploadPlan> {
@@ -25,7 +25,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
     let mut path = None;
     let mut mode = 0o644_u32;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut session_id = None;
     let mut resume_token = None;
     let mut chunk_size_bytes = FILE_TRANSFER_CHUNK_BYTES as u32;
@@ -99,15 +99,15 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                 )?;
                 index += 1;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs =
-                    parse_bounded_u64("--proof-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
+            "--privilege-ttl" => {
+                privilege_ttl_secs =
+                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
                 index += 2;
             }
-            value if value.starts_with("--proof-ttl=") => {
-                proof_ttl_secs = parse_bounded_u64(
-                    "--proof-ttl",
-                    Some(value.trim_start_matches("--proof-ttl=")),
+            value if value.starts_with("--privilege-ttl=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    "--privilege-ttl",
+                    Some(value.trim_start_matches("--privilege-ttl=")),
                     1,
                     3600,
                 )?;
@@ -266,7 +266,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
         mode,
         clients: selection.clients,
         tags: selection.tags,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed: selection.confirmed,
         session_id,
@@ -286,7 +286,7 @@ pub(crate) fn parse_vty_file_transfer_download(
     let mut destination = None;
     let mut path = None;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut session_id = None;
     let mut resume_token = None;
     let mut chunk_size_bytes = FILE_TRANSFER_CHUNK_BYTES as u32;
@@ -337,15 +337,15 @@ pub(crate) fn parse_vty_file_transfer_download(
                 )?;
                 index += 1;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs =
-                    parse_bounded_u64("--proof-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
+            "--privilege-ttl" => {
+                privilege_ttl_secs =
+                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
                 index += 2;
             }
-            value if value.starts_with("--proof-ttl=") => {
-                proof_ttl_secs = parse_bounded_u64(
-                    "--proof-ttl",
-                    Some(value.trim_start_matches("--proof-ttl=")),
+            value if value.starts_with("--privilege-ttl=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    "--privilege-ttl",
+                    Some(value.trim_start_matches("--privilege-ttl=")),
                     1,
                     3600,
                 )?;
@@ -486,7 +486,7 @@ pub(crate) fn parse_vty_file_transfer_download(
         path,
         clients: selection.clients,
         tags: selection.tags,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed: selection.confirmed,
         session_id,
@@ -502,30 +502,30 @@ pub(crate) fn parse_vty_file_transfer_download(
 pub(crate) fn submit_vty_file_transfer_upload(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: FileTransferUploadPlan,
 ) -> Result<String> {
     execute_file_transfer_upload(
         api_url,
         token,
         request,
-        &proof_context.password,
-        &proof_context.salt_hex,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
     )
 }
 
 pub(crate) fn submit_vty_file_transfer_download(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: FileTransferDownloadPlan,
 ) -> Result<String> {
     execute_file_transfer_download(
         api_url,
         token,
         request,
-        &proof_context.password,
-        &proof_context.salt_hex,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
     )
 }
 

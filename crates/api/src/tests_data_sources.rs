@@ -18,6 +18,7 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -112,6 +113,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -265,6 +267,7 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -423,6 +426,7 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -495,6 +499,7 @@ async fn data_source_hot_config_renders_selected_presets() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -658,6 +663,7 @@ async fn data_source_hot_config_rejects_unsafe_migrated_preset_commands() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -718,13 +724,13 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Root,
                     effective_uid: Some(0),
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
-                    command_protocol_version: 1,
                     unprivileged_hint: None,
                 },
             },
@@ -738,13 +744,13 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
-                    command_protocol_version: 1,
                     unprivileged_hint: Some("running without root in test".to_string()),
                 },
             },
@@ -845,7 +851,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
         process.evidence["supervisor_workflow"],
         "process_supervisor"
     );
-    assert_eq!(process.evidence["proof_gated"], true);
+    assert_eq!(process.evidence["privilege_gated"], true);
     assert_eq!(process.evidence["privilege_mode"], "root");
     assert_eq!(process.evidence["can_apply_process_limits"], true);
     assert_eq!(process.evidence["process_limits_status"], "available");
@@ -941,6 +947,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -953,6 +960,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -984,9 +992,9 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 include_config: true,
                 status: "artifact_metadata_recorded".to_string(),
                 payload_hash: "6".repeat(64),
-                proof_scope: "backup".to_string(),
-                proof_command_id: None,
-                proof_expires_unix: None,
+                signed_command_scope: "backup".to_string(),
+                signed_command_id: None,
+                signed_command_expires_unix: None,
                 artifact_id: None,
                 source_job_id: Some(Uuid::new_v4()),
                 source_schedule_id: None,
@@ -1004,9 +1012,9 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
             destination_root: Some("/restore".to_string()),
             status: "planned_metadata_only".to_string(),
             payload_hash: "7".repeat(64),
-            proof_scope: "restore".to_string(),
-            proof_command_id: None,
-            proof_expires_unix: None,
+            signed_command_scope: "restore".to_string(),
+            signed_command_id: None,
+            signed_command_expires_unix: None,
             note: None,
             created_at: "101".to_string(),
         });
@@ -1059,8 +1067,6 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 automation_blocker: Some("heartbeat timed out".to_string()),
                 automation_targets: vec!["edge-a".to_string()],
                 automation_updated_at: Some("120".to_string()),
-                activation_delegations: Vec::new(),
-                rollback_delegations: Vec::new(),
                 targets: vec![AgentUpdateRolloutTargetView {
                     client_id: "edge-a".to_string(),
                     status: "heartbeat_timeout".to_string(),

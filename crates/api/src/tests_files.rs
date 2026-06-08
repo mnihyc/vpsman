@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{
     body::to_bytes,
     extract::{Path, Query, State},
@@ -346,10 +344,9 @@ fn file_push_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "file_push");
@@ -436,10 +433,9 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "file_push_chunked");

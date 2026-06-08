@@ -6,9 +6,8 @@ use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
-    derive_super_key, encode_inline_file_payload, encode_json, payload_hash, random_nonce,
-    sign_privilege_proof, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, CommandEnvelope,
-    JobCommand, RestoreRollbackFile,
+    encode_inline_file_payload, payload_hash, AgentCapabilitySnapshot, AgentHello,
+    AgentPrivilegeMode, JobCommand, RestoreRollbackFile,
 };
 
 use crate::{
@@ -21,7 +20,6 @@ use crate::{
     routes_jobs::create_job,
     routes_restores::{create_restore_plan, validate_create_restore_plan},
     state::{AppState, EnrollmentSettings},
-    unix_now,
 };
 
 #[test]
@@ -129,7 +127,7 @@ fn restore_plan_validation_requires_scope_and_confirmation() {
         destination_root: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_restore_plan(&missing_scope)
@@ -146,7 +144,7 @@ fn restore_plan_validation_requires_scope_and_confirmation() {
         destination_root: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_restore_plan(&relative_path)
@@ -163,7 +161,7 @@ fn restore_plan_validation_requires_scope_and_confirmation() {
         destination_root: None,
         confirmed: false,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_restore_plan(&unconfirmed).unwrap_err().code,
@@ -172,7 +170,7 @@ fn restore_plan_validation_requires_scope_and_confirmation() {
 }
 
 #[tokio::test]
-async fn restore_plan_records_metadata_and_audit_after_proof_envelope() {
+async fn restore_plan_records_metadata_and_audit_after_privilege_unlock() {
     let repo = seeded_restore_repo().await;
     let source_backup_id = create_source_backup(&repo).await;
     let state = test_state(repo.clone());
@@ -184,13 +182,7 @@ async fn restore_plan_records_metadata_and_audit_after_proof_envelope() {
         destination_root: Some("/restore".to_string()),
         confirmed: true,
         note: Some("restore rehearsal".to_string()),
-        envelope: Some(restore_envelope(
-            "client-b",
-            source_backup_id,
-            &["/etc/hostname"],
-            true,
-            Some("/restore"),
-        )),
+        privilege_assertion: None,
     };
 
     let (status, Json(view)) = create_restore_plan(State(state), HeaderMap::new(), Json(request))
@@ -207,9 +199,9 @@ async fn restore_plan_records_metadata_and_audit_after_proof_envelope() {
     assert!(view.include_config);
     assert_eq!(view.destination_root.as_deref(), Some("/restore"));
     assert_eq!(view.status, "planned_metadata_only");
-    assert_eq!(view.proof_scope, "client:client-b");
-    assert!(view.proof_command_id.is_some());
-    assert!(view.proof_expires_unix.is_some());
+    assert_eq!(view.signed_command_scope, "client:client-b");
+    assert!(view.signed_command_id.is_some());
+    assert!(view.signed_command_expires_unix.is_none());
     assert_eq!(restore_plans.len(), 1);
     assert_eq!(restore_plans[0].id, view.id);
     assert!(audits
@@ -218,7 +210,7 @@ async fn restore_plan_records_metadata_and_audit_after_proof_envelope() {
 }
 
 #[tokio::test]
-async fn restore_plan_rejects_missing_mismatched_or_expired_proof_envelope() {
+async fn restore_plan_requires_privilege_gateway_verification() {
     let repo = seeded_restore_repo().await;
     let source_backup_id = create_source_backup(&repo).await;
 
@@ -230,77 +222,17 @@ async fn restore_plan_rejects_missing_mismatched_or_expired_proof_envelope() {
         destination_root: None,
         confirmed: true,
         note: None,
-        envelope: None,
+        privilege_assertion: None,
     };
     let missing_error = create_restore_plan(
-        State(test_state(repo.clone())),
+        State(test_state_without_privilege(repo)),
         HeaderMap::new(),
         Json(missing),
     )
     .await
     .unwrap_err();
-    assert_eq!(missing_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(missing_error.code, "restore_proof_required");
-
-    let mismatched = CreateRestorePlanRequest {
-        source_backup_request_id: source_backup_id,
-        target_client_id: "client-b".to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: false,
-        destination_root: None,
-        confirmed: true,
-        note: None,
-        envelope: Some(restore_envelope(
-            "client-b",
-            source_backup_id,
-            &["/etc/issue"],
-            false,
-            None,
-        )),
-    };
-    let mismatched_error = create_restore_plan(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(mismatched),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(mismatched_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(mismatched_error.code, "invalid_restore_proof_envelope");
-    assert!(
-        repo.list_audit_logs(10)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|audit| audit.action == "restore.rejected_authorization_required")
-            .count()
-            >= 2
-    );
-
-    let mut expired_envelope = restore_envelope(
-        "client-b",
-        source_backup_id,
-        &["/etc/hostname"],
-        false,
-        None,
-    );
-    expired_envelope.proof.as_mut().unwrap().expires_unix = unix_now().saturating_sub(1);
-    let expired = CreateRestorePlanRequest {
-        source_backup_request_id: source_backup_id,
-        target_client_id: "client-b".to_string(),
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: false,
-        destination_root: None,
-        confirmed: true,
-        note: None,
-        envelope: Some(expired_envelope),
-    };
-    let expired_error =
-        create_restore_plan(State(test_state(repo)), HeaderMap::new(), Json(expired))
-            .await
-            .unwrap_err();
-    assert_eq!(expired_error.status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(expired_error.code, "invalid_restore_proof_envelope");
+    assert_eq!(missing_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(missing_error.code, "gateway_control_url_missing");
 }
 
 #[tokio::test]
@@ -315,6 +247,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
@@ -337,7 +270,6 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
                 .to_string(),
         }],
     };
-    let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
         selector_expression: "id:client-b".to_string(),
         destructive: true,
@@ -349,10 +281,9 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(test_command_envelope("client-b", &command_hash)),
-        envelopes: Default::default(),
     };
 
     let (status, Json(response)) = create_job(
@@ -389,6 +320,7 @@ async fn seeded_restore_repo() -> Repository {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -406,7 +338,7 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("source".to_string()),
-        envelope: Some(backup_envelope("client-a", &["/etc/hostname"], true)),
+        privilege_assertion: None,
     };
     let (_, Json(view)) = create_backup_request(
         State(test_state(repo.clone())),
@@ -424,7 +356,7 @@ fn test_state(repo: Repository) -> AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
         enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
@@ -437,13 +369,20 @@ fn test_state(repo: Repository) -> AppState {
     }
 }
 
+fn test_state_without_privilege(repo: Repository) -> AppState {
+    AppState {
+        gateway: GatewayDispatchClient::default(),
+        ..test_state(repo)
+    }
+}
+
 fn test_state_with_signing_key(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[23_u8; 32]))),
         enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
@@ -453,79 +392,5 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
-    }
-}
-
-fn backup_envelope(client_id: &str, paths: &[&str], include_config: bool) -> CommandEnvelope {
-    let command = JobCommand::Backup {
-        paths: paths.iter().map(|path| (*path).to_string()).collect(),
-        include_config,
-        recipient_public_key_hex: None,
-    };
-    command_envelope(client_id, &command, unix_now() + 60)
-}
-
-fn restore_envelope(
-    client_id: &str,
-    source_backup_request_id: Uuid,
-    paths: &[&str],
-    include_config: bool,
-    destination_root: Option<&str>,
-) -> CommandEnvelope {
-    let command = JobCommand::Restore {
-        source_backup_request_id,
-        paths: paths.iter().map(|path| (*path).to_string()).collect(),
-        include_config,
-        destination_root: destination_root.map(ToOwned::to_owned),
-        archive_path: None,
-        archive_base64: None,
-        archive_size_bytes: None,
-        archive_sha256_hex: None,
-        dry_run: false,
-        post_restore_argv: Vec::new(),
-    };
-    command_envelope(client_id, &command, unix_now() + 60)
-}
-
-fn command_envelope(client_id: &str, command: &JobCommand, expires_unix: u64) -> CommandEnvelope {
-    let payload_hash_hex = payload_hash(&encode_json(command).unwrap());
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let super_key = derive_super_key("correct horse", b"restore-test");
-    let proof = sign_privilege_proof(
-        &super_key,
-        command_id,
-        &scope,
-        &payload_hash_hex,
-        &random_nonce(),
-        expires_unix,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex,
-        proof: Some(proof),
-        server_signature: Vec::new(),
-    }
-}
-
-fn test_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let super_key = derive_super_key("correct horse", b"restore-test");
-    let proof = sign_privilege_proof(
-        &super_key,
-        command_id,
-        &scope,
-        command_hash,
-        &random_nonce(),
-        unix_now() + 300,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex: command_hash.to_string(),
-        proof: Some(proof),
-        server_signature: Vec::new(),
     }
 }

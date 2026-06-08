@@ -9,32 +9,28 @@ Create a short-lived enrollment token from the control plane:
 
 ```sh
 cargo run -p vpsctl -- enrollment-token-create \
-  --allowed-client-id edge-01 \
   --default-display-name edge-01 \
   --default-tags edge,provider-a \
   --ttl-secs 1800
 ```
 
-Render an enrolled agent config on the target or in a secure install
-environment:
+For a new VPS, the server assigns the durable client ID when the token is
+created. Use the display name and default tags for operator-facing labels.
+Copy the `token` field from the response; the token is consumed when the agent
+claims it.
+
+Install directly on the target with the release installer:
 
 ```sh
-export VPSMAN_API_URL=https://panel.example.com
-export VPSMAN_ENROLLMENT_TOKEN=<token>
-export VPSMAN_CLIENT_ID=edge-01
-export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
-
-cargo run -p vpsctl -- enroll-config \
-  --client-id edge-01 \
-  --super-salt-hex "$VPSMAN_SUPER_SALT_HEX" \
-  --output-file ./agent.toml
+curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE=root VPSMAN_ENROLLMENT_API_URL=https://panel.example.com VPSMAN_ENROLLMENT_TOKEN=<token> bash
 ```
 
-The rendered config stores derived proof material and agent identity. It does
-not store the plaintext super password. Server-facing alias, pool, country, and
-tags come from enrollment-token defaults or later panel/CLI inventory edits;
-the agent does not claim or mutate them.
+The installer downloads the released agent and `vpsctl`, claims the token with
+`vpsctl enroll-config`, writes the generated `client_id` into `agent.toml`, and
+starts the systemd service. Agent config stores agent identity, gateway trust,
+and server signing trust only; it does not store super-password material or
+gateway privilege verifier material. Server-facing tags come from token
+defaults or later panel/CLI inventory edits.
 
 ## Configure Signed Discovery
 
@@ -47,22 +43,21 @@ export VPSMAN_DISCOVERY_TRUSTED_SERVER_PUBLIC_KEYS_HEX=<next_32_byte_public_key_
 ```
 
 New enrollment configs include those keys in
-`discovery_trusted_server_ed25519_public_keys_hex`. Proof-gated hot config may
+`discovery_trusted_server_ed25519_public_keys_hex`. Privileged hot config may
 update this discovery trust ring before rotating the discovery signer, without
-changing the privileged command-signing authority.
+changing the command-signing authority.
 
 ## Install A Root Agent
 
 Root mode is the production default. It installs under `/opt/vpsman`, writes
-`/etc/vpsman/agent.toml`, and renders systemd plus SysV init autostart assets.
+`/etc/vpsman/agent.toml`, and renders a systemd service.
 
 ```sh
-config_b64="$(base64 < ./agent.toml | tr -d '\n')"
-env VPSMAN_INSTALL_MODE=root \
-  VPSMAN_AGENT_URL=https://updates.example/vpsman-agent \
-  VPSMAN_AGENT_SHA256_HEX=<64_hex_sha256> \
-  VPSMAN_AGENT_CONFIG_B64="$config_b64" \
-  bash scripts/install-agent.sh
+curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env \
+  VPSMAN_INSTALL_MODE=root \
+  VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
+  VPSMAN_ENROLLMENT_TOKEN=<token> \
+  bash
 ```
 
 Use this mode for tunnels, Bird2 config, process limits, backups/restores under
@@ -74,12 +69,13 @@ Unprivileged mode installs under the user's home and reports reduced
 capabilities to the server:
 
 ```sh
-env VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_SERVICE_HOME=/home/vpsman \
-  VPSMAN_AGENT_URL=https://updates.example/vpsman-agent \
-  VPSMAN_AGENT_SHA256_HEX=<64_hex_sha256> \
-  VPSMAN_AGENT_CONFIG_B64="$config_b64" \
-  bash scripts/install-agent.sh
+mkdir -p ~/vpsman-agent
+cd ~/vpsman-agent
+curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env \
+  VPSMAN_INSTALL_MODE=unprivileged \
+  VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
+  VPSMAN_ENROLLMENT_TOKEN=<token> \
+  bash
 ```
 
 Expect privileged operations such as tunnel mutation, cgroup limits, restore to
@@ -99,8 +95,9 @@ cargo run -p vpsctl -- reenrollment-token-create \
   --confirmed
 ```
 
-Install the new agent with that token and the same `client_id`. The server
-rotates the client key only through the bound token path and preserves
+Install the rebuilt agent with that token. The token is already bound to the
+existing client ID; the installer does not send a client ID during claim. The
+server rotates the client key only through the bound token path and preserves
 server-side state.
 
 If the current enrolled key is compromised or a rebuilt VPS should be forced to

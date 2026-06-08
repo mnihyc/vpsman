@@ -3,6 +3,7 @@ import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
 
 type RestoreRunFormProps = {
+  confirmationOpen: boolean;
   forceUnprivileged: boolean;
   onForceUnprivilegedChange: (value: boolean) => void;
   onArtifactFileChange: (value: File | null) => void;
@@ -11,18 +12,16 @@ type RestoreRunFormProps = {
   onDryRunChange: (value: boolean) => void;
   onPrivateKeyHexChange: (value: string) => void;
   onPostRestoreArgvChange: (value: string) => void;
-  onRestoreRunConfirmedChange: (value: boolean) => void;
   onRestoreTimeoutSecsChange: (value: number) => void;
   onRunRestore: () => void;
   pending: boolean;
-  proofReady: boolean;
+  privilegeReady: boolean;
   restoreArchivePath: string;
   restoreArchiveSha256Hex: string;
   restoreArtifactFile: File | null;
   restoreDryRun: boolean;
   restorePrivateKeyHex: string;
   restorePostRestoreArgv: string;
-  restoreRunConfirmed: boolean;
   restoreSourceId: string;
   restoreTarget: AgentView | null;
   restoreTargetId: string;
@@ -30,6 +29,7 @@ type RestoreRunFormProps = {
 };
 
 export function RestoreRunForm({
+  confirmationOpen,
   forceUnprivileged,
   onForceUnprivilegedChange,
   onArtifactFileChange,
@@ -38,18 +38,16 @@ export function RestoreRunForm({
   onDryRunChange,
   onPrivateKeyHexChange,
   onPostRestoreArgvChange,
-  onRestoreRunConfirmedChange,
   onRestoreTimeoutSecsChange,
   onRunRestore,
   pending,
-  proofReady,
+  privilegeReady,
   restoreArchivePath,
   restoreArchiveSha256Hex,
   restoreArtifactFile,
   restoreDryRun,
   restorePrivateKeyHex,
   restorePostRestoreArgv,
-  restoreRunConfirmed,
   restoreSourceId,
   restoreTarget,
   restoreTargetId,
@@ -115,10 +113,6 @@ export function RestoreRunForm({
           />
         </label>
         <label className="checkLine">
-          <input checked={restoreRunConfirmed} onChange={(event) => onRestoreRunConfirmedChange(event.target.checked)} type="checkbox" />
-          <span>Confirmed executable restore</span>
-        </label>
-        <label className="checkLine">
           <input checked={restoreDryRun} onChange={(event) => onDryRunChange(event.target.checked)} type="checkbox" />
           <span>Dry-run rehearsal</span>
         </label>
@@ -137,15 +131,17 @@ export function RestoreRunForm({
           />
           <span>Force unprivileged best effort</span>
         </label>
-        <button
-          className="primaryAction dangerPrimary"
-          disabled={pending || !proofReady || !restoreSourceId || !restoreTargetId}
-          onClick={onRunRestore}
-          type="button"
-        >
-          <Play size={17} />
-          Run restore
-        </button>
+        {!confirmationOpen && (
+          <button
+            className="primaryAction dangerPrimary"
+            disabled={pending || !privilegeReady || !restoreSourceId || !restoreTargetId}
+            onClick={onRunRestore}
+            type="button"
+          >
+            <Play size={17} />
+            Run restore
+          </button>
+        )}
       </form>
     </>
   );

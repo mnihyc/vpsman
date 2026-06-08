@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentNoiseMode, AgentUpdateConfig, BandwidthTier, CommandEnvelope,
-    JobCommand, RuntimeTunnelControl, RuntimeTunnelTopologyIntent, ServerEndpoint,
+    AgentCapabilitySnapshot, AgentNoiseMode, AgentUpdateConfig, BandwidthTier, JobCommand,
+    PrivilegeAssertion, RuntimeTunnelControl, RuntimeTunnelTopologyIntent, ServerEndpoint,
     TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
@@ -17,7 +15,9 @@ pub(crate) use crate::model_data_sources::*;
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSummary {
     pub(crate) total: usize,
-    pub(crate) connected: usize,
+    pub(crate) online: usize,
+    pub(crate) offline: usize,
+    pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,
 }
@@ -59,6 +59,12 @@ pub(crate) struct AgentView {
     pub(crate) display_name: String,
     pub(crate) status: String,
     pub(crate) tags: Vec<String>,
+    pub(crate) registration_ip: Option<String>,
+    pub(crate) last_ip: Option<String>,
+    pub(crate) last_seen_at: Option<String>,
+    pub(crate) internal_build_number: u64,
+    pub(crate) stale_since: Option<String>,
+    pub(crate) stale_reason: Option<String>,
     pub(crate) capabilities: AgentCapabilitySnapshot,
 }
 
@@ -190,25 +196,11 @@ pub(crate) struct JobHistoryView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct AuthProofRotationHistoryView {
-    pub(crate) job_id: Uuid,
-    pub(crate) actor_id: Option<Uuid>,
-    pub(crate) status: String,
-    pub(crate) target_count: i32,
-    pub(crate) completed_count: i32,
-    pub(crate) failed_count: i32,
-    pub(crate) pending_count: i32,
-    pub(crate) rotation_generation: Option<String>,
-    pub(crate) payload_hash: String,
-    pub(crate) created_at: String,
-    pub(crate) completed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub(crate) struct JobTargetView {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) status: String,
+    pub(crate) message: Option<String>,
     pub(crate) exit_code: Option<i32>,
     pub(crate) started_at: Option<String>,
     pub(crate) completed_at: Option<String>,
@@ -347,7 +339,7 @@ pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) status: String,
     pub(crate) confidence: String,
     pub(crate) requires_approval: bool,
-    pub(crate) proof_required: bool,
+    pub(crate) privilege_required: bool,
     pub(crate) mutation_mode: String,
     pub(crate) approval_scope: Vec<String>,
     pub(crate) evidence: NetworkOspfUpdateEvidenceView,
@@ -528,15 +520,12 @@ pub(crate) struct CreateEnrollmentTokenResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClaimEnrollmentRequest {
     pub(crate) token: String,
-    #[serde(default)]
-    pub(crate) client_id: Option<String>,
     pub(crate) client_public_key_hex: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ClaimEnrollmentResponse {
     pub(crate) client_id: String,
-    pub(crate) display_name: String,
     pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
     pub(crate) discovery_url: Option<String>,
     pub(crate) noise_mode: AgentNoiseMode,
@@ -545,7 +534,6 @@ pub(crate) struct ClaimEnrollmentResponse {
     pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
     pub(crate) telemetry_light_secs: u64,
     pub(crate) telemetry_full_secs: u64,
-    pub(crate) tags: Vec<String>,
     pub(crate) update: AgentUpdateConfig,
 }
 
@@ -639,8 +627,9 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) operation: JobCommand,
     #[serde(default)]
     pub(crate) selector_expression: String,
-    pub(crate) interval_secs: u64,
-    pub(crate) start_at_unix: Option<u64>,
+    pub(crate) cron_expr: String,
+    #[serde(default = "default_schedule_timezone")]
+    pub(crate) timezone: String,
     #[serde(default = "default_schedule_enabled")]
     pub(crate) enabled: bool,
     #[serde(default = "default_schedule_catch_up_policy")]
@@ -651,19 +640,49 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) retry_delay_secs: i64,
     #[serde(default = "default_schedule_max_failures")]
     pub(crate) max_failures: i32,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DispatchScheduledJobRequest {
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateScheduleRequest {
+    pub(crate) name: String,
+    pub(crate) operation: JobCommand,
     #[serde(default)]
-    pub(crate) confirmed: bool,
+    pub(crate) selector_expression: String,
+    pub(crate) cron_expr: String,
+    #[serde(default = "default_schedule_timezone")]
+    pub(crate) timezone: String,
+    #[serde(default = "default_schedule_enabled")]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_schedule_catch_up_policy")]
+    pub(crate) catch_up_policy: String,
+    #[serde(default = "default_schedule_catch_up_limit")]
+    pub(crate) catch_up_limit: i32,
+    #[serde(default = "default_schedule_retry_delay_secs")]
+    pub(crate) retry_delay_secs: i64,
+    #[serde(default = "default_schedule_max_failures")]
+    pub(crate) max_failures: i32,
     #[serde(default)]
-    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferScheduleRequest {
+    pub(crate) deferred_until: String,
     #[serde(default)]
-    pub(crate) force_unprivileged: bool,
-    pub(crate) envelope: Option<CommandEnvelope>,
+    pub(crate) reason: Option<String>,
     #[serde(default)]
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchedulePrivilegeMutationRequest {
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -674,7 +693,9 @@ pub(crate) struct ScheduleView {
     pub(crate) command_type: String,
     pub(crate) operation: JobCommand,
     pub(crate) selector_expression: String,
-    pub(crate) interval_secs: i64,
+    pub(crate) cron_expr: String,
+    pub(crate) timezone: String,
+    pub(crate) next_runs: Vec<String>,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
@@ -683,22 +704,18 @@ pub(crate) struct ScheduleView {
     pub(crate) last_error: Option<String>,
     pub(crate) next_run_at: String,
     pub(crate) last_run_at: Option<String>,
+    pub(crate) deferred_until: Option<String>,
+    pub(crate) deleted_at: Option<String>,
     pub(crate) created_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ScheduledJobDispatchRecord {
-    pub(crate) job_id: Uuid,
-    pub(crate) source_schedule_id: Option<Uuid>,
-    pub(crate) actor_id: Option<Uuid>,
-    pub(crate) command_type: String,
-    pub(crate) operation: JobCommand,
-    pub(crate) payload_hash: String,
-    pub(crate) targets: Vec<String>,
+    pub(crate) updated_at: String,
 }
 
 fn default_schedule_enabled() -> bool {
     true
+}
+
+fn default_schedule_timezone() -> String {
+    "UTC".to_string()
 }
 
 fn default_schedule_catch_up_policy() -> String {
@@ -718,13 +735,62 @@ fn default_schedule_max_failures() -> i32 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateTagRequest {
     pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AssignTagRequest {
     pub(crate) tag: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BulkTagMutationAction {
+    Add,
+    Remove,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkTagMutationRequest {
+    pub(crate) action: BulkTagMutationAction,
+    pub(crate) tag: String,
+    pub(crate) selector_expression: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteTagRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TagMutationResponse {
+    pub(crate) tag: String,
+    pub(crate) action: String,
+    pub(crate) target_count: usize,
+    pub(crate) changed_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) affected: Vec<AgentView>,
+    pub(crate) confirmation_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,18 +803,12 @@ pub(crate) struct UpdateAgentAliasRequest {
 pub(crate) struct BulkResolveRequest {
     #[serde(default)]
     pub(crate) selector_expression: String,
-    #[serde(default)]
-    pub(crate) destructive: bool,
-    #[serde(default)]
-    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct BulkResolveResponse {
     pub(crate) targets: Vec<AgentView>,
     pub(crate) target_count: usize,
-    pub(crate) destructive: bool,
-    pub(crate) confirmation_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -824,12 +884,11 @@ pub(crate) struct CreateJobRequest {
     pub(crate) force_unprivileged: bool,
     pub(crate) privileged: bool,
     #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
     pub(crate) idempotency_key: Option<String>,
     #[serde(default)]
     pub(crate) reconnect_policy: Option<serde_json::Value>,
-    pub(crate) envelope: Option<CommandEnvelope>,
-    #[serde(default)]
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
 }
 
 #[derive(Debug, Serialize)]

@@ -5,6 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
     default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, JobCommand,
+    TerminalUserPolicy,
 };
 
 use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
@@ -36,7 +37,7 @@ pub(crate) struct TerminalOpenCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -62,7 +63,7 @@ pub(crate) struct TerminalInputCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -84,7 +85,7 @@ pub(crate) struct TerminalPollCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -108,7 +109,7 @@ pub(crate) struct TerminalResizeCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -130,7 +131,7 @@ pub(crate) struct TerminalCloseCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -147,6 +148,8 @@ pub(crate) fn terminal_open(
         session_id,
         argv: command.argv,
         cwd: command.cwd,
+        user: None,
+        user_policy: TerminalUserPolicy::Fail,
         cols: command.cols,
         rows: command.rows,
         replay_from_seq: command.replay_from_seq,
@@ -162,7 +165,7 @@ pub(crate) fn terminal_open(
         &command.tags,
         &command.password_env,
         command.super_salt_hex.as_deref(),
-        command.proof_ttl_secs,
+        command.privilege_ttl_secs,
         command.timeout_secs,
         command.confirmed,
     )?;
@@ -192,7 +195,7 @@ pub(crate) fn terminal_input(
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
-            command.proof_ttl_secs,
+            command.privilege_ttl_secs,
             command.timeout_secs,
             command.confirmed,
         )?
@@ -220,7 +223,7 @@ pub(crate) fn terminal_poll(
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
-            command.proof_ttl_secs,
+            command.privilege_ttl_secs,
             command.timeout_secs,
             command.confirmed,
         )?
@@ -249,7 +252,7 @@ pub(crate) fn terminal_resize(
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
-            command.proof_ttl_secs,
+            command.privilege_ttl_secs,
             command.timeout_secs,
             command.confirmed,
         )?
@@ -277,7 +280,7 @@ pub(crate) fn terminal_close(
             &command.tags,
             &command.password_env,
             command.super_salt_hex.as_deref(),
-            command.proof_ttl_secs,
+            command.privilege_ttl_secs,
             command.timeout_secs,
             command.confirmed,
         )?
@@ -295,7 +298,7 @@ fn submit_terminal_operation(
     tags: &[String],
     password_env: &str,
     super_salt_hex: Option<&str>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
 ) -> Result<String> {
@@ -308,7 +311,7 @@ fn submit_terminal_operation(
         tags,
         password_env,
         super_salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed,
         force_unprivileged: false,

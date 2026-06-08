@@ -21,9 +21,17 @@ impl Repository {
                         .iter()
                         .filter(|agent| !hidden.contains(&agent.id))
                         .count(),
-                    connected: agents
+                    online: agents
                         .iter()
-                        .filter(|agent| agent.status == "connected" && !hidden.contains(&agent.id))
+                        .filter(|agent| agent.status == "online" && !hidden.contains(&agent.id))
+                        .count(),
+                    offline: agents
+                        .iter()
+                        .filter(|agent| agent.status == "offline" && !hidden.contains(&agent.id))
+                        .count(),
+                    stale: agents
+                        .iter()
+                        .filter(|agent| agent.status == "stale" && !hidden.contains(&agent.id))
                         .count(),
                     warnings: 0,
                     running_jobs: 0,
@@ -34,8 +42,10 @@ impl Repository {
                     r#"
                     SELECT
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL) AS total,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'connected') AS connected,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status NOT IN ('connected', 'unknown')) AS warnings,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'online') AS online,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'offline') AS offline,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'stale') AS stale,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status <> 'online') AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running', 'dispatching')) AS running_jobs
                     "#,
                 )
@@ -43,7 +53,9 @@ impl Repository {
                 .await?;
                 Ok(FleetSummary {
                     total: row.try_get::<i64, _>("total")? as usize,
-                    connected: row.try_get::<i64, _>("connected")? as usize,
+                    online: row.try_get::<i64, _>("online")? as usize,
+                    offline: row.try_get::<i64, _>("offline")? as usize,
+                    stale: row.try_get::<i64, _>("stale")? as usize,
                     warnings: row.try_get::<i64, _>("warnings")? as usize,
                     running_jobs: row.try_get::<i64, _>("running_jobs")? as usize,
                 })
@@ -71,6 +83,12 @@ impl Repository {
                         c.id,
                         c.display_name,
                         c.status,
+                        c.registration_ip::text AS registration_ip,
+                        c.last_ip::text AS last_ip,
+                        c.last_seen_at::text AS last_seen_at,
+                        c.internal_build_number,
+                        c.stale_since::text AS stale_since,
+                        c.stale_reason,
                         c.capabilities,
                         COALESCE(
                             array_remove(array_agg(t.name ORDER BY t.name), NULL),
@@ -80,7 +98,7 @@ impl Repository {
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
                     WHERE c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -94,6 +112,14 @@ impl Repository {
                             display_name: row.try_get("display_name")?,
                             status: row.try_get("status")?,
                             tags: row.try_get("tags")?,
+                            registration_ip: row.try_get("registration_ip")?,
+                            last_ip: row.try_get("last_ip")?,
+                            last_seen_at: row.try_get("last_seen_at")?,
+                            internal_build_number: row
+                                .try_get::<i64, _>("internal_build_number")?
+                                .max(1) as u64,
+                            stale_since: row.try_get("stale_since")?,
+                            stale_reason: row.try_get("stale_reason")?,
                             capabilities: row
                                 .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
                                     "capabilities",
@@ -153,15 +179,20 @@ impl Repository {
     }
 
     pub(crate) async fn create_tag(&self, request: CreateTagRequest) -> Result<TagView> {
+        let CreateTagRequest { name, .. } = request;
+        self.create_tag_name(name).await
+    }
+
+    pub(crate) async fn create_tag_name(&self, name: String) -> Result<TagView> {
         match self {
             Self::Memory(memory) => {
                 let mut tags = memory.tags.write().await;
-                if !tags.iter().any(|tag| tag == &request.name) {
-                    tags.push(request.name.clone());
+                if !tags.iter().any(|tag| tag == &name) {
+                    tags.push(name.clone());
                     tags.sort();
                 }
                 Ok(TagView {
-                    name: request.name,
+                    name,
                     clients: Vec::new(),
                 })
             }
@@ -175,12 +206,12 @@ impl Repository {
                     "#,
                 )
                 .bind(id)
-                .bind(&request.name)
+                .bind(&name)
                 .execute(pool)
                 .await?;
                 Ok(TagView {
-                    clients: self.clients_for_tag(&request.name).await?,
-                    name: request.name,
+                    clients: self.clients_for_tag(&name).await?,
+                    name,
                 })
             }
         }
@@ -200,10 +231,7 @@ impl Repository {
                     }
                 }
                 drop(agents);
-                self.create_tag(CreateTagRequest {
-                    name: tag.to_string(),
-                })
-                .await?;
+                self.create_tag_name(tag.to_string()).await?;
                 let hidden = memory.hidden_clients.read().await;
                 Ok(TagView {
                     name: tag.to_string(),
@@ -262,6 +290,203 @@ impl Repository {
                 Ok(TagView {
                     name: tag.to_string(),
                     clients: self.clients_for_tag(tag).await?,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn bulk_mutate_tags(
+        &self,
+        request: &BulkTagMutationRequest,
+    ) -> Result<TagMutationResponse> {
+        let targets = self
+            .resolve_bulk_targets(&BulkResolveRequest {
+                selector_expression: request.selector_expression.clone(),
+            })
+            .await?
+            .targets;
+        if !request.confirmed {
+            return Ok(TagMutationResponse {
+                tag: request.tag.clone(),
+                action: tag_action_label(&request.action).to_string(),
+                target_count: targets.len(),
+                changed_count: 0,
+                skipped_count: targets.len(),
+                affected: targets,
+                confirmation_required: true,
+            });
+        }
+        match self {
+            Self::Memory(memory) => {
+                let mut changed = 0_usize;
+                if matches!(request.action, BulkTagMutationAction::Add) {
+                    let mut tags = memory.tags.write().await;
+                    if !tags.iter().any(|tag| tag == &request.tag) {
+                        tags.push(request.tag.clone());
+                        tags.sort();
+                    }
+                }
+                let hidden = memory.hidden_clients.read().await.clone();
+                let target_ids = targets
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .collect::<HashSet<_>>();
+                let mut agents = memory.agents.write().await;
+                for agent in agents.iter_mut().filter(|agent| {
+                    !hidden.contains(&agent.id) && target_ids.contains(agent.id.as_str())
+                }) {
+                    match request.action {
+                        BulkTagMutationAction::Add => {
+                            if !agent.tags.iter().any(|tag| tag == &request.tag) {
+                                agent.tags.push(request.tag.clone());
+                                agent.tags.sort();
+                                changed += 1;
+                            }
+                        }
+                        BulkTagMutationAction::Remove => {
+                            let before = agent.tags.len();
+                            agent.tags.retain(|tag| tag != &request.tag);
+                            if agent.tags.len() != before {
+                                changed += 1;
+                            }
+                        }
+                    }
+                }
+                Ok(TagMutationResponse {
+                    tag: request.tag.clone(),
+                    action: tag_action_label(&request.action).to_string(),
+                    target_count: targets.len(),
+                    changed_count: changed,
+                    skipped_count: targets.len().saturating_sub(changed),
+                    affected: targets,
+                    confirmation_required: false,
+                })
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                if matches!(request.action, BulkTagMutationAction::Add) {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO tags (id, name)
+                        VALUES ($1, $2)
+                        ON CONFLICT (name) DO NOTHING
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(&request.tag)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let mut changed = 0_u64;
+                for agent in &targets {
+                    match request.action {
+                        BulkTagMutationAction::Add => {
+                            changed += sqlx::query(
+                                r#"
+                                INSERT INTO client_tags (client_id, tag_id)
+                                SELECT $1, id FROM tags WHERE name = $2
+                                ON CONFLICT DO NOTHING
+                                "#,
+                            )
+                            .bind(&agent.id)
+                            .bind(&request.tag)
+                            .execute(&mut *tx)
+                            .await?
+                            .rows_affected();
+                        }
+                        BulkTagMutationAction::Remove => {
+                            changed += sqlx::query(
+                                r#"
+                                DELETE FROM client_tags ct
+                                USING tags t
+                                WHERE ct.tag_id = t.id
+                                  AND ct.client_id = $1
+                                  AND t.name = $2
+                                "#,
+                            )
+                            .bind(&agent.id)
+                            .bind(&request.tag)
+                            .execute(&mut *tx)
+                            .await?
+                            .rows_affected();
+                        }
+                    }
+                }
+                tx.commit().await?;
+                let changed = changed as usize;
+                Ok(TagMutationResponse {
+                    tag: request.tag.clone(),
+                    action: tag_action_label(&request.action).to_string(),
+                    target_count: targets.len(),
+                    changed_count: changed,
+                    skipped_count: targets.len().saturating_sub(changed),
+                    affected: targets,
+                    confirmation_required: false,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn delete_tag(
+        &self,
+        tag: &str,
+        confirmed: bool,
+    ) -> Result<TagMutationResponse> {
+        let affected = self.clients_for_tag(tag).await?;
+        if !confirmed {
+            return Ok(TagMutationResponse {
+                tag: tag.to_string(),
+                action: "delete".to_string(),
+                target_count: affected.len(),
+                changed_count: 0,
+                skipped_count: affected.len(),
+                affected,
+                confirmation_required: true,
+            });
+        }
+        match self {
+            Self::Memory(memory) => {
+                memory.tags.write().await.retain(|existing| existing != tag);
+                let mut changed = 0_usize;
+                let mut agents = memory.agents.write().await;
+                for agent in agents.iter_mut() {
+                    let before = agent.tags.len();
+                    agent.tags.retain(|existing| existing != tag);
+                    if before != agent.tags.len() {
+                        changed += 1;
+                    }
+                }
+                Ok(TagMutationResponse {
+                    tag: tag.to_string(),
+                    action: "delete".to_string(),
+                    target_count: affected.len(),
+                    changed_count: changed,
+                    skipped_count: affected.len().saturating_sub(changed),
+                    affected,
+                    confirmation_required: false,
+                })
+            }
+            Self::Postgres(pool) => {
+                let result = sqlx::query("DELETE FROM tags WHERE name = $1")
+                    .bind(tag)
+                    .execute(pool)
+                    .await?;
+                Ok(TagMutationResponse {
+                    tag: tag.to_string(),
+                    action: "delete".to_string(),
+                    target_count: affected.len(),
+                    changed_count: if result.rows_affected() > 0 {
+                        affected.len()
+                    } else {
+                        0
+                    },
+                    skipped_count: if result.rows_affected() > 0 {
+                        0
+                    } else {
+                        affected.len()
+                    },
+                    affected,
+                    confirmation_required: false,
                 })
             }
         }
@@ -442,6 +667,12 @@ impl Repository {
                         c.id,
                         c.display_name,
                         c.status,
+                        c.registration_ip::text AS registration_ip,
+                        c.last_ip::text AS last_ip,
+                        c.last_seen_at::text AS last_seen_at,
+                        c.internal_build_number,
+                        c.stale_since::text AS stale_since,
+                        c.stale_reason,
                         c.capabilities,
                         COALESCE(
                             array_remove(array_agg(t.name ORDER BY t.name), NULL),
@@ -451,7 +682,7 @@ impl Repository {
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
                     WHERE c.id = $1 AND c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
                     "#,
                 )
                 .bind(client_id)
@@ -462,6 +693,13 @@ impl Repository {
                     display_name: row.try_get("display_name")?,
                     status: row.try_get("status")?,
                     tags: row.try_get("tags")?,
+                    registration_ip: row.try_get("registration_ip")?,
+                    last_ip: row.try_get("last_ip")?,
+                    last_seen_at: row.try_get("last_seen_at")?,
+                    internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1)
+                        as u64,
+                    stale_since: row.try_get("stale_since")?,
+                    stale_reason: row.try_get("stale_reason")?,
                     capabilities: row
                         .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
                             "capabilities",
@@ -482,8 +720,6 @@ impl Repository {
             return Ok(BulkResolveResponse {
                 target_count: 0,
                 targets: Vec::new(),
-                destructive: request.destructive,
-                confirmation_required: request.destructive && !request.confirmed,
             });
         };
         let mut targets = match self {
@@ -506,6 +742,12 @@ impl Repository {
                         c.id,
                         c.display_name,
                         c.status,
+                        c.registration_ip::text AS registration_ip,
+                        c.last_ip::text AS last_ip,
+                        c.last_seen_at::text AS last_seen_at,
+                        c.internal_build_number,
+                        c.stale_since::text AS stale_since,
+                        c.stale_reason,
                         c.capabilities,
                         COALESCE(
                             array_remove(array_agg(all_tags.name ORDER BY all_tags.name), NULL),
@@ -515,7 +757,7 @@ impl Repository {
                     LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -528,6 +770,14 @@ impl Repository {
                             display_name: row.try_get("display_name")?,
                             status: row.try_get("status")?,
                             tags: row.try_get("tags")?,
+                            registration_ip: row.try_get("registration_ip")?,
+                            last_ip: row.try_get("last_ip")?,
+                            last_seen_at: row.try_get("last_seen_at")?,
+                            internal_build_number: row
+                                .try_get::<i64, _>("internal_build_number")?
+                                .max(1) as u64,
+                            stale_since: row.try_get("stale_since")?,
+                            stale_reason: row.try_get("stale_reason")?,
                             capabilities: row
                                 .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
                                     "capabilities",
@@ -546,8 +796,6 @@ impl Repository {
         Ok(BulkResolveResponse {
             target_count: targets.len(),
             targets,
-            destructive: request.destructive,
-            confirmation_required: request.destructive && !request.confirmed,
         })
     }
     pub(crate) async fn clients_for_tag(&self, tag: &str) -> Result<Vec<AgentView>> {
@@ -573,6 +821,12 @@ impl Repository {
                         c.id,
                         c.display_name,
                         c.status,
+                        c.registration_ip::text AS registration_ip,
+                        c.last_ip::text AS last_ip,
+                        c.last_seen_at::text AS last_seen_at,
+                        c.internal_build_number,
+                        c.stale_since::text AS stale_since,
+                        c.stale_reason,
                         c.capabilities,
                         COALESCE(
                             array_remove(array_agg(all_tags.name ORDER BY all_tags.name), NULL),
@@ -585,7 +839,7 @@ impl Repository {
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE matching_tag.name = $1
                       AND c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -599,6 +853,14 @@ impl Repository {
                             display_name: row.try_get("display_name")?,
                             status: row.try_get("status")?,
                             tags: row.try_get("tags")?,
+                            registration_ip: row.try_get("registration_ip")?,
+                            last_ip: row.try_get("last_ip")?,
+                            last_seen_at: row.try_get("last_seen_at")?,
+                            internal_build_number: row
+                                .try_get::<i64, _>("internal_build_number")?
+                                .max(1) as u64,
+                            stale_since: row.try_get("stale_since")?,
+                            stale_reason: row.try_get("stale_reason")?,
                             capabilities: row
                                 .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
                                     "capabilities",
@@ -609,5 +871,12 @@ impl Repository {
                     .collect()
             }
         }
+    }
+}
+
+fn tag_action_label(action: &BulkTagMutationAction) -> &'static str {
+    match action {
+        BulkTagMutationAction::Add => "add",
+        BulkTagMutationAction::Remove => "remove",
     }
 }

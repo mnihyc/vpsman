@@ -8,10 +8,11 @@ use crate::{
     commands_backups::{
         restore_artifact_bytes, restore_rollback_operation_from_api, restore_run_operation,
     },
+    commands_schedules::selector_expression_from_targets,
     http::http_post_json,
-    proof::build_envelopes_for_job_command,
+    privilege::build_privilege_for_job_command,
     vty_jobs::{
-        vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyProofContext,
+        vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyPrivilegeContext,
     },
 };
 
@@ -75,7 +76,7 @@ pub(crate) struct VtyBackupPolicyUpsert {
     pub(crate) include_config: bool,
     pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) selection: VtyJobSelection,
-    pub(crate) interval_secs: u64,
+    pub(crate) cron_expr: String,
     pub(crate) enabled: bool,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
@@ -245,12 +246,12 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
 pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
     let name = tokens
         .first()
-        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--interval <secs>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <id:<id>|name:<display>|tag:<name>|tag>... --confirmed")?
+        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
         .to_string();
     let mut paths = Vec::new();
     let mut include_config = false;
     let mut recipient_public_key_hex = None;
-    let mut interval_secs = 86_400_u64;
+    let mut cron_expr = "0 3 * * *".to_string();
     let mut enabled = true;
     let mut catch_up_policy = "skip_missed".to_string();
     let mut catch_up_limit = 1_i32;
@@ -301,20 +302,26 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
                 );
                 index += 1;
             }
+            "--cron" | "--cron-expr" => {
+                let cron_tokens = tokens
+                    .get(index + 1..index + 6)
+                    .context("--cron requires five UTC cron fields")?;
+                cron_expr = cron_tokens.join(" ");
+                index += 6;
+            }
+            value if value.starts_with("--cron=") => {
+                cron_expr = normalize_vty_cron_value(value.trim_start_matches("--cron="));
+                index += 1;
+            }
+            value if value.starts_with("--cron-expr=") => {
+                cron_expr = normalize_vty_cron_value(value.trim_start_matches("--cron-expr="));
+                index += 1;
+            }
             "--interval" => {
-                interval_secs = tokens
-                    .get(index + 1)
-                    .context("--interval requires a value")?
-                    .parse()
-                    .context("invalid --interval")?;
-                index += 2;
+                anyhow::bail!("--interval was replaced by --cron <min> <hour> <dom> <mon> <dow>");
             }
             value if value.starts_with("--interval=") => {
-                interval_secs = value
-                    .trim_start_matches("--interval=")
-                    .parse()
-                    .context("invalid --interval")?;
-                index += 1;
+                anyhow::bail!("--interval was replaced by --cron=<min>,<hour>,<dom>,<mon>,<dow>");
             }
             "--retention-days" => {
                 retention_days = Some(
@@ -436,8 +443,8 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
     ensure_backup_scope(&paths, include_config, "backup-policy-upsert")?;
     ensure_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
-        (1..=31_536_000).contains(&interval_secs),
-        "backup policy interval out of range"
+        cron_expr.split_whitespace().count() == 5,
+        "backup policy cron must have five fields"
     );
     let selection = VtyJobSelection::parse(&target_tokens)?;
     anyhow::ensure!(
@@ -450,7 +457,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         include_config,
         recipient_public_key_hex,
         selection,
-        interval_secs,
+        cron_expr,
         enabled,
         catch_up_policy,
         catch_up_limit,
@@ -460,6 +467,10 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         keep_last,
         rotation_generation,
     })
+}
+
+fn normalize_vty_cron_value(value: &str) -> String {
+    value.replace([',', '_'], " ")
 }
 
 pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRequest> {
@@ -737,17 +748,21 @@ pub(crate) fn submit_vty_backup_request(
             .clone()
             .map(|value| value.to_ascii_lowercase()),
     };
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&request.client_id),
+    let target_ids = vec![request.client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "backup",
+        &selector_expression,
         password,
         salt_hex,
         300,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&request.client_id)
-        .context("failed to build backup proof envelope")?;
+        30,
+        None,
+        false,
+        true,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/backups",
@@ -759,7 +774,7 @@ pub(crate) fn submit_vty_backup_request(
             "recipient_public_key_hex": request.recipient_public_key_hex,
             "confirmed": request.confirmed,
             "note": request.note,
-            "envelope": envelope,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -767,7 +782,7 @@ pub(crate) fn submit_vty_backup_request(
 pub(crate) fn submit_vty_backup_run(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyBackupRunRequest,
 ) -> Result<String> {
     let operation = JobCommand::Backup {
@@ -784,7 +799,7 @@ pub(crate) fn submit_vty_backup_run(
     vty_submit_operation(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         "backup",
         &operation,
         request.selection,
@@ -806,10 +821,9 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "paths": request.paths,
             "include_config": request.include_config,
             "recipient_public_key_hex": request.recipient_public_key_hex,
-            "clients": request.selection.clients,
-            "tags": request.selection.tags,
-            "interval_secs": request.interval_secs,
-            "start_at_unix": null,
+            "selector_expression": selector_expression_from_targets(&request.selection.clients, &request.selection.tags),
+            "cron_expr": request.cron_expr,
+            "timezone": "UTC",
             "enabled": request.enabled,
             "catch_up_policy": request.catch_up_policy,
             "catch_up_limit": request.catch_up_limit,
@@ -842,17 +856,21 @@ pub(crate) fn submit_vty_restore_plan(
         dry_run: false,
         post_restore_argv: Vec::new(),
     };
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&request.target_client_id),
+    let target_ids = vec![request.target_client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "restore",
+        &selector_expression,
         password,
         salt_hex,
         300,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&request.target_client_id)
-        .context("failed to build restore proof envelope")?;
+        30,
+        None,
+        false,
+        true,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/restore-plans",
@@ -865,7 +883,7 @@ pub(crate) fn submit_vty_restore_plan(
             "destination_root": request.destination_root,
             "confirmed": request.confirmed,
             "note": request.note,
-            "envelope": envelope,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -873,7 +891,7 @@ pub(crate) fn submit_vty_restore_plan(
 pub(crate) fn submit_vty_restore_run(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyRestoreRunRequest,
 ) -> Result<String> {
     let artifact_bytes = restore_artifact_bytes(
@@ -893,7 +911,7 @@ pub(crate) fn submit_vty_restore_run(
     vty_submit_operation_with_force(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         "restore",
         &operation,
         VtyJobSelection {
@@ -910,7 +928,7 @@ pub(crate) fn submit_vty_restore_run(
 pub(crate) fn submit_vty_restore_rollback(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyRestoreRollbackRequest,
 ) -> Result<String> {
     let operation = restore_rollback_operation_from_api(
@@ -922,7 +940,7 @@ pub(crate) fn submit_vty_restore_rollback(
     vty_submit_operation_with_force(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         "restore_rollback",
         &operation,
         VtyJobSelection {

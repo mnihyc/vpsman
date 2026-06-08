@@ -3,23 +3,25 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use vpsman_common::{
-    backend_config_proof_payload, payload_hash, plan_tunnel, render_tunnel_endpoint_backend_config,
-    render_tunnel_endpoint_config, BandwidthTier, JobCommand, OspfCostPolicy, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    backend_config_signature_payload, payload_hash, plan_tunnel,
+    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
+    JobCommand, OspfCostPolicy, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_post_json},
     network_runtime_args::{
         build_runtime_control, build_runtime_topology, RuntimeControlArgs, RuntimeManagerArg,
         RuntimeTopologyArgs,
     },
-    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 #[derive(Debug, Args)]
@@ -257,7 +259,7 @@ pub(crate) struct TunnelApplyCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -281,7 +283,7 @@ pub(crate) struct TunnelOspfCostUpdateCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -301,7 +303,7 @@ pub(crate) struct TunnelRollbackCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
@@ -321,7 +323,7 @@ pub(crate) struct TunnelStatusCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
     pub(crate) timeout_secs: u64,
 }
@@ -341,7 +343,7 @@ pub(crate) struct TunnelProbeCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
 }
@@ -367,7 +369,7 @@ pub(crate) struct TunnelSpeedTestCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
 }
@@ -392,40 +394,29 @@ pub(crate) fn tunnel_apply(
         plan: Box::new(plan),
         side,
         config_backend,
-        config_sha256_hex: Some(payload_hash(&backend_config_proof_payload(&backend_config))),
+        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
+            &backend_config,
+        ))),
         ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_apply",
-                "argv": [],
-                "clients": [endpoint.local_client_id],
-                "tags": [],
-                "privileged": true,
-                "destructive": true,
-                "confirmed": request.confirmed,
-                "force_unprivileged": request.force_unprivileged,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_apply",
+            vec![endpoint.local_client_id],
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            true,
+            request.confirmed,
+            request.force_unprivileged,
         )?
     );
     Ok(())
@@ -457,34 +448,21 @@ pub(crate) fn tunnel_ospf_cost_update(
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_ospf_cost_update",
-                "argv": [],
-                "clients": [endpoint.local_client_id],
-                "tags": [],
-                "privileged": true,
-                "destructive": true,
-                "confirmed": request.confirmed,
-                "force_unprivileged": request.force_unprivileged,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_ospf_cost_update",
+            vec![endpoint.local_client_id],
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            true,
+            request.confirmed,
+            request.force_unprivileged,
         )?
     );
     Ok(())
@@ -505,34 +483,21 @@ pub(crate) fn tunnel_rollback(
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_rollback",
-                "argv": [],
-                "clients": [endpoint.local_client_id],
-                "tags": [],
-                "privileged": true,
-                "destructive": true,
-                "confirmed": request.confirmed,
-                "force_unprivileged": request.force_unprivileged,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_rollback",
+            vec![endpoint.local_client_id],
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            true,
+            request.confirmed,
+            request.force_unprivileged,
         )?
     );
     Ok(())
@@ -552,33 +517,21 @@ pub(crate) fn tunnel_status(
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_status",
-                "argv": [],
-                "clients": [endpoint.local_client_id],
-                "tags": [],
-                "privileged": true,
-                "destructive": false,
-                "confirmed": false,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_status",
+            vec![endpoint.local_client_id],
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            false,
+            false,
+            false,
         )?
     );
     Ok(())
@@ -608,33 +561,21 @@ pub(crate) fn tunnel_probe(
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_probe",
-                "argv": [],
-                "clients": [endpoint.local_client_id],
-                "tags": [],
-                "privileged": true,
-                "destructive": false,
-                "confirmed": false,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_probe",
+            vec![endpoint.local_client_id],
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            false,
+            false,
+            false,
         )?
     );
     Ok(())
@@ -670,36 +611,72 @@ pub(crate) fn tunnel_speed_test(
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    let envelopes = build_envelopes_for_job_command(
-        &target_clients,
-        &operation,
-        &password,
-        &salt_hex,
-        request.proof_ttl_secs,
-    )?
-    .1;
     println!(
         "{}",
-        http_post_json(
+        submit_network_job(
             api_url,
-            "/api/v1/jobs",
             token,
-            &serde_json::json!({
-                "command": "network_speed_test",
-                "argv": [],
-                "clients": target_clients,
-                "tags": [],
-                "privileged": true,
-                "destructive": false,
-                "confirmed": false,
-                "timeout_secs": request.timeout_secs,
-                "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
-            }),
+            "network_speed_test",
+            target_clients,
+            operation,
+            &password,
+            &salt_hex,
+            request.privilege_ttl_secs,
+            request.timeout_secs,
+            false,
+            false,
+            false,
         )?
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_network_job(
+    api_url: &str,
+    token: Option<&str>,
+    command_label: &str,
+    target_clients: Vec<String>,
+    operation: JobCommand,
+    password: &str,
+    salt_hex: &str,
+    ttl_secs: u64,
+    timeout_secs: u64,
+    destructive: bool,
+    confirmed: bool,
+    force_unprivileged: bool,
+) -> Result<String> {
+    let selector_expression = selector_expression_from_targets(&target_clients, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_clients,
+        &operation,
+        command_label,
+        &selector_expression,
+        password,
+        salt_hex,
+        ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
+    )?;
+    http_post_json(
+        api_url,
+        "/api/v1/jobs",
+        token,
+        &serde_json::json!({
+            "command": command_label,
+            "argv": [],
+            "selector_expression": selector_expression,
+            "privileged": true,
+            "destructive": destructive,
+            "confirmed": confirmed,
+            "force_unprivileged": force_unprivileged,
+            "timeout_secs": timeout_secs,
+            "operation": operation,
+            "privilege_assertion": privilege.privilege_assertion,
+        }),
+    )
 }
 
 fn validate_speed_test_bounds(

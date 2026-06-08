@@ -3,6 +3,7 @@ import { ConsoleShell } from "./components/ConsoleShell";
 import { AuthPanel } from "./panels/AuthPanel";
 import { DashboardPanel } from "./panels/DashboardPanel";
 import { FleetWorkspace } from "./panels/FleetWorkspace";
+import { ConfigPanel } from "./panels/ConfigPanel";
 import { JobHistoryPanel } from "./panels/JobHistoryPanel";
 import { TagsPanel } from "./panels/TagsPanel";
 import { SchedulesPanel } from "./panels/SchedulesPanel";
@@ -13,7 +14,7 @@ import { TopologyPanel } from "./panels/TopologyPanel";
 import { PreferencesPanel } from "./panels/PreferencesPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
-import type { ProofMaterial } from "./proof";
+import type { PrivilegeMaterial } from "./privilege";
 import { defaultSubpages, normalizeSubpage } from "./constants";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
@@ -30,7 +31,7 @@ export function App() {
   const [activeSubpages, setActiveSubpages] = useState<Record<ActiveView, string>>({ ...defaultSubpages });
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(null);
-  const [proofMaterial, setProofMaterial] = useState<ProofMaterial | null>(null);
+  const [privilegeMaterial, setPrivilegeMaterial] = useState<PrivilegeMaterial | null>(null);
   const dashboard = useDashboardData(activeView);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = dashboard.operator?.preferences ?? DEFAULT_OPERATOR_PREFERENCES;
@@ -41,25 +42,25 @@ export function App() {
   );
   const visibleSummary = useMemo(
     () => ({
-      connected: visibleAgents.filter((agent) => agent.status === "connected").length,
+      online: visibleAgents.filter((agent) => agent.status === "online").length,
       total: visibleAgents.length,
     }),
     [visibleAgents],
   );
-  const connectedRatio = useMemo(() => {
+  const onlineRatio = useMemo(() => {
     if (dashboard.summary.total === 0) {
       return "0%";
     }
-    return `${Math.round((dashboard.summary.connected / dashboard.summary.total) * 100)}%`;
-  }, [dashboard.summary.connected, dashboard.summary.total]);
+    return `${Math.round((dashboard.summary.online / dashboard.summary.total) * 100)}%`;
+  }, [dashboard.summary.online, dashboard.summary.total]);
   const activeSubpage = normalizeSubpage(activeView, activeSubpages[activeView]);
   const heroTitle = getHeroTitle(activeView);
   const hasFleetScope = fleetViews.fleetQuery.trim().length > 0 || fleetViews.activeSavedViewId !== null;
   const heroCopy =
     activeView === "Fleet" && hasFleetScope
-      ? `${visibleSummary.connected} visible connected / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+      ? `${visibleSummary.online} visible online / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
-        ? `${dashboard.summary.connected} connected / ${dashboard.summary.total} total`
+        ? `${dashboard.summary.online} online / ${dashboard.summary.total} total`
       : getHeroCopy(activeView);
 
   useEffect(() => {
@@ -99,12 +100,12 @@ export function App() {
     selectView("Jobs", "history");
   }
 
-  function openProofUnlock() {
-    selectView("Access", "proof");
+  function openPrivilegeUnlock() {
+    selectView("Access", "privilege");
   }
 
-  function lockProof() {
-    setProofMaterial(null);
+  function lockPrivilege() {
+    setPrivilegeMaterial(null);
   }
 
   return (
@@ -124,7 +125,7 @@ export function App() {
       activeView={activeView}
       agents={dashboard.agents}
       apiToken={dashboard.apiToken}
-      connectedRatio={connectedRatio}
+      onlineRatio={onlineRatio}
       draftSavedFleetViewName={fleetViews.draftSavedViewName}
       filteredAgentCount={visibleAgents.length}
       fleetQuery={fleetViews.fleetQuery}
@@ -135,14 +136,14 @@ export function App() {
       onClearSession={dashboard.clearSession}
       onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
       onFleetQueryChange={fleetViews.setFleetQuery}
-      onLockProof={lockProof}
-      onOpenAccessControls={openProofUnlock}
+      onLockPrivilege={lockPrivilege}
+      onOpenAccessControls={openPrivilegeUnlock}
       onSaveFleetView={fleetViews.saveFleetView}
       onSelectSubpage={selectSubpage}
       onSelectView={selectView}
       onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
       operatorPreferencesReady={dashboard.operator !== null}
-      proofUnlocked={proofMaterial !== null}
+      privilegeUnlocked={privilegeMaterial !== null}
       savedFleetViews={fleetViews.savedViews}
       summary={dashboard.summary}
     >
@@ -179,9 +180,15 @@ export function App() {
               fleetAlertNotificationChannels={dashboard.fleetAlertNotificationChannels}
               fleetAlertNotifications={dashboard.fleetAlertNotifications}
               lastLiveEvent={dashboard.lastLiveEvent}
+              onCreateJob={dashboard.createJob}
               onDeleteAgent={dashboard.deleteAgent}
+              onLoadJobOutputs={dashboard.loadJobOutputs}
+              onLoadJobTargets={dashboard.loadJobTargets}
+              onOpenJobDetails={openJobDetails}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onSelectAgent={setSelectedAgentId}
               onUpdateAgentAlias={dashboard.updateAgentAlias}
+              privilegeMaterial={privilegeMaterial}
               scopeActive={hasFleetScope}
               onDispatchFleetAlertNotifications={dashboard.dispatchFleetAlertNotifications}
               onProcessFleetAlertNotifications={dashboard.processFleetAlertNotifications}
@@ -196,30 +203,52 @@ export function App() {
               wsState={dashboard.wsState}
             />
           )}
-          {activeView === "Tags" && (
-            <TagsPanel
+          {activeView === "Config" && (
+            <ConfigPanel
               activeSubpage={activeSubpage}
               agents={visibleAgents}
               dataSourceAssignments={dashboard.dataSourceAssignments}
               dataSourcePresets={dashboard.dataSourcePresets}
               dataSourceStatus={dashboard.dataSourceStatus}
               error={dashboard.tagsError}
+              hotConfigRuleTemplates={dashboard.hotConfigRuleTemplates}
+              jobs={dashboard.jobs}
               loading={dashboard.tagsLoading}
               onAssignDataSourcePreset={dashboard.assignDataSourcePreset}
-              onAssignTag={dashboard.assignTag}
               onCloneDataSourcePreset={dashboard.cloneDataSourcePreset}
               onCreateJob={dashboard.createJob}
               onCreateDataSourcePreset={dashboard.createDataSourcePreset}
-              onCreateTag={dashboard.createTag}
               onDiffDataSourcePreset={dashboard.diffDataSourcePreset}
-              onOpenProofUnlock={openProofUnlock}
+              onLoadJobOutputs={dashboard.loadJobOutputs}
+              onLoadJobTargets={dashboard.loadJobTargets}
+              onDeleteHotConfigRuleTemplate={dashboard.deleteHotConfigRuleTemplate}
+              onOpenJobDetails={openJobDetails}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onRefresh={dashboard.loadTagInventory}
               onRenderDataSourceHotConfig={dashboard.renderDataSourceHotConfig}
+              onRenderHotConfigRuleTemplate={dashboard.renderHotConfigRuleTemplate}
               onResolveBulk={dashboard.resolveBulkPreview}
               onTestDataSourcePreset={dashboard.testDataSourcePreset}
               onUpdateDataSourcePreset={dashboard.updateDataSourcePreset}
-              proofMaterial={proofMaterial}
-              setProofMaterial={setProofMaterial}
+              onUpsertHotConfigRuleTemplate={dashboard.upsertHotConfigRuleTemplate}
+              privilegeMaterial={privilegeMaterial}
+              setPrivilegeMaterial={setPrivilegeMaterial}
+            />
+          )}
+          {activeView === "Tags" && (
+            <TagsPanel
+              activeSubpage={activeSubpage}
+              agents={visibleAgents}
+              error={dashboard.tagsError}
+              loading={dashboard.tagsLoading}
+              onAssignTag={dashboard.assignTag}
+              onCreateTag={dashboard.createTag}
+              onBulkMutateTags={dashboard.bulkMutateTags}
+              onDeleteTag={dashboard.deleteTag}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
+              onRefresh={dashboard.loadTagInventory}
+              onResolveBulk={dashboard.resolveBulkPreview}
+              privilegeMaterial={privilegeMaterial}
               tags={dashboard.tags}
             />
           )}
@@ -243,11 +272,8 @@ export function App() {
               onCreateJob={dashboard.createJob}
               onCreateAgentUpdateRelease={dashboard.createAgentUpdateRelease}
               onCreateAgentUpdateRolloutPolicy={dashboard.createAgentUpdateRolloutPolicy}
-              onDelegateAgentUpdateActivation={dashboard.delegateAgentUpdateActivation}
-              onDelegateAgentUpdateRollback={dashboard.delegateAgentUpdateRollback}
               onUpdateAgentUpdateRolloutControl={dashboard.updateAgentUpdateRolloutControl}
               onUploadAgentUpdateArtifact={dashboard.uploadAgentUpdateArtifact}
-              onDispatchScheduledJob={dashboard.dispatchScheduledJob}
               onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
               onDownloadOutputArtifact={dashboard.downloadJobOutputArtifact}
               onDownloadFileTransferSource={dashboard.downloadFileTransferSource}
@@ -264,10 +290,10 @@ export function App() {
               onUploadFileTransferSource={dashboard.uploadFileTransferSource}
               onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
               pendingSelectedJobId={pendingJobDetailId}
-              proofMaterial={proofMaterial}
+              privilegeMaterial={privilegeMaterial}
               processSupervisorInventory={dashboard.processSupervisorInventory}
-              setProofMaterial={setProofMaterial}
-              onOpenProofUnlock={openProofUnlock}
+              setPrivilegeMaterial={setPrivilegeMaterial}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               terminalSessions={dashboard.terminalSessions}
             />
           )}
@@ -275,10 +301,19 @@ export function App() {
             <SchedulesPanel
               activeSubpage={activeSubpage}
               agents={visibleAgents}
+              commandTemplates={dashboard.commandTemplates}
               error={dashboard.schedulesError}
               loading={dashboard.schedulesLoading}
+              onApplyScheduleNow={dashboard.applyScheduleNow}
               onCreateSchedule={dashboard.createSchedule}
+              onDeferSchedule={dashboard.deferSchedule}
+              onDeleteSchedule={dashboard.deleteSchedule}
+              onDisableSchedule={dashboard.disableSchedule}
+              onEnableSchedule={dashboard.enableSchedule}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onRefresh={dashboard.loadSchedules}
+              onUpdateSchedule={dashboard.updateSchedule}
+              privilegeMaterial={privilegeMaterial}
               schedules={dashboard.schedules}
             />
           )}
@@ -303,12 +338,12 @@ export function App() {
               onLoadOutputs={dashboard.loadJobOutputs}
               onLoadTargets={dashboard.loadJobTargets}
               onOpenJobDetails={openJobDetails}
-              onOpenProofUnlock={openProofUnlock}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onPromoteTelemetryTunnel={dashboard.promoteTelemetryTunnel}
               onPromoteTunnelPlanToAdapter={dashboard.promoteTunnelPlanToAdapter}
               onRefresh={dashboard.loadTunnelPlans}
-              proofMaterial={proofMaterial}
-              setProofMaterial={setProofMaterial}
+              privilegeMaterial={privilegeMaterial}
+              setPrivilegeMaterial={setPrivilegeMaterial}
               topologyGraph={dashboard.topologyGraph}
               telemetryTunnels={dashboard.telemetryTunnels}
               tunnelPlans={dashboard.tunnelPlans}
@@ -350,10 +385,10 @@ export function App() {
               onLoadJobOutputs={dashboard.loadJobOutputs}
               onPrepareBackupArtifactRestore={dashboard.prepareBackupArtifactRestore}
               onPruneBackupPolicies={dashboard.pruneBackupPolicies}
-              onOpenProofUnlock={openProofUnlock}
+              onOpenPrivilegeUnlock={openPrivilegeUnlock}
               onRefresh={dashboard.loadBackups}
-              proofMaterial={proofMaterial}
-              setProofMaterial={setProofMaterial}
+              privilegeMaterial={privilegeMaterial}
+              setPrivilegeMaterial={setPrivilegeMaterial}
               onUploadBackupArtifact={dashboard.uploadBackupArtifact}
               onUploadBackupArtifactChunked={dashboard.uploadBackupArtifactChunked}
             />
@@ -376,15 +411,14 @@ export function App() {
               onRevokeOperatorSession={dashboard.revokeOperatorSession}
               onSetupTotp={dashboard.setupTotp}
               operator={dashboard.operator}
-              proofMaterial={proofMaterial}
+              privilegeMaterial={privilegeMaterial}
               clientKeyRevocations={dashboard.clientKeyRevocations}
               enrollmentTokens={dashboard.enrollmentTokens}
               keyLifecycleReport={dashboard.keyLifecycleReport}
               operatorSessions={dashboard.operatorSessions}
               operators={dashboard.operators}
-              proofRotations={dashboard.proofRotations}
               sessionVaultAvailable={dashboard.authVaultAvailable}
-              setProofMaterial={setProofMaterial}
+              setPrivilegeMaterial={setPrivilegeMaterial}
               wsState={dashboard.wsState}
             />
           )}

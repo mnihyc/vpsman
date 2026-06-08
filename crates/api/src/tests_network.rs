@@ -1,20 +1,26 @@
 use super::*;
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    backend_config_proof_payload, derive_super_key, encode_json, payload_hash, plan_tunnel,
-    random_nonce, render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config,
-    sign_privilege_proof, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, BandwidthTier,
-    CommandEnvelope, JobCommand, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput, MANAGED_BIRD2_FILE,
+    backend_config_signature_payload, payload_hash, plan_tunnel,
+    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, AgentCapabilitySnapshot,
+    AgentHello, AgentPrivilegeMode, BandwidthTier, JobCommand, OspfCostPolicy,
+    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelRoute,
+    RuntimeTunnelTopologyIntent, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION, MANAGED_BIRD2_FILE,
+    MIN_COMMAND_PROTOCOL_VERSION,
 };
 
 use crate::{
-    gateway_client::GatewayDispatchClient, job_request::validate_job_command,
-    routes_jobs::create_job, state::EnrollmentSettings,
+    gateway_client::GatewayDispatchClient,
+    job_request::{
+        job_command_min_supported_protocol_version, job_command_protocol_version,
+        validate_job_command,
+    },
+    routes_jobs::create_job,
+    state::EnrollmentSettings,
 };
 
 #[tokio::test]
@@ -343,7 +349,9 @@ fn network_apply_validation_requires_backend_specific_config_hash() {
         plan: Box::new(plan.clone()),
         side: TunnelEndpointSide::Left,
         config_backend: TunnelConfigBackend::Netplan,
-        config_sha256_hex: Some(payload_hash(&backend_config_proof_payload(&backend_config))),
+        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
+            &backend_config,
+        ))),
         ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
@@ -408,6 +416,21 @@ fn network_status_validation_rejects_mutating_plan() {
     let error = validate_job_command(&command).unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_status_plan_must_be_observe_plan");
+}
+
+#[test]
+fn network_interfaces_validation_uses_current_protocol() {
+    let command = JobCommand::NetworkInterfaces;
+
+    validate_job_command(&command).unwrap();
+    assert_eq!(
+        job_command_protocol_version(&command),
+        CURRENT_COMMAND_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        job_command_min_supported_protocol_version(&command),
+        MIN_COMMAND_PROTOCOL_VERSION
+    );
 }
 
 #[test]
@@ -525,6 +548,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -551,10 +575,9 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),
@@ -569,7 +592,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
 }
 
 #[tokio::test]
-async fn network_apply_degrades_unprivileged_target_without_gateway() {
+async fn network_apply_degrades_unprivileged_target_after_privilege_verification() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -580,6 +603,7 @@ async fn network_apply_degrades_unprivileged_target_without_gateway() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
@@ -601,7 +625,6 @@ async fn network_apply_degrades_unprivileged_target_without_gateway() {
         ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
-    let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
         selector_expression: "id:left-a".to_string(),
         destructive: true,
@@ -613,13 +636,14 @@ async fn network_apply_degrades_unprivileged_target_without_gateway() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(test_command_envelope("left-a", &command_hash)),
-        envelopes: Default::default(),
     };
     let (status, response) = create_job(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state_with_signing_key_and_privilege_auto_approve(
+            repo.clone(),
+        )),
         HeaderMap::new(),
         Json(request),
     )
@@ -645,6 +669,7 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -665,10 +690,9 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),
@@ -694,6 +718,7 @@ async fn network_status_create_job_rejects_wrong_side_target() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -714,10 +739,9 @@ async fn network_status_create_job_rejects_wrong_side_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),
@@ -743,6 +767,7 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -765,10 +790,9 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),
@@ -794,6 +818,7 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -819,10 +844,9 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: Default::default(),
     };
     let error = create_job(
         State(test_state_with_signing_key(repo)),
@@ -880,23 +904,9 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
     }
 }
 
-fn test_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let proof_key = derive_super_key("correct horse", &[1, 2, 3, 4]);
-    let proof = sign_privilege_proof(
-        &proof_key,
-        command_id,
-        &scope,
-        command_hash,
-        &random_nonce(),
-        unix_now() + 300,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex: command_hash.to_string(),
-        proof: Some(proof),
-        server_signature: Vec::new(),
+fn test_state_with_signing_key_and_privilege_auto_approve(repo: Repository) -> AppState {
+    AppState {
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
+        ..test_state_with_signing_key(repo)
     }
 }

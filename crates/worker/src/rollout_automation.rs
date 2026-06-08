@@ -3,8 +3,8 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-const PROOF_DELEGATION_BLOCKER: &str =
-    "privileged rollout dispatch requires fresh per-target proof; use panel or CLI until proof delegation is configured";
+const GATEWAY_PRIVILEGE_APPROVAL_BLOCKER: &str =
+    "privileged rollout dispatch requires a saved gateway-approved rollout action; use direct panel or CLI activation/rollback";
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct RolloutAutomationRun {
@@ -365,7 +365,7 @@ fn plan_rollout_automation(
         return decision(
             "rollback_required",
             Some("operator_rollback_targets"),
-            Some(PROOF_DELEGATION_BLOCKER),
+            Some(GATEWAY_PRIVILEGE_APPROVAL_BLOCKER),
             rollback_targets,
         );
     }
@@ -416,7 +416,7 @@ fn plan_rollout_automation(
         return decision(
             action,
             Some("operator_activate_batch"),
-            Some(PROOF_DELEGATION_BLOCKER),
+            Some(GATEWAY_PRIVILEGE_APPROVAL_BLOCKER),
             staged_targets.into_iter().take(batch_size).collect(),
         );
     }
@@ -478,7 +478,8 @@ fn decision(
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_rollout_automation, RolloutControlState, RolloutTargetState, PROOF_DELEGATION_BLOCKER,
+        plan_rollout_automation, RolloutControlState, RolloutTargetState,
+        GATEWAY_PRIVILEGE_APPROVAL_BLOCKER,
     };
 
     fn target(client_id: &str, status: &str) -> RolloutTargetState {
@@ -513,7 +514,10 @@ mod tests {
             decision.next_action.as_deref(),
             Some("operator_activate_batch")
         );
-        assert_eq!(decision.blocker.as_deref(), Some(PROOF_DELEGATION_BLOCKER));
+        assert_eq!(
+            decision.blocker.as_deref(),
+            Some(GATEWAY_PRIVILEGE_APPROVAL_BLOCKER)
+        );
         assert_eq!(decision.targets, ["client-a", "client-b"]);
     }
 
@@ -567,7 +571,10 @@ mod tests {
             decision.next_action.as_deref(),
             Some("operator_rollback_targets")
         );
-        assert_eq!(decision.blocker.as_deref(), Some(PROOF_DELEGATION_BLOCKER));
+        assert_eq!(
+            decision.blocker.as_deref(),
+            Some(GATEWAY_PRIVILEGE_APPROVAL_BLOCKER)
+        );
         assert_eq!(decision.targets, ["client-a", "client-b"]);
     }
 

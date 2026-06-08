@@ -5,10 +5,16 @@ test.skip(!process.env.VPSMAN_LIVE_API_SMOKE, "live API smoke is enabled by scri
 
 test("uses the real API proxy for fleet, topology planning, and audit visibility", async ({ page }) => {
   await page.goto("/");
+  if (await page.getByRole("heading", { name: "Operator access" }).isVisible()) {
+    await page.getByLabel("Username").fill(process.env.VPSMAN_LIVE_API_USERNAME ?? "frontend-live-admin");
+    await page.getByLabel("Password").fill(process.env.VPSMAN_LIVE_API_PASSWORD ?? "frontend-live-password");
+    await page.getByRole("button", { name: "Submit login" }).click();
+  }
 
+  await openConsoleSubpage(page, "Fleet", "Instances");
   await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /edge-live-a/ })).toBeVisible();
-  await expect(page.locator(".consoleHeader").getByText("2 connected / 2 total")).toBeVisible();
+  await expect(page.getByRole("row", { name: /edge-live-a/ })).toBeVisible();
+  await expect(page.locator(".consoleHeader").getByText("2 online / 2 total")).toBeVisible();
 
   await openConsoleSubpage(page, "Topology", "Tunnel plans");
   await expect(page.getByRole("heading", { name: "Tunnel plans" })).toBeVisible();

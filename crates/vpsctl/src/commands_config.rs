@@ -6,13 +6,14 @@ use ed25519_dalek::SigningKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    derive_super_key, sign_update_artifact_hash, validate_agent_config_shape,
-    verify_update_artifact_signature, AgentConfig, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
+    sign_update_artifact_hash, validate_agent_config_shape, verify_update_artifact_signature,
+    AgentConfig, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
+use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_file, http_post_json};
 use crate::jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest};
-use crate::proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex};
+use crate::privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex};
 use crate::util::percent_encode_path_segment;
 
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
@@ -48,9 +49,10 @@ pub(crate) fn hot_config(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
+    force_unprivileged: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         confirmed,
@@ -69,6 +71,8 @@ pub(crate) fn hot_config(
         .map_err(|message| anyhow::anyhow!("invalid hot config: {message}"))?;
     let operation = JobCommand::HotConfig {
         toml: toml_document,
+        preserve_redacted: None,
+        base_config_sha256_hex: None,
     };
     println!(
         "{}",
@@ -81,60 +85,10 @@ pub(crate) fn hot_config(
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
-            force_unprivileged: false,
-        })?
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn super_password_rotate(
-    api_url: &str,
-    token: Option<&str>,
-    new_proof_key_hex: Option<String>,
-    new_password_env: Option<String>,
-    new_super_salt_hex: Option<String>,
-    rotation_generation: Option<String>,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "super-password-rotate requires --confirmed because it changes privileged proof material"
-    );
-    let new_proof_key_hex = auth_rotation_proof_key_hex(
-        new_proof_key_hex.as_deref(),
-        new_password_env.as_deref(),
-        new_super_salt_hex.as_deref(),
-    )?;
-    let rotation_generation = normalize_rotation_generation(rotation_generation.as_deref())?;
-    let operation = JobCommand::AuthProofKeyRotate {
-        new_proof_key_hex,
-        rotation_generation,
-    };
-    println!(
-        "{}",
-        submit_privileged_operation(PrivilegedOperationRequest {
-            api_url,
-            token,
-            operation: &operation,
-            command_label: "auth_proof_key_rotate",
-            clients: &clients,
-            tags: &tags,
-            password_env: &password_env,
-            super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
-            timeout_secs,
-            confirmed,
-            force_unprivileged: false,
+            force_unprivileged,
         })?
     );
     Ok(())
@@ -152,7 +106,7 @@ pub(crate) fn agent_update(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     canary_count: Option<u16>,
     confirmed: bool,
@@ -176,13 +130,20 @@ pub(crate) fn agent_update(
     };
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
+        "agent_update",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
+        timeout_secs,
+        canary_count.map(i32::from),
+        force_unprivileged,
+        true,
     )?;
     println!(
         "{}",
@@ -194,16 +155,14 @@ pub(crate) fn agent_update(
                 "command": "agent_update",
                 "argv": [],
                 "operation": operation,
-                "clients": clients,
-                "tags": tags,
+                "selector_expression": selector_expression,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
                 "canary_count": canary_count,
-                "envelope": null,
-                "envelopes": envelopes,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -221,7 +180,7 @@ pub(crate) fn agent_update_check(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     canary_count: Option<u16>,
     confirmed: bool,
@@ -247,13 +206,20 @@ pub(crate) fn agent_update_check(
     };
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
+        "agent_update_check",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
+        timeout_secs,
+        canary_count.map(i32::from),
+        force_unprivileged,
+        true,
     )?;
     println!(
         "{}",
@@ -265,16 +231,14 @@ pub(crate) fn agent_update_check(
                 "command": "agent_update_check",
                 "argv": [],
                 "operation": operation,
-                "clients": clients,
-                "tags": tags,
+                "selector_expression": selector_expression,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
                 "canary_count": canary_count,
-                "envelope": null,
-                "envelopes": envelopes,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -807,74 +771,6 @@ fn select_rollout_targets(
     Ok(candidates)
 }
 
-fn select_rollout_delegation_targets(
-    rollout: &AgentUpdateRolloutRecord,
-    explicit_clients: &[String],
-) -> Result<Vec<String>> {
-    let rollout_clients = rollout
-        .targets
-        .iter()
-        .map(|target| target.client_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let mut candidates = if explicit_clients.is_empty() {
-        let automation_targets = rollout
-            .automation_targets
-            .iter()
-            .filter(|client_id| rollout_clients.contains(*client_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if automation_targets.is_empty() {
-            rollout_clients.iter().cloned().collect()
-        } else {
-            automation_targets
-        }
-    } else {
-        for client_id in explicit_clients {
-            anyhow::ensure!(
-                rollout_clients.contains(client_id),
-                "--clients contains {client_id}, which is not part of this rollout"
-            );
-        }
-        explicit_clients.to_vec()
-    };
-    candidates.sort();
-    candidates.dedup();
-    anyhow::ensure!(
-        !candidates.is_empty(),
-        "no rollout targets are available for rollback delegation"
-    );
-    Ok(candidates)
-}
-
-fn select_rollout_activation_delegation_targets(
-    rollout: &AgentUpdateRolloutRecord,
-    explicit_clients: &[String],
-) -> Result<Vec<String>> {
-    let rollout_clients = rollout
-        .targets
-        .iter()
-        .map(|target| target.client_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let mut candidates = if explicit_clients.is_empty() {
-        rollout_clients.iter().cloned().collect()
-    } else {
-        for client_id in explicit_clients {
-            anyhow::ensure!(
-                rollout_clients.contains(client_id),
-                "--clients contains {client_id}, which is not part of this rollout"
-            );
-        }
-        explicit_clients.to_vec()
-    };
-    candidates.sort();
-    candidates.dedup();
-    anyhow::ensure!(
-        !candidates.is_empty(),
-        "no rollout targets are available for activation delegation"
-    );
-    Ok(candidates)
-}
-
 fn rollout_canary_batch_size(canary_count: i32) -> Option<u16> {
     (canary_count > 0).then_some(canary_count as u16)
 }
@@ -919,19 +815,26 @@ fn submit_rollout_operation(
     clients: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     force_unprivileged: bool,
     confirmed: bool,
 ) -> Result<()> {
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(&clients, &[]);
+    let privilege = build_privilege_for_job_command(
         &clients,
         &operation,
+        command_label,
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
     )?;
     println!(
         "{}",
@@ -943,15 +846,13 @@ fn submit_rollout_operation(
                 "command": command_label,
                 "argv": [],
                 "operation": operation,
-                "clients": clients,
-                "tags": [],
+                "selector_expression": selector_expression,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
-                "envelope": null,
-                "envelopes": envelopes,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -967,7 +868,7 @@ pub(crate) fn agent_update_rollout_activate(
     clients: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     restart_agent: bool,
     force_unprivileged: bool,
@@ -996,7 +897,7 @@ pub(crate) fn agent_update_rollout_activate(
         selected_clients,
         password_env,
         super_salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         force_unprivileged,
         confirmed,
@@ -1012,7 +913,7 @@ pub(crate) fn agent_update_rollout_rollback(
     clients: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     force_unprivileged: bool,
     confirmed: bool,
@@ -1048,126 +949,11 @@ pub(crate) fn agent_update_rollout_rollback(
         selected_clients,
         password_env,
         super_salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         force_unprivileged,
         confirmed,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_delegate_rollback(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: String,
-    rollback_sha256_hex: Option<String>,
-    clients: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
-    force_unprivileged: bool,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-delegate-rollback requires --confirmed because it escrows privileged rollback proofs"
-    );
-    anyhow::ensure!(
-        (15..=86_400).contains(&proof_ttl_secs),
-        "--proof-ttl-secs must be between 15 and 86400 seconds"
-    );
-    let rollout = load_rollout(api_url, token, &rollout_id)?;
-    let selected_clients = select_rollout_delegation_targets(&rollout, &clients)?;
-    let rollback_sha256_hex = rollback_sha256_hex
-        .as_deref()
-        .map(|value| validate_sha256_arg(value, "--rollback-sha256-hex"))
-        .transpose()?;
-    let operation = JobCommand::AgentUpdateRollback {
-        rollback_sha256_hex: rollback_sha256_hex.clone(),
-    };
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        &selected_clients,
-        &operation,
-        &password,
-        &salt_hex,
-        proof_ttl_secs,
-    )?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!(
-                "/api/v1/agent-update-rollouts/{}/rollback-delegation",
-                percent_encode_path_segment(&rollout_id)
-            ),
-            token,
-            &serde_json::json!({
-                "confirmed": confirmed,
-                "rollback_sha256_hex": rollback_sha256_hex,
-                "force_unprivileged": force_unprivileged,
-                "envelopes": envelopes,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_delegate_activation(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: String,
-    clients: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
-    restart_agent: bool,
-    force_unprivileged: bool,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-delegate-activation requires --confirmed because it escrows privileged activation proofs"
-    );
-    anyhow::ensure!(
-        (15..=86_400).contains(&proof_ttl_secs),
-        "--proof-ttl-secs must be between 15 and 86400 seconds"
-    );
-    let rollout = load_rollout(api_url, token, &rollout_id)?;
-    let selected_clients = select_rollout_activation_delegation_targets(&rollout, &clients)?;
-    let operation = JobCommand::AgentUpdateActivate {
-        staged_sha256_hex: rollout.artifact_sha256_hex.clone(),
-        restart_agent,
-    };
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        &selected_clients,
-        &operation,
-        &password,
-        &salt_hex,
-        proof_ttl_secs,
-    )?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!(
-                "/api/v1/agent-update-rollouts/{}/activation-delegation",
-                percent_encode_path_segment(&rollout_id)
-            ),
-            token,
-            &serde_json::json!({
-                "confirmed": confirmed,
-                "restart_agent": restart_agent,
-                "force_unprivileged": force_unprivileged,
-                "envelopes": envelopes,
-            }),
-        )?
-    );
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1179,7 +965,7 @@ pub(crate) fn agent_update_activate(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     restart_agent: bool,
     confirmed: bool,
@@ -1205,7 +991,7 @@ pub(crate) fn agent_update_activate(
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -1223,7 +1009,7 @@ pub(crate) fn agent_update_rollback(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -1250,7 +1036,7 @@ pub(crate) fn agent_update_rollback(
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -1352,50 +1138,6 @@ fn build_update_signature_from_bytes(
     })
 }
 
-pub(crate) fn auth_rotation_proof_key_hex(
-    new_proof_key_hex: Option<&str>,
-    new_password_env: Option<&str>,
-    new_super_salt_hex: Option<&str>,
-) -> Result<String> {
-    match (new_proof_key_hex, new_password_env) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("use either --new-proof-key-hex or --new-password-env, not both")
-        }
-        (Some(value), None) => validate_hex32_arg(value, "--new-proof-key-hex"),
-        (None, Some(password_env)) => {
-            let password = load_super_password(password_env)?;
-            let salt_hex = match new_super_salt_hex {
-                Some(value) => value.to_string(),
-                None => std::env::var("VPSMAN_NEW_SUPER_SALT_HEX").context(
-                    "set --new-super-salt-hex or VPSMAN_NEW_SUPER_SALT_HEX for local rotation-key derivation",
-                )?,
-            };
-            let salt =
-                hex::decode(salt_hex.trim()).context("new super-password salt is not valid hex")?;
-            anyhow::ensure!(
-                !salt.is_empty(),
-                "new super-password salt decodes to empty salt"
-            );
-            Ok(hex::encode(derive_super_key(&password, &salt)))
-        }
-        (None, None) => anyhow::bail!(
-            "super-password rotation requires --new-proof-key-hex or --new-password-env"
-        ),
-    }
-}
-
-pub(crate) fn normalize_rotation_generation(value: Option<&str>) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    anyhow::ensure!(
-        !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control),
-        "--rotation-generation must be 1-128 non-control characters"
-    );
-    Ok(Some(value.to_string()))
-}
-
 fn read_update_artifact(artifact_file: &PathBuf) -> Result<Vec<u8>> {
     let artifact = std::fs::read(artifact_file)
         .with_context(|| format!("failed to read update artifact {}", artifact_file.display()))?;
@@ -1406,15 +1148,6 @@ fn read_update_artifact(artifact_file: &PathBuf) -> Result<Vec<u8>> {
         MAX_UPDATE_ARTIFACT_BYTES
     );
     Ok(artifact)
-}
-
-fn validate_hex32_arg(value: &str, label: &str) -> Result<String> {
-    let value = value.trim().to_ascii_lowercase();
-    anyhow::ensure!(
-        value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit),
-        "{label} must be 64 hex characters"
-    );
-    Ok(value)
 }
 
 fn validate_sha256_arg(value: &str, label: &str) -> Result<String> {
@@ -1493,14 +1226,11 @@ fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Result<[u8; 32
 mod tests {
     use super::{
         agent_update_rollout_control, agent_update_rollout_policy_create,
-        auth_rotation_proof_key_hex, build_update_artifact_upload_payload,
-        build_update_signature_json, normalize_rotation_generation,
-        select_rollout_activation_delegation_targets, select_rollout_delegation_targets,
-        select_rollout_targets, validate_update_input, AgentUpdateRolloutRecord,
-        AgentUpdateRolloutTargetRecord,
+        build_update_artifact_upload_payload, build_update_signature_json, select_rollout_targets,
+        validate_update_input, AgentUpdateRolloutRecord, AgentUpdateRolloutTargetRecord,
     };
     use ed25519_dalek::SigningKey;
-    use vpsman_common::{derive_super_key, sign_update_artifact_hash};
+    use vpsman_common::sign_update_artifact_hash;
 
     #[test]
     fn validates_signed_update_input() {
@@ -1530,36 +1260,6 @@ mod tests {
             None,
         )
         .is_err());
-    }
-
-    #[test]
-    fn derives_auth_rotation_key_locally_or_accepts_derived_key() {
-        let direct = auth_rotation_proof_key_hex(Some(&"aa".repeat(32)), None, None).unwrap();
-        assert_eq!(direct, "aa".repeat(32));
-
-        let env_name = format!("VPSMAN_TEST_NEXT_PASSWORD_{}", uuid::Uuid::new_v4());
-        std::env::set_var(&env_name, "next-super-password");
-        let derived = auth_rotation_proof_key_hex(None, Some(&env_name), Some("01020304")).unwrap();
-        std::env::remove_var(&env_name);
-        assert_eq!(
-            derived,
-            hex::encode(derive_super_key("next-super-password", &[1, 2, 3, 4]))
-        );
-
-        assert!(
-            auth_rotation_proof_key_hex(Some(&"aa".repeat(32)), Some(&env_name), None).is_err()
-        );
-        assert!(auth_rotation_proof_key_hex(Some("not-a-key"), None, None).is_err());
-    }
-
-    #[test]
-    fn validates_auth_rotation_generation_label() {
-        assert_eq!(
-            normalize_rotation_generation(Some(" 2026-q2 ")).unwrap(),
-            Some("2026-q2".to_string())
-        );
-        assert!(normalize_rotation_generation(Some("")).is_err());
-        assert!(normalize_rotation_generation(Some("bad\nlabel")).is_err());
     }
 
     #[test]
@@ -1646,68 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn rollback_delegation_targets_use_automation_scope_and_validate_explicit_clients() {
-        let rollout = AgentUpdateRolloutRecord {
-            id: "rollout-a".to_string(),
-            artifact_sha256_hex: "ab".repeat(32),
-            canary_count: 1,
-            automation_targets: vec!["client-b".to_string()],
-            targets: vec![
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-a".to_string(),
-                    status: "completed".to_string(),
-                },
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-b".to_string(),
-                    status: "activation_pending_restart".to_string(),
-                },
-            ],
-        };
-
-        let selected = select_rollout_delegation_targets(&rollout, &[]).unwrap();
-        assert_eq!(selected, vec!["client-b"]);
-
-        let explicit =
-            select_rollout_delegation_targets(&rollout, &["client-a".to_string()]).unwrap();
-        assert_eq!(explicit, vec!["client-a"]);
-
-        assert!(select_rollout_delegation_targets(&rollout, &["client-c".to_string()]).is_err());
-    }
-
-    #[test]
-    fn activation_delegation_targets_default_to_full_rollout_scope() {
-        let rollout = AgentUpdateRolloutRecord {
-            id: "rollout-a".to_string(),
-            artifact_sha256_hex: "ab".repeat(32),
-            canary_count: 1,
-            automation_targets: vec!["client-b".to_string()],
-            targets: vec![
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-a".to_string(),
-                    status: "completed".to_string(),
-                },
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-b".to_string(),
-                    status: "completed".to_string(),
-                },
-            ],
-        };
-
-        let selected = select_rollout_activation_delegation_targets(&rollout, &[]).unwrap();
-        assert_eq!(selected, vec!["client-a", "client-b"]);
-
-        let explicit =
-            select_rollout_activation_delegation_targets(&rollout, &["client-b".to_string()])
-                .unwrap();
-        assert_eq!(explicit, vec!["client-b"]);
-
-        assert!(
-            select_rollout_activation_delegation_targets(&rollout, &["client-c".to_string()])
-                .is_err()
-        );
-    }
-
-    #[test]
     fn rollout_control_validation_fails_before_http_for_bad_requests() {
         assert!(agent_update_rollout_control(
             "http://127.0.0.1:1",
@@ -1727,7 +1365,7 @@ mod tests {
             false,
             false,
             None,
-            Some("dispatch_without_proof".to_string()),
+            Some("invalid_gate".to_string()),
             true,
         )
         .is_err());

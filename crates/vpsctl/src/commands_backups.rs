@@ -16,9 +16,10 @@ use crate::{
         decrypt_backup_artifact, validate_artifact_metadata, validate_artifact_object_key,
         MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_post_json},
     jobs::resolve_target_ids,
-    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 pub(crate) use crate::backup_artifact_crypto::restore_artifact_bytes;
@@ -133,8 +134,7 @@ pub(crate) fn backup_policy_upsert(
     recipient_public_key_hex: Option<String>,
     clients: Vec<String>,
     tags: Vec<String>,
-    interval_secs: u64,
-    start_at_unix: Option<u64>,
+    cron_expr: String,
     enabled: bool,
     catch_up_policy: String,
     catch_up_limit: i32,
@@ -152,6 +152,7 @@ pub(crate) fn backup_policy_upsert(
         "backup-policy-upsert requires at least one target selector"
     );
     anyhow::ensure!(confirmed, "backup-policy-upsert requires --confirmed");
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
     println!(
         "{}",
         http_post_json(
@@ -163,10 +164,9 @@ pub(crate) fn backup_policy_upsert(
                 "paths": paths,
                 "include_config": include_config,
                 "recipient_public_key_hex": recipient_public_key_hex,
-                "clients": clients,
-                "tags": tags,
-                "interval_secs": interval_secs,
-                "start_at_unix": start_at_unix,
+                "selector_expression": selector_expression,
+                "cron_expr": cron_expr,
+                "timezone": "UTC",
                 "enabled": enabled,
                 "catch_up_policy": catch_up_policy,
                 "catch_up_limit": catch_up_limit,
@@ -414,7 +414,7 @@ pub(crate) fn backup_run(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
@@ -423,20 +423,26 @@ pub(crate) fn backup_run(
     anyhow::ensure!(confirmed, "backup-run requires --confirmed");
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags, false, confirmed)?;
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
         recipient_public_key_hex: recipient_public_key_hex.map(|value| value.to_ascii_lowercase()),
     };
-    let envelopes = build_envelopes_for_job_command(
+    let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
+        "backup",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
-    )?
-    .1;
+        privilege_ttl_secs,
+        timeout_secs,
+        None,
+        false,
+        true,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -446,15 +452,13 @@ pub(crate) fn backup_run(
             &serde_json::json!({
                 "command": "backup",
                 "argv": [],
-                "clients": clients,
-                "tags": tags,
+                "selector_expression": selector_expression,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
                 "timeout_secs": timeout_secs,
                 "operation": operation,
-                "envelope": null,
-                "envelopes": envelopes,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -472,7 +476,7 @@ pub(crate) fn backup_request(
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     validate_backup_scope(&paths, include_config)?;
@@ -486,17 +490,21 @@ pub(crate) fn backup_request(
             .clone()
             .map(|value| value.to_ascii_lowercase()),
     };
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&client_id),
+    let target_ids = vec![client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "backup",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&client_id)
-        .context("failed to build backup proof envelope")?;
+        privilege_ttl_secs,
+        30,
+        None,
+        false,
+        true,
+    )?;
 
     println!(
         "{}",
@@ -511,7 +519,7 @@ pub(crate) fn backup_request(
                 "recipient_public_key_hex": recipient_public_key_hex,
                 "confirmed": confirmed,
                 "note": note,
-                "envelope": envelope,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -568,7 +576,7 @@ pub(crate) fn restore_plan(
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -600,17 +608,21 @@ pub(crate) fn restore_plan(
         dry_run: false,
         post_restore_argv: Vec::new(),
     };
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&target_client_id),
+    let target_ids = vec![target_client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "restore",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&target_client_id)
-        .context("failed to build restore proof envelope")?;
+        privilege_ttl_secs,
+        30,
+        None,
+        false,
+        true,
+    )?;
 
     println!(
         "{}",
@@ -626,7 +638,7 @@ pub(crate) fn restore_plan(
                 "destination_root": destination_root,
                 "confirmed": confirmed,
                 "note": note,
-                "envelope": envelope,
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
@@ -646,7 +658,7 @@ pub(crate) fn restore_run(
     destination_root: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -670,7 +682,7 @@ pub(crate) fn restore_run(
             destination_root,
             &password,
             &salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -692,7 +704,7 @@ pub(crate) fn restore_run_with_credentials(
     destination_root: Option<String>,
     password: &str,
     salt_hex: &str,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -712,17 +724,21 @@ pub(crate) fn restore_run_with_credentials(
         include_config,
         destination_root,
     )?;
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&target_client_id),
+    let target_ids = vec![target_client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "restore",
+        &selector_expression,
         password,
         salt_hex,
-        proof_ttl_secs,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&target_client_id)
-        .context("failed to build restore proof envelope")?;
+        privilege_ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
+    )?;
 
     http_post_json(
         api_url,
@@ -731,16 +747,14 @@ pub(crate) fn restore_run_with_credentials(
         &serde_json::json!({
             "command": "restore",
             "argv": [],
-            "clients": [target_client_id],
-            "tags": [],
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": true,
             "confirmed": confirmed,
             "force_unprivileged": force_unprivileged,
             "timeout_secs": timeout_secs,
             "operation": operation,
-            "envelope": envelope,
-            "envelopes": {},
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -753,7 +767,7 @@ pub(crate) fn restore_rollback(
     target_client_id: String,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -764,17 +778,21 @@ pub(crate) fn restore_rollback(
         restore_rollback_operation_from_api(api_url, token, restore_job_id, &target_client_id)?;
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let mut envelopes = build_envelopes_for_job_command(
-        std::slice::from_ref(&target_client_id),
+    let target_ids = vec![target_client_id.clone()];
+    let selector_expression = selector_expression_from_targets(&target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_ids,
         &operation,
+        "restore_rollback",
+        &selector_expression,
         &password,
         &salt_hex,
-        proof_ttl_secs,
-    )?
-    .1;
-    let envelope = envelopes
-        .remove(&target_client_id)
-        .context("failed to build restore rollback proof envelope")?;
+        privilege_ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
+    )?;
 
     println!(
         "{}",
@@ -785,16 +803,14 @@ pub(crate) fn restore_rollback(
             &serde_json::json!({
                 "command": "restore_rollback",
                 "argv": [],
-                "clients": [target_client_id],
-                "tags": [],
+                "selector_expression": selector_expression,
                 "privileged": true,
                 "destructive": true,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
                 "operation": operation,
-                "envelope": envelope,
-                "envelopes": {},
+                "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );

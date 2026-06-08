@@ -1,5 +1,7 @@
 import { History, Keyboard, LogIn, Maximize2, Radio, RefreshCw, TerminalSquare, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CrudPager } from "../../components/CrudPager";
 import type { TerminalAction } from "../jobDispatchModel";
 import type { WsTerminalOutputEvent } from "../../types";
@@ -27,6 +29,15 @@ export function TerminalSessionsPanel({
   const [replayPendingKey, setReplayPendingKey] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [followKey, setFollowKey] = useState<string | null>(null);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const activeSession = useMemo(
+    () =>
+      sessions.find((session) => `${session.client_id}:${session.session_id}` === activeKey) ??
+      sessions.find((session) => !session.session_exited && session.state !== "closed") ??
+      sessions[0] ??
+      null,
+    [activeKey, sessions],
+  );
 
   useEffect(() => {
     if (!lastTerminalOutputEvent || !followKey) {
@@ -41,6 +52,7 @@ export function TerminalSessionsPanel({
 
   async function loadDurableReplay(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
+    setActiveKey(key);
     setReplayPendingKey(key);
     setReplayError(null);
     try {
@@ -69,6 +81,7 @@ export function TerminalSessionsPanel({
 
   function toggleFollow(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
+    setActiveKey(key);
     if (followKey === key) {
       setFollowKey(null);
       return;
@@ -88,6 +101,48 @@ export function TerminalSessionsPanel({
           <RefreshCw size={14} />
           <span>Refresh</span>
         </button>
+      </div>
+      <div className="terminalWorkspace">
+        <div className="terminalActiveHeader">
+          <div>
+            <strong>{activeSession ? clientLabel(activeSession.client_id) : "No active terminal"}</strong>
+            <span>
+              {activeSession
+                ? `${shortId(activeSession.session_id)} · ${formatArgv(activeSession.argv) || activeSession.last_command_type}`
+                : "Open a terminal session to attach retained output"}
+            </span>
+          </div>
+          <div className="rowActions compactRowActions">
+            <button
+              className="secondaryAction compactAction"
+              disabled={!activeSession}
+              onClick={() => activeSession && void loadDurableReplay(activeSession)}
+              type="button"
+            >
+              <History size={13} />
+              <span>Replay</span>
+            </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={!activeSession || Boolean(activeSession.session_exited) || activeSession.state === "closed"}
+              onClick={() => activeSession && onPrepareAction(activeSession, "input")}
+              type="button"
+            >
+              <Keyboard size={13} />
+              <span>Input</span>
+            </button>
+          </div>
+        </div>
+        <XtermReplay
+          label="Active terminal emulator"
+          text={
+            replayPreview && replayPreview.sessionId === activeSession?.session_id
+              ? replayPreview.text
+              : activeSession
+                ? "Select Replay or Follow to load retained output for this session.\r\n"
+                : "No terminal session selected.\r\n"
+          }
+        />
       </div>
       <CrudPager
         fields={[
@@ -124,10 +179,13 @@ export function TerminalSessionsPanel({
               const active = !session.session_exited && session.state !== "closed";
               const key = `${session.client_id}:${session.session_id}`;
               const following = followKey === key;
+              const selected = activeSession?.client_id === session.client_id && activeSession.session_id === session.session_id;
               return (
-                <div className="historyRow terminalSessionGrid" key={`${session.client_id}:${session.session_id}`}>
+                <div className={`historyRow terminalSessionGrid ${selected ? "selectedTerminalSession" : ""}`} key={`${session.client_id}:${session.session_id}`}>
                   <span className="historyPrimary">
-                    <strong>{clientLabel(session.client_id)}</strong>
+                    <button className="linkLikeButton" onClick={() => setActiveKey(key)} type="button">
+                      {clientLabel(session.client_id)}
+                    </button>
                     <small>{shortId(session.session_id)}</small>
                   </span>
                   <span className="historyPrimary">
@@ -252,6 +310,56 @@ export function TerminalSessionsPanel({
       )}
     </div>
   );
+}
+
+function XtermReplay({ label, text }: { label: string; text: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current) {
+      return;
+    }
+    const terminal = new Terminal({
+      convertEol: true,
+      cursorBlink: false,
+      disableStdin: true,
+      fontFamily: '"Roboto Mono", "SFMono-Regular", Consolas, monospace',
+      fontSize: 12,
+      rows: 18,
+      theme: {
+        background: "#111827",
+        foreground: "#e5e7eb",
+      },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(containerRef.current);
+    terminalRef.current = terminal;
+    fitRef.current = fit;
+    window.setTimeout(() => fit.fit(), 0);
+    const resize = () => fit.fit();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      terminal.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+    terminal.reset();
+    terminal.write(text);
+    window.setTimeout(() => fitRef.current?.fit(), 0);
+  }, [text]);
+
+  return <div aria-label={label} className="xtermReplay" ref={containerRef} />;
 }
 
 type TerminalReplayPreview = {

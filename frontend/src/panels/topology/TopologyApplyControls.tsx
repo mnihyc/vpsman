@@ -1,11 +1,16 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
-import { waitForBulkJobTargets, type BulkJobProgress } from "../../bulkJobProgress";
+import {
+  formatTargetAvailabilitySummary,
+  targetPreflightUnavailable,
+  waitForBulkJobTargets,
+  type BulkJobProgress,
+} from "../../bulkJobProgress";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
-import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
 import {
@@ -34,18 +39,18 @@ export function TopologyApplyControls({
   onCreateJob,
   onLoadTargets,
   onOpenJobDetails,
-  onOpenProofUnlock,
-  proofMaterial,
-  setProofMaterial,
+  onOpenPrivilegeUnlock,
+  privilegeMaterial,
+  setPrivilegeMaterial,
   tunnelPlans,
 }: {
   agents: AgentView[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenProofUnlock: () => void;
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  onOpenPrivilegeUnlock: () => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -53,7 +58,6 @@ export function TopologyApplyControls({
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
   const [timeoutSecs, setTimeoutSecs] = useState(60);
-  const [proofTtlSecs, setProofTtlSecs] = useState(300);
   const [probeCount, setProbeCount] = useState(3);
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
   const [speedDurationSecs, setSpeedDurationSecs] = useState(3);
@@ -85,13 +89,11 @@ export function TopologyApplyControls({
       ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
         ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
-      : proofMaterial
+      : privilegeMaterial
         ? "Ready"
         : "Locked");
   const pendingActionTargetIds = pendingAction && endpoint ? targetClientIdsForAction(pendingAction, endpoint) : [];
   const pendingActionTargets = resolveAgentsById(agents, pendingActionTargetIds);
-  const pendingConnectedTargets = pendingActionTargets.filter((target) => target.status === "connected").length;
-  const pendingUnavailableTargets = Math.max(0, pendingActionTargets.length - pendingConnectedTargets);
   const pendingSelector = pendingActionTargetIds.length > 0 ? selectorExpressionForClientIds(pendingActionTargetIds) : "-";
   const pendingConfirmationItems = pendingAction
     ? [
@@ -99,16 +101,13 @@ export function TopologyApplyControls({
         { label: "Selector", value: pendingSelector },
         {
           label: "Targets",
-          value:
-            pendingUnavailableTargets > 0
-              ? `${pendingActionTargets.length} resolved (${pendingConnectedTargets} connected, ${pendingUnavailableTargets} unavailable)`
-              : `${pendingActionTargets.length} resolved`,
+          value: formatTargetAvailabilitySummary(pendingActionTargets),
         },
         { label: "Plan", value: selectedPlan?.name ?? "-" },
         { label: "Endpoint", value: side },
         ...(pendingAction === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
         { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
-        { label: "Proof TTL", value: `${clampInteger(proofTtlSecs, 15, 3600)}s` },
+        { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
         ...(isMutation(pendingAction) ? [{ label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" }] : []),
       ]
     : [];
@@ -140,8 +139,8 @@ export function TopologyApplyControls({
       setActionError("Select a tunnel plan");
       return;
     }
-    if (!proofMaterial) {
-      setActionError("Proof is locked");
+    if (!privilegeMaterial) {
+      setActionError("Privilege unlock is locked");
       return;
     }
     setPendingAction(mode);
@@ -160,8 +159,8 @@ export function TopologyApplyControls({
       if (!selectedPlan || !endpoint) {
         throw new Error("Select a tunnel plan");
       }
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       const boundedProbeCount = clampInteger(probeCount, 1, 20);
       const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
@@ -192,27 +191,31 @@ export function TopologyApplyControls({
         mode === "speed_test"
           ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
           : [builtOperation.endpoint.localClientId];
-      const builtProof = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+      const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
+      const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: targetClientIds,
+        commandType: commandName(mode),
+        forceUnprivileged: boundedForceUnprivileged,
         operation: builtOperation.operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: boundedTimeoutSecs,
       });
       const job = await onCreateJob({
         argv: [],
-        selector_expression: selectorExpressionForClientIds(targetClientIds),
+        selector_expression: selectorExpression,
         command: commandName(mode),
         confirmed: isMutation(mode),
         destructive: isMutation(mode),
-        envelope: null,
-        envelopes: builtProof.envelopes,
         operation: builtOperation.operation,
-        force_unprivileged: isMutation(mode) ? forceUnprivileged : false,
+        force_unprivileged: boundedForceUnprivileged,
         privileged: true,
-        timeout_secs: clampInteger(timeoutSecs, 1, 3600),
+        privilege_assertion: builtPrivilege.privilegeAssertion,
+        timeout_secs: boundedTimeoutSecs,
       });
-      setLastPayloadHash(builtProof.payloadHashHex);
+      setLastPayloadHash(builtPrivilege.payloadHashHex);
       setLastJob(job);
       setLastAction(mode);
       await trackNetworkProgress(job, resolveAgentsById(agents, targetClientIds));
@@ -229,7 +232,7 @@ export function TopologyApplyControls({
       failed: 0,
       jobId: job.job_id,
       retrieved: 0,
-      unavailable: targets.filter((target) => target.status !== "connected").length,
+      unavailable: targets.filter(targetPreflightUnavailable).length,
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
@@ -302,17 +305,6 @@ export function TopologyApplyControls({
               onChange={(event) => setTimeoutSecs(Number(event.target.value))}
               type="number"
               value={timeoutSecs}
-            />
-          </label>
-          <label>
-            <span>Proof TTL seconds</span>
-            <input
-              aria-label="Network apply proof TTL seconds"
-              max={3600}
-              min={15}
-              onChange={(event) => setProofTtlSecs(Number(event.target.value))}
-              type="number"
-              value={proofTtlSecs}
             />
           </label>
         </div>
@@ -450,7 +442,7 @@ export function TopologyApplyControls({
         <div className="dispatchActions">
           <button
             className="primaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             type="submit"
           >
             <Play size={17} />
@@ -458,7 +450,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitRollback}
             type="button"
           >
@@ -467,7 +459,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitStatus}
             type="button"
           >
@@ -476,7 +468,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitProbe}
             type="button"
           >
@@ -485,7 +477,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !proofMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitSpeedTest}
             type="button"
           >
@@ -494,11 +486,11 @@ export function TopologyApplyControls({
           </button>
         </div>
       </form>
-      <ProofVaultBox
+      <PrivilegeVaultBox
         lastPayloadHash={lastPayloadHash}
-        onOpenUnlock={onOpenProofUnlock}
-        onProofMaterialChange={setProofMaterial}
-        proofMaterial={proofMaterial}
+        onOpenUnlock={onOpenPrivilegeUnlock}
+        onPrivilegeMaterialChange={setPrivilegeMaterial}
+        privilegeMaterial={privilegeMaterial}
       />
     </section>
   );

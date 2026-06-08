@@ -73,7 +73,7 @@ export async function buildNetworkApplyOperation(
       plan,
       side,
       config_backend: backend,
-      config_sha256_hex: await sha256Text(backendProofPayload(backendConfig, backend)),
+      config_sha256_hex: await sha256Text(backendSignaturePayload(backendConfig, backend)),
       ifupdown_sha256_hex: await sha256Text(endpoint.ifupdownSnippet),
       bird2_sha256_hex: await sha256Text(endpoint.bird2InterfaceSnippet),
     },
@@ -217,7 +217,7 @@ function renderBackendConfig(plan: TunnelPlan, endpoint: TunnelEndpointConfig, b
   ];
 }
 
-function backendProofPayload(files: BackendFile[], backend: TunnelConfigBackend): string {
+function backendSignaturePayload(files: BackendFile[], backend: TunnelConfigBackend): string {
   return files
     .map(
       (file) =>

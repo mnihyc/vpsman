@@ -2,14 +2,14 @@
 
 These tutorials are operator-facing guides for using the system. They assume
 the architecture and security model from `../DESIGN.md`: agents connect to the
-gateway over plain TCP with Noise protection, privileged operations are
-authorized by local proof generation, and the super password is never sent to
-the API.
+gateway over plain TCP with Noise protection, browsers and CLI keep the super
+password local, and privileged operations send request-bound assertions that
+the private gateway verifies.
 
 Use these in order for a new deployment:
 
 1. `00-operator-quickstart.md`: shortest path from local control plane to
-   enrolled VPS, fleet view, proof-gated command, backup, and update check.
+   enrolled VPS, fleet view, privileged command, backup, and update check.
 2. `01-local-control-plane.md`: run the API, gateway, worker, and panel locally.
 3. `02-enroll-agents.md`: create enrollment material, install root or
    unprivileged agents, and re-enroll rebuilt VPSs.
@@ -46,5 +46,6 @@ export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
 ```
 
 `VPSMAN_API_TOKEN` authenticates the operator to the API. The super password
-and salt are used locally by browser/CLI/VTY proof generation for privileged
-commands. Keep them out of shell history where possible.
+and salt stay local to the browser/CLI/VTY and are used to build request-bound
+privilege assertions for the private gateway. Keep them out of shell history
+where possible.

@@ -1,4 +1,5 @@
 mod backup_artifact_crypto;
+mod build_info;
 mod cli;
 mod cli_access;
 mod cli_update;
@@ -27,7 +28,7 @@ mod http;
 mod jobs;
 mod network_runtime_args;
 mod output;
-mod proof;
+mod privilege;
 mod util;
 mod vty;
 mod vty_agent_update;

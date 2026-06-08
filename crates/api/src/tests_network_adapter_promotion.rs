@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use vpsman_common::{

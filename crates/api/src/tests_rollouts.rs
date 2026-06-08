@@ -1,41 +1,10 @@
-use std::collections::HashMap;
-
 use crate::model_rollout_policies::CreateAgentUpdateRolloutPolicyRequest;
 use crate::routes_rollout_policies::validate_create_agent_update_rollout_policy;
-use crate::routes_rollouts::{
-    validate_agent_update_activation_delegation_request,
-    validate_agent_update_rollback_delegation_request,
-    validate_agent_update_rollout_control_request,
-};
+use crate::routes_rollouts::validate_agent_update_rollout_control_request;
 use crate::*;
 use ed25519_dalek::SigningKey;
 use vpsman_common::AgentUpdateHeartbeat;
-use vpsman_common::{
-    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_proof,
-    sign_update_artifact_hash, CommandEnvelope, JobCommand,
-};
-
-fn rollback_proof_envelope(client_id: &str, command_hash: &str, ttl_secs: u64) -> CommandEnvelope {
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let nonce = random_nonce();
-    let expires_unix = unix_now().saturating_add(ttl_secs);
-    let proof = sign_privilege_proof(
-        &derive_super_key("correct horse", &[1, 2, 3, 4]),
-        command_id,
-        &scope,
-        command_hash,
-        &nonce,
-        expires_unix,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex: command_hash.to_string(),
-        proof: Some(proof),
-        server_signature: Vec::new(),
-    }
-}
+use vpsman_common::{encode_json, payload_hash, sign_update_artifact_hash, JobCommand};
 
 fn rollout_test_operator() -> AuthContext {
     AuthContext {
@@ -140,15 +109,27 @@ async fn agent_update_rollout_policy_defaults_match_provider_channel_and_record_
         memory.agents.write().await.push(AgentView {
             id: "edge-a".to_string(),
             display_name: "edge-a".to_string(),
-            status: "connected".to_string(),
+            status: "online".to_string(),
             tags: vec!["bgp".to_string(), "provider:hetzner".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: Default::default(),
         });
         memory.agents.write().await.push(AgentView {
             id: "edge-b".to_string(),
             display_name: "edge-b".to_string(),
-            status: "connected".to_string(),
+            status: "online".to_string(),
             tags: vec!["bgp".to_string(), "provider:hetzner".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: Default::default(),
         });
     }
@@ -228,10 +209,9 @@ async fn agent_update_rollout_policy_defaults_match_provider_channel_and_record_
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let resolved_agents = repo
         .resolve_bulk_targets(&request.target_selection())
@@ -317,10 +297,9 @@ async fn agent_update_dispatch_records_rollout_without_sensitive_artifact_url() 
         canary_count: Some(1),
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let targets = vec!["client-a".to_string()];
 
@@ -352,6 +331,7 @@ async fn agent_update_dispatch_records_rollout_without_sensitive_artifact_url() 
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "staged".to_string(),
             outputs: Vec::new(),
@@ -402,10 +382,9 @@ async fn agent_update_rollout_control_updates_pause_gate_and_audits() {
         canary_count: Some(1),
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     repo.record_dispatching_job(
         &request,
@@ -486,7 +465,7 @@ fn agent_update_rollout_control_validation_requires_confirmed_safe_gate() {
             confirmed: true,
             paused: None,
             pause_reason: None,
-            automation_health_gate: Some("dispatch_without_proof".to_string()),
+            automation_health_gate: Some("invalid_gate".to_string()),
         })
         .is_err()
     );
@@ -499,445 +478,6 @@ fn agent_update_rollout_control_validation_requires_confirmed_safe_gate() {
         })
         .is_ok()
     );
-}
-
-#[tokio::test]
-async fn agent_update_rollback_delegation_records_and_claims_timeout_targets_only() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::new_v4(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let update_operation = JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: "ef".repeat(32),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-    };
-    let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
-    let update_request = CreateJobRequest {
-        selector_expression: "id:client-a".to_string(),
-        destructive: false,
-        confirmed: true,
-        command: "agent_update".to_string(),
-        argv: Vec::new(),
-        operation: Some(update_operation),
-        timeout_secs: Some(30),
-        canary_count: Some(1),
-        force_unprivileged: false,
-        privileged: true,
-        idempotency_key: None,
-        reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
-    };
-    repo.record_dispatching_job(
-        &update_request,
-        &update_hash,
-        &operator,
-        &["client-a".to_string()],
-    )
-    .await
-    .unwrap();
-    let rollout_id = repo.list_agent_update_rollouts(10).await.unwrap()[0].id;
-
-    let rollback_operation = JobCommand::AgentUpdateRollback {
-        rollback_sha256_hex: Some("fe".repeat(32)),
-    };
-    let command_hash = payload_hash(&encode_json(&rollback_operation).unwrap());
-    let envelope = rollback_proof_envelope("client-a", &command_hash, 600);
-    let proof_hex = envelope.proof.as_ref().unwrap().proof_hex.clone();
-    let mut envelopes = HashMap::new();
-    envelopes.insert("client-a".to_string(), envelope);
-    let request = AgentUpdateRollbackDelegationRequest {
-        confirmed: true,
-        rollback_sha256_hex: Some("fe".repeat(32)),
-        force_unprivileged: false,
-        envelopes,
-    };
-
-    let summary = repo
-        .record_agent_update_rollback_delegation(rollout_id, &request, &operator)
-        .await
-        .unwrap();
-
-    assert_eq!(summary.rollout_id, rollout_id);
-    assert_eq!(summary.action, "agent_update_rollback");
-    assert_eq!(summary.target_count, 1);
-    assert_eq!(summary.ready_count, 1);
-    assert_eq!(summary.payload_hash, command_hash);
-    assert!(summary.proof_expires_unix_min.is_some());
-    let listed = repo.list_agent_update_rollouts(10).await.unwrap();
-    assert_eq!(listed[0].rollback_delegations.len(), 1);
-    assert_eq!(listed[0].rollback_delegations[0].payload_hash, command_hash);
-    assert_eq!(listed[0].rollback_delegations[0].ready_count, 1);
-    assert!(repo
-        .claim_ready_agent_update_rollback_delegations(10)
-        .await
-        .unwrap()
-        .is_empty());
-
-    {
-        let mut rollouts = memory.agent_update_rollouts.write().await;
-        let rollout = rollouts
-            .iter_mut()
-            .find(|rollout| rollout.id == rollout_id)
-            .unwrap();
-        rollout.status = "heartbeat_timeout".to_string();
-        rollout.failed_count = 1;
-        rollout.pending_count = 0;
-        rollout.updated_at = unix_now().to_string();
-        let target = rollout
-            .targets
-            .iter_mut()
-            .find(|target| target.client_id == "client-a")
-            .unwrap();
-        target.status = "heartbeat_timeout".to_string();
-        target.updated_at = unix_now().to_string();
-    }
-
-    let claims = repo
-        .claim_ready_agent_update_rollback_delegations(10)
-        .await
-        .unwrap();
-    assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0].rollout_id, rollout_id);
-    assert_eq!(claims[0].payload_hash, command_hash);
-    assert_eq!(claims[0].clients, vec!["client-a"]);
-    assert_eq!(claims[0].envelopes.len(), 1);
-
-    let summary = repo
-        .agent_update_rollback_delegation_summary(rollout_id, &command_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(summary.ready_count, 0);
-    assert_eq!(summary.dispatching_count, 1);
-
-    let audit_json = serde_json::to_string(&repo.list_audit_logs(20).await.unwrap()).unwrap();
-    assert!(audit_json.contains("scoped_exact_rollback_proof_escrow"));
-    assert!(!audit_json.contains(&proof_hex));
-}
-
-#[tokio::test]
-async fn agent_update_activation_delegation_claims_recommended_completed_targets_only() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::new_v4(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let staged_sha256_hex = "ef".repeat(32);
-    let update_operation = JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: staged_sha256_hex.clone(),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-    };
-    let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
-    let update_request = CreateJobRequest {
-        selector_expression: "id:client-a || id:client-b".to_string(),
-        destructive: false,
-        confirmed: true,
-        command: "agent_update".to_string(),
-        argv: Vec::new(),
-        operation: Some(update_operation),
-        timeout_secs: Some(30),
-        canary_count: Some(1),
-        force_unprivileged: false,
-        privileged: true,
-        idempotency_key: None,
-        reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
-    };
-    repo.record_dispatching_job(
-        &update_request,
-        &update_hash,
-        &operator,
-        &["client-a".to_string(), "client-b".to_string()],
-    )
-    .await
-    .unwrap();
-    let rollout_id = repo.list_agent_update_rollouts(10).await.unwrap()[0].id;
-
-    let activation_operation = JobCommand::AgentUpdateActivate {
-        staged_sha256_hex: staged_sha256_hex.clone(),
-        restart_agent: true,
-    };
-    let command_hash = payload_hash(&encode_json(&activation_operation).unwrap());
-    let envelope_a = rollback_proof_envelope("client-a", &command_hash, 600);
-    let proof_hex = envelope_a.proof.as_ref().unwrap().proof_hex.clone();
-    let mut envelopes = HashMap::new();
-    envelopes.insert("client-a".to_string(), envelope_a);
-    envelopes.insert(
-        "client-b".to_string(),
-        rollback_proof_envelope("client-b", &command_hash, 600),
-    );
-    let request = AgentUpdateActivationDelegationRequest {
-        confirmed: true,
-        restart_agent: true,
-        force_unprivileged: false,
-        envelopes,
-    };
-
-    let summary = repo
-        .record_agent_update_activation_delegation(rollout_id, &request, &operator)
-        .await
-        .unwrap();
-
-    assert_eq!(summary.rollout_id, rollout_id);
-    assert_eq!(summary.action, "agent_update_activate");
-    assert_eq!(summary.target_count, 2);
-    assert_eq!(summary.ready_count, 2);
-    assert_eq!(summary.payload_hash, command_hash);
-    assert_eq!(summary.staged_sha256_hex, staged_sha256_hex);
-    assert!(summary.restart_agent);
-    let listed = repo.list_agent_update_rollouts(10).await.unwrap();
-    assert_eq!(listed[0].activation_delegations.len(), 1);
-    assert_eq!(
-        listed[0].activation_delegations[0].payload_hash,
-        command_hash
-    );
-    assert_eq!(listed[0].activation_delegations[0].ready_count, 2);
-    assert!(repo
-        .claim_ready_agent_update_activation_delegations(10)
-        .await
-        .unwrap()
-        .is_empty());
-
-    {
-        let mut rollouts = memory.agent_update_rollouts.write().await;
-        let rollout = rollouts
-            .iter_mut()
-            .find(|rollout| rollout.id == rollout_id)
-            .unwrap();
-        rollout.status = "staged".to_string();
-        rollout.completed_count = 2;
-        rollout.pending_count = 0;
-        rollout.automation_status = "ready_activate_canary".to_string();
-        rollout.automation_next_action = Some("operator_activate_batch".to_string());
-        rollout.automation_targets = vec!["client-a".to_string()];
-        rollout.updated_at = unix_now().to_string();
-        for target in &mut rollout.targets {
-            target.status = "completed".to_string();
-            target.updated_at = unix_now().to_string();
-        }
-    }
-
-    let claims = repo
-        .claim_ready_agent_update_activation_delegations(10)
-        .await
-        .unwrap();
-    assert_eq!(claims.len(), 1);
-    assert_eq!(claims[0].rollout_id, rollout_id);
-    assert_eq!(claims[0].payload_hash, command_hash);
-    assert_eq!(claims[0].clients, vec!["client-a"]);
-    assert_eq!(claims[0].staged_sha256_hex, "ef".repeat(32));
-    assert!(claims[0].restart_agent);
-    assert_eq!(claims[0].envelopes.len(), 1);
-
-    let summary = repo
-        .agent_update_activation_delegation_summary(rollout_id, &command_hash)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(summary.ready_count, 1);
-    assert_eq!(summary.dispatching_count, 1);
-
-    let audit_json = serde_json::to_string(&repo.list_audit_logs(20).await.unwrap()).unwrap();
-    assert!(audit_json.contains("scoped_exact_activation_proof_escrow"));
-    assert!(!audit_json.contains(&proof_hex));
-}
-
-#[tokio::test]
-async fn agent_update_delegated_proof_expiry_updates_rollout_read_model() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::new_v4(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let staged_sha256_hex = "ef".repeat(32);
-    let update_operation = JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: staged_sha256_hex.clone(),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-    };
-    let update_hash = payload_hash(&encode_json(&update_operation).unwrap());
-    let update_request = CreateJobRequest {
-        selector_expression: "id:client-a".to_string(),
-        destructive: false,
-        confirmed: true,
-        command: "agent_update".to_string(),
-        argv: Vec::new(),
-        operation: Some(update_operation),
-        timeout_secs: Some(30),
-        canary_count: Some(1),
-        force_unprivileged: false,
-        privileged: true,
-        idempotency_key: None,
-        reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
-    };
-    repo.record_dispatching_job(
-        &update_request,
-        &update_hash,
-        &operator,
-        &["client-a".to_string()],
-    )
-    .await
-    .unwrap();
-    let rollout_id = repo.list_agent_update_rollouts(10).await.unwrap()[0].id;
-
-    let activation_operation = JobCommand::AgentUpdateActivate {
-        staged_sha256_hex,
-        restart_agent: false,
-    };
-    let command_hash = payload_hash(&encode_json(&activation_operation).unwrap());
-    let envelope = rollback_proof_envelope("client-a", &command_hash, 600);
-    let proof_hex = envelope.proof.as_ref().unwrap().proof_hex.clone();
-    let mut envelopes = HashMap::new();
-    envelopes.insert("client-a".to_string(), envelope);
-    repo.record_agent_update_activation_delegation(
-        rollout_id,
-        &AgentUpdateActivationDelegationRequest {
-            confirmed: true,
-            restart_agent: false,
-            force_unprivileged: false,
-            envelopes,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
-
-    {
-        let mut delegations = memory.agent_update_rollback_delegations.write().await;
-        let record = delegations
-            .iter_mut()
-            .find(|record| record.rollout_id == rollout_id)
-            .unwrap();
-        record.proof_expires_unix = unix_now() as i64 - 1;
-    }
-
-    let expired = repo
-        .expire_agent_update_delegated_proofs(100)
-        .await
-        .unwrap();
-    assert_eq!(expired, 1);
-
-    let rollouts = repo.list_agent_update_rollouts(10).await.unwrap();
-    let delegation = &rollouts[0].activation_delegations[0];
-    assert_eq!(delegation.ready_count, 0);
-    assert_eq!(delegation.expired_count, 1);
-
-    let claims = repo
-        .claim_ready_agent_update_activation_delegations(10)
-        .await
-        .unwrap();
-    assert!(claims.is_empty());
-
-    let audit_json = serde_json::to_string(&repo.list_audit_logs(20).await.unwrap()).unwrap();
-    assert!(audit_json.contains("agent_update.delegated_proof_expired"));
-    assert!(audit_json.contains("proof_expires_unix elapsed before dispatch claim"));
-    assert!(!audit_json.contains(&proof_hex));
-}
-
-#[test]
-fn agent_update_rollback_delegation_validation_requires_confirmed_envelopes_and_hash_shape() {
-    assert!(validate_agent_update_rollback_delegation_request(
-        &AgentUpdateRollbackDelegationRequest {
-            confirmed: false,
-            rollback_sha256_hex: None,
-            force_unprivileged: false,
-            envelopes: HashMap::new(),
-        }
-    )
-    .is_err());
-    assert!(validate_agent_update_rollback_delegation_request(
-        &AgentUpdateRollbackDelegationRequest {
-            confirmed: true,
-            rollback_sha256_hex: None,
-            force_unprivileged: false,
-            envelopes: HashMap::new(),
-        }
-    )
-    .is_err());
-    let mut envelopes = HashMap::new();
-    envelopes.insert(
-        "client-a".to_string(),
-        rollback_proof_envelope("client-a", &"aa".repeat(32), 600),
-    );
-    assert!(validate_agent_update_rollback_delegation_request(
-        &AgentUpdateRollbackDelegationRequest {
-            confirmed: true,
-            rollback_sha256_hex: Some("bad".to_string()),
-            force_unprivileged: false,
-            envelopes,
-        }
-    )
-    .is_err());
-}
-
-#[test]
-fn agent_update_activation_delegation_validation_requires_confirmed_envelopes() {
-    assert!(validate_agent_update_activation_delegation_request(
-        &AgentUpdateActivationDelegationRequest {
-            confirmed: false,
-            restart_agent: false,
-            force_unprivileged: false,
-            envelopes: HashMap::new(),
-        }
-    )
-    .is_err());
-    assert!(validate_agent_update_activation_delegation_request(
-        &AgentUpdateActivationDelegationRequest {
-            confirmed: true,
-            restart_agent: false,
-            force_unprivileged: false,
-            envelopes: HashMap::new(),
-        }
-    )
-    .is_err());
-    let mut envelopes = HashMap::new();
-    envelopes.insert(
-        "client-a".to_string(),
-        rollback_proof_envelope("client-a", &"aa".repeat(32), 600),
-    );
-    assert!(validate_agent_update_activation_delegation_request(
-        &AgentUpdateActivationDelegationRequest {
-            confirmed: true,
-            restart_agent: true,
-            force_unprivileged: false,
-            envelopes,
-        }
-    )
-    .is_ok());
 }
 
 #[tokio::test]
@@ -972,10 +512,9 @@ async fn agent_update_heartbeat_marks_rollout_after_restart() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let job_id = repo
         .record_dispatching_job(
@@ -992,6 +531,7 @@ async fn agent_update_heartbeat_marks_rollout_after_restart() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "staged".to_string(),
             outputs: Vec::new(),
@@ -1059,10 +599,9 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let update_job_id = repo
         .record_dispatching_job(
@@ -1079,6 +618,7 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "staged".to_string(),
             outputs: Vec::new(),
@@ -1104,10 +644,9 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let activation_job_id = repo
         .record_dispatching_job(
@@ -1124,6 +663,7 @@ async fn agent_update_activation_completed_marks_rollout_pending_restart() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "activated".to_string(),
             outputs: Vec::new(),
@@ -1183,10 +723,9 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let update_job_id = repo
         .record_dispatching_job(
@@ -1203,6 +742,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "staged".to_string(),
             outputs: Vec::new(),
@@ -1228,10 +768,9 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let activation_job_id = repo
         .record_dispatching_job(
@@ -1248,6 +787,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "activated".to_string(),
             outputs: Vec::new(),
@@ -1274,10 +814,9 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let rollback_job_id = repo
         .record_dispatching_job(
@@ -1294,6 +833,7 @@ async fn agent_update_rollback_completed_marks_rollout_rolled_back() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "rolled back".to_string(),
             outputs: Vec::new(),
@@ -1365,10 +905,9 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let update_job_id = repo
         .record_dispatching_job(
@@ -1385,6 +924,7 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "staged".to_string(),
             outputs: Vec::new(),
@@ -1410,10 +950,9 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let activation_job_id = repo
         .record_dispatching_job(
@@ -1430,6 +969,7 @@ async fn stale_activation_pending_rollout_expires_with_audit() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "activated".to_string(),
             outputs: Vec::new(),
@@ -1496,10 +1036,9 @@ async fn agent_update_heartbeat_does_not_upgrade_failed_rollout_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let job_id = repo
         .record_dispatching_job(
@@ -1516,6 +1055,7 @@ async fn agent_update_heartbeat_does_not_upgrade_failed_rollout_target() {
         &TargetDispatchOutcome {
             status: "failed".to_string(),
             exit_code: Some(1),
+            command_version: Some(1),
             accepted: true,
             message: "staging failed".to_string(),
             outputs: Vec::new(),

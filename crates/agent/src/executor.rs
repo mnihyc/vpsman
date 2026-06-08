@@ -27,6 +27,7 @@ use crate::{
         execute_file_push, execute_file_push_chunked, execute_file_transfer_abort,
         execute_file_transfer_chunk, execute_file_transfer_commit, execute_file_transfer_start,
     },
+    network_interfaces::{execute_network_interfaces_command, NetworkInterfacesInput},
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
     telemetry::unix_now,
@@ -47,17 +48,10 @@ pub(crate) fn authorize_job(
     request: &JobRequest,
     replay_cache: &mut PrivilegeReplayCache,
 ) -> std::result::Result<(), String> {
-    let proof_key = decode_required_32_hex(
-        config.auth.proof_key_hex.as_deref(),
-        "missing agent proof key",
-    )?;
     let server_public_key = decode_required_32_hex(
         config.auth.server_ed25519_public_key_hex.as_deref(),
         "missing server signing public key",
     )?;
-    let proof_key: [u8; 32] = proof_key
-        .try_into()
-        .map_err(|_| "agent proof key must be 32 bytes".to_string())?;
     let server_public_key: [u8; 32] = server_public_key
         .try_into()
         .map_err(|_| "server signing public key must be 32 bytes".to_string())?;
@@ -65,7 +59,6 @@ pub(crate) fn authorize_job(
         .map_err(|_| "invalid server signing public key".to_string())?;
     let payload = encode_json(&request.command).map_err(|error| error.to_string())?;
     verify_command_envelope(
-        &proof_key,
         &verifying_key,
         &format!("client:{}", config.client_id),
         &payload,
@@ -318,6 +311,14 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
         JobCommand::ProcessList { limit } => {
             execute_process_list(config, job_id, *limit, timeout_secs).await
         }
+        JobCommand::NetworkInterfaces => {
+            execute_network_interfaces_command(NetworkInterfacesInput {
+                job_id,
+                config,
+                timeout_secs,
+            })
+            .await
+        }
         JobCommand::ProcessStart { .. }
         | JobCommand::ProcessStop { .. }
         | JobCommand::ProcessRestart { .. }
@@ -385,9 +386,9 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
             })
             .await
         }
-        JobCommand::HotConfig { .. }
+        JobCommand::ConfigRead
+        | JobCommand::HotConfig { .. }
         | JobCommand::DataSourceConfigPatch { .. }
-        | JobCommand::AuthProofKeyRotate { .. }
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }

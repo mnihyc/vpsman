@@ -4,16 +4,18 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use vpsman_common::{encode_json, payload_hash, JobCommand};
+use vpsman_common::{encode_json, payload_hash, CommandEnvelope, JobCommand};
 
 use crate::{
     error::ApiError,
-    job_request::{validate_file_path, validate_unsigned_command_envelope},
+    job_request::validate_file_path,
     model::{
         BulkResolveRequest, CreateRestorePlanRequest, ListQuery, RestorePlanStatus, RestorePlanView,
     },
+    privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     selector_expression::id_selector_expression,
     state::AppState,
+    unix_now,
 };
 
 const MAX_RESTORE_PATHS: usize = 64;
@@ -48,23 +50,24 @@ pub(crate) async fn create_restore_plan(
     let payload = encode_json(&command)
         .map_err(|error| ApiError::from(anyhow!("failed to encode restore command: {error}")))?;
     let command_hash = payload_hash(&payload);
-    let envelope = match request.envelope.as_ref() {
-        Some(envelope) => envelope,
-        None => {
-            state
-                .repo
-                .record_rejected_restore_plan(
-                    &request,
-                    Some(&command_hash),
-                    &operator,
-                    "restore_proof_required",
-                )
-                .await?;
-            return Err(ApiError::forbidden("restore_proof_required"));
-        }
-    };
-    if validate_unsigned_command_envelope(envelope, &request.target_client_id, &command_hash)
-        .is_err()
+    let resolved_targets = vec![request.target_client_id.clone()];
+    let selector_expression = id_selector_expression(&request.target_client_id);
+    let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
+        selector_expression: &selector_expression,
+        command_type: "restore",
+        operation_payload_hash: &command_hash,
+        resolved_targets: &resolved_targets,
+        timeout_secs: 30,
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+    });
+    if let Err(error) = verify_privilege_intent(
+        &state,
+        &privilege_intent,
+        request.privilege_assertion.clone(),
+    )
+    .await
     {
         state
             .repo
@@ -72,11 +75,12 @@ pub(crate) async fn create_restore_plan(
                 &request,
                 Some(&command_hash),
                 &operator,
-                "invalid_restore_proof_envelope",
+                "restore_privilege_verification_failed",
             )
             .await?;
-        return Err(ApiError::forbidden("invalid_restore_proof_envelope"));
+        return Err(error);
     }
+    let envelope = metadata_command_envelope(&request.target_client_id, &command_hash);
 
     Ok((
         StatusCode::CREATED,
@@ -87,7 +91,7 @@ pub(crate) async fn create_restore_plan(
                     &request,
                     &source_backup,
                     &command_hash,
-                    envelope,
+                    &envelope,
                     &operator,
                     RestorePlanStatus::PlannedMetadataOnly,
                 )
@@ -146,8 +150,6 @@ async fn ensure_single_restore_target(
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: id_selector_expression(&request.target_client_id),
-            destructive: false,
-            confirmed: true,
         })
         .await?;
     if resolved.target_count == 1 && resolved.targets[0].id == request.target_client_id {
@@ -169,5 +171,17 @@ fn restore_command(request: &CreateRestorePlanRequest) -> JobCommand {
         archive_sha256_hex: None,
         dry_run: false,
         post_restore_argv: Vec::new(),
+    }
+}
+
+fn metadata_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
+    let now = unix_now();
+    CommandEnvelope {
+        command_id: uuid::Uuid::new_v4(),
+        scope: format!("client:{client_id}"),
+        payload_hash_hex: command_hash.to_string(),
+        signed_unix: now,
+        expires_unix: now.saturating_add(300),
+        server_signature: Vec::new(),
     }
 }

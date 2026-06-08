@@ -15,8 +15,9 @@ use crate::cli_access::{
     FleetAlertStateUpdateCommand, FleetAlertStatesCommand, FleetAlertsCommand, LimitCommand,
     LoginCommand, NameCommand, OperatorCreateCommand, OperatorSessionRevokeCommand,
     OperatorSessionsCommand, ReenrollmentTokenCreateCommand, RefreshCommand, ScheduleCreateCommand,
-    ScheduleDispatchCommand, TelemetryNetworkRatesCommand, TelemetryRollupsCommand,
-    TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
+    ScheduleDeferCommand, ScheduleMutationCommand, ScheduleUpdateCommand,
+    TelemetryNetworkRatesCommand, TelemetryRollupsCommand, TelemetryTunnelsCommand,
+    TotpConfirmCommand, TotpPasswordCommand,
 };
 use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
@@ -34,7 +35,11 @@ use crate::commands_terminal::{
 use crate::output::OutputMode;
 
 #[derive(Debug, Parser)]
-#[command(name = "vpsctl", about = "CLI and VTY shell for vpsman")]
+#[command(
+    name = "vpsctl",
+    about = "CLI and VTY shell for vpsman",
+    version = concat!(env!("CARGO_PKG_VERSION"), "+cli.", env!("VPSMAN_CLI_BUILD_NUMBER"))
+)]
 pub(crate) struct Args {
     #[arg(long, env = "VPSMAN_API_URL", default_value = "http://127.0.0.1:8080")]
     pub(crate) api_url: String,
@@ -73,7 +78,6 @@ pub(crate) enum Command {
     ClientKeyRevocations(LimitCommand),
     ClientKeyRevoke(ClientKeyRevokeCommand),
     KeyLifecycleReport,
-    SuperPasswordRotations(LimitCommand),
     EnrollClaim(EnrollClaimCommand),
     EnrollConfig(EnrollConfigCommand),
     Summary,
@@ -121,7 +125,12 @@ pub(crate) enum Command {
     },
     Schedules,
     ScheduleCreate(ScheduleCreateCommand),
-    ScheduleDispatch(ScheduleDispatchCommand),
+    ScheduleUpdate(ScheduleUpdateCommand),
+    ScheduleEnable(ScheduleMutationCommand),
+    ScheduleDisable(ScheduleMutationCommand),
+    ScheduleDefer(ScheduleDeferCommand),
+    ScheduleApplyNow(ScheduleMutationCommand),
+    ScheduleDelete(ScheduleMutationCommand),
     JobCreate {
         #[arg(long)]
         command: String,
@@ -133,16 +142,12 @@ pub(crate) enum Command {
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        #[arg(long)]
-        envelope_file: Option<PathBuf>,
-        #[arg(long)]
-        envelopes_file: Option<PathBuf>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = true)]
@@ -168,7 +173,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -186,7 +191,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -251,7 +256,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -279,7 +284,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -315,7 +320,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -381,7 +386,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -399,35 +404,13 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
-    },
-    SuperPasswordRotate {
-        #[arg(long)]
-        new_proof_key_hex: Option<String>,
-        #[arg(long)]
-        new_password_env: Option<String>,
-        #[arg(long)]
-        new_super_salt_hex: Option<String>,
-        #[arg(long)]
-        rotation_generation: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        tags: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
-        timeout_secs: u64,
         #[arg(long, default_value_t = false)]
-        confirmed: bool,
+        force_unprivileged: bool,
     },
     AgentUpdate {
         #[arg(long)]
@@ -447,7 +430,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
         #[arg(long)]
@@ -473,7 +456,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
         #[arg(long)]
@@ -495,7 +478,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -517,7 +500,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -556,7 +539,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -578,45 +561,9 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-    },
-    AgentUpdateRolloutDelegateRollback {
-        #[arg(long)]
-        rollout_id: String,
-        #[arg(long)]
-        rollback_sha256_hex: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 3600)]
-        proof_ttl_secs: u64,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-    },
-    AgentUpdateRolloutDelegateActivation {
-        #[arg(long)]
-        rollout_id: String,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 3600)]
-        proof_ttl_secs: u64,
-        #[arg(long, default_value_t = false)]
-        restart_agent: bool,
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
         #[arg(long, default_value_t = false)]
@@ -648,7 +595,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -690,7 +637,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -710,7 +657,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -728,7 +675,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -746,7 +693,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -766,7 +713,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -895,10 +842,8 @@ pub(crate) enum Command {
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        #[arg(long, default_value_t = 86_400)]
-        interval_secs: u64,
-        #[arg(long)]
-        start_at_unix: Option<u64>,
+        #[arg(long, default_value = "0 3 * * *")]
+        cron_expr: String,
         #[arg(long, default_value_t = false)]
         disabled: bool,
         #[arg(long, default_value = "skip_missed")]
@@ -952,7 +897,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -972,7 +917,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -1038,7 +983,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -1064,7 +1009,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -1092,7 +1037,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -1110,7 +1055,7 @@ pub(crate) enum Command {
         #[arg(long)]
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
-        proof_ttl_secs: u64,
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
@@ -1131,20 +1076,6 @@ pub(crate) enum Command {
     TunnelSpeedTest(TunnelSpeedTestCommand),
     NoiseKeygen,
     SigningKeygen,
-    Proof {
-        #[arg(long)]
-        scope: String,
-        #[arg(long)]
-        salt_hex: String,
-        #[arg(long)]
-        payload_hash_hex: String,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        command_id: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        ttl_secs: u64,
-    },
     Vty,
 }
 

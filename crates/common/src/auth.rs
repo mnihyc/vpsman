@@ -10,11 +10,17 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub const MAX_PRIVILEGE_ASSERTION_AGE_SECS: u64 = 300;
+pub const MAX_PRIVILEGE_ASSERTION_CLOCK_SKEW_SECS: u64 = 60;
+pub const MAX_COMMAND_SIGNATURE_AGE_SECS: u64 = 300;
+pub const MAX_COMMAND_SIGNATURE_CLOCK_SKEW_SECS: u64 = 60;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct PrivilegeProof {
+pub struct PrivilegeAssertion {
     pub nonce_hex: String,
+    pub issued_unix: u64,
     pub expires_unix: u64,
-    pub proof_hex: String,
+    pub assertion_hex: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -22,7 +28,10 @@ pub struct CommandEnvelope {
     pub command_id: Uuid,
     pub scope: String,
     pub payload_hash_hex: String,
-    pub proof: Option<PrivilegeProof>,
+    #[serde(default)]
+    pub signed_unix: u64,
+    #[serde(default)]
+    pub expires_unix: u64,
     pub server_signature: Vec<u8>,
 }
 
@@ -32,15 +41,13 @@ pub enum AuthorizationError {
     ScopeMismatch { expected: String, actual: String },
     #[error("command payload hash mismatch")]
     PayloadHashMismatch,
-    #[error("command is missing super-password proof")]
-    MissingProof,
-    #[error("command super-password proof is invalid or expired")]
-    InvalidProof,
+    #[error("command server signature timestamp is invalid or expired")]
+    InvalidCommandSignatureTime,
     #[error("command is missing server signature")]
     MissingServerSignature,
     #[error("command server signature is invalid")]
     InvalidServerSignature,
-    #[error("command proof nonce was already used")]
+    #[error("command id was already used")]
     Replay,
 }
 
@@ -83,6 +90,56 @@ impl PrivilegeReplayCache {
     }
 }
 
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum PrivilegeAssertionError {
+    #[error("privilege assertion nonce is invalid")]
+    InvalidNonce,
+    #[error("privilege assertion timestamp is invalid or expired")]
+    InvalidTime,
+    #[error("privilege assertion HMAC is invalid")]
+    InvalidAssertion,
+    #[error("privilege assertion nonce was already used")]
+    Replay,
+}
+
+#[derive(Debug)]
+pub struct PrivilegeAssertionReplayCache {
+    max_entries: usize,
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl Default for PrivilegeAssertionReplayCache {
+    fn default() -> Self {
+        Self::new(4096)
+    }
+}
+
+impl PrivilegeAssertionReplayCache {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries: max_entries.max(1),
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    pub fn remember(&mut self, nonce_hex: &str) -> Result<(), PrivilegeAssertionError> {
+        let nonce_hex = nonce_hex.to_string();
+        if self.seen.contains(&nonce_hex) {
+            return Err(PrivilegeAssertionError::Replay);
+        }
+        self.seen.insert(nonce_hex.clone());
+        self.order.push_back(nonce_hex);
+        while self.order.len() > self.max_entries {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn random_nonce() -> [u8; 16] {
     let mut nonce = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -104,55 +161,62 @@ pub fn payload_hash(payload: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub fn sign_privilege_proof(
-    super_key: &[u8; 32],
-    command_id: Uuid,
-    scope: &str,
-    payload_hash_hex: &str,
+pub fn sign_privilege_assertion(
+    verifier_key: &[u8; 32],
+    intent_hash_hex: &str,
     nonce: &[u8; 16],
+    issued_unix: u64,
     expires_unix: u64,
-) -> PrivilegeProof {
-    let mut mac = HmacSha256::new_from_slice(super_key).expect("HMAC accepts 32-byte keys");
-    mac.update(b"vpsman-privileged-command-v1");
-    mac.update(command_id.as_bytes());
-    mac.update(scope.as_bytes());
-    mac.update(payload_hash_hex.as_bytes());
+) -> PrivilegeAssertion {
+    let mut mac = HmacSha256::new_from_slice(verifier_key).expect("HMAC accepts 32-byte keys");
+    mac.update(b"vpsman-gateway-privilege-assertion-v1");
+    mac.update(intent_hash_hex.as_bytes());
     mac.update(nonce);
+    mac.update(&issued_unix.to_be_bytes());
     mac.update(&expires_unix.to_be_bytes());
 
-    PrivilegeProof {
+    PrivilegeAssertion {
         nonce_hex: hex::encode(nonce),
+        issued_unix,
         expires_unix,
-        proof_hex: hex::encode(mac.finalize().into_bytes()),
+        assertion_hex: hex::encode(mac.finalize().into_bytes()),
     }
 }
 
-pub fn verify_privilege_proof(
-    super_key: &[u8; 32],
-    command_id: Uuid,
-    scope: &str,
-    payload_hash_hex: &str,
-    proof: &PrivilegeProof,
+pub fn verify_privilege_assertion(
+    verifier_key: &[u8; 32],
+    intent: &str,
+    assertion: &PrivilegeAssertion,
     now_unix: u64,
-) -> bool {
-    if proof.expires_unix < now_unix {
-        return false;
+    replay_cache: &mut PrivilegeAssertionReplayCache,
+) -> Result<String, PrivilegeAssertionError> {
+    if assertion.expires_unix < assertion.issued_unix
+        || assertion.expires_unix < now_unix
+        || assertion.issued_unix > now_unix.saturating_add(MAX_PRIVILEGE_ASSERTION_CLOCK_SKEW_SECS)
+        || now_unix.saturating_sub(assertion.issued_unix) > MAX_PRIVILEGE_ASSERTION_AGE_SECS
+    {
+        return Err(PrivilegeAssertionError::InvalidTime);
     }
-    let Ok(nonce_vec) = hex::decode(&proof.nonce_hex) else {
-        return false;
-    };
-    let Ok(nonce) = <[u8; 16]>::try_from(nonce_vec.as_slice()) else {
-        return false;
-    };
-    let expected = sign_privilege_proof(
-        super_key,
-        command_id,
-        scope,
-        payload_hash_hex,
+    let nonce_vec =
+        hex::decode(&assertion.nonce_hex).map_err(|_| PrivilegeAssertionError::InvalidNonce)?;
+    let nonce = <[u8; 16]>::try_from(nonce_vec.as_slice())
+        .map_err(|_| PrivilegeAssertionError::InvalidNonce)?;
+    let intent_hash_hex = payload_hash(intent.as_bytes());
+    let expected = sign_privilege_assertion(
+        verifier_key,
+        &intent_hash_hex,
         &nonce,
-        proof.expires_unix,
+        assertion.issued_unix,
+        assertion.expires_unix,
     );
-    constant_time_eq(expected.proof_hex.as_bytes(), proof.proof_hex.as_bytes())
+    if !constant_time_eq(
+        expected.assertion_hex.as_bytes(),
+        assertion.assertion_hex.as_bytes(),
+    ) {
+        return Err(PrivilegeAssertionError::InvalidAssertion);
+    }
+    replay_cache.remember(&assertion.nonce_hex)?;
+    Ok(intent_hash_hex)
 }
 
 pub fn sign_command_envelope(
@@ -220,7 +284,6 @@ pub fn verify_discovery_document_signature(
 }
 
 pub fn verify_command_envelope(
-    super_key: &[u8; 32],
     server_verifying_key: &VerifyingKey,
     expected_scope: &str,
     payload: &[u8],
@@ -239,19 +302,12 @@ pub fn verify_command_envelope(
         return Err(AuthorizationError::PayloadHashMismatch);
     }
 
-    let proof = envelope
-        .proof
-        .as_ref()
-        .ok_or(AuthorizationError::MissingProof)?;
-    if !verify_privilege_proof(
-        super_key,
-        envelope.command_id,
-        &envelope.scope,
-        &envelope.payload_hash_hex,
-        proof,
-        now_unix,
-    ) {
-        return Err(AuthorizationError::InvalidProof);
+    if envelope.expires_unix < envelope.signed_unix
+        || envelope.expires_unix < now_unix
+        || envelope.signed_unix > now_unix.saturating_add(MAX_COMMAND_SIGNATURE_CLOCK_SKEW_SECS)
+        || now_unix.saturating_sub(envelope.signed_unix) > MAX_COMMAND_SIGNATURE_AGE_SECS
+    {
+        return Err(AuthorizationError::InvalidCommandSignatureTime);
     }
 
     if envelope.server_signature.is_empty() {
@@ -263,7 +319,7 @@ pub fn verify_command_envelope(
         .verify(&command_signature_payload(envelope), &signature)
         .map_err(|_| AuthorizationError::InvalidServerSignature)?;
 
-    replay_cache.remember(envelope.command_id, &proof.nonce_hex)
+    replay_cache.remember(envelope.command_id, "server-signature")
 }
 
 fn discovery_signature_payload(document: &DiscoveryDocument) -> Vec<u8> {
@@ -287,15 +343,8 @@ fn command_signature_payload(envelope: &CommandEnvelope) -> Vec<u8> {
     payload.extend_from_slice(envelope.command_id.as_bytes());
     push_len_prefixed(&mut payload, envelope.scope.as_bytes());
     push_len_prefixed(&mut payload, envelope.payload_hash_hex.as_bytes());
-    match &envelope.proof {
-        Some(proof) => {
-            payload.push(1);
-            push_len_prefixed(&mut payload, proof.nonce_hex.as_bytes());
-            payload.extend_from_slice(&proof.expires_unix.to_be_bytes());
-            push_len_prefixed(&mut payload, proof.proof_hex.as_bytes());
-        }
-        None => payload.push(0),
-    }
+    payload.extend_from_slice(&envelope.signed_unix.to_be_bytes());
+    payload.extend_from_slice(&envelope.expires_unix.to_be_bytes());
     payload
 }
 
@@ -326,54 +375,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn privilege_proof_round_trip() {
-        let key = derive_super_key("secret", b"client-salt");
-        let id = Uuid::new_v4();
-        let hash = payload_hash(b"reboot");
-        let nonce = [9_u8; 16];
-        let proof = sign_privilege_proof(&key, id, "client:one", &hash, &nonce, 200);
-
-        assert!(verify_privilege_proof(
-            &key,
-            id,
-            "client:one",
-            &hash,
-            &proof,
-            100
-        ));
-        assert!(!verify_privilege_proof(
-            &key,
-            id,
-            "client:two",
-            &hash,
-            &proof,
-            100
-        ));
-        assert!(!verify_privilege_proof(
-            &key,
-            id,
-            "client:one",
-            &hash,
-            &proof,
-            201
-        ));
-    }
-
-    #[test]
     fn command_envelope_authorizes_once() {
-        let key = derive_super_key("secret", b"client-salt");
         let signing = SigningKey::from_bytes(&[7_u8; 32]);
         let verifying = signing.verifying_key();
         let payload = br#"{"argv":["/bin/true"]}"#;
         let id = Uuid::new_v4();
         let hash = payload_hash(payload);
-        let nonce = [3_u8; 16];
-        let proof = sign_privilege_proof(&key, id, "client:lax-edge-01", &hash, &nonce, 200);
         let mut envelope = CommandEnvelope {
             command_id: id,
             scope: "client:lax-edge-01".to_string(),
             payload_hash_hex: hash,
-            proof: Some(proof),
+            signed_unix: 100,
+            expires_unix: 200,
             server_signature: Vec::new(),
         };
         envelope.server_signature = sign_command_envelope(&signing, &envelope);
@@ -381,7 +394,6 @@ mod tests {
         let mut replay_cache = PrivilegeReplayCache::default();
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:lax-edge-01",
                 payload,
@@ -393,7 +405,6 @@ mod tests {
         );
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:lax-edge-01",
                 payload,
@@ -459,18 +470,17 @@ mod tests {
 
     #[test]
     fn command_envelope_rejects_scope_payload_and_signature_mismatch() {
-        let key = derive_super_key("secret", b"client-salt");
         let signing = SigningKey::from_bytes(&[9_u8; 32]);
         let verifying = signing.verifying_key();
         let payload = b"payload";
         let id = Uuid::new_v4();
         let hash = payload_hash(payload);
-        let proof = sign_privilege_proof(&key, id, "client:one", &hash, &[4_u8; 16], 200);
         let mut envelope = CommandEnvelope {
             command_id: id,
             scope: "client:one".to_string(),
             payload_hash_hex: hash,
-            proof: Some(proof),
+            signed_unix: 100,
+            expires_unix: 200,
             server_signature: Vec::new(),
         };
         envelope.server_signature = sign_command_envelope(&signing, &envelope);
@@ -478,7 +488,6 @@ mod tests {
         let mut replay_cache = PrivilegeReplayCache::default();
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:two",
                 payload,
@@ -493,7 +502,6 @@ mod tests {
         );
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:one",
                 b"different",
@@ -508,7 +516,6 @@ mod tests {
         tampered.server_signature[0] ^= 0x01;
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:one",
                 payload,
@@ -521,49 +528,23 @@ mod tests {
     }
 
     #[test]
-    fn command_envelope_rejects_missing_or_expired_proof() {
-        let key = derive_super_key("secret", b"client-salt");
+    fn command_envelope_rejects_expired_signature_time() {
         let signing = SigningKey::from_bytes(&[11_u8; 32]);
         let verifying = signing.verifying_key();
         let payload = b"payload";
         let id = Uuid::new_v4();
-        let mut missing_proof = CommandEnvelope {
-            command_id: id,
-            scope: "client:one".to_string(),
-            payload_hash_hex: payload_hash(payload),
-            proof: None,
-            server_signature: Vec::new(),
-        };
-        missing_proof.server_signature = sign_command_envelope(&signing, &missing_proof);
-
-        let mut replay_cache = PrivilegeReplayCache::default();
-        assert_eq!(
-            verify_command_envelope(
-                &key,
-                &verifying,
-                "client:one",
-                payload,
-                &missing_proof,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::MissingProof)
-        );
-
-        let expired_hash = payload_hash(payload);
-        let expired_proof =
-            sign_privilege_proof(&key, id, "client:one", &expired_hash, &[5_u8; 16], 99);
         let mut expired = CommandEnvelope {
             command_id: id,
             scope: "client:one".to_string(),
-            payload_hash_hex: expired_hash,
-            proof: Some(expired_proof),
+            payload_hash_hex: payload_hash(payload),
+            signed_unix: 90,
+            expires_unix: 99,
             server_signature: Vec::new(),
         };
         expired.server_signature = sign_command_envelope(&signing, &expired);
+        let mut replay_cache = PrivilegeReplayCache::default();
         assert_eq!(
             verify_command_envelope(
-                &key,
                 &verifying,
                 "client:one",
                 payload,
@@ -571,7 +552,59 @@ mod tests {
                 100,
                 &mut replay_cache,
             ),
-            Err(AuthorizationError::InvalidProof)
+            Err(AuthorizationError::InvalidCommandSignatureTime)
+        );
+    }
+
+    #[test]
+    fn privilege_assertion_authorizes_once_for_exact_intent() {
+        let verifier_key = [3_u8; 32];
+        let intent = r#"{"action":"job.dispatch","target":"client-a"}"#;
+        let intent_hash = payload_hash(intent.as_bytes());
+        let assertion =
+            sign_privilege_assertion(&verifier_key, &intent_hash, &[7_u8; 16], 100, 300);
+        let mut replay_cache = PrivilegeAssertionReplayCache::default();
+
+        assert_eq!(
+            verify_privilege_assertion(&verifier_key, intent, &assertion, 120, &mut replay_cache),
+            Ok(intent_hash)
+        );
+        assert_eq!(
+            verify_privilege_assertion(&verifier_key, intent, &assertion, 120, &mut replay_cache),
+            Err(PrivilegeAssertionError::Replay)
+        );
+    }
+
+    #[test]
+    fn privilege_assertion_rejects_mismatched_and_stale_intent() {
+        let verifier_key = [4_u8; 32];
+        let intent = r#"{"action":"tag.delete","target":"tag:prod"}"#;
+        let intent_hash = payload_hash(intent.as_bytes());
+        let assertion =
+            sign_privilege_assertion(&verifier_key, &intent_hash, &[8_u8; 16], 100, 300);
+        let mut replay_cache = PrivilegeAssertionReplayCache::default();
+
+        assert_eq!(
+            verify_privilege_assertion(
+                &verifier_key,
+                r#"{"action":"tag.delete","target":"tag:stage"}"#,
+                &assertion,
+                120,
+                &mut replay_cache
+            ),
+            Err(PrivilegeAssertionError::InvalidAssertion)
+        );
+
+        let stale = sign_privilege_assertion(&verifier_key, &intent_hash, &[9_u8; 16], 100, 1000);
+        assert_eq!(
+            verify_privilege_assertion(
+                &verifier_key,
+                intent,
+                &stale,
+                401,
+                &mut PrivilegeAssertionReplayCache::default()
+            ),
+            Err(PrivilegeAssertionError::InvalidTime)
         );
     }
 }

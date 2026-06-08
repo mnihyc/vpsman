@@ -568,7 +568,7 @@ fn renders_custom_fou_runtime_options_without_hardcoded_ports() {
 }
 
 #[test]
-fn renders_backend_specific_tunnel_files_and_proof_payload() {
+fn renders_backend_specific_tunnel_files_and_signature_payload() {
     let plan = plan_tunnel(&TunnelPlanInput {
         name: "lax-hkg".to_string(),
         interface_name: "tun42".to_string(),
@@ -600,7 +600,7 @@ fn renders_backend_specific_tunnel_files_and_proof_payload() {
     assert!(netplan.files[0].contents.contains("local: 203.0.113.20"));
     assert!(netplan.files[0].contents.contains("remote: 198.51.100.10"));
     assert!(netplan.files[0].contents.contains("10.255.0.1/31"));
-    assert!(!backend_config_proof_payload(&netplan).is_empty());
+    assert!(!backend_config_signature_payload(&netplan).is_empty());
 
     let networkd = render_tunnel_endpoint_backend_config(
         &plan,

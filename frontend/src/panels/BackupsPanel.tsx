@@ -1,15 +1,16 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleSplitWorkspace } from "../components/ConsoleLayout";
-import { ProofVaultBox } from "../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { bytesToBase64 } from "../fileTransfer";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
-  buildEnvelopesForOperation,
+  buildPrivilegeForJobOperation,
   parseCommandArgv,
-  type ProofMaterial,
-} from "../proof";
+  type PrivilegeMaterial,
+} from "../privilege";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
@@ -104,10 +105,10 @@ type BackupsPanelProps = {
     artifactFile: File,
     confirmed: boolean,
   ) => Promise<BackupArtifactRecord>;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onRefresh: () => Promise<void>;
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 };
 
 type RestoreRunInput = {
@@ -130,6 +131,18 @@ type RestoreRunResult = {
   nextJob: CreateJobResponse;
   payloadHashHex: string;
 };
+
+type BackupConfirmationAction =
+  | "policy"
+  | "policy-prune"
+  | "backup-request"
+  | "artifact-upload"
+  | "artifact-handoff"
+  | "restore-plan"
+  | "restore-run"
+  | "restore-rollback"
+  | "migration-link"
+  | "migration-run";
 
 const INLINE_BACKUP_ARTIFACT_UPLOAD_LIMIT_BYTES = 16 * 1024 * 1024;
 const backupSubpageSummaries: Record<
@@ -163,20 +176,18 @@ export function BackupsPanel({
   onLoadJobOutputs,
   onPrepareBackupArtifactRestore,
   onPruneBackupPolicies,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onUploadBackupArtifact,
   onUploadBackupArtifactChunked,
   onRefresh,
-  proofMaterial,
-  setProofMaterial,
+  privilegeMaterial,
+  setPrivilegeMaterial,
 }: BackupsPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState("");
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
   const [note, setNote] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
-  const [proofTtlSecs, setProofTtlSecs] = useState(300);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState("nightly-backup");
   const [policyTargetsText, setPolicyTargetsText] = useState(
@@ -188,16 +199,14 @@ export function BackupsPanel({
   const [policyIncludeConfig, setPolicyIncludeConfig] = useState(true);
   const [policyRecipientPublicKeyHex, setPolicyRecipientPublicKeyHex] =
     useState("");
-  const [policyIntervalSecs, setPolicyIntervalSecs] = useState(86_400);
+  const [policyCronExpr, setPolicyCronExpr] = useState("0 3 * * *");
   const [policyRetentionDays, setPolicyRetentionDays] = useState(30);
   const [policyKeepLast, setPolicyKeepLast] = useState(7);
   const [policyRotationGeneration, setPolicyRotationGeneration] = useState("");
   const [policyEnabled, setPolicyEnabled] = useState(true);
-  const [policyConfirmed, setPolicyConfirmed] = useState(false);
   const [policyPruneScheduleId, setPolicyPruneScheduleId] = useState("");
   const [policyPruneDryRun, setPolicyPruneDryRun] = useState(true);
   const [policyPruneMetadataOnly, setPolicyPruneMetadataOnly] = useState(false);
-  const [policyPruneConfirmed, setPolicyPruneConfirmed] = useState(false);
   const [lastPolicy, setLastPolicy] = useState<BackupPolicyRecord | null>(null);
   const [lastPolicyPrune, setLastPolicyPrune] =
     useState<BackupPolicyPruneResponse | null>(null);
@@ -207,12 +216,10 @@ export function BackupsPanel({
   const [artifactBackupId, setArtifactBackupId] = useState("");
   const [artifactObjectKey, setArtifactObjectKey] = useState("");
   const [artifactFile, setArtifactFile] = useState<File | null>(null);
-  const [artifactConfirmed, setArtifactConfirmed] = useState(false);
   const [artifactUploadMode, setArtifactUploadMode] = useState<
     "inline" | "chunked"
   >("inline");
   const [handoffJobId, setHandoffJobId] = useState("");
-  const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const [lastArtifact, setLastArtifact] = useState<BackupArtifactRecord | null>(
     null,
   );
@@ -224,7 +231,6 @@ export function BackupsPanel({
   const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false);
   const [restoreDestinationRoot, setRestoreDestinationRoot] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
-  const [restoreConfirmed, setRestoreConfirmed] = useState(false);
   const [restoreArtifactFile, setRestoreArtifactFile] = useState<File | null>(
     null,
   );
@@ -234,13 +240,11 @@ export function BackupsPanel({
   const [restorePostRestoreArgv, setRestorePostRestoreArgv] = useState("");
   const [restorePrivateKeyHex, setRestorePrivateKeyHex] = useState("");
   const [restoreTimeoutSecs, setRestoreTimeoutSecs] = useState(60);
-  const [restoreRunConfirmed, setRestoreRunConfirmed] = useState(false);
   const [restoreForceUnprivileged, setRestoreForceUnprivileged] =
     useState(false);
   const [rollbackRestoreJobId, setRollbackRestoreJobId] = useState("");
   const [rollbackTargetId, setRollbackTargetId] = useState("");
   const [rollbackTimeoutSecs, setRollbackTimeoutSecs] = useState(60);
-  const [rollbackConfirmed, setRollbackConfirmed] = useState(false);
   const [rollbackForceUnprivileged, setRollbackForceUnprivileged] =
     useState(false);
   const [lastRestorePlan, setLastRestorePlan] =
@@ -251,9 +255,10 @@ export function BackupsPanel({
     useState<CreateJobResponse | null>(null);
   const [migrationRestorePlanId, setMigrationRestorePlanId] = useState("");
   const [migrationNote, setMigrationNote] = useState("");
-  const [migrationConfirmed, setMigrationConfirmed] = useState(false);
   const [lastMigrationLink, setLastMigrationLink] =
     useState<MigrationLinkRecord | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<BackupConfirmationAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const paths = useMemo(() => parseBackupPaths(pathsText), [pathsText]);
@@ -331,8 +336,12 @@ export function BackupsPanel({
                         migrationLinks.length === 1 ? "" : "s"
                       }`);
 
-  async function submitPolicy(event: FormEvent<HTMLFormElement>) {
+  function submitPolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPendingConfirmation("policy");
+  }
+
+  async function executePolicy() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!policyName.trim()) {
         throw new Error("Policy name is required");
@@ -350,9 +359,6 @@ export function BackupsPanel({
       if (recipient && !/^[0-9a-f]{64}$/.test(recipient)) {
         throw new Error("Recipient public key must be 32-byte hex");
       }
-      if (!policyConfirmed) {
-        throw new Error("Backup policy requires confirmation");
-      }
       const policy = await onCreateBackupPolicy({
         name: policyName.trim(),
         selector_expression: policyTargetsText.trim(),
@@ -362,44 +368,49 @@ export function BackupsPanel({
         retention_days: clampInteger(policyRetentionDays, 1, 3650),
         keep_last: clampInteger(policyKeepLast, 1, 1000),
         rotation_generation: policyRotationGeneration.trim() || null,
-        interval_secs: clampInteger(policyIntervalSecs, 1, 31_536_000),
-        start_at_unix: null,
+        cron_expr: policyCronExpr.trim(),
+        timezone: "UTC",
         enabled: policyEnabled,
         catch_up_policy: "skip_missed",
         catch_up_limit: 1,
         retry_delay_secs: 300,
         max_failures: 3,
-        confirmed: policyConfirmed,
+        confirmed: true,
       });
       setLastPolicy(policy);
-      setPolicyConfirmed(false);
     });
   }
 
-  async function submitPolicyPrune(event: FormEvent<HTMLFormElement>) {
+  function submitPolicyPrune(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (policyPruneDryRun) {
+      void executePolicyPrune();
+    } else {
+      setPendingConfirmation("policy-prune");
+    }
+  }
+
+  async function executePolicyPrune() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!policyPruneDryRun && !policyPruneConfirmed) {
-        throw new Error("Policy prune requires confirmation");
-      }
       const result = await onPruneBackupPolicies({
         schedule_id: policyPruneScheduleId || null,
         dry_run: policyPruneDryRun,
         metadata_only: policyPruneMetadataOnly,
-        confirmed: policyPruneConfirmed,
+        confirmed: true,
       });
       setLastPolicyPrune(result);
-      if (!policyPruneDryRun) {
-        setPolicyPruneConfirmed(false);
-      }
     });
   }
 
-  async function submitRequest(event: FormEvent<HTMLFormElement>) {
+  function submitRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPendingConfirmation("backup-request");
+  }
+
+  async function executeRequest() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       if (!clientId) {
         throw new Error("Select a VPS");
@@ -407,32 +418,27 @@ export function BackupsPanel({
       if (!includeConfig && paths.length === 0) {
         throw new Error("Select config or at least one absolute path");
       }
-      if (!confirmed) {
-        throw new Error("Backup request requires confirmation");
-      }
       const operation: JobOperation = {
         type: "backup",
         paths,
         include_config: includeConfig,
       };
-      const built = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds([clientId]);
+      const built = await buildPrivilegeForJobOperation({
         clientIds: [clientId],
+        commandType: "backup",
         operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: 30,
       });
-      const envelope = built.envelopes[clientId];
-      if (!envelope) {
-        throw new Error("Backup proof envelope was not generated");
-      }
       const request = await onCreateBackupRequest({
         client_id: clientId,
         paths,
         include_config: includeConfig,
-        confirmed,
+        confirmed: true,
         note: note.trim() || null,
-        envelope,
+        privilege_assertion: built.privilegeAssertion,
       });
       setLastPayloadHash(built.payloadHashHex);
       setLastRequest(request);
@@ -441,8 +447,12 @@ export function BackupsPanel({
     });
   }
 
-  async function submitArtifactUpload(event: FormEvent<HTMLFormElement>) {
+  function submitArtifactUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPendingConfirmation("artifact-upload");
+  }
+
+  async function executeArtifactUpload() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!artifactBackupId) {
         throw new Error("Select a backup request");
@@ -453,9 +463,6 @@ export function BackupsPanel({
       if (!artifactFile) {
         throw new Error("Select an encrypted artifact file");
       }
-      if (!artifactConfirmed) {
-        throw new Error("Artifact upload requires confirmation");
-      }
       const objectKey = artifactObjectKey.trim();
       const artifact =
         artifactUploadMode === "chunked"
@@ -463,31 +470,31 @@ export function BackupsPanel({
               artifactBackupId,
               objectKey,
               artifactFile,
-              artifactConfirmed,
+              true,
             )
           : await onUploadBackupArtifact(artifactBackupId, {
               object_key: objectKey,
               artifact_base64: await fileToBase64(artifactFile),
-              confirmed: artifactConfirmed,
+              confirmed: true,
             });
       setLastArtifact(artifact);
     });
   }
 
-  async function submitArtifactHandoff() {
+  function submitArtifactHandoff() {
+    setPendingConfirmation("artifact-handoff");
+  }
+
+  async function executeArtifactHandoff() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!artifactBackupId) {
         throw new Error("Select a backup request");
       }
-      if (!handoffConfirmed) {
-        throw new Error("Retained output promotion requires confirmation");
-      }
       const handoff = await onHandoffBackupArtifact(artifactBackupId, {
-        confirmed: handoffConfirmed,
+        confirmed: true,
         job_id: handoffJobId.trim() || null,
       });
       setLastArtifact(handoff.artifact);
-      setHandoffConfirmed(false);
     });
   }
 
@@ -506,11 +513,15 @@ export function BackupsPanel({
     }
   }
 
-  async function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
+  function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPendingConfirmation("restore-plan");
+  }
+
+  async function executeRestorePlan() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       if (!restoreSourceId) {
         throw new Error("Select a source backup request");
@@ -520,9 +531,6 @@ export function BackupsPanel({
       }
       if (!restoreIncludeConfig && restorePaths.length === 0) {
         throw new Error("Select config or at least one absolute path");
-      }
-      if (!restoreConfirmed) {
-        throw new Error("Restore plan requires confirmation");
       }
       const operation: JobOperation = {
         type: "restore",
@@ -534,26 +542,24 @@ export function BackupsPanel({
         archive_size_bytes: null,
         archive_sha256_hex: null,
       };
-      const built = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds([restoreTargetId]);
+      const built = await buildPrivilegeForJobOperation({
         clientIds: [restoreTargetId],
+        commandType: "restore",
         operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: 30,
       });
-      const envelope = built.envelopes[restoreTargetId];
-      if (!envelope) {
-        throw new Error("Restore proof envelope was not generated");
-      }
       const plan = await onCreateRestorePlan({
         source_backup_request_id: restoreSourceId,
         target_client_id: restoreTargetId,
         paths: restorePaths,
         include_config: restoreIncludeConfig,
         destination_root: restoreDestinationRoot.trim() || null,
-        confirmed: restoreConfirmed,
+        confirmed: true,
         note: restoreNote.trim() || null,
-        envelope,
+        privilege_assertion: built.privilegeAssertion,
       });
       setLastPayloadHash(built.payloadHashHex);
       setLastRestorePlan(plan);
@@ -563,8 +569,8 @@ export function BackupsPanel({
   async function dispatchRestoreRun(
     input: RestoreRunInput,
   ): Promise<RestoreRunResult> {
-    if (!proofMaterial) {
-      throw new Error("Proof is locked");
+    if (!privilegeMaterial) {
+      throw new Error("Privilege unlock is locked");
     }
     if (!input.sourceBackupRequestId) {
       throw new Error("Select a source backup request");
@@ -651,34 +657,38 @@ export function BackupsPanel({
         post_restore_argv: postRestoreArgv,
       };
     }
-    const built = await buildEnvelopesForOperation({
+    const selectorExpression = selectorExpressionForClientIds([input.targetClientId]);
+    const boundedTimeoutSecs = clampInteger(input.timeoutSecs, 1, 3600);
+    const built = await buildPrivilegeForJobOperation({
       clientIds: [input.targetClientId],
+      commandType: "restore",
+      forceUnprivileged: input.forceUnprivileged,
       operation,
-      proofTtlSecs,
-      superPassword: proofMaterial.superPassword,
-      superSaltHex: proofMaterial.superSaltHex,
+      privilegeMaterial,
+      selectorExpression,
+      timeoutSecs: boundedTimeoutSecs,
     });
     const nextJob = await onCreateJob({
-      selector_expression: selectorExpressionForClientIds([input.targetClientId]),
+      selector_expression: selectorExpression,
       destructive: !input.dryRun,
       confirmed: true,
       command: "restore",
       argv: [],
       operation,
-      timeout_secs: clampInteger(input.timeoutSecs, 1, 3600),
+      timeout_secs: boundedTimeoutSecs,
       force_unprivileged: input.forceUnprivileged,
       privileged: true,
-      envelope: null,
-      envelopes: built.envelopes,
+      privilege_assertion: built.privilegeAssertion,
     });
     return { nextJob, payloadHashHex: built.payloadHashHex };
   }
 
-  async function submitRestoreRun() {
+  function submitRestoreRun() {
+    setPendingConfirmation("restore-run");
+  }
+
+  async function executeRestoreRun() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!restoreRunConfirmed) {
-        throw new Error("Executable restore requires confirmation");
-      }
       const { nextJob, payloadHashHex } = await dispatchRestoreRun({
         sourceBackupRequestId: restoreSourceId,
         targetClientId: restoreTargetId,
@@ -699,23 +709,23 @@ export function BackupsPanel({
       setLastRestoreJob(nextJob);
       setRollbackRestoreJobId(nextJob.job_id);
       setRollbackTargetId(restoreTargetId);
-      setRollbackConfirmed(false);
     });
   }
 
-  async function submitRestoreRollback() {
+  function submitRestoreRollback() {
+    setPendingConfirmation("restore-rollback");
+  }
+
+  async function executeRestoreRollback() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       if (!rollbackRestoreJobId.trim()) {
         throw new Error("Restore job ID is required");
       }
       if (!rollbackTargetId.trim()) {
         throw new Error("Target VPS is required");
-      }
-      if (!rollbackConfirmed) {
-        throw new Error("Restore rollback requires confirmation");
       }
       const restoreJobId = rollbackRestoreJobId.trim();
       const targetClientId = rollbackTargetId.trim();
@@ -725,57 +735,60 @@ export function BackupsPanel({
         targetClientId,
         outputs,
       );
-      const built = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds([targetClientId]);
+      const boundedTimeoutSecs = clampInteger(rollbackTimeoutSecs, 1, 3600);
+      const built = await buildPrivilegeForJobOperation({
         clientIds: [targetClientId],
+        commandType: "restore_rollback",
+        forceUnprivileged: rollbackForceUnprivileged,
         operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: boundedTimeoutSecs,
       });
       const nextJob = await onCreateJob({
-        selector_expression: selectorExpressionForClientIds([targetClientId]),
+        selector_expression: selectorExpression,
         destructive: true,
         confirmed: true,
         command: "restore_rollback",
         argv: [],
         operation,
-        timeout_secs: clampInteger(rollbackTimeoutSecs, 1, 3600),
+        timeout_secs: boundedTimeoutSecs,
         force_unprivileged: rollbackForceUnprivileged,
         privileged: true,
-        envelope: null,
-        envelopes: built.envelopes,
+        privilege_assertion: built.privilegeAssertion,
       });
       setLastPayloadHash(built.payloadHashHex);
       setLastRollbackJob(nextJob);
-      setRollbackConfirmed(false);
     });
   }
 
-  async function submitMigrationLink() {
+  function submitMigrationLink() {
+    setPendingConfirmation("migration-link");
+  }
+
+  async function executeMigrationLink() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!migrationRestorePlanId) {
         throw new Error("Select a restore plan");
       }
-      if (!migrationConfirmed) {
-        throw new Error("Migration link requires confirmation");
-      }
       const link = await onCreateMigrationLink({
         restore_plan_id: migrationRestorePlanId,
-        confirmed: migrationConfirmed,
+        confirmed: true,
         note: migrationNote.trim() || null,
       });
       setLastMigrationLink(link);
-      setMigrationConfirmed(false);
     });
   }
 
-  async function submitMigrationRun() {
+  function submitMigrationRun() {
+    setPendingConfirmation("migration-run");
+  }
+
+  async function executeMigrationRun() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!selectedMigrationRestorePlan) {
         throw new Error("Select a restore plan");
-      }
-      if (!migrationConfirmed) {
-        throw new Error("Migration run requires confirmation");
       }
       const link = await onCreateMigrationLink({
         restore_plan_id: selectedMigrationRestorePlan.id,
@@ -811,10 +824,179 @@ export function BackupsPanel({
       setLastRestoreJob(nextJob);
       setRollbackRestoreJobId(nextJob.job_id);
       setRollbackTargetId(selectedMigrationRestorePlan.target_client_id);
-      setMigrationConfirmed(false);
-      setRollbackConfirmed(false);
     });
   }
+
+  function buildBackupConfirmationItems(
+    action: BackupConfirmationAction,
+  ): Array<{ label: string; value: ReactNode }> {
+    switch (action) {
+      case "policy":
+        return [
+          { label: "Policy", value: policyName.trim() || "unnamed" },
+          { label: "Targets", value: `${policyTargetCount} VPSs` },
+          { label: "Scope", value: `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths` },
+          { label: "Schedule", value: policyCronExpr.trim() || "cron required" },
+        ];
+      case "policy-prune":
+        return [
+          { label: "Scope", value: policyPruneScheduleId ? shortId(policyPruneScheduleId) : "all policies" },
+          { label: "Mode", value: policyPruneMetadataOnly ? "metadata only" : "metadata and objects" },
+        ];
+      case "backup-request":
+        return [
+          { label: "VPS", value: selectedAgent ? formatVpsName(selectedAgent, vpsNameDisplayMode) : clientId || "none" },
+          { label: "Scope", value: `${includeConfig ? "config, " : ""}${paths.length} paths` },
+          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+        ];
+      case "artifact-upload":
+        return [
+          { label: "Request", value: artifactBackupId ? shortId(artifactBackupId) : "none" },
+          { label: "Object", value: artifactObjectKey.trim() || "missing" },
+          { label: "Mode", value: artifactUploadMode },
+        ];
+      case "artifact-handoff":
+        return [
+          { label: "Request", value: artifactBackupId ? shortId(artifactBackupId) : "none" },
+          { label: "Source job", value: handoffJobId.trim() || "latest retained output" },
+        ];
+      case "restore-plan":
+        return [
+          { label: "Source", value: restoreSourceId ? shortId(restoreSourceId) : "none" },
+          { label: "Target", value: restoreTarget ? formatVpsName(restoreTarget, vpsNameDisplayMode) : restoreTargetId || "none" },
+          { label: "Scope", value: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths` },
+          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+        ];
+      case "restore-run":
+        return [
+          { label: "Source", value: restoreSourceId ? shortId(restoreSourceId) : "none" },
+          { label: "Target", value: restoreTarget ? formatVpsName(restoreTarget, vpsNameDisplayMode) : restoreTargetId || "none" },
+          { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
+          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+        ];
+      case "restore-rollback":
+        return [
+          { label: "Restore job", value: rollbackRestoreJobId.trim() ? shortId(rollbackRestoreJobId.trim()) : "none" },
+          { label: "Target", value: rollbackTarget ? formatVpsName(rollbackTarget, vpsNameDisplayMode) : rollbackTargetId || "none" },
+          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+        ];
+      case "migration-link":
+        return [
+          { label: "Restore plan", value: migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none" },
+          { label: "Note", value: migrationNote.trim() || "none" },
+        ];
+      case "migration-run":
+        return [
+          { label: "Restore plan", value: selectedMigrationRestorePlan ? shortId(selectedMigrationRestorePlan.id) : "none" },
+          {
+            label: "Route",
+            value: selectedMigrationRestorePlan
+              ? `${clientLabel(selectedMigrationRestorePlan.source_client_id)} to ${clientLabel(selectedMigrationRestorePlan.target_client_id)}`
+              : "none",
+          },
+          { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
+          { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+        ];
+    }
+  }
+
+  function backupConfirmationDetail(action: BackupConfirmationAction | null): string {
+    switch (action) {
+      case "policy":
+        return "Confirm the saved schedule, target snapshot, and backup scope.";
+      case "policy-prune":
+        return "Confirm pruning retained backup metadata and object references for the selected policy scope.";
+      case "backup-request":
+        return "Confirm this browser-unlocked backup request before it is written.";
+      case "artifact-upload":
+        return "Confirm the encrypted artifact upload for the selected backup request.";
+      case "artifact-handoff":
+        return "Confirm promoting retained job output into a backup artifact record.";
+      case "restore-plan":
+        return "Confirm the restore intent and target before saving the plan.";
+      case "restore-run":
+        return restoreDryRun ? "Confirm the restore rehearsal dispatch." : "Confirm the live restore dispatch.";
+      case "restore-rollback":
+        return "Confirm restore rollback dispatch for the selected target.";
+      case "migration-link":
+        return "Confirm writing the migration link for the selected restore plan.";
+      case "migration-run":
+        return restoreDryRun ? "Confirm migration link and restore rehearsal dispatch." : "Confirm migration link and live restore dispatch.";
+      default:
+        return "";
+    }
+  }
+
+  async function confirmBackupAction() {
+    const action = pendingConfirmation;
+    if (!action) {
+      return;
+    }
+    setPendingConfirmation(null);
+    switch (action) {
+      case "policy":
+        await executePolicy();
+        break;
+      case "policy-prune":
+        await executePolicyPrune();
+        break;
+      case "backup-request":
+        await executeRequest();
+        break;
+      case "artifact-upload":
+        await executeArtifactUpload();
+        break;
+      case "artifact-handoff":
+        await executeArtifactHandoff();
+        break;
+      case "restore-plan":
+        await executeRestorePlan();
+        break;
+      case "restore-run":
+        await executeRestoreRun();
+        break;
+      case "restore-rollback":
+        await executeRestoreRollback();
+        break;
+      case "migration-link":
+        await executeMigrationLink();
+        break;
+      case "migration-run":
+        await executeMigrationRun();
+        break;
+    }
+  }
+
+  const backupConfirmationTitle =
+    pendingConfirmation === "policy"
+      ? "Save backup policy"
+      : pendingConfirmation === "policy-prune"
+        ? "Prune backup artifacts"
+        : pendingConfirmation === "backup-request"
+          ? "Request backup"
+          : pendingConfirmation === "artifact-upload"
+            ? "Upload backup artifact"
+            : pendingConfirmation === "artifact-handoff"
+              ? "Promote retained output"
+              : pendingConfirmation === "restore-plan"
+                ? "Create restore plan"
+                : pendingConfirmation === "restore-run"
+                  ? "Run restore"
+                  : pendingConfirmation === "restore-rollback"
+                    ? "Rollback restore"
+                    : pendingConfirmation === "migration-link"
+                      ? "Link migration"
+                      : "Run migration restore";
+  const backupConfirmationItems = pendingConfirmation
+    ? buildBackupConfirmationItems(pendingConfirmation)
+    : [];
+  const backupConfirmationTone =
+    pendingConfirmation === "policy-prune" ||
+    pendingConfirmation === "restore-run" ||
+    pendingConfirmation === "restore-rollback" ||
+    pendingConfirmation === "migration-run"
+      ? "danger"
+      : "normal";
 
   return (
     <section className="workspace singleColumn backupWorkspace">
@@ -852,17 +1034,29 @@ export function BackupsPanel({
         }
         detail={
           <aside className="inspector backupInspector">
+            <ConfirmationPrompt
+              confirmLabel="Confirm"
+              detail={backupConfirmationDetail(pendingConfirmation)}
+              items={backupConfirmationItems}
+              onCancel={() => setPendingConfirmation(null)}
+              onConfirm={() => void confirmBackupAction()}
+              open={pendingConfirmation !== null}
+              pending={pending}
+              title={backupConfirmationTitle}
+              tone={backupConfirmationTone}
+            />
             {backupSubpage === "policies" && (
               <>
                 <BackupPolicyForm
+                  agents={agents}
+                  confirmationOpen={pendingConfirmation === "policy"}
+                  cronExpr={policyCronExpr}
                   includeConfig={policyIncludeConfig}
-                  intervalSecs={policyIntervalSecs}
                   keepLast={policyKeepLast}
                   name={policyName}
-                  onConfirmedChange={setPolicyConfirmed}
+                  onCronExprChange={setPolicyCronExpr}
                   onEnabledChange={setPolicyEnabled}
                   onIncludeConfigChange={setPolicyIncludeConfig}
-                  onIntervalSecsChange={setPolicyIntervalSecs}
                   onKeepLastChange={setPolicyKeepLast}
                   onNameChange={setPolicyName}
                   onPathsTextChange={setPolicyPathsText}
@@ -874,7 +1068,6 @@ export function BackupsPanel({
                   pathsCount={policyPaths.length}
                   pathsText={policyPathsText}
                   pending={pending}
-                  policyConfirmed={policyConfirmed}
                   policyEnabled={policyEnabled}
                   recipientPublicKeyHex={policyRecipientPublicKeyHex}
                   retentionDays={policyRetentionDays}
@@ -886,13 +1079,11 @@ export function BackupsPanel({
                   }
                   targetExpressionValid={!policyTargetParse.error}
                   targetsText={policyTargetsText}
-                  agents={agents}
                 />
                 <BackupPolicyPruneForm
-                  confirmed={policyPruneConfirmed}
+                  confirmationOpen={pendingConfirmation === "policy-prune"}
                   dryRun={policyPruneDryRun}
                   metadataOnly={policyPruneMetadataOnly}
-                  onConfirmedChange={setPolicyPruneConfirmed}
                   onDryRunChange={setPolicyPruneDryRun}
                   onMetadataOnlyChange={setPolicyPruneMetadataOnly}
                   onScheduleIdChange={setPolicyPruneScheduleId}
@@ -908,21 +1099,18 @@ export function BackupsPanel({
               <BackupRequestForm
                 agents={agents}
                 clientId={clientId}
-                confirmed={confirmed}
+                confirmationOpen={pendingConfirmation === "backup-request"}
                 includeConfig={includeConfig}
                 note={note}
                 onClientIdChange={setClientId}
-                onConfirmedChange={setConfirmed}
                 onIncludeConfigChange={setIncludeConfig}
                 onNoteChange={setNote}
                 onPathsTextChange={setPathsText}
-                onProofTtlSecsChange={setProofTtlSecs}
                 onSubmit={submitRequest}
                 pathsCount={paths.length}
                 pathsText={pathsText}
                 pending={pending}
-                proofReady={Boolean(proofMaterial)}
-                proofTtlSecs={proofTtlSecs}
+                privilegeReady={Boolean(privilegeMaterial)}
                 selectedAgentName={
                   selectedAgent
                     ? formatVpsName(selectedAgent, vpsNameDisplayMode)
@@ -933,22 +1121,20 @@ export function BackupsPanel({
             {backupSubpage === "artifacts" && (
               <ArtifactUploadForm
                 artifactBackupId={artifactBackupId}
-                artifactConfirmed={artifactConfirmed}
+                artifactConfirmationOpen={pendingConfirmation === "artifact-upload"}
                 artifactFile={artifactFile}
                 artifactObjectKey={artifactObjectKey}
                 artifactUploadMode={artifactUploadMode}
                 backups={backups}
                 clientLabel={clientLabel}
-                handoffConfirmed={handoffConfirmed}
+                handoffConfirmationOpen={pendingConfirmation === "artifact-handoff"}
                 handoffJobId={handoffJobId}
                 onArtifactBackupIdChange={selectArtifactBackupId}
-                onArtifactConfirmedChange={setArtifactConfirmed}
                 onArtifactFileChange={selectArtifactFile}
                 onArtifactObjectKeyChange={setArtifactObjectKey}
                 onArtifactUploadModeChange={setArtifactUploadMode}
-                onHandoffConfirmedChange={setHandoffConfirmed}
                 onHandoffJobIdChange={setHandoffJobId}
-                onHandoffSubmit={() => void submitArtifactHandoff()}
+                onHandoffSubmit={submitArtifactHandoff}
                 onSubmit={submitArtifactUpload}
                 pending={pending}
               />
@@ -958,17 +1144,16 @@ export function BackupsPanel({
                 <RestorePlanForm
                   agents={agents}
                   backups={backups}
+                  confirmationOpen={pendingConfirmation === "restore-plan"}
                   onDestinationRootChange={setRestoreDestinationRoot}
                   onIncludeConfigChange={setRestoreIncludeConfig}
                   onNoteChange={setRestoreNote}
                   onPathsTextChange={setRestorePathsText}
-                  onRestoreConfirmedChange={setRestoreConfirmed}
                   onSourceIdChange={setRestoreSourceId}
                   onSubmit={submitRestorePlan}
                   onTargetIdChange={setRestoreTargetId}
                   pending={pending}
-                  proofReady={Boolean(proofMaterial)}
-                  restoreConfirmed={restoreConfirmed}
+                  privilegeReady={Boolean(privilegeMaterial)}
                   restoreDestinationRoot={restoreDestinationRoot}
                   restoreIncludeConfig={restoreIncludeConfig}
                   restoreNote={restoreNote}
@@ -984,6 +1169,7 @@ export function BackupsPanel({
                   clientLabel={clientLabel}
                 />
                 <RestoreRunForm
+                  confirmationOpen={pendingConfirmation === "restore-run"}
                   forceUnprivileged={restoreForceUnprivileged}
                   onForceUnprivilegedChange={setRestoreForceUnprivileged}
                   onArtifactFileChange={setRestoreArtifactFile}
@@ -992,44 +1178,41 @@ export function BackupsPanel({
                   onDryRunChange={setRestoreDryRun}
                   onPrivateKeyHexChange={setRestorePrivateKeyHex}
                   onPostRestoreArgvChange={setRestorePostRestoreArgv}
-                  onRestoreRunConfirmedChange={setRestoreRunConfirmed}
                   onRestoreTimeoutSecsChange={setRestoreTimeoutSecs}
-                  onRunRestore={() => void submitRestoreRun()}
+                  onRunRestore={submitRestoreRun}
                   pending={pending}
-                  proofReady={Boolean(proofMaterial)}
+                  privilegeReady={Boolean(privilegeMaterial)}
                   restoreArchivePath={restoreArchivePath}
                   restoreArchiveSha256Hex={restoreArchiveSha256Hex}
                   restoreArtifactFile={restoreArtifactFile}
                   restoreDryRun={restoreDryRun}
                   restorePrivateKeyHex={restorePrivateKeyHex}
                   restorePostRestoreArgv={restorePostRestoreArgv}
-                  restoreRunConfirmed={restoreRunConfirmed}
                   restoreSourceId={restoreSourceId}
                   restoreTarget={restoreTarget}
                   restoreTargetId={restoreTargetId}
                   restoreTimeoutSecs={restoreTimeoutSecs}
                 />
                 <RestoreRollbackForm
+                  confirmationOpen={pendingConfirmation === "restore-rollback"}
                   forceUnprivileged={rollbackForceUnprivileged}
                   onForceUnprivilegedChange={setRollbackForceUnprivileged}
                   onRestoreJobIdChange={setRollbackRestoreJobId}
-                  onRestoreRollbackConfirmedChange={setRollbackConfirmed}
                   onRestoreRollbackTimeoutSecsChange={setRollbackTimeoutSecs}
-                  onRunRestoreRollback={() => void submitRestoreRollback()}
+                  onRunRestoreRollback={submitRestoreRollback}
                   onTargetClientIdChange={setRollbackTargetId}
                   pending={pending}
-                  proofReady={Boolean(proofMaterial)}
+                  privilegeReady={Boolean(privilegeMaterial)}
                   restoreJobId={rollbackRestoreJobId}
-                  restoreRollbackConfirmed={rollbackConfirmed}
                   restoreRollbackTimeoutSecs={rollbackTimeoutSecs}
                   targetAgent={rollbackTarget}
                   targetClientId={rollbackTargetId}
                 />
-                <ProofVaultBox
+                <PrivilegeVaultBox
                   lastPayloadHash={lastPayloadHash}
-                  onOpenUnlock={onOpenProofUnlock}
-                  onProofMaterialChange={setProofMaterial}
-                  proofMaterial={proofMaterial}
+                  onOpenUnlock={onOpenPrivilegeUnlock}
+                  onPrivilegeMaterialChange={setPrivilegeMaterial}
+                  privilegeMaterial={privilegeMaterial}
                 />
               </>
             )}
@@ -1040,28 +1223,28 @@ export function BackupsPanel({
                   clientLabel={clientLabel}
                   forceUnprivileged={restoreForceUnprivileged}
                   lastMigrationLink={lastMigrationLink}
-                  migrationConfirmed={migrationConfirmed}
+                  linkConfirmationOpen={pendingConfirmation === "migration-link"}
                   migrationNote={migrationNote}
                   migrationRestorePlanId={migrationRestorePlanId}
-                  onMigrationConfirmedChange={setMigrationConfirmed}
                   onMigrationNoteChange={setMigrationNote}
                   onMigrationRestorePlanIdChange={setMigrationRestorePlanId}
-                  onRunMigrationRestore={() => void submitMigrationRun()}
-                  onSubmit={() => void submitMigrationLink()}
+                  onRunMigrationRestore={submitMigrationRun}
+                  onSubmit={submitMigrationLink}
                   pending={pending}
                   postRestoreArgv={restorePostRestoreArgv}
                   privateKeyReady={Boolean(restorePrivateKeyHex.trim())}
-                  proofReady={Boolean(proofMaterial)}
+                  privilegeReady={Boolean(privilegeMaterial)}
                   restoreDryRun={restoreDryRun}
                   restorePlans={restorePlans}
+                  runConfirmationOpen={pendingConfirmation === "migration-run"}
                   selectedPlan={selectedMigrationRestorePlan}
                   sourceBackup={selectedMigrationSourceBackup}
                 />
-                <ProofVaultBox
+                <PrivilegeVaultBox
                   lastPayloadHash={lastPayloadHash}
-                  onOpenUnlock={onOpenProofUnlock}
-                  onProofMaterialChange={setProofMaterial}
-                  proofMaterial={proofMaterial}
+                  onOpenUnlock={onOpenPrivilegeUnlock}
+                  onPrivilegeMaterialChange={setPrivilegeMaterial}
+                  privilegeMaterial={privilegeMaterial}
                 />
               </>
             )}

@@ -12,6 +12,7 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
         client_id: "client-a".to_string(),
         job_id,
+        command_version: 1,
         accepted: true,
         message: "accepted".to_string(),
         outputs: vec![CommandOutput {
@@ -39,6 +40,7 @@ fn gateway_canceled_output_maps_to_canceled_target_status() {
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
         client_id: "client-a".to_string(),
         job_id,
+        command_version: 1,
         accepted: true,
         message: "accepted".to_string(),
         outputs: vec![CommandOutput {
@@ -58,6 +60,127 @@ fn gateway_canceled_output_maps_to_canceled_target_status() {
     assert_eq!(outcome.exit_code, Some(130));
     assert!(outcome.accepted);
     assert_eq!(aggregate_job_status(&[outcome.status], 1), "canceled");
+}
+
+#[test]
+fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        command_version: 1,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "file_write_text",
+                "status": "failed",
+                "reason": "permission denied",
+            }))
+            .unwrap(),
+            exit_code: Some(13),
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.exit_code, Some(13));
+    assert_eq!(outcome.message, "file_write_text: permission denied");
+}
+
+#[test]
+fn protocol_mismatch_detects_unsupported_command_status_output() {
+    let job_id = Uuid::new_v4();
+    let outcome = TargetDispatchOutcome {
+        status: "failed".to_string(),
+        exit_code: Some(1),
+        command_version: Some(2),
+        accepted: true,
+        message: "failed".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "unsupported_command_version",
+                "command_type": "shell_argv",
+                "requested_version": 2,
+                "supported_min_version": 1,
+                "supported_max_version": 1,
+            }))
+            .unwrap(),
+            exit_code: Some(1),
+            done: true,
+        }],
+    };
+
+    assert_eq!(
+        protocol_mismatch_reason(
+            &outcome,
+            2,
+            &JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+        )
+        .as_deref(),
+        Some("agent_rejected_unsupported_shell_argv_command_version")
+    );
+}
+
+#[test]
+fn protocol_mismatch_detects_lower_response_command_version() {
+    let job_id = Uuid::new_v4();
+    let outcome = TargetDispatchOutcome {
+        status: "completed".to_string(),
+        exit_code: Some(0),
+        command_version: Some(1),
+        accepted: true,
+        message: "ok".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "command_status",
+                "command_version": 1,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    };
+
+    assert_eq!(
+        protocol_mismatch_reason(
+            &outcome,
+            2,
+            &JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+        )
+        .as_deref(),
+        Some("agent_returned_lower_command_version")
+    );
+}
+
+#[test]
+fn stale_target_message_keeps_failure_reason_explicit() {
+    assert_eq!(
+        stale_target_message(
+            "unsupported_command_version",
+            "agent_rejected_unsupported_shell_argv_command_version",
+        ),
+        "stale: agent_rejected_unsupported_shell_argv_command_version; unsupported_command_version",
+    );
+    assert_eq!(
+        stale_target_message(
+            "stale: prior detail",
+            "agent_returned_lower_command_version"
+        ),
+        "stale: prior detail",
+    );
 }
 
 #[test]
@@ -387,8 +510,14 @@ fn test_agent(id: &str, capabilities: AgentCapabilitySnapshot) -> AgentView {
     AgentView {
         id: id.to_string(),
         display_name: id.to_string(),
-        status: "connected".to_string(),
+        status: "online".to_string(),
         tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        stale_since: None,
+        stale_reason: None,
         capabilities,
     }
 }

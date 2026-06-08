@@ -368,112 +368,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn list_auth_proof_rotation_history(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<AuthProofRotationHistoryView>> {
-        match self {
-            Self::Memory(memory) => {
-                let jobs = memory.jobs.read().await;
-                let operations = memory.job_operations.read().await;
-                let targets = memory.job_targets.read().await;
-                let rows =
-                    jobs.iter()
-                        .rev()
-                        .filter_map(|job| {
-                            let JobCommand::AuthProofKeyRotate {
-                                rotation_generation,
-                                ..
-                            } = operations.get(&job.id)?
-                            else {
-                                return None;
-                            };
-                            let counts = target_status_counts(
-                                targets.iter().filter(|target| target.job_id == job.id).map(
-                                    |target| {
-                                        (
-                                            target.status.as_str(),
-                                            target.completed_at.as_deref().is_none(),
-                                        )
-                                    },
-                                ),
-                            );
-                            Some(AuthProofRotationHistoryView {
-                                job_id: job.id,
-                                actor_id: job.actor_id,
-                                status: job.status.clone(),
-                                target_count: job.target_count,
-                                completed_count: counts.completed,
-                                failed_count: counts.failed,
-                                pending_count: counts.pending,
-                                rotation_generation: rotation_generation.clone(),
-                                payload_hash: job.payload_hash.clone(),
-                                created_at: job.created_at.clone(),
-                                completed_at: job.completed_at.clone(),
-                            })
-                        })
-                        .take(limit as usize)
-                        .collect();
-                Ok(rows)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        job.id,
-                        job.actor_id,
-                        job.status,
-                        job.target_count,
-                        job.payload_hash,
-                        job.operation ->> 'rotation_generation' AS rotation_generation,
-                        job.created_at::text AS created_at,
-                        job.completed_at::text AS completed_at,
-                        COUNT(target.client_id) FILTER (WHERE target.status = 'completed') AS completed_count,
-                        COUNT(target.client_id) FILTER (
-                            WHERE target.status IN ('queued', 'dispatching')
-                              AND target.completed_at IS NULL
-                        ) AS pending_count,
-                        COUNT(target.client_id) FILTER (
-                            WHERE target.client_id IS NOT NULL
-                              AND target.status <> 'completed'
-                              AND NOT (
-                                  target.status IN ('queued', 'dispatching')
-                                  AND target.completed_at IS NULL
-                              )
-                        ) AS failed_count
-                    FROM jobs job
-                    LEFT JOIN job_targets target ON target.job_id = job.id
-                    WHERE job.command_type = 'auth_proof_key_rotate'
-                       OR job.operation ->> 'type' = 'auth_proof_key_rotate'
-                    GROUP BY job.id
-                    ORDER BY job.created_at DESC, job.id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(AuthProofRotationHistoryView {
-                            job_id: row.try_get("id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            status: row.try_get("status")?,
-                            target_count: row.try_get("target_count")?,
-                            completed_count: i64_to_i32(row.try_get("completed_count")?),
-                            failed_count: i64_to_i32(row.try_get("failed_count")?),
-                            pending_count: i64_to_i32(row.try_get("pending_count")?),
-                            rotation_generation: row.try_get("rotation_generation")?,
-                            payload_hash: row.try_get("payload_hash")?,
-                            created_at: row.try_get("created_at")?,
-                            completed_at: row.try_get("completed_at")?,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn list_job_targets(&self, job_id: Uuid) -> Result<Vec<JobTargetView>> {
         match self {
             Self::Memory(memory) => Ok(memory
@@ -491,6 +385,7 @@ impl Repository {
                         job_id,
                         client_id,
                         status,
+                        message,
                         exit_code,
                         started_at::text AS started_at,
                         completed_at::text AS completed_at
@@ -508,6 +403,7 @@ impl Repository {
                             job_id: row.try_get("job_id")?,
                             client_id: row.try_get("client_id")?,
                             status: row.try_get("status")?,
+                            message: row.try_get("message")?,
                             exit_code: row.try_get("exit_code")?,
                             started_at: row.try_get("started_at")?,
                             completed_at: row.try_get("completed_at")?,
@@ -672,7 +568,6 @@ impl Repository {
             "force_unprivileged": request.force_unprivileged,
             "idempotency_key": request.idempotency_key,
             "reconnect_policy": request.reconnect_policy,
-            "has_envelope": request.envelope.is_some(),
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
@@ -712,6 +607,7 @@ impl Repository {
                                 job_id,
                                 client_id,
                                 status: "rejected_authorization_required".to_string(),
+                                message: Some("authorization required".to_string()),
                                 exit_code: None,
                                 started_at: None,
                                 completed_at: Some(created_at.clone()),
@@ -755,14 +651,15 @@ impl Repository {
                     sqlx::query(
                         r#"
                         INSERT INTO job_targets (
-                            job_id, client_id, status, completed_at
+                            job_id, client_id, status, message, completed_at
                         )
-                        VALUES ($1, $2, $3, now())
+                        VALUES ($1, $2, $3, $4, now())
                         "#,
                     )
                     .bind(job_id)
                     .bind(client_id)
                     .bind("rejected_authorization_required")
+                    .bind("authorization required")
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -814,6 +711,45 @@ impl Repository {
         resolved_targets: &[String],
         rollout_policy: &ResolvedAgentUpdateRolloutPolicy,
     ) -> Result<Uuid> {
+        self.record_dispatching_job_with_rollout_policy_and_source(
+            request,
+            command_hash,
+            operator,
+            resolved_targets,
+            rollout_policy,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatching_job_from_schedule(
+        &self,
+        request: &CreateJobRequest,
+        command_hash: &str,
+        operator: &AuthContext,
+        resolved_targets: &[String],
+        source_schedule_id: Uuid,
+    ) -> Result<Uuid> {
+        self.record_dispatching_job_with_rollout_policy_and_source(
+            request,
+            command_hash,
+            operator,
+            resolved_targets,
+            &ResolvedAgentUpdateRolloutPolicy::default(),
+            Some(source_schedule_id),
+        )
+        .await
+    }
+
+    async fn record_dispatching_job_with_rollout_policy_and_source(
+        &self,
+        request: &CreateJobRequest,
+        command_hash: &str,
+        operator: &AuthContext,
+        resolved_targets: &[String],
+        rollout_policy: &ResolvedAgentUpdateRolloutPolicy,
+        source_schedule_id: Option<Uuid>,
+    ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
         let metadata = json!({
             "selector_expression": request.selector_expression,
@@ -827,8 +763,7 @@ impl Repository {
             "reconnect_policy": request.reconnect_policy,
             "rollout_policy_id": rollout_policy.policy_id,
             "rollout_policy_name": &rollout_policy.policy_name,
-            "has_legacy_envelope": request.envelope.is_some(),
-            "envelope_count": request.envelopes.len(),
+            "source_schedule_id": source_schedule_id,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
@@ -875,6 +810,7 @@ impl Repository {
                                 job_id,
                                 client_id,
                                 status: "queued".to_string(),
+                                message: None,
                                 exit_code: None,
                                 started_at: None,
                                 completed_at: None,
@@ -922,10 +858,10 @@ impl Repository {
                     r#"
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
-                        target_count, payload_hash, operation, idempotency_key,
+                        target_count, payload_hash, operation, source_schedule_id, idempotency_key,
                         reconnect_policy
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{"duplicate_delivery":"ignore_completed","resume_outputs":true,"cancel_on_disconnect":false}'::jsonb))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true,"cancel_on_disconnect":false}'::jsonb))
                     "#,
                 )
                 .bind(job_id)
@@ -936,6 +872,7 @@ impl Repository {
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
                 .bind(sqlx::types::Json(&operation))
+                .bind(source_schedule_id)
                 .bind(request.idempotency_key.as_deref())
                 .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
@@ -944,9 +881,9 @@ impl Repository {
                     sqlx::query(
                         r#"
                         INSERT INTO job_targets (
-                            job_id, client_id, status
+                            job_id, client_id, status, message
                         )
-                        VALUES ($1, $2, $3)
+                        VALUES ($1, $2, $3, NULL)
                         "#,
                     )
                     .bind(job_id)
@@ -1019,6 +956,7 @@ impl Repository {
                     .find(|target| target.job_id == job_id && target.client_id == client_id)
                 {
                     target.status = outcome.status.clone();
+                    target.message = Some(outcome.message.clone());
                     target.exit_code = outcome.exit_code;
                     target
                         .started_at
@@ -1118,7 +1056,8 @@ impl Repository {
                     r#"
                     UPDATE job_targets
                     SET status = $3,
-                        exit_code = $4,
+                        message = $4,
+                        exit_code = $5,
                         started_at = COALESCE(started_at, now()),
                         completed_at = now()
                     WHERE job_id = $1 AND client_id = $2
@@ -1127,6 +1066,7 @@ impl Repository {
                 .bind(job_id)
                 .bind(client_id)
                 .bind(&outcome.status)
+                .bind(&outcome.message)
                 .bind(outcome.exit_code)
                 .execute(pool)
                 .await?;
@@ -1331,32 +1271,4 @@ impl Repository {
         }
         Ok(())
     }
-}
-
-struct TargetStatusCounts {
-    completed: i32,
-    failed: i32,
-    pending: i32,
-}
-
-fn target_status_counts<'a>(targets: impl Iterator<Item = (&'a str, bool)>) -> TargetStatusCounts {
-    let mut counts = TargetStatusCounts {
-        completed: 0,
-        failed: 0,
-        pending: 0,
-    };
-    for (status, pending_without_completion) in targets {
-        if status == "completed" {
-            counts.completed += 1;
-        } else if pending_without_completion && matches!(status, "queued" | "dispatching") {
-            counts.pending += 1;
-        } else {
-            counts.failed += 1;
-        }
-    }
-    counts
-}
-
-fn i64_to_i32(value: i64) -> i32 {
-    value.clamp(0, i32::MAX as i64) as i32
 }

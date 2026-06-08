@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::vty_jobs::VtyProofContext;
+use crate::vty_jobs::VtyPrivilegeContext;
 use crate::vty_network::{
     parse_vty_tunnel_apply, parse_vty_tunnel_plan, parse_vty_tunnel_promote_telemetry,
     parse_vty_tunnel_rollback, parse_vty_tunnel_status, submit_or_render_vty_tunnel_plan,
@@ -31,7 +31,7 @@ pub(crate) fn is_vty_network_dispatch_command(command: &str) -> bool {
 pub(crate) fn submit_vty_network_dispatch_command(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     command: &str,
 ) -> Result<()> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
@@ -85,7 +85,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
             );
         }
         "tunnel-apply" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_apply(&parts[1..]) {
@@ -93,18 +93,18 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-apply --plan-file <plan.json> --side <left|right> [--backend <ifupdown|netplan|systemd-networkd>] [--timeout <1-3600>] [--proof-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-apply --plan-file <plan.json> --side <left|right> [--backend <ifupdown|netplan|systemd-networkd>] [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_apply(api_url, token, proof_context, request)?
+                submit_vty_tunnel_apply(api_url, token, privilege_context, request)?
             );
         }
         "tunnel-ospf-cost-update" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_ospf_cost_update(&parts[1..]) {
@@ -112,18 +112,18 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-ospf-cost-update --plan-file <plan.json> --side <left|right> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--timeout <1-3600>] [--proof-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-ospf-cost-update --plan-file <plan.json> --side <left|right> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_ospf_cost_update(api_url, token, proof_context, request)?
+                submit_vty_tunnel_ospf_cost_update(api_url, token, privilege_context, request)?
             );
         }
         "tunnel-rollback" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_rollback(&parts[1..]) {
@@ -131,18 +131,18 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-rollback --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--proof-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-rollback --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_rollback(api_url, token, proof_context, request)?
+                submit_vty_tunnel_rollback(api_url, token, privilege_context, request)?
             );
         }
         "tunnel-status" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_status(&parts[1..]) {
@@ -150,18 +150,18 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-status --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--proof-ttl <1-3600>]"
+                        "usage: tunnel-status --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_status(api_url, token, proof_context, request)?
+                submit_vty_tunnel_status(api_url, token, privilege_context, request)?
             );
         }
         "tunnel-probe" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_probe(&parts[1..]) {
@@ -169,18 +169,18 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-probe --plan-file <plan.json> --side <left|right> [--count <1-20>] [--interval-ms <200-10000>] [--timeout <1-3600>] [--proof-ttl <1-3600>]"
+                        "usage: tunnel-probe --plan-file <plan.json> --side <left|right> [--count <1-20>] [--interval-ms <200-10000>] [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_probe(api_url, token, proof_context, request)?
+                submit_vty_tunnel_probe(api_url, token, privilege_context, request)?
             );
         }
         "tunnel-speed-test" => {
-            if !require_proof(proof_context) {
+            if !require_privilege_unlock(privilege_context) {
                 return Ok(());
             }
             let request = match parse_vty_tunnel_speed_test(&parts[1..]) {
@@ -188,14 +188,14 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--proof-ttl <1-3600>]"
+                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
                     );
                     return Ok(());
                 }
             };
             println!(
                 "{}",
-                submit_vty_tunnel_speed_test(api_url, token, proof_context, request)?
+                submit_vty_tunnel_speed_test(api_url, token, privilege_context, request)?
             );
         }
         _ => {}
@@ -204,12 +204,12 @@ pub(crate) fn submit_vty_network_dispatch_command(
     Ok(())
 }
 
-fn require_proof(proof_context: &VtyProofContext) -> bool {
-    if proof_context.enabled {
+fn require_privilege_unlock(privilege_context: &VtyPrivilegeContext) -> bool {
+    if privilege_context.enabled {
         return true;
     }
     println!(
-        "privileged proof is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
+        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
     );
     false
 }

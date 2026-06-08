@@ -496,9 +496,13 @@ async fn build_dashboard_overview(
         available_filters,
         summary: DashboardSummaryView {
             total: scoped_agents.len(),
-            connected: scoped_agents
+            online: scoped_agents
                 .iter()
-                .filter(|agent| agent.status == "connected")
+                .filter(|agent| agent.status == "online")
+                .count(),
+            offline: scoped_agents
+                .iter()
+                .filter(|agent| agent.status == "offline")
                 .count(),
             stale: stale_agents,
             warnings: stale_agents.max(alerts.len()),
@@ -755,7 +759,7 @@ fn dashboard_group_options() -> Vec<DashboardGroupByOptionView> {
         (
             "status",
             "Status",
-            "Connected, stale, enrolled, and other client states",
+            "Online, offline, and stale client states",
         ),
         (
             "date",
@@ -1561,7 +1565,7 @@ fn build_date_groups(
         if let Some(timestamp) = parse_timestamp_unix(&backup.created_at) {
             let group = date_group_entry(&mut groups, bucket_start(timestamp));
             if backup.status == BackupRequestStatus::ArtifactMetadataRecorded.as_str() {
-                group.connected += 1;
+                group.online += 1;
             } else {
                 group.stale += 1;
             }
@@ -1591,7 +1595,8 @@ fn date_group_entry(
             kind: "date".to_string(),
             query: None,
             total: 0,
-            connected: 0,
+            online: 0,
+            offline: 0,
             stale: 0,
             warnings: 0,
             running_jobs: 0,
@@ -1621,15 +1626,18 @@ fn cluster_for_agents(
     running_job_targets: &HashMap<String, usize>,
     network_by_client: &HashMap<String, NetworkClientAggregate>,
 ) -> DashboardLabelClusterView {
-    let mut connected = 0_usize;
+    let mut online = 0_usize;
+    let mut offline = 0_usize;
     let mut stale = 0_usize;
     let mut warnings = 0_usize;
     let mut running_jobs = 0_usize;
     let mut rx_bps = 0.0_f64;
     let mut tx_bps = 0.0_f64;
     for agent in &agents {
-        if agent.status == "connected" {
-            connected += 1;
+        if agent.status == "online" {
+            online += 1;
+        } else if agent.status == "offline" {
+            offline += 1;
         } else if is_degraded_agent_status(&agent.status) {
             stale += 1;
         }
@@ -1652,7 +1660,8 @@ fn cluster_for_agents(
         kind,
         query: query.clone(),
         total,
-        connected,
+        online,
+        offline,
         stale,
         warnings,
         running_jobs,
@@ -1838,7 +1847,7 @@ fn is_running_job_status(status: &str) -> bool {
 }
 
 fn is_degraded_agent_status(status: &str) -> bool {
-    status != "connected" && status != "unknown"
+    status == "stale"
 }
 
 fn ratio(numerator: i128, denominator: i128) -> Option<f64> {

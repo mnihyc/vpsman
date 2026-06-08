@@ -557,10 +557,10 @@ fn summarize_server_drift(
     let mut reasons = Vec::new();
     for client_id in [left_client_id, right_client_id] {
         match agent_status.get(client_id).map(String::as_str) {
-            Some("connected") => {}
+            Some("online") => {}
             Some(status) => {
                 offline_client_ids.push(client_id.to_string());
-                reasons.push(format!("endpoint_not_connected:{client_id}:{status}"));
+                reasons.push(format!("endpoint_not_online:{client_id}:{status}"));
             }
             None => {
                 offline_client_ids.push(client_id.to_string());
@@ -607,7 +607,7 @@ fn topology_drift_policy(
     runtime_degraded: bool,
 ) -> String {
     if convergence_blocked {
-        "hold_convergence_until_endpoints_connected"
+        "hold_convergence_until_endpoints_online"
     } else if import_candidate_count > 0 {
         "observe_only_until_import_promoted"
     } else if runtime_degraded {

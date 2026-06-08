@@ -27,8 +27,6 @@ pub(crate) enum EnrollmentClaimOutcome {
     InvalidToken,
     ExpiredToken,
     UsedToken,
-    ProvisionClientIdSupplied,
-    TokenClientMismatch,
     ExistingClientRequiresReenrollmentToken,
     ReenrollmentClientMissing,
     ReenrollmentClientKeyChanged,
@@ -367,10 +365,7 @@ impl Repository {
         request: &ClaimEnrollmentRequest,
     ) -> Result<EnrollmentClaimOutcome> {
         let context = EnrollmentClaimContext {
-            fallback_display_name: request
-                .client_id
-                .clone()
-                .unwrap_or_else(|| "pending-enrollment".to_string()),
+            fallback_display_name: "pending-enrollment".to_string(),
         };
         self.claim_enrollment_with_context(settings, &context, request)
             .await
@@ -402,14 +397,8 @@ impl Repository {
                 }
                 let tags = enrollment_claim_tags(settings, &token.default_tags);
                 let policy = EnrollmentTokenPolicy::from_record(token);
-                let effective_client_id = match claim_client_id(&policy, request) {
+                let effective_client_id = match claim_client_id(&policy) {
                     Ok(client_id) => client_id,
-                    Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied) => {
-                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
-                    }
-                    Err(EnrollmentClaimPolicy::TokenClientMismatch) => {
-                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
-                    }
                     Err(EnrollmentClaimPolicy::ReenrollmentClientMissing) => {
                         return Ok(EnrollmentClaimOutcome::ReenrollmentClientMissing);
                     }
@@ -425,12 +414,6 @@ impl Repository {
                     .cloned();
                 match enforce_claim_policy(&policy, existing_public_key.as_deref()) {
                     EnrollmentClaimPolicy::Allowed => {}
-                    EnrollmentClaimPolicy::ProvisionClientIdSupplied => {
-                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
-                    }
-                    EnrollmentClaimPolicy::TokenClientMismatch => {
-                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
-                    }
                     EnrollmentClaimPolicy::ExistingClientRequiresReenrollmentToken => {
                         return Ok(EnrollmentClaimOutcome::ExistingClientRequiresReenrollmentToken);
                     }
@@ -497,8 +480,6 @@ impl Repository {
                 Ok(EnrollmentClaimOutcome::Accepted(Box::new(claim_response(
                     settings,
                     &effective_client_id,
-                    display_name,
-                    tags,
                     policy.update_config(&settings.update),
                 ))))
             }
@@ -562,14 +543,8 @@ impl Repository {
                     unmanaged_update_restart_agent: row
                         .try_get("unmanaged_update_restart_agent")?,
                 };
-                let effective_client_id = match claim_client_id(&policy, request) {
+                let effective_client_id = match claim_client_id(&policy) {
                     Ok(client_id) => client_id,
-                    Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied) => {
-                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
-                    }
-                    Err(EnrollmentClaimPolicy::TokenClientMismatch) => {
-                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
-                    }
                     Err(EnrollmentClaimPolicy::ReenrollmentClientMissing) => {
                         return Ok(EnrollmentClaimOutcome::ReenrollmentClientMissing);
                     }
@@ -593,12 +568,6 @@ impl Repository {
                 });
                 match enforce_claim_policy(&policy, existing_key) {
                     EnrollmentClaimPolicy::Allowed => {}
-                    EnrollmentClaimPolicy::ProvisionClientIdSupplied => {
-                        return Ok(EnrollmentClaimOutcome::ProvisionClientIdSupplied);
-                    }
-                    EnrollmentClaimPolicy::TokenClientMismatch => {
-                        return Ok(EnrollmentClaimOutcome::TokenClientMismatch);
-                    }
                     EnrollmentClaimPolicy::ExistingClientRequiresReenrollmentToken => {
                         return Ok(EnrollmentClaimOutcome::ExistingClientRequiresReenrollmentToken);
                     }
@@ -614,11 +583,11 @@ impl Repository {
                     INSERT INTO clients (
                         id, display_name, public_key, status, agent_version, os_release, arch
                     )
-                    VALUES ($1, $2, $3, 'enrolled', '', '', '')
+                    VALUES ($1, $2, $3, 'offline', '', '', '')
                     ON CONFLICT (id) DO UPDATE SET
                         display_name = EXCLUDED.display_name,
                         public_key = EXCLUDED.public_key,
-                        status = 'enrolled'
+                        status = CASE WHEN clients.status = 'stale' THEN clients.status ELSE 'offline' END
                     "#,
                 )
                 .bind(&effective_client_id)
@@ -696,8 +665,6 @@ impl Repository {
                 Ok(EnrollmentClaimOutcome::Accepted(Box::new(claim_response(
                     settings,
                     &effective_client_id,
-                    display_name,
-                    tags,
                     policy.update_config(&settings.update),
                 ))))
             }
@@ -839,8 +806,6 @@ impl EnrollmentTokenPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnrollmentClaimPolicy {
     Allowed,
-    ProvisionClientIdSupplied,
-    TokenClientMismatch,
     ExistingClientRequiresReenrollmentToken,
     ReenrollmentClientMissing,
     ReenrollmentClientKeyChanged,
@@ -856,7 +821,7 @@ async fn upsert_memory_unenrolled_client(
     let mut agents = memory.agents.write().await;
     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
         agent.display_name = display_name.to_string();
-        agent.status = "unenrolled".to_string();
+        agent.status = "offline".to_string();
         for tag in tags {
             if !agent.tags.iter().any(|existing| existing == tag) {
                 agent.tags.push(tag.clone());
@@ -867,8 +832,14 @@ async fn upsert_memory_unenrolled_client(
         agents.push(crate::model::AgentView {
             id: client_id.to_string(),
             display_name: display_name.to_string(),
-            status: "unenrolled".to_string(),
+            status: "offline".to_string(),
             tags: tags.to_vec(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: Default::default(),
         });
     }
@@ -887,7 +858,7 @@ async fn insert_postgres_unenrolled_client(
         INSERT INTO clients (
             id, display_name, public_key, status, agent_version, os_release, arch
         )
-        VALUES ($1, $2, $3, 'unenrolled', '', '', '')
+        VALUES ($1, $2, $3, 'offline', '', '', '')
         "#,
     )
     .bind(client_id)
@@ -970,24 +941,10 @@ fn enforce_claim_policy(
 
 fn claim_client_id(
     policy: &EnrollmentTokenPolicy,
-    request: &ClaimEnrollmentRequest,
 ) -> std::result::Result<String, EnrollmentClaimPolicy> {
     let Some(token_client_id) = policy.allowed_client_id.as_deref() else {
         return Err(EnrollmentClaimPolicy::ReenrollmentClientMissing);
     };
-    if policy.purpose == ENROLLMENT_PURPOSE_PROVISION {
-        if request.client_id.as_deref().is_some() {
-            return Err(EnrollmentClaimPolicy::ProvisionClientIdSupplied);
-        }
-        return Ok(token_client_id.to_string());
-    }
-    if request
-        .client_id
-        .as_deref()
-        .is_some_and(|client_id| client_id != token_client_id)
-    {
-        return Err(EnrollmentClaimPolicy::TokenClientMismatch);
-    }
     Ok(token_client_id.to_string())
 }
 
@@ -1008,7 +965,7 @@ async fn upsert_memory_enrolled_client(
     let mut agents = memory.agents.write().await;
     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
         agent.display_name = display_name.to_string();
-        agent.status = "enrolled".to_string();
+        agent.status = "offline".to_string();
         for tag in tags {
             if !agent.tags.iter().any(|existing| existing == tag) {
                 agent.tags.push(tag.clone());
@@ -1020,8 +977,14 @@ async fn upsert_memory_enrolled_client(
     agents.push(crate::model::AgentView {
         id: client_id.to_string(),
         display_name: display_name.to_string(),
-        status: "enrolled".to_string(),
+        status: "offline".to_string(),
         tags: tags.to_vec(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        stale_since: None,
+        stale_reason: None,
         capabilities: Default::default(),
     });
     drop(agents);
@@ -1030,13 +993,10 @@ async fn upsert_memory_enrolled_client(
 fn claim_response(
     settings: &EnrollmentSettings,
     client_id: &str,
-    display_name: String,
-    tags: Vec<String>,
     update: AgentUpdateConfig,
 ) -> ClaimEnrollmentResponse {
     ClaimEnrollmentResponse {
         client_id: client_id.to_string(),
-        display_name,
         tcp_endpoints: settings.tcp_endpoints.clone(),
         discovery_url: settings.discovery_url.clone(),
         noise_mode: settings.noise_mode,
@@ -1047,7 +1007,6 @@ fn claim_response(
             .clone(),
         telemetry_light_secs: settings.telemetry_light_secs,
         telemetry_full_secs: settings.telemetry_full_secs,
-        tags,
         update,
     }
 }

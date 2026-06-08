@@ -64,15 +64,6 @@ pub(crate) fn id_selector_expression(client_id: &str) -> String {
     format!("id:{}", client_id.trim())
 }
 
-pub(crate) fn or_selector_expression(selectors: impl IntoIterator<Item = String>) -> String {
-    selectors
-        .into_iter()
-        .map(|selector| selector.trim().to_string())
-        .filter(|selector| !selector.is_empty())
-        .collect::<Vec<_>>()
-        .join(" || ")
-}
-
 fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let chars = input.char_indices().collect::<Vec<_>>();
@@ -323,8 +314,14 @@ mod tests {
         AgentView {
             id: id.to_string(),
             display_name: name.to_string(),
-            status: "connected".to_string(),
+            status: "online".to_string(),
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            stale_since: None,
+            stale_reason: None,
             capabilities: AgentCapabilitySnapshot::default(),
         }
     }

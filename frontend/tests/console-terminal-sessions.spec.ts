@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -16,8 +16,8 @@ async function dispatchWithPrompt(composer: Locator) {
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
 
-async function unlockTerminalProof(page: Page) {
-  await unlockProofFromTop(page);
+async function unlockTerminalPrivilege(page: Page) {
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Jobs", "Terminal sessions");
 }
 
@@ -29,7 +29,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await expect(page.getByRole("button", { name: "Poll terminal session 71717171" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Input terminal session 71717171" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Close terminal session 71717171" })).toBeDisabled();
-  await unlockTerminalProof(page);
+  await unlockTerminalPrivilege(page);
 
   const composer = page.locator(".commandComposer");
   await activate(page.getByRole("button", { name: "Attach terminal session 61616161" }));
@@ -62,7 +62,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     selector_expression: "id:agent-sfo-01",
-    command: "terminal_session",
+    command: "terminal_input",
     operation: {
       input_seq: 3,
       session_id: "61616161-2222-4333-8444-555555555555",
@@ -77,7 +77,7 @@ test("dispatches terminal poll from retained session inventory", async ({ page }
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Terminal sessions");
-  await unlockTerminalProof(page);
+  await unlockTerminalPrivilege(page);
 
   const composer = page.locator(".commandComposer");
   await activate(page.getByRole("button", { name: "Poll terminal session 61616161" }));
@@ -92,7 +92,7 @@ test("dispatches terminal poll from retained session inventory", async ({ page }
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     selector_expression: "id:agent-sfo-01",
-    command: "terminal_session",
+    command: "terminal_poll",
     operation: {
       replay_from_seq: 1,
       session_id: "61616161-2222-4333-8444-555555555555",

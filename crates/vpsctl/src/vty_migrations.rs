@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     commands_migrations::migration_run_with_credentials, http::http_post_json,
-    vty_jobs::VtyProofContext,
+    vty_jobs::VtyPrivilegeContext,
 };
 
 pub(crate) struct VtyMigrationLinkRequest {
@@ -140,7 +140,7 @@ pub(crate) fn submit_vty_migration_link(
 pub(crate) fn submit_vty_migration_run(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyMigrationRunRequest,
 ) -> Result<String> {
     migration_run_with_credentials(
@@ -150,8 +150,8 @@ pub(crate) fn submit_vty_migration_run(
         request.artifact_file,
         request.private_key_env,
         request.note,
-        &proof_context.password,
-        &proof_context.salt_hex,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
         300,
         request.timeout_secs,
         request.confirmed,

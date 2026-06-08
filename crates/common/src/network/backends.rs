@@ -56,7 +56,7 @@ pub fn render_backend_config_for_endpoint(
     Ok(TunnelBackendConfig { backend, files })
 }
 
-pub fn backend_config_proof_payload(config: &TunnelBackendConfig) -> Vec<u8> {
+pub fn backend_config_signature_payload(config: &TunnelBackendConfig) -> Vec<u8> {
     let mut payload = String::new();
     for file in &config.files {
         payload.push_str("vpsman-network-backend-file-v1\n");

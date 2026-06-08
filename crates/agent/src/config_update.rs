@@ -4,24 +4,78 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use vpsman_common::{
     validate_data_source_config_patch_section, validate_hot_config_update, AgentConfig,
     CommandOutput, OutputStream, MAX_AGENT_HOT_CONFIG_BYTES,
 };
+
+pub(crate) const REDACTED_PRESERVE: &str = "<redacted:preserve>";
+
+pub(crate) fn read_redacted_config(
+    job_id: uuid::Uuid,
+    current: &AgentConfig,
+    config_path: &Path,
+) -> Result<Vec<CommandOutput>> {
+    let mut redacted = current.clone();
+    redact_preserved_fields(&mut redacted);
+    let redacted_toml =
+        toml::to_string_pretty(&redacted).context("failed to serialize redacted config")?;
+    Ok(vec![CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&serde_json::json!({
+            "type": "config_read",
+            "status": "read",
+            "config_path": config_path.display().to_string(),
+            "toml": redacted_toml,
+            "base_config_sha256_hex": config_sha256_hex(current)?,
+            "redaction_token": REDACTED_PRESERVE,
+            "redacted_fields": redacted_config_fields(),
+            "supported_sections": [
+                "display_name",
+                "tcp_endpoints",
+                "discovery_url",
+                "backup",
+                "update",
+                "execution",
+                "telemetry",
+                "network",
+                "telemetry_light_secs",
+                "telemetry_full_secs",
+                "tags"
+            ],
+            "autocomplete": supported_config_autocomplete(),
+        }))?,
+        exit_code: Some(0),
+        done: true,
+    }])
+}
 
 pub(crate) fn apply_hot_config_update(
     job_id: uuid::Uuid,
     current: &mut AgentConfig,
     config_path: &Path,
     toml_document: &str,
+    preserve_redacted: bool,
+    base_config_sha256_hex: Option<&str>,
 ) -> Result<Vec<CommandOutput>> {
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
         "hot config TOML exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
-    let updated: AgentConfig =
+    if let Some(base_config_sha256_hex) = base_config_sha256_hex {
+        anyhow::ensure!(
+            config_sha256_hex(current)? == base_config_sha256_hex,
+            "hot config base hash is stale"
+        );
+    }
+    let mut updated: AgentConfig =
         toml::from_str(toml_document).context("failed to parse hot config TOML")?;
+    if preserve_redacted {
+        preserve_redacted_fields(current, &mut updated);
+    }
     validate_hot_config_update(current, &updated)
         .map_err(|message| anyhow::anyhow!("invalid hot config: {message}"))?;
     persist_config_update(current, &updated, config_path)?;
@@ -35,10 +89,113 @@ pub(crate) fn apply_hot_config_update(
             "status": "applied",
             "config_path": config_path.display().to_string(),
             "rollback_path": rollback_path(config_path).display().to_string(),
+            "base_config_sha256_hex": base_config_sha256_hex,
+            "new_config_sha256_hex": config_sha256_hex(current)?,
         }))?,
         exit_code: Some(0),
         done: true,
     }])
+}
+
+pub(crate) fn config_sha256_hex(config: &AgentConfig) -> Result<String> {
+    let document = toml::to_string_pretty(config).context("failed to serialize config for hash")?;
+    Ok(hex::encode(Sha256::digest(document.as_bytes())))
+}
+
+fn redact_preserved_fields(config: &mut AgentConfig) {
+    config.client_id = REDACTED_PRESERVE.to_string();
+    if config.noise.client_private_key_hex.is_some() {
+        config.noise.client_private_key_hex = Some(REDACTED_PRESERVE.to_string());
+    }
+    if config.noise.server_public_key_hex.is_some() {
+        config.noise.server_public_key_hex = Some(REDACTED_PRESERVE.to_string());
+    }
+    if config.auth.server_ed25519_public_key_hex.is_some() {
+        config.auth.server_ed25519_public_key_hex = Some(REDACTED_PRESERVE.to_string());
+    }
+    if config.update.trusted_artifact_signing_key_hex.is_some() {
+        config.update.trusted_artifact_signing_key_hex = Some(REDACTED_PRESERVE.to_string());
+    }
+}
+
+fn preserve_redacted_fields(current: &AgentConfig, updated: &mut AgentConfig) {
+    if updated.client_id == REDACTED_PRESERVE {
+        updated.client_id = current.client_id.clone();
+    }
+    if updated.noise.client_private_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
+        updated.noise.client_private_key_hex = current.noise.client_private_key_hex.clone();
+    }
+    if updated.noise.server_public_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
+        updated.noise.server_public_key_hex = current.noise.server_public_key_hex.clone();
+    }
+    if updated.auth.server_ed25519_public_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
+        updated.auth.server_ed25519_public_key_hex =
+            current.auth.server_ed25519_public_key_hex.clone();
+    }
+    if updated.update.trusted_artifact_signing_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
+        updated.update.trusted_artifact_signing_key_hex =
+            current.update.trusted_artifact_signing_key_hex.clone();
+    }
+}
+
+fn redacted_config_fields() -> Vec<&'static str> {
+    vec![
+        "client_id",
+        "noise.client_private_key_hex",
+        "noise.server_public_key_hex",
+        "auth.server_ed25519_public_key_hex",
+        "update.trusted_artifact_signing_key_hex",
+    ]
+}
+
+fn supported_config_autocomplete() -> serde_json::Value {
+    serde_json::json!({
+        "top_level": [
+            "display_name",
+            "tcp_endpoints",
+            "discovery_url",
+            "telemetry_light_secs",
+            "telemetry_full_secs",
+            "tags"
+        ],
+        "sections": {
+            "backup": ["recipient_public_key_hex", "max_plaintext_bytes"],
+            "update": [
+                "unmanaged_enabled",
+                "unmanaged_version_url",
+                "unmanaged_interval_secs",
+                "unmanaged_jitter_secs",
+                "unmanaged_activate",
+                "unmanaged_restart_agent"
+            ],
+            "execution": [
+                "shell_script_argv",
+                "working_directory",
+                "environment_policy",
+                "environment_keep",
+                "environment_set",
+                "pty_policy",
+                "process_cleanup"
+            ],
+            "telemetry": [
+                "source",
+                "proc_root",
+                "sys_class_net_dir",
+                "hostname_file",
+                "os_release_file",
+                "custom_metrics_command"
+            ],
+            "network": [
+                "root_dir",
+                "backend",
+                "preset",
+                "apply_enabled",
+                "validate_enabled",
+                "reload_enabled",
+                "runtime_reconcile_enabled"
+            ]
+        }
+    })
 }
 
 pub(crate) fn apply_data_source_config_patch(
@@ -77,44 +234,6 @@ pub(crate) fn apply_data_source_config_patch(
         exit_code: Some(0),
         done: true,
     }])
-}
-
-pub(crate) fn rotate_auth_proof_key(
-    job_id: uuid::Uuid,
-    current: &mut AgentConfig,
-    config_path: &Path,
-    new_proof_key_hex: &str,
-    rotation_generation: Option<&str>,
-) -> Result<Vec<CommandOutput>> {
-    validate_proof_key_hex(new_proof_key_hex)?;
-    if let Some(rotation_generation) = rotation_generation {
-        anyhow::ensure!(
-            !rotation_generation.trim().is_empty()
-                && rotation_generation.len() <= 128
-                && !rotation_generation.chars().any(char::is_control),
-            "proof rotation generation is invalid"
-        );
-    }
-    if current.auth.proof_key_hex.as_deref() == Some(new_proof_key_hex) {
-        return Ok(vec![proof_rotation_status(
-            job_id,
-            config_path,
-            rotation_generation,
-            "already_current",
-        )?]);
-    }
-
-    let mut updated = current.clone();
-    updated.auth.proof_key_hex = Some(new_proof_key_hex.to_string());
-    persist_config_update(current, &updated, config_path)?;
-    *current = updated;
-
-    Ok(vec![proof_rotation_status(
-        job_id,
-        config_path,
-        rotation_generation,
-        "applied",
-    )?])
 }
 
 fn merge_data_source_patch(target: &mut toml::Value, patch: toml::Value) -> Result<()> {
@@ -208,35 +327,6 @@ fn persist_config_update(
     Ok(())
 }
 
-fn validate_proof_key_hex(value: &str) -> Result<()> {
-    anyhow::ensure!(
-        value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit),
-        "new proof key must be 32-byte hex"
-    );
-    Ok(())
-}
-
-fn proof_rotation_status(
-    job_id: uuid::Uuid,
-    config_path: &Path,
-    rotation_generation: Option<&str>,
-    status: &str,
-) -> Result<CommandOutput> {
-    Ok(CommandOutput {
-        job_id,
-        stream: OutputStream::Status,
-        data: serde_json::to_vec(&serde_json::json!({
-            "type": "auth_proof_key_rotate",
-            "status": status,
-            "config_path": config_path.display().to_string(),
-            "rollback_path": rollback_path(config_path).display().to_string(),
-            "rotation_generation": rotation_generation,
-        }))?,
-        exit_code: Some(0),
-        done: true,
-    })
-}
-
 fn rollback_path(config_path: &Path) -> PathBuf {
     let file_name = config_path
         .file_name()
@@ -286,6 +376,8 @@ mod tests {
             &mut current,
             &path,
             &toml::to_string_pretty(&updated).unwrap(),
+            false,
+            None,
         )
         .unwrap();
 
@@ -319,6 +411,8 @@ mod tests {
             &mut current,
             &path,
             &toml::to_string_pretty(&updated).unwrap(),
+            false,
+            None,
         )
         .is_err());
         assert!(!path.exists());

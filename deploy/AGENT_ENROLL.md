@@ -86,17 +86,19 @@ Copy the `token` value from the response. Tokens are consumed when claimed. The
 `assigned_client_id` value is the server-side VPS identity that will be written
 to the agent config during claim.
 
+After token creation, the Access panel shows a copyable one-line root install
+command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE=root VPSMAN_ENROLLMENT_API_URL=https://panel.example.com VPSMAN_ENROLLMENT_TOKEN=<token> bash
+```
+
 `--default-display-name` is not written into `agent.toml`. Do not supply a
 client id for normal provisioning; use `reenrollment-token-create` when a
 rebuilt VPS must keep an existing server identity.
 
-Keep a local super password and a 32-byte salt for privileged operations. The
-agent config stores only the derived proof key, not the plaintext password.
-
-```sh
-export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
-```
+The agent config stores gateway identity and server signing trust only. It does
+not store super-password material or privilege verifier material.
 
 ## 3. Choose Install Mode
 
@@ -122,8 +124,6 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-ag
   VPSMAN_INSTALL_MODE=root \
   VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
   VPSMAN_ENROLLMENT_TOKEN=<token> \
-  VPSMAN_SUPER_PASSWORD=<local_super_password> \
-  VPSMAN_SUPER_SALT_HEX=<64_hex_salt> \
   bash
 ```
 
@@ -158,8 +158,6 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-ag
   VPSMAN_INSTALL_MODE=unprivileged \
   VPSMAN_ENROLLMENT_API_URL=https://panel.example.com \
   VPSMAN_ENROLLMENT_TOKEN=<token> \
-  VPSMAN_SUPER_PASSWORD=<local_super_password> \
-  VPSMAN_SUPER_SALT_HEX=<64_hex_salt> \
   bash
 ```
 

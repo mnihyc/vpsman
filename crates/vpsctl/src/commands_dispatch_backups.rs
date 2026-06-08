@@ -28,8 +28,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             recipient_public_key_hex,
             clients,
             tags,
-            interval_secs,
-            start_at_unix,
+            cron_expr,
             disabled,
             catch_up_policy,
             catch_up_limit,
@@ -49,8 +48,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 recipient_public_key_hex,
                 clients,
                 tags,
-                interval_secs,
-                start_at_unix,
+                cron_expr,
                 !disabled,
                 catch_up_policy,
                 catch_up_limit,
@@ -95,7 +93,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             note,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             confirmed,
         } => {
             commands_backups::backup_request(
@@ -108,7 +106,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 note,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 confirmed,
             )?;
             Ok(None)
@@ -121,7 +119,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             tags,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
         } => {
@@ -135,7 +133,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 tags,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 timeout_secs,
                 confirmed,
             )?;
@@ -216,7 +214,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             note,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             confirmed,
         } => {
             commands_backups::restore_plan(
@@ -230,7 +228,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 note,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 confirmed,
             )?;
             Ok(None)
@@ -245,7 +243,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             destination_root,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -262,7 +260,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 destination_root,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 timeout_secs,
                 confirmed,
                 force_unprivileged,
@@ -274,7 +272,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             target_client_id,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -286,7 +284,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 target_client_id,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 timeout_secs,
                 confirmed,
                 force_unprivileged,
@@ -308,7 +306,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             note,
             password_env,
             super_salt_hex,
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged,
@@ -322,7 +320,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 note,
                 password_env,
                 super_salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
                 timeout_secs,
                 confirmed,
                 force_unprivileged,
@@ -375,24 +373,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::SigningKeygen => {
             commands_keys::signing_keygen()?;
-            Ok(None)
-        }
-        Command::Proof {
-            scope,
-            salt_hex,
-            payload_hash_hex,
-            password_env,
-            command_id,
-            ttl_secs,
-        } => {
-            commands_keys::print_proof(
-                &scope,
-                &salt_hex,
-                &payload_hash_hex,
-                &password_env,
-                command_id.as_deref(),
-                ttl_secs,
-            )?;
             Ok(None)
         }
         Command::Vty => {

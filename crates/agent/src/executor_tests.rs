@@ -8,20 +8,18 @@ mod tests {
     use std::{io::Cursor, os::unix::fs::PermissionsExt};
     use tokio::sync::mpsc;
     use vpsman_common::{
-        derive_super_key, encode_json, payload_hash, random_nonce, sign_command_envelope,
-        sign_privilege_proof, AgentAuthConfig, AgentConfig, AgentExecutionConfig,
-        AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
+        encode_json, payload_hash, sign_command_envelope, AgentAuthConfig, AgentConfig,
+        AgentExecutionConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
         AgentExecutionPtyPolicy, AgentProcessInventorySource, AgentUserSessionsSource,
         CommandEnvelope, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk, JobCommand,
         JobRequest, OutputStream, PrivilegeReplayCache, RuntimeTunnelCommand,
     };
 
-    fn test_config(signing_key: &SigningKey, proof_key: &[u8; 32]) -> AgentConfig {
+    fn test_config(signing_key: &SigningKey) -> AgentConfig {
         AgentConfig {
             client_id: "client-a".to_string(),
             display_name: "client-a".to_string(),
             auth: AgentAuthConfig {
-                proof_key_hex: Some(hex_encode(proof_key)),
                 server_ed25519_public_key_hex: Some(hex_encode(
                     signing_key.verifying_key().as_bytes(),
                 )),
@@ -32,7 +30,7 @@ mod tests {
         }
     }
 
-    fn signed_job(signing_key: &SigningKey, proof_key: &[u8; 32]) -> JobRequest {
+    fn signed_job(signing_key: &SigningKey) -> JobRequest {
         let command = JobCommand::Shell {
             argv: vec!["/bin/echo".to_string(), "hello".to_string()],
             pty: false,
@@ -40,19 +38,13 @@ mod tests {
         let command_payload = encode_json(&command).unwrap();
         let payload_hash_hex = payload_hash(&command_payload);
         let command_id = uuid::Uuid::new_v4();
-        let proof = sign_privilege_proof(
-            proof_key,
-            command_id,
-            "client:client-a",
-            &payload_hash_hex,
-            &random_nonce(),
-            unix_now() + 60,
-        );
+        let signed_unix = unix_now();
         let mut envelope = CommandEnvelope {
             command_id,
             scope: "client:client-a".to_string(),
             payload_hash_hex,
-            proof: Some(proof),
+            signed_unix,
+            expires_unix: signed_unix + 60,
             server_signature: Vec::new(),
         };
         envelope.server_signature = sign_command_envelope(signing_key, &envelope);
@@ -68,27 +60,25 @@ mod tests {
     #[test]
     fn command_authorization_accepts_once_and_rejects_replay() {
         let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
-        let proof_key = derive_super_key("secret", b"client-a");
-        let config = test_config(&signing_key, &proof_key);
-        let request = signed_job(&signing_key, &proof_key);
+        let config = test_config(&signing_key);
+        let request = signed_job(&signing_key);
         let mut replay_cache = PrivilegeReplayCache::default();
 
         assert!(authorize_job(&config, &request, &mut replay_cache).is_ok());
         assert!(authorize_job(&config, &request, &mut replay_cache)
             .unwrap_err()
-            .contains("nonce was already used"));
+            .contains("command id was already used"));
     }
 
     #[test]
     fn command_authorization_rejects_missing_agent_auth_config() {
         let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
-        let proof_key = derive_super_key("secret", b"client-a");
-        let request = signed_job(&signing_key, &proof_key);
+        let request = signed_job(&signing_key);
         let mut replay_cache = PrivilegeReplayCache::default();
 
         assert_eq!(
             authorize_job(&AgentConfig::default(), &request, &mut replay_cache).unwrap_err(),
-            "missing agent proof key"
+            "missing server signing public key"
         );
     }
 
@@ -153,6 +143,8 @@ mod tests {
                     "read line; printf 'got:%s\\n' \"$line\"".to_string(),
                 ],
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: None,
@@ -238,6 +230,8 @@ mod tests {
                 session_id,
                 argv: argv.clone(),
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: None,
@@ -260,6 +254,8 @@ mod tests {
                 session_id,
                 argv,
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: Some(1),
@@ -304,6 +300,8 @@ mod tests {
                     "sleep 0.2; printf 'idle-terminal-output\\n'; sleep 10".to_string(),
                 ],
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: None,
@@ -360,6 +358,8 @@ mod tests {
                     "i=0; while [ \"$i\" -lt 700 ]; do printf 'terminal-window-line-%04d\\n' \"$i\"; i=$((i+1)); done; sleep 10".to_string(),
                 ],
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: Some(1),
@@ -402,6 +402,8 @@ mod tests {
                     "sleep 30".to_string(),
                 ],
                 cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
                 cols: 120,
                 rows: 40,
                 replay_from_seq: None,

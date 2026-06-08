@@ -19,7 +19,9 @@ const statusOutput = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
 
 const summary = {
-  connected: 2,
+  online: 2,
+  offline: 1,
+  stale: 0,
   running_jobs: 3,
   total: 3,
   warnings: 1,
@@ -37,7 +39,7 @@ const dashboardOverview = {
       { description: "country:* tag distribution", label: "Countries", value: "countries" },
       { description: "provider:* tag distribution", label: "Providers", value: "providers" },
       { description: "One group per VPS in the selected scope", label: "VPS clients", value: "clients" },
-      { description: "Connected, stale, enrolled, and other client states", label: "Status", value: "status" },
+      { description: "Online, offline, and stale client states", label: "Status", value: "status" },
       { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
     ],
     providers: [
@@ -82,7 +84,7 @@ const dashboardOverview = {
   group_by: "labels",
   label_clusters: [
     {
-      connected: 1,
+      online: 1,
       drilldown: {
         label: "Open matching VPS",
         query: "country:US",
@@ -100,7 +102,7 @@ const dashboardOverview = {
       warnings: 2,
     },
     {
-      connected: 1,
+      online: 1,
       drilldown: {
         label: "Open matching VPS",
         query: "country:DE",
@@ -118,7 +120,7 @@ const dashboardOverview = {
       warnings: 1,
     },
     {
-      connected: 1,
+      online: 1,
       drilldown: {
         label: "Open matching VPS",
         query: "provider:alpha",
@@ -136,7 +138,7 @@ const dashboardOverview = {
       warnings: 1,
     },
     {
-      connected: 2,
+      online: 2,
       drilldown: {
         label: "Open matching VPS",
         query: null,
@@ -335,7 +337,7 @@ const dashboardOverview = {
         id: "fleet-alert-agent-agent-nyc-03-stale",
         observed_at: "2026-06-05T20:25:00Z",
         severity: "warning",
-        title: "Agent is not connected",
+        title: "Agent is not online",
       },
     ],
     running_jobs: 3,
@@ -425,7 +427,7 @@ const dashboardOverview = {
     value: null,
   },
   summary: {
-    connected: 2,
+    online: 2,
     running_jobs: 3,
     stale: 1,
     total: 3,
@@ -447,6 +449,8 @@ const operatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  enrollment_install_command_template:
+    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
   language: "en",
   sidebar_subpanel_default: "active",
   timezone: null,
@@ -477,14 +481,14 @@ const agents = [
     capabilities: rootCapabilities,
     display_name: "edge-sfo-01",
     id: "agent-sfo-01",
-    status: "connected",
+    status: "online",
     tags: ["country:US", "provider:alpha"],
   },
   {
     capabilities: rootCapabilities,
     display_name: "core-fra-02",
     id: "agent-fra-02",
-    status: "connected",
+    status: "online",
     tags: ["bgp", "bird2", "country:DE"],
   },
   {
@@ -521,7 +525,7 @@ const fleetAlerts = [
     status: "stale",
     target_id: "agent-nyc-03",
     target_kind: "agent",
-    title: "Agent is not connected",
+    title: "Agent is not online",
   },
   {
     category: "source_readiness",
@@ -685,7 +689,7 @@ const dataSourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-sfo-01",
-    client_status: "connected",
+    client_status: "online",
     display_name: "edge-sfo-01",
     domain: "runtime_traffic_accounting_source",
     evidence: {
@@ -706,7 +710,7 @@ const dataSourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-fra-02",
-    client_status: "connected",
+    client_status: "online",
     display_name: "core-fra-02",
     domain: "runtime_traffic_accounting_source",
     evidence: {
@@ -727,7 +731,7 @@ const dataSourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-sfo-01",
-    client_status: "connected",
+    client_status: "online",
     display_name: "edge-sfo-01",
     domain: "backup_object_store",
     evidence: {
@@ -749,7 +753,7 @@ const dataSourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-sfo-01",
-    client_status: "connected",
+    client_status: "online",
     display_name: "edge-sfo-01",
     domain: "update_artifact_source",
     evidence: {
@@ -769,6 +773,35 @@ const dataSourceStatus = [
     status: "metadata_only",
     status_reason:
       "signed HTTPS update release metadata exists; hosted artifact storage is optional",
+  },
+];
+
+const hotConfigRuleTemplates = [
+  {
+    actor_id: null,
+    built_in: true,
+    category: "Data sources",
+    created_at: "2026-06-02T10:00:00Z",
+    description: "Selects the runtime traffic accounting source for selected VPSs.",
+    docs_metadata: {
+      examples: ["runtime_traffic_accounting_source = \"vnstat\""],
+      notes: ["Generates a partial hot-config patch only for the traffic accounting source."],
+    },
+    domain: "runtime_traffic_accounting_source",
+    field_schema: {
+      properties: {
+        source: {
+          enum: ["vnstat", "interface_counters"],
+          type: "string",
+        },
+      },
+      required: ["source"],
+      type: "object",
+    },
+    id: "91919191-1111-4111-8111-919191919191",
+    name: "Traffic source",
+    raw_generator_body: "runtime_traffic_accounting_source = {{source}}",
+    updated_at: "2026-06-02T10:00:00Z",
   },
 ];
 
@@ -837,9 +870,9 @@ const backupRequests = [
     note: "fixture backup",
     paths: ["/etc/hostname"],
     payload_hash: "a".repeat(64),
-    proof_command_id: null,
-    proof_expires_unix: null,
-    proof_scope: "client:agent-sfo-01",
+    signed_command_id: null,
+    signed_command_expires_unix: null,
+    signed_command_scope: "client:agent-sfo-01",
     status: "artifact_metadata_recorded",
   },
 ];
@@ -1076,18 +1109,26 @@ const schedules = [
     catch_up_policy: "run_once",
     command_type: "shell",
     created_at: "2026-05-31T09:00:00Z",
+    cron_expr: "0 * * * *",
     enabled: true,
     failure_count: 0,
     id: "51515151-6161-4717-8abc-defdefdefdef",
-    interval_secs: 3600,
     last_error: null,
     last_run_at: "2026-05-31T10:00:00Z",
     max_failures: 3,
     name: "edge-health-hourly",
     next_run_at: "2026-05-31T11:00:00Z",
+    next_runs: [
+      "2026-05-31T11:00:00Z",
+      "2026-05-31T12:00:00Z",
+      "2026-05-31T13:00:00Z",
+      "2026-05-31T14:00:00Z",
+      "2026-05-31T15:00:00Z",
+    ],
     operation: { argv: ["uptime"], pty: false, type: "shell" },
     retry_delay_secs: 300,
     selector_expression: "id:agent-sfo-01 || provider:alpha",
+    timezone: "UTC",
   },
 ];
 
@@ -1111,33 +1152,12 @@ const agentUpdateRollouts = [
     automation_status: "ready_activate_canary",
     automation_next_action: "operator_activate_batch",
     automation_blocker:
-      "privileged rollout dispatch requires fresh per-target proof",
+      "privileged rollout dispatch requires a saved gateway-approved rollout action; use direct panel or CLI activation/rollback",
     automation_targets: ["agent-sfo-01"],
     automation_updated_at: "2026-05-31T10:10:01Z",
-    activation_delegations: [
-      {
-        action: "agent_update_activate",
-        created_at: "2026-05-31T10:09:59Z",
-        dispatch_job_id: null,
-        dispatched_count: 0,
-        dispatching_count: 0,
-        expired_count: 0,
-        failed_count: 0,
-        payload_hash: "a".repeat(64),
-        proof_expires_unix_max: 1780308600,
-        proof_expires_unix_min: 1780308600,
-        ready_count: 1,
-        restart_agent: true,
-        rollout_id: "12121212-3434-4567-8abc-defdefdefdef",
-        staged_sha256_hex: "d".repeat(64),
-        target_count: 1,
-        updated_at: "2026-05-31T10:09:59Z",
-      },
-    ],
     id: "12121212-3434-4567-8abc-defdefdefdef",
     job_id: "66666666-aaaa-4bbb-8ccc-dddddddddddd",
     pending_count: 0,
-    rollback_delegations: [],
     status: "staged",
     target_count: 1,
     targets: [
@@ -1457,7 +1477,7 @@ const topologyGraph = {
       degraded_tunnel_count: 0,
       display_name: "edge-sfo-01",
       latest_observed_at: "2026-05-31T10:09:00Z",
-      status: "connected",
+      status: "online",
       tags: ["provider:alpha", "country:US"],
       tunnel_count: 1,
     },
@@ -1467,7 +1487,7 @@ const topologyGraph = {
       degraded_tunnel_count: 0,
       display_name: "core-fra-02",
       latest_observed_at: "2026-05-31T10:09:00Z",
-      status: "connected",
+      status: "online",
       tags: ["bgp", "bird2", "country:DE"],
       tunnel_count: 1,
     },
@@ -1524,7 +1544,7 @@ export const ospfUpdatePlans = [
     mutation_mode: "reviewed_plan_only",
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
-    proof_required: true,
+    privilege_required: true,
     proposed_left_bird2_interface_snippet: [
       "# vpsman GRE tunnel sfo-fra-gre: agent-sfo-01 -> agent-fra-02",
       'interface "tunab" {',
@@ -1559,6 +1579,7 @@ export async function installConsoleApiMock(page: Page) {
       dataSourceAssignmentsFixture,
       dataSourcePresetsFixture,
       dataSourceStatusFixture,
+      hotConfigRuleTemplatesFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
       enrollmentTokensFixture,
@@ -1598,6 +1619,7 @@ export async function installConsoleApiMock(page: Page) {
         bulkResolve: [] as unknown[],
         dataSourcePresetAssignments: [] as unknown[],
         dataSourcePresets: [] as unknown[],
+        hotConfigRuleTemplates: [] as unknown[],
         enrollmentTokens: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
         fleetAlertNotificationDispatches: [] as unknown[],
@@ -1616,6 +1638,7 @@ export async function installConsoleApiMock(page: Page) {
         migrationLinks: [] as unknown[],
         operatorPreferences: [] as unknown[],
         restorePlans: [] as unknown[],
+        scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlans: [] as unknown[],
@@ -1624,7 +1647,66 @@ export async function installConsoleApiMock(page: Page) {
         configurable: true,
         value: requests,
       });
-      const createdJobTargets = new Map<string, string[]>();
+      const createdJobTargets = new Map<
+        string,
+        Array<{
+          client_id: string;
+          completed_at: string | null;
+          exit_code: number | null;
+          message: string | null;
+          started_at: string | null;
+          status: string;
+        }>
+      >();
+      const commandTypeForOperation = (operation: Record<string, unknown> | undefined): string | null => {
+        if (!operation || typeof operation.type !== "string") {
+          return null;
+        }
+        if (operation.type === "shell") {
+          return operation.pty ? "shell_pty" : "shell_argv";
+        }
+        return operation.type;
+      };
+      const normalizeScheduleRecord = (schedule: Record<string, unknown>) => ({
+        catch_up_limit: schedule.catch_up_limit ?? 1,
+        catch_up_policy: schedule.catch_up_policy ?? "run_once",
+        command_type: schedule.command_type ?? commandTypeForOperation(schedule.operation as Record<string, unknown> | undefined) ?? "shell_argv",
+        created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
+        cron_expr: schedule.cron_expr ?? "0 * * * *",
+        deferred_until: schedule.deferred_until ?? null,
+        deleted_at: schedule.deleted_at ?? null,
+        enabled: schedule.enabled ?? true,
+        failure_count: schedule.failure_count ?? 0,
+        id: schedule.id ?? "52525252-6161-4717-8abc-defdefdefdef",
+        last_error: schedule.last_error ?? null,
+        last_run_at: schedule.last_run_at ?? null,
+        max_failures: schedule.max_failures ?? 3,
+        name: schedule.name ?? "scheduled-job",
+        next_run_at: schedule.next_run_at ?? "2026-06-02T11:00:00Z",
+        next_runs: schedule.next_runs ?? [
+          "2026-06-02T11:00:00Z",
+          "2026-06-02T12:00:00Z",
+          "2026-06-02T13:00:00Z",
+          "2026-06-02T14:00:00Z",
+          "2026-06-02T15:00:00Z",
+        ],
+        operation: schedule.operation ?? {
+          argv: ["uptime"],
+          pty: false,
+          type: "shell",
+        },
+        retry_delay_secs: schedule.retry_delay_secs ?? 300,
+        selector_expression: schedule.selector_expression ?? "id:*",
+        timezone: schedule.timezone ?? "UTC",
+        updated_at: schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
+      });
+      const currentSchedules = (
+        schedulesFixture as Array<Record<string, unknown>>
+      ).map((schedule) => normalizeScheduleRecord(schedule));
+      const findSchedule = (encodedScheduleId: string) => {
+        const scheduleId = decodeURIComponent(encodedScheduleId);
+        return currentSchedules.find((schedule) => schedule.id === scheduleId) ?? null;
+      };
       const jsonResponse = (body: unknown, status = 200) =>
         Promise.resolve(
           new Response(JSON.stringify(body), {
@@ -1829,14 +1911,7 @@ export async function installConsoleApiMock(page: Page) {
       const jobTargetsFor = (jobId: string) => {
         const createdTargets = createdJobTargets.get(jobId);
         if (createdTargets) {
-          return createdTargets.map((clientId) => ({
-            client_id: clientId,
-            completed_at: "2026-05-31T10:09:00Z",
-            exit_code: 0,
-            job_id: jobId,
-            started_at: "2026-05-31T10:08:55Z",
-            status: "completed",
-          }));
+          return createdTargets.map((target) => ({ ...target, job_id: jobId }));
         }
         const job =
           (jobsFixture as Array<{ id: string; status: string; target_count: number; completed_at: string | null }>).find(
@@ -2016,7 +2091,7 @@ export async function installConsoleApiMock(page: Page) {
           const currentAgents = visibleAgents();
           return jsonResponse({
             ...summaryFixture,
-            connected: currentAgents.filter((agent) => agent.status === "connected").length,
+            online: currentAgents.filter((agent) => agent.status === "online").length,
             total: currentAgents.length,
           });
         }
@@ -2192,8 +2267,6 @@ export async function installConsoleApiMock(page: Page) {
           return jsonResponse(clientKeyRevocationsFixture);
         if (pathname === "/api/v1/key-lifecycle/report" && method === "GET")
           return jsonResponse(keyLifecycleReportFixture);
-        if (pathname === "/api/v1/auth/proof-rotations" && method === "GET")
-          return emptyArrayResponse();
         if (
           pathname.startsWith("/api/v1/clients/") &&
           pathname.endsWith("/key-revocations") &&
@@ -2302,6 +2375,63 @@ export async function installConsoleApiMock(page: Page) {
         }
         if (pathname === "/api/v1/data-source-status" && method === "GET") {
           return jsonResponse(dataSourceStatusFixture);
+        }
+        if (pathname === "/api/v1/hot-config/rule-templates" && method === "GET") {
+          return jsonResponse(hotConfigRuleTemplatesFixture);
+        }
+        if (pathname === "/api/v1/hot-config/rule-templates" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.hotConfigRuleTemplates.push(body);
+          const request = body as {
+            category?: string;
+            description?: string;
+            docs_metadata?: Record<string, unknown>;
+            domain?: string;
+            field_schema?: Record<string, unknown>;
+            id?: string | null;
+            name?: string;
+            raw_generator_body?: string;
+          };
+          return jsonResponse({
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            built_in: false,
+            category: request.category ?? "Custom",
+            created_at: "2026-06-02T10:05:00Z",
+            description: request.description ?? "",
+            docs_metadata: request.docs_metadata ?? {},
+            domain: request.domain ?? "custom",
+            field_schema: request.field_schema ?? { type: "object" },
+            id: request.id ?? "92929292-2222-4222-8222-929292929292",
+            name: request.name ?? "Custom rule",
+            raw_generator_body: request.raw_generator_body ?? "",
+            updated_at: "2026-06-02T10:05:00Z",
+          });
+        }
+        if (
+          pathname.startsWith("/api/v1/hot-config/rule-templates/") &&
+          pathname.endsWith("/render") &&
+          method === "POST"
+        ) {
+          const templateId = pathname.split("/").at(-2) ?? hotConfigRuleTemplatesFixture[0].id;
+          const template =
+            hotConfigRuleTemplatesFixture.find((record: { id: string }) => record.id === templateId) ??
+            hotConfigRuleTemplatesFixture[0];
+          return jsonResponse({
+            affected_sections: [template.domain],
+            docs_metadata: template.docs_metadata,
+            generated_at: "2026-06-02T10:06:00Z",
+            name: template.name,
+            patch: {
+              [template.domain]: {
+                source: "vnstat",
+              },
+            },
+            template_id: template.id,
+            toml: "[data_sources]\nruntime_traffic_accounting_source = \"vnstat\"\n",
+          });
+        }
+        if (pathname.startsWith("/api/v1/hot-config/rule-templates/") && method === "DELETE") {
+          return new Response(null, { status: 204 });
         }
         if (
           pathname === "/api/v1/data-source-assignments" &&
@@ -2632,7 +2762,7 @@ export async function installConsoleApiMock(page: Page) {
           return jsonResponse(backupsFixture);
         }
         if (pathname === "/api/v1/schedules" && method === "GET") {
-          return jsonResponse(schedulesFixture);
+          return jsonResponse(currentSchedules.filter((schedule) => !schedule.deleted_at));
         }
         if (pathname === "/api/v1/schedules" && method === "POST") {
           const body = await readJsonBody(input, init);
@@ -2641,28 +2771,39 @@ export async function installConsoleApiMock(page: Page) {
             catch_up_limit?: number;
             catch_up_policy?: string;
             command_type?: string;
+            cron_expr?: string;
             enabled?: boolean;
-            interval_secs?: number;
             max_failures?: number;
             name?: string;
             operation?: Record<string, unknown>;
             retry_delay_secs?: number;
             selector_expression?: string;
+            timezone?: string;
           };
-          return jsonResponse({
+          const cronExpr = request.cron_expr ?? "0 * * * *";
+          const schedule = normalizeScheduleRecord({
             catch_up_limit: request.catch_up_limit ?? 1,
             catch_up_policy: request.catch_up_policy ?? "run_once",
             command_type: request.command_type ?? "shell",
             created_at: "2026-06-02T10:04:00Z",
+            cron_expr: cronExpr,
+            deferred_until: null,
+            deleted_at: null,
             enabled: request.enabled ?? true,
             failure_count: 0,
             id: "52525252-6161-4717-8abc-defdefdefdef",
-            interval_secs: request.interval_secs ?? 3600,
             last_error: null,
             last_run_at: null,
             max_failures: request.max_failures ?? 3,
             name: request.name ?? "scheduled-job",
             next_run_at: "2026-06-02T11:04:00Z",
+            next_runs: [
+              "2026-06-02T11:04:00Z",
+              "2026-06-02T12:04:00Z",
+              "2026-06-02T13:04:00Z",
+              "2026-06-02T14:04:00Z",
+              "2026-06-02T15:04:00Z",
+            ],
             operation: request.operation ?? {
               argv: ["uptime"],
               pty: false,
@@ -2670,6 +2811,89 @@ export async function installConsoleApiMock(page: Page) {
             },
             retry_delay_secs: request.retry_delay_secs ?? 300,
             selector_expression: request.selector_expression ?? "id:*",
+            timezone: request.timezone ?? "UTC",
+            updated_at: "2026-06-02T10:04:00Z",
+          });
+          currentSchedules.push(schedule);
+          return jsonResponse(schedule);
+        }
+        const scheduleMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)$/);
+        if (scheduleMatch && method === "PUT") {
+          const body = await readJsonBody(input, init);
+          requests.scheduleActions.push({ body, method, path: pathname });
+          const schedule = findSchedule(scheduleMatch[1]);
+          if (!schedule) {
+            return jsonResponse({ error: "schedule_not_found" }, 404);
+          }
+          const request = body as {
+            catch_up_limit?: number;
+            catch_up_policy?: string;
+            cron_expr?: string;
+            enabled?: boolean;
+            max_failures?: number;
+            name?: string;
+            operation?: Record<string, unknown>;
+            retry_delay_secs?: number;
+            selector_expression?: string;
+            timezone?: string;
+          };
+          Object.assign(schedule, {
+            catch_up_limit: request.catch_up_limit ?? schedule.catch_up_limit,
+            catch_up_policy: request.catch_up_policy ?? schedule.catch_up_policy,
+            command_type: commandTypeForOperation(request.operation) ?? schedule.command_type,
+            cron_expr: request.cron_expr ?? schedule.cron_expr,
+            enabled: request.enabled ?? schedule.enabled,
+            max_failures: request.max_failures ?? schedule.max_failures,
+            name: request.name ?? schedule.name,
+            operation: request.operation ?? schedule.operation,
+            retry_delay_secs: request.retry_delay_secs ?? schedule.retry_delay_secs,
+            selector_expression: request.selector_expression ?? schedule.selector_expression,
+            timezone: request.timezone ?? schedule.timezone,
+            updated_at: "2026-06-02T10:05:00Z",
+          });
+          return jsonResponse(schedule);
+        }
+        if (scheduleMatch && method === "DELETE") {
+          const body = await readJsonBody(input, init);
+          requests.scheduleActions.push({ body, method, path: pathname });
+          const schedule = findSchedule(scheduleMatch[1]);
+          if (!schedule) {
+            return jsonResponse({ error: "schedule_not_found" }, 404);
+          }
+          schedule.deleted_at = "2026-06-02T10:08:00Z";
+          schedule.enabled = false;
+          schedule.updated_at = "2026-06-02T10:08:00Z";
+          return jsonResponse(schedule);
+        }
+        const scheduleActionMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)\/(enable|disable|defer|apply-now)$/);
+        if (scheduleActionMatch && method === "POST") {
+          const body = await readJsonBody(input, init);
+          const [, encodedScheduleId, action] = scheduleActionMatch;
+          requests.scheduleActions.push({ body, method, path: pathname });
+          const schedule = findSchedule(encodedScheduleId);
+          if (!schedule) {
+            return jsonResponse({ error: "schedule_not_found" }, 404);
+          }
+          if (action === "enable") {
+            schedule.enabled = true;
+            schedule.updated_at = "2026-06-02T10:06:00Z";
+            return jsonResponse(schedule);
+          }
+          if (action === "disable") {
+            schedule.enabled = false;
+            schedule.updated_at = "2026-06-02T10:06:00Z";
+            return jsonResponse(schedule);
+          }
+          if (action === "defer") {
+            schedule.deferred_until = (body as { deferred_until?: string } | null)?.deferred_until ?? "2026-06-03T12:00:00Z";
+            schedule.updated_at = "2026-06-02T10:07:00Z";
+            return jsonResponse(schedule);
+          }
+          return jsonResponse({
+            accepted_targets: resolveBulkTargets({ selector_expression: schedule.selector_expression }).filter((agent) => agent.status !== "offline").length,
+            job_id: "abababab-2323-4545-8989-cdcdcdcdcdcd",
+            schedule_id: schedule.id,
+            status: "accepted",
           });
         }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
@@ -2772,9 +2996,9 @@ export async function installConsoleApiMock(page: Page) {
             note: null,
             paths: ["/etc/hostname"],
             payload_hash: "c".repeat(64),
-            proof_command_id: null,
-            proof_expires_unix: null,
-            proof_scope: "client:agent-fra-02",
+            signed_command_id: null,
+            signed_command_expires_unix: null,
+            signed_command_scope: "client:agent-fra-02",
             source_backup_request_id: backupsFixture[0].id,
             source_client_id: "agent-sfo-01",
             status: "planned_metadata_only",
@@ -2891,8 +3115,6 @@ export async function installConsoleApiMock(page: Page) {
           requests.bulkResolve.push(body);
           const targets = resolveBulkTargets(body);
           return jsonResponse({
-            confirmation_required: false,
-            destructive: false,
             target_count: targets.length,
             targets,
           });
@@ -2901,11 +3123,25 @@ export async function installConsoleApiMock(page: Page) {
           const body = await readJsonBody(input, init);
           requests.jobs.push(body);
           const targets = resolveBulkTargets(body);
-          const acceptedTargetIds = targets.filter((agent) => agent.status === "connected").map((agent) => agent.id);
+          const commandType = (body as { command?: string } | null)?.command ?? "job";
+          const acceptedTargets = targets.filter((agent) => agent.status !== "offline");
+          const targetRecords = targets.map((agent) => ({
+            client_id: agent.id,
+            completed_at: agent.status === "offline" ? null : "2026-05-31T10:09:00Z",
+            exit_code: agent.status === "stale" ? 2 : agent.status === "offline" ? null : 0,
+            message:
+              agent.status === "stale"
+                ? `stale: agent rejected ${commandType} command_version 3`
+                : agent.status === "offline"
+                  ? "agent offline"
+                  : "completed",
+            started_at: agent.status === "offline" ? null : "2026-05-31T10:08:55Z",
+            status: agent.status === "stale" ? "failed" : agent.status === "offline" ? "dispatch_failed" : "completed",
+          }));
           const jobId = "11111111-2222-4333-8444-555555555555";
-          createdJobTargets.set(jobId, acceptedTargetIds);
+          createdJobTargets.set(jobId, targetRecords);
           return jsonResponse({
-            accepted_targets: acceptedTargetIds.length,
+            accepted_targets: acceptedTargets.length,
             job_id: jobId,
             status: "accepted",
           });
@@ -2954,6 +3190,7 @@ export async function installConsoleApiMock(page: Page) {
       dataSourceAssignmentsFixture: dataSourceAssignments,
       dataSourcePresetsFixture: dataSourcePresets,
       dataSourceStatusFixture: dataSourceStatus,
+      hotConfigRuleTemplatesFixture: hotConfigRuleTemplates,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
       enrollmentTokensFixture: enrollmentTokens,

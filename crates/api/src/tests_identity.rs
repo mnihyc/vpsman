@@ -43,7 +43,6 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: first_created.token,
-            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
@@ -90,7 +89,6 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: second_token,
-            client_id: None,
             client_public_key_hex: "22".repeat(32),
         },
     )
@@ -102,7 +100,7 @@ async fn rebuilt_client_reenrollment_rotates_key_and_preserves_server_state() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].id, client_id);
     assert_eq!(agents[0].display_name, "edge-after-rebuild");
-    assert_eq!(agents[0].status, "enrolled");
+    assert_eq!(agents[0].status, "offline");
     assert_eq!(
         agents[0].tags,
         vec![
@@ -165,7 +163,6 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: first_created.token,
-            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
@@ -233,7 +230,6 @@ async fn client_key_revocation_blocks_current_key_until_confirmed_reenrollment()
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: second_token,
-            client_id: None,
             client_public_key_hex: "22".repeat(32),
         },
     )
@@ -302,7 +298,6 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: first_created.token,
-            client_id: None,
             client_public_key_hex: "11".repeat(32),
         },
     )
@@ -332,25 +327,11 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
         .unwrap();
     let normal_client_id = normal_created.assigned_client_id.clone().unwrap();
 
-    assert!(matches!(
-        repo.claim_enrollment(
-            &EnrollmentSettings::default(),
-            &ClaimEnrollmentRequest {
-                token: normal_created.token.clone(),
-                client_id: Some(client_id.clone()),
-                client_public_key_hex: "22".repeat(32),
-            },
-        )
-        .await
-        .unwrap(),
-        EnrollmentClaimOutcome::ProvisionClientIdSupplied
-    ));
     let normal_response = repo
         .claim_enrollment(
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
                 token: normal_created.token,
-                client_id: None,
                 client_public_key_hex: "22".repeat(32),
             },
         )
@@ -369,7 +350,7 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
         .await
         .unwrap());
 
-    let wrong_client_token = repo
+    let reenrollment_token = repo
         .create_enrollment_token(
             &CreateEnrollmentTokenRequest {
                 ttl_secs: Some(600),
@@ -392,19 +373,24 @@ async fn existing_client_key_rotation_requires_bound_reenrollment_token() {
         .unwrap()
         .token;
 
-    assert!(matches!(
-        repo.claim_enrollment(
+    let reenrollment_response = repo
+        .claim_enrollment(
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
-                token: wrong_client_token,
-                client_id: Some("client-other".to_string()),
+                token: reenrollment_token,
                 client_public_key_hex: "33".repeat(32),
             },
         )
         .await
-        .unwrap(),
-        EnrollmentClaimOutcome::TokenClientMismatch
-    ));
+        .unwrap();
+    let EnrollmentClaimOutcome::Accepted(reenrollment_response) = reenrollment_response else {
+        panic!("expected bound re-enrollment");
+    };
+    assert_eq!(reenrollment_response.client_id, client_id);
+    assert!(repo
+        .validate_agent_public_key(&client_id, &"33".repeat(32))
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -419,13 +405,13 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
-                    command_protocol_version: 1,
                     unprivileged_hint: Some(
                         "root-only operations require forced best-effort or a root agent"
                             .to_string(),

@@ -266,6 +266,29 @@ CROSS JOIN data_source_presets presets
 WHERE presets.is_default
 ON CONFLICT (client_id, domain) DO NOTHING;
 
+CREATE TABLE hot_config_rule_templates (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    description TEXT NOT NULL,
+    field_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
+    raw_generator_body TEXT NOT NULL,
+    docs_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    built_in BOOLEAN NOT NULL DEFAULT FALSE,
+    actor_id UUID REFERENCES operators(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT hot_config_rule_templates_name_not_empty CHECK (length(trim(name)) > 0),
+    CONSTRAINT hot_config_rule_templates_category_not_empty CHECK (length(trim(category)) > 0),
+    CONSTRAINT hot_config_rule_templates_domain_not_empty CHECK (length(trim(domain)) > 0),
+    CONSTRAINT hot_config_rule_templates_schema_object CHECK (jsonb_typeof(field_schema) = 'object'),
+    CONSTRAINT hot_config_rule_templates_docs_object CHECK (jsonb_typeof(docs_metadata) = 'object')
+);
+
+CREATE INDEX hot_config_rule_templates_category_idx
+    ON hot_config_rule_templates (category, name);
+
 CREATE TABLE file_transfer_source_artifacts (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,

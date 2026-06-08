@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vpsman_common::CommandEnvelope;
+use vpsman_common::PrivilegeAssertion;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BackupRequestStatus {
@@ -74,9 +74,9 @@ pub(crate) struct BackupRequestView {
     pub(crate) include_config: bool,
     pub(crate) status: String,
     pub(crate) payload_hash: String,
-    pub(crate) proof_scope: String,
-    pub(crate) proof_command_id: Option<Uuid>,
-    pub(crate) proof_expires_unix: Option<u64>,
+    pub(crate) signed_command_scope: String,
+    pub(crate) signed_command_id: Option<Uuid>,
+    pub(crate) signed_command_expires_unix: Option<u64>,
     pub(crate) artifact_id: Option<Uuid>,
     pub(crate) source_job_id: Option<Uuid>,
     pub(crate) source_schedule_id: Option<Uuid>,
@@ -96,6 +96,7 @@ pub(crate) struct BackupArtifactView {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateBackupRequest {
     pub(crate) client_id: String,
     #[serde(default)]
@@ -106,7 +107,8 @@ pub(crate) struct CreateBackupRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
-    pub(crate) envelope: Option<CommandEnvelope>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,7 +123,9 @@ pub(crate) struct BackupPolicyView {
     pub(crate) retention_days: i32,
     pub(crate) keep_last: i32,
     pub(crate) rotation_generation: Option<String>,
-    pub(crate) interval_secs: i64,
+    pub(crate) cron_expr: String,
+    pub(crate) timezone: String,
+    pub(crate) next_runs: Vec<String>,
     pub(crate) catch_up_policy: String,
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
@@ -157,8 +161,9 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,
-    pub(crate) interval_secs: u64,
-    pub(crate) start_at_unix: Option<u64>,
+    pub(crate) cron_expr: String,
+    #[serde(default = "backup_policy_default_timezone")]
+    pub(crate) timezone: String,
     #[serde(default = "backup_policy_default_enabled")]
     pub(crate) enabled: bool,
     #[serde(default = "backup_policy_default_catch_up_policy")]
@@ -308,14 +313,15 @@ pub(crate) struct RestorePlanView {
     pub(crate) destination_root: Option<String>,
     pub(crate) status: String,
     pub(crate) payload_hash: String,
-    pub(crate) proof_scope: String,
-    pub(crate) proof_command_id: Option<Uuid>,
-    pub(crate) proof_expires_unix: Option<u64>,
+    pub(crate) signed_command_scope: String,
+    pub(crate) signed_command_id: Option<Uuid>,
+    pub(crate) signed_command_expires_unix: Option<u64>,
     pub(crate) note: Option<String>,
     pub(crate) created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateRestorePlanRequest {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
@@ -327,7 +333,8 @@ pub(crate) struct CreateRestorePlanRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
-    pub(crate) envelope: Option<CommandEnvelope>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -356,6 +363,10 @@ pub(crate) struct CreateMigrationLinkRequest {
 
 fn backup_policy_default_enabled() -> bool {
     true
+}
+
+fn backup_policy_default_timezone() -> String {
+    "UTC".to_string()
 }
 
 fn backup_policy_default_catch_up_policy() -> String {

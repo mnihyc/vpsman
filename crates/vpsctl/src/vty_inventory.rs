@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 
-use crate::http::{http_get, http_post_json};
 use crate::util::percent_encode_query_value;
+use crate::{
+    commands_schedules::selector_expression_from_targets,
+    http::{http_get, http_post_json},
+    privilege::{build_privilege_for_db, load_super_password, load_super_salt_hex},
+};
 
 #[derive(Debug, PartialEq)]
 enum VtyInventoryCommand {
@@ -314,22 +318,55 @@ pub(crate) fn submit_vty_inventory_command(
     command: &str,
 ) -> Result<String> {
     match parse_vty_inventory_command(command)? {
-        VtyInventoryCommand::TagCreate { name } => http_post_json(
-            api_url,
-            "/api/v1/tags",
-            token,
-            &serde_json::json!({
-                "name": name,
-            }),
-        ),
-        VtyInventoryCommand::AgentTag { client_id, tag } => http_post_json(
-            api_url,
-            &format!("/api/v1/agents/{client_id}/tags"),
-            token,
-            &serde_json::json!({
-                "tag": tag,
-            }),
-        ),
+        VtyInventoryCommand::TagCreate { name } => {
+            let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+            let salt_hex = load_super_salt_hex(None)?;
+            let privilege_assertion = build_privilege_for_db(
+                "tag.create",
+                &name,
+                None,
+                &[],
+                true,
+                &password,
+                &salt_hex,
+                300,
+            )?;
+            http_post_json(
+                api_url,
+                "/api/v1/tags",
+                token,
+                &serde_json::json!({
+                    "name": name,
+                    "confirmed": true,
+                    "privilege_assertion": privilege_assertion,
+                }),
+            )
+        }
+        VtyInventoryCommand::AgentTag { client_id, tag } => {
+            let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+            let salt_hex = load_super_salt_hex(None)?;
+            let targets = vec![client_id.clone()];
+            let privilege_assertion = build_privilege_for_db(
+                "tag.assign",
+                &tag,
+                None,
+                &targets,
+                true,
+                &password,
+                &salt_hex,
+                300,
+            )?;
+            http_post_json(
+                api_url,
+                &format!("/api/v1/agents/{client_id}/tags"),
+                token,
+                &serde_json::json!({
+                    "tag": tag,
+                    "confirmed": true,
+                    "privilege_assertion": privilege_assertion,
+                }),
+            )
+        }
         VtyInventoryCommand::DataSourcePresets { domain } => {
             http_get(api_url, &data_source_presets_path(domain.as_deref()), token)
         }
@@ -674,8 +711,7 @@ pub(crate) fn submit_vty_inventory_command(
             &serde_json::json!({
                 "domain": domain,
                 "preset_id": preset_id,
-                "clients": clients,
-                "tags": tags,
+                "selector_expression": selector_expression_from_targets(&clients, &tags),
                 "confirmed": confirmed,
             }),
         ),
@@ -684,10 +720,7 @@ pub(crate) fn submit_vty_inventory_command(
             "/api/v1/bulk/resolve",
             token,
             &serde_json::json!({
-                "clients": [],
-                "tags": tags,
-                "destructive": false,
-                "confirmed": false,
+                "selector_expression": selector_expression_from_targets(&[], &tags),
             }),
         ),
         VtyInventoryCommand::TelemetryRollups {

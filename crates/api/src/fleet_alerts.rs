@@ -281,7 +281,7 @@ impl AppState {
 
 fn append_agent_status_alerts(alerts: &mut Vec<FleetAlertView>, agents: &[AgentView]) {
     for agent in agents {
-        if agent.status == "connected" || agent.status == "unknown" {
+        if agent.status == "online" {
             continue;
         }
         let severity = if agent.status.contains("offline") {
@@ -297,7 +297,7 @@ fn append_agent_status_alerts(alerts: &mut Vec<FleetAlertView>, agents: &[AgentV
                 target_kind: "agent",
                 target_id: &agent.id,
                 client_id: Some(&agent.id),
-                title: "Agent is not connected",
+                title: "Agent is not online",
                 detail: format!("{} currently reports {}", agent.display_name, agent.status),
                 status: &agent.status,
                 evidence: json!({

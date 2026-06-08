@@ -1,40 +1,552 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { CrudPager } from "../components/CrudPager";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { parseSearchExpression } from "../searchExpression";
 import type {
   AgentView,
-  AssignDataSourcePresetRequest,
-  AssignDataSourcePresetResponse,
   BulkResolveResponse,
-  CloneDataSourcePresetRequest,
-  CreateJobRequest,
-  CreateJobResponse,
-  CreateDataSourcePresetRequest,
-  DataSourceHotConfigResponse,
-  DataSourcePresetAssignmentRecord,
-  DataSourcePresetDiffRequest,
-  DataSourcePresetDiffResponse,
-  DataSourcePresetRecord,
-  DataSourcePresetTestRequest,
-  DataSourcePresetTestResponse,
-  DataSourceStatusRecord,
+  BulkTagMutationRequest,
+  TagMutationResponse,
   TagView,
-  UpdateDataSourcePresetRequest,
-  UpdateDataSourcePresetResponse,
 } from "../types";
+import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial, type PrivilegeAssertion } from "../privilege";
+import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import { formatVpsName, runPanelAction } from "../utils";
-import { CrudPager } from "../components/CrudPager";
-import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
-import type { ProofMaterial } from "../proof";
 
-const TAG_TARGET_SELECTOR_STORAGE_KEY = "vpsman.tagsTargeting.selectorExpression";
+const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
+
+export function TagsPanel({
+  activeSubpage,
+  agents,
+  error,
+  loading,
+  onAssignTag,
+  onBulkMutateTags,
+  onCreateTag,
+  onDeleteTag,
+  onOpenPrivilegeUnlock,
+  onRefresh,
+  onResolveBulk,
+  privilegeMaterial,
+  tags,
+}: {
+  activeSubpage: string;
+  agents: AgentView[];
+  error: string | null;
+  loading: boolean;
+  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onOpenPrivilegeUnlock: () => void;
+  onRefresh: () => void;
+  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  privilegeMaterial: PrivilegeMaterial | null;
+  tags: TagView[];
+}) {
+  const subpage = ["registry", "assignments", "bulk"].includes(activeSubpage) ? activeSubpage : "registry";
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(null);
+  const status =
+    actionError ??
+    error ??
+    (lastMutation
+      ? `${lastMutation.action} ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
+      : loading
+        ? "Refreshing tag state"
+        : `${tags.length} tags across ${agents.length} VPSs`);
+
+  return (
+    <section className="workspace singleColumn">
+      <div className="fleetPanel">
+        <div className="sectionHeader">
+          <div>
+            <h2>{subpage === "bulk" ? "Bulk tags" : subpage === "assignments" ? "Tag assignments" : "Tags"}</h2>
+            <span>{status}</span>
+          </div>
+          <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
+            <RefreshCw size={15} />
+            <span>Refresh</span>
+          </button>
+        </div>
+        {subpage === "registry" && (
+          <TagRegistry
+            onCreateTag={onCreateTag}
+            onDeleteTag={onDeleteTag}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            pending={pending}
+            privilegeMaterial={privilegeMaterial}
+            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            setLastMutation={setLastMutation}
+            tags={tags}
+          />
+        )}
+        {subpage === "assignments" && (
+          <TagAssignments
+            agents={agents}
+            onAssignTag={onAssignTag}
+            onBulkMutateTags={onBulkMutateTags}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            pending={pending}
+            privilegeMaterial={privilegeMaterial}
+            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            setLastMutation={setLastMutation}
+            tags={tags}
+          />
+        )}
+        {subpage === "bulk" && (
+          <BulkTagPanel
+            agents={agents}
+            onBulkMutateTags={onBulkMutateTags}
+            onDeleteTag={onDeleteTag}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onResolveBulk={onResolveBulk}
+            pending={pending}
+            privilegeMaterial={privilegeMaterial}
+            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            setLastMutation={setLastMutation}
+            tags={tags}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TagRegistry({
+  onCreateTag,
+  onDeleteTag,
+  onOpenPrivilegeUnlock,
+  pending,
+  privilegeMaterial,
+  runAction,
+  setLastMutation,
+  tags,
+}: {
+  onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onOpenPrivilegeUnlock: () => void;
+  pending: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
+  runAction: (action: () => Promise<void>) => Promise<void>;
+  setLastMutation: (response: TagMutationResponse | null) => void;
+  tags: TagView[];
+}) {
+  const [tagName, setTagName] = useState("");
+  const [deleteCandidate, setDeleteCandidate] = useState<TagView | null>(null);
+
+  async function submitTag(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runAction(async () => {
+      const tag = tagName.trim();
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        "tag.create",
+        tag,
+        null,
+        [],
+      );
+      await onCreateTag(tag, privilegeAssertion);
+      setTagName("");
+      setLastMutation(null);
+    });
+  }
+
+  async function deleteSelected() {
+    const candidate = deleteCandidate;
+    setDeleteCandidate(null);
+    if (!candidate) {
+      return;
+    }
+    await runAction(async () => {
+      const targetIds = candidate.clients.map((client) => client.id);
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        "tag.delete",
+        candidate.name,
+        null,
+        targetIds,
+      );
+      setLastMutation(await onDeleteTag(candidate.name, true, privilegeAssertion));
+    });
+  }
+
+  return (
+    <>
+      <form className="compactForm tagCreateForm" onSubmit={submitTag}>
+        <strong>Create tag</strong>
+        <div className="formRow">
+          <input aria-label="Tag name" onChange={(event) => setTagName(event.target.value)} placeholder="provider:alpha, country:us, app:edge" value={tagName} />
+          <button className="secondaryAction" disabled={pending || !tagName.trim()} type="submit">
+            <Plus size={14} />
+            <span>Create</span>
+          </button>
+        </div>
+      </form>
+      <CrudPager
+        fields={[
+          { label: "Tag", value: (tag) => tag.name },
+          { label: "Clients", value: (tag) => tag.clients.length },
+        ]}
+        itemLabel="tags"
+        items={tags}
+        pageSize={12}
+        title="Tag registry"
+        empty={
+          <div className="emptyState">
+            <ShieldCheck size={22} />
+            <strong>No tags</strong>
+            <span>Create provider, country, or custom tags to target recurring VPS groups.</span>
+          </div>
+        }
+      >
+        {(rows) => (
+          <div className="table hierarchyTable">
+            <div className="historyRow heading tagRegistryGrid">
+              <span>Tag</span>
+              <span>Clients</span>
+              <span>Action</span>
+            </div>
+            {rows.map((tag) => (
+              <div className="historyRow tagRegistryGrid" key={tag.name}>
+                <span className="tags">
+                  <em>{tag.name}</em>
+                </span>
+                <span>{tag.clients.length}</span>
+                <span>
+                  <button className="secondaryAction compactAction dangerAction" disabled={pending} onClick={() => setDeleteCandidate(tag)} type="button">
+                    <Trash2 size={13} />
+                    <span>Delete</span>
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CrudPager>
+      <ConfirmationPrompt
+        confirmLabel="Delete tag"
+        detail="Delete this tag and all assignments."
+        items={[
+          { label: "Tag", value: deleteCandidate?.name ?? "-" },
+          { label: "Assignments", value: String(deleteCandidate?.clients.length ?? 0) },
+        ]}
+        onCancel={() => setDeleteCandidate(null)}
+        onConfirm={() => void deleteSelected()}
+        open={deleteCandidate !== null}
+        pending={pending}
+        title="Confirm tag delete"
+      />
+    </>
+  );
+}
+
+function TagAssignments({
+  agents,
+  onAssignTag,
+  onBulkMutateTags,
+  onOpenPrivilegeUnlock,
+  pending,
+  privilegeMaterial,
+  runAction,
+  setLastMutation,
+  tags,
+}: {
+  agents: AgentView[];
+  onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
+  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onOpenPrivilegeUnlock: () => void;
+  pending: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
+  runAction: (action: () => Promise<void>) => Promise<void>;
+  setLastMutation: (response: TagMutationResponse | null) => void;
+  tags: TagView[];
+}) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [tagByAgent, setTagByAgent] = useState<Record<string, string>>({});
+  const tagNames = useMemo(() => tags.map((tag) => tag.name).sort(), [tags]);
+
+  async function addTag(agent: AgentView) {
+    const tag = tagByAgent[agent.id]?.trim();
+    if (!tag) {
+      return;
+    }
+    await runAction(async () => {
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        "tag.assign",
+        tag,
+        null,
+        [agent.id],
+      );
+      await onAssignTag(agent.id, tag, privilegeAssertion);
+      setLastMutation({
+        action: "add",
+        affected: [agent],
+        changed_count: 1,
+        confirmation_required: false,
+        skipped_count: 0,
+        tag,
+        target_count: 1,
+      });
+      setTagByAgent((current) => ({ ...current, [agent.id]: "" }));
+    });
+  }
+
+  async function removeTag(agent: AgentView, tag: string) {
+    await runAction(async () => {
+      const selector = selectorExpressionForClientIds([agent.id]);
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        "tag.bulk_remove",
+        tag,
+        selector,
+        [agent.id],
+      );
+      setLastMutation(
+        await onBulkMutateTags({
+          action: "remove",
+          confirmed: true,
+          privilege_assertion: privilegeAssertion,
+          selector_expression: selector,
+          tag,
+        }),
+      );
+    });
+  }
+
+  return (
+    <CrudPager
+      fields={[
+        { label: "VPS", value: (agent) => formatVpsName(agent, vpsNameDisplayMode) },
+        { label: "Status", value: (agent) => agent.status },
+        { label: "Tags", value: (agent) => agent.tags.join(" ") },
+      ]}
+      itemLabel="VPSs"
+      items={agents}
+      pageSize={10}
+      title="VPS tag assignments"
+    >
+      {(rows) => (
+        <div className="table hierarchyTable">
+          <div className="historyRow heading tagAssignmentGrid">
+            <span>VPS</span>
+            <span>Status</span>
+            <span>Current tags</span>
+            <span>Add tag</span>
+          </div>
+          {rows.map((agent) => (
+            <div className="historyRow tagAssignmentGrid" key={agent.id}>
+              <span className="historyPrimary">
+                <strong title={agent.id}>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+                <small>{agent.id}</small>
+              </span>
+              <span>{agent.status}</span>
+              <span className="tagChipList">
+                {agent.tags.map((tag) => (
+                  <button className="tagRemoveChip" disabled={pending} key={tag} onClick={() => void removeTag(agent, tag)} title={`Remove ${tag}`} type="button">
+                    <span>{tag}</span>
+                    <X size={12} />
+                  </button>
+                ))}
+              </span>
+              <span className="formRow inlineTagAdd">
+                <input
+                  aria-label={`Tag to add to ${agent.display_name}`}
+                  list="tag-options"
+                  onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
+                  placeholder="tag"
+                  value={tagByAgent[agent.id] ?? ""}
+                />
+                <button className="secondaryAction compactAction" disabled={pending || !(tagByAgent[agent.id] ?? "").trim()} onClick={() => void addTag(agent)} type="button">
+                  <Plus size={13} />
+                </button>
+              </span>
+            </div>
+          ))}
+          <datalist id="tag-options">
+            {tagNames.map((tag) => (
+              <option key={tag} value={tag} />
+            ))}
+          </datalist>
+        </div>
+      )}
+    </CrudPager>
+  );
+}
+
+function BulkTagPanel({
+  agents,
+  onBulkMutateTags,
+  onDeleteTag,
+  onOpenPrivilegeUnlock,
+  onResolveBulk,
+  pending,
+  privilegeMaterial,
+  runAction,
+  setLastMutation,
+  tags,
+}: {
+  agents: AgentView[];
+  onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
+  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
+  onOpenPrivilegeUnlock: () => void;
+  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  pending: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
+  runAction: (action: () => Promise<void>) => Promise<void>;
+  setLastMutation: (response: TagMutationResponse | null) => void;
+  tags: TagView[];
+}) {
+  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(TAG_BULK_SELECTOR_STORAGE_KEY));
+  const [action, setAction] = useState<"add" | "remove" | "delete">("add");
+  const [tag, setTag] = useState("");
+  const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+
+  useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
+
+  async function previewTargets() {
+    await runAction(async () => {
+      if (selectorParse.error) {
+        throw new Error(selectorParse.error);
+      }
+      setPreview(await onResolveBulk(selectorExpression.trim()));
+    });
+  }
+
+  async function submitMutation() {
+    setConfirmOpen(false);
+    await runAction(async () => {
+      if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
+        throw new Error("Privilege unlock is required before bulk tag mutation");
+      }
+      if (action === "delete") {
+        const targetIds = tags.find((item) => item.name === tag.trim())?.clients.map((client) => client.id) ?? [];
+        const privilegeAssertion = await dbPrivilegeAssertion(
+          privilegeMaterial,
+          onOpenPrivilegeUnlock,
+          "tag.delete",
+          tag.trim(),
+          null,
+          targetIds,
+        );
+        setLastMutation(await onDeleteTag(tag.trim(), true, privilegeAssertion));
+        return;
+      }
+      const targetIds = preview?.targets.map((agent) => agent.id) ?? [];
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        action === "add" ? "tag.bulk_add" : "tag.bulk_remove",
+        tag.trim(),
+        selectorExpression.trim(),
+        targetIds,
+      );
+      setLastMutation(
+        await onBulkMutateTags({
+          action,
+          confirmed: true,
+          privilege_assertion: privilegeAssertion,
+          selector_expression: selectorExpression.trim(),
+          tag: tag.trim(),
+        }),
+      );
+    });
+  }
+
+  return (
+    <div className="configApplyGrid">
+      <div className="compactForm">
+        <strong>Bulk mutation</strong>
+        <select aria-label="Bulk tag action" onChange={(event) => setAction(event.target.value as "add" | "remove" | "delete")} value={action}>
+          <option value="add">Add tag by selector</option>
+          <option value="remove">Remove tag by selector</option>
+          <option value="delete">Delete tag globally</option>
+        </select>
+        <input aria-label="Bulk tag" list="bulk-tag-options" onChange={(event) => setTag(event.target.value)} placeholder="tag" value={tag} />
+        <datalist id="bulk-tag-options">
+          {tags.map((item) => (
+            <option key={item.name} value={item.name} />
+          ))}
+        </datalist>
+        {action !== "delete" && (
+          <>
+            <SearchExpressionInput
+              agents={agents}
+              ariaLabel="Bulk tag selector expression"
+              className="targetExpressionBar"
+              onChange={(value) => {
+                setSelectorExpression(value);
+                setPreview(null);
+              }}
+              placeholder="provider:* && country:US"
+              showMatchCount
+              value={selectorExpression}
+              verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
+              verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
+            />
+            <button className="secondaryAction" disabled={pending || !selectorExpression.trim()} onClick={previewTargets} type="button">
+              Preview targets
+            </button>
+          </>
+        )}
+        <div className="privilegeGateBox">
+          <ShieldCheck size={16} />
+          <span>{privilegeMaterial ? "Privilege unlocked" : "Unlock privilege to enable bulk tag mutation"}</span>
+          {!privilegeMaterial && (
+            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+              Unlock
+            </button>
+          )}
+        </div>
+        <button
+          className="primaryAction"
+          disabled={pending || !privilegeMaterial || !tag.trim() || (action !== "delete" && (!preview?.target_count || Boolean(selectorParse.error)))}
+          onClick={() => setConfirmOpen(true)}
+          type="button"
+        >
+          <Tag size={16} />
+          Apply mutation
+        </button>
+      </div>
+      <div className="targetChipList bulkTagPreview">
+        {(preview?.targets ?? []).slice(0, 48).map((agent) => (
+          <span className="targetChip" key={agent.id} title={agent.id}>
+            {agent.display_name}
+          </span>
+        ))}
+        {preview && preview.target_count > 48 && <span className="targetChip mutedChip">+{preview.target_count - 48} more</span>}
+      </div>
+      <ConfirmationPrompt
+        confirmLabel="Apply tag mutation"
+        detail={action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
+        items={[
+          { label: "Action", value: action },
+          { label: "Tag", value: tag || "-" },
+          { label: "Selector", value: action === "delete" ? "all assignments" : selectorExpression || "-" },
+          { label: "Targets", value: action === "delete" ? String(tags.find((item) => item.name === tag)?.clients.length ?? 0) : String(preview?.target_count ?? 0) },
+        ]}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => void submitMutation()}
+        open={confirmOpen}
+        pending={pending}
+        title="Confirm tag mutation"
+      />
+    </div>
+  );
+}
 
 function readLocalString(key: string): string {
-  if (typeof window === "undefined") {
-    return "";
-  }
   try {
     return window.localStorage.getItem(key) ?? "";
   } catch {
@@ -43,9 +555,6 @@ function readLocalString(key: string): string {
 }
 
 function writeLocalString(key: string, value: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
   try {
     if (value.trim()) {
       window.localStorage.setItem(key, value);
@@ -53,315 +562,30 @@ function writeLocalString(key: string, value: string) {
       window.localStorage.removeItem(key);
     }
   } catch {
-    // Browser-local targeting persistence must not block tag management.
+    // Browser-local selector persistence must not block tag workflows.
   }
 }
 
-export function TagsPanel({
-  activeSubpage,
-  agents,
-  error,
-  loading,
-  onAssignDataSourcePreset,
-  onAssignTag,
-  onCloneDataSourcePreset,
-  onCreateJob,
-  onCreateDataSourcePreset,
-  onCreateTag,
-  onDiffDataSourcePreset,
-  onOpenProofUnlock,
-  onRefresh,
-  onRenderDataSourceHotConfig,
-  onResolveBulk,
-  onTestDataSourcePreset,
-  onUpdateDataSourcePreset,
-  proofMaterial,
-  setProofMaterial,
-  dataSourceAssignments,
-  dataSourcePresets,
-  dataSourceStatus,
-  tags,
-}: {
-  activeSubpage: string;
-  agents: AgentView[];
-  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
-  dataSourcePresets: DataSourcePresetRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
-  error: string | null;
-  loading: boolean;
-  onAssignDataSourcePreset: (request: AssignDataSourcePresetRequest) => Promise<AssignDataSourcePresetResponse>;
-  onAssignTag: (clientId: string, tag: string) => Promise<void>;
-  onCloneDataSourcePreset: (presetId: string, request: CloneDataSourcePresetRequest) => Promise<void>;
-  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreateDataSourcePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
-  onCreateTag: (name: string) => Promise<void>;
-  onDiffDataSourcePreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
-  onOpenProofUnlock: () => void;
-  onRefresh: () => void;
-  onRenderDataSourceHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
-  onResolveBulk: (selectorExpression: string, destructive: boolean, confirmed?: boolean) => Promise<BulkResolveResponse>;
-  onTestDataSourcePreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
-  onUpdateDataSourcePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
-  tags: TagView[];
-}) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [tagName, setTagName] = useState("");
-  const [targetClient, setTargetClient] = useState("");
-  const [targetTag, setTargetTag] = useState("");
-  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(TAG_TARGET_SELECTOR_STORAGE_KEY));
-  const [destructive, setDestructive] = useState(false);
-  const [bulkPreview, setBulkPreview] = useState<BulkResolveResponse | null>(null);
-  const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
-  const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const tagSubpage = ["registry", "targeting", "presets", "status"].includes(activeSubpage)
-    ? activeSubpage
-    : "registry";
-
-  async function submitTag(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
-      await onCreateTag(tagName.trim());
-      setTagName("");
-    });
+async function dbPrivilegeAssertion(
+  privilegeMaterial: PrivilegeMaterial | null,
+  onOpenPrivilegeUnlock: () => void,
+  action: string,
+  target: string,
+  selectorExpression: string | null,
+  resolvedTargets: string[],
+): Promise<PrivilegeAssertion> {
+  if (!privilegeMaterial) {
+    onOpenPrivilegeUnlock();
+    throw new Error("Privilege unlock is required");
   }
-
-  async function submitAssignments(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
-      if (targetClient && targetTag) {
-        await onAssignTag(targetClient, targetTag);
-      }
-      setTargetTag("");
-    });
-  }
-
-  async function previewBulk() {
-    const parsed = parseSearchExpression(selectorExpression);
-    if (parsed.error) {
-      setActionError(parsed.error);
-      return;
-    }
-    await runPanelAction(setPending, setActionError, async () => {
-      setBulkPreview(await onResolveBulk(selectorExpression.trim(), destructive));
-    });
-  }
-
-  useEffect(() => {
-    writeLocalString(TAG_TARGET_SELECTOR_STORAGE_KEY, selectorExpression);
-  }, [selectorExpression]);
-
-  useEffect(() => {
-    if (!selectorExpression.trim()) {
-      setSelectorVerification("neutral");
-      setSelectorVerificationMessage(null);
-      setBulkPreview(null);
-      return;
-    }
-    const parsed = parseSearchExpression(selectorExpression);
-    if (parsed.error) {
-      setSelectorVerification("invalid");
-      setSelectorVerificationMessage("Invalid");
-      setBulkPreview(null);
-      return;
-    }
-    let canceled = false;
-    setSelectorVerification("checking");
-    setSelectorVerificationMessage("Checking");
-    const timeout = window.setTimeout(() => {
-      void onResolveBulk(selectorExpression.trim(), destructive)
-        .then((response) => {
-          if (canceled) {
-            return;
-          }
-          setBulkPreview(response);
-          setSelectorVerification("valid");
-          setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
-        })
-        .catch(() => {
-          if (canceled) {
-            return;
-          }
-          setBulkPreview(null);
-          setSelectorVerification("invalid");
-          setSelectorVerificationMessage("Invalid");
-        });
-    }, 300);
-    return () => {
-      canceled = true;
-      window.clearTimeout(timeout);
-    };
-  }, [agents.length, destructive, onResolveBulk, selectorExpression]);
-
-  const status = actionError ?? error ?? (loading ? "Refreshing tag state" : "Live tag targets");
-
-  return (
-    <section className="workspace singleColumn">
-      {tagSubpage === "registry" && (
-        <div className="fleetPanel">
-          <div className="sectionHeader">
-            <div>
-              <h2>Tags</h2>
-              <span>{status}</span>
-            </div>
-            <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-              Refresh
-            </button>
-          </div>
-
-          <div className="managementGrid">
-            <form className="compactForm" onSubmit={submitTag}>
-              <strong>Create tag</strong>
-              <div className="formRow">
-                <input
-                  aria-label="Tag name"
-                  onChange={(event) => setTagName(event.target.value)}
-                  placeholder="provider:alpha, country:us, app:edge"
-                  value={tagName}
-                />
-                <button className="secondaryAction" disabled={pending || !tagName.trim()} type="submit">
-                  Create
-                </button>
-              </div>
-            </form>
-          </div>
-
-          <CrudPager
-            fields={[
-              { label: "Tag", value: (tag) => tag.name },
-              { label: "Clients", value: (tag) => tag.clients.length },
-            ]}
-            itemLabel="tags"
-            items={tags}
-            pageSize={8}
-            title="Tag records"
-            empty={
-              <div className="emptyState">
-                <ShieldCheck size={22} />
-                <strong>No tags</strong>
-                <span>Create provider, country, or custom tags to target recurring VPS groups.</span>
-              </div>
-            }
-          >
-            {(tagRows) => (
-              <div className="table hierarchyTable">
-                <div className="historyRow heading tagGrid">
-                  <span>Tag</span>
-                  <span>Clients</span>
-                </div>
-                {tagRows.map((tag) => (
-                  <div className="historyRow tagGrid" key={tag.name}>
-                    <span className="tags">
-                      <em>{tag.name}</em>
-                    </span>
-                    <span>{tag.clients.length}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CrudPager>
-        </div>
-      )}
-
-      {(tagSubpage === "presets" || tagSubpage === "status") && (
-        <DataSourcePresetPanel
-          activeSubpage={tagSubpage}
-          agents={agents}
-          assignments={dataSourceAssignments}
-          dataSourceStatus={dataSourceStatus}
-          onAssignPreset={onAssignDataSourcePreset}
-          onClonePreset={onCloneDataSourcePreset}
-          onCreateJob={onCreateJob}
-          onCreatePreset={onCreateDataSourcePreset}
-          onDiffPreset={onDiffDataSourcePreset}
-          onOpenProofUnlock={onOpenProofUnlock}
-          onRenderHotConfig={onRenderDataSourceHotConfig}
-          onTestPreset={onTestDataSourcePreset}
-          onUpdatePreset={onUpdateDataSourcePreset}
-          proofMaterial={proofMaterial}
-          presets={dataSourcePresets}
-          setProofMaterial={setProofMaterial}
-        />
-      )}
-
-      {tagSubpage === "targeting" && (
-      <div className="fleetPanel">
-        <div className="sectionHeader">
-          <div>
-          <h2>Targeting</h2>
-          <span>Resolve before dispatch</span>
-          </div>
-        </div>
-
-        <div className="managementGrid">
-        <form className="compactForm" onSubmit={submitAssignments}>
-          <strong>Assign VPS</strong>
-          <select aria-label="VPS" onChange={(event) => setTargetClient(event.target.value)} value={targetClient}>
-            <option value="">VPS</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {formatVpsName(agent, vpsNameDisplayMode)}
-              </option>
-            ))}
-          </select>
-          <input
-            aria-label="Tag to assign"
-            onChange={(event) => setTargetTag(event.target.value)}
-            placeholder="tag"
-            value={targetTag}
-          />
-          <button className="wideAction" disabled={pending || !targetClient || !targetTag} type="submit">
-            Apply
-          </button>
-        </form>
-
-        <div className="compactForm">
-          <strong>Bulk preview</strong>
-          <SearchExpressionInput
-            agents={agents}
-            ariaLabel="Tag targeting selector expression"
-            className="compact"
-            onChange={(value) => {
-              setSelectorExpression(value);
-              setBulkPreview(null);
-            }}
-            placeholder="provider:* && country:US"
-            showMatchCount
-            value={selectorExpression}
-            verification={selectorVerification}
-            verificationMessage={selectorVerificationMessage}
-          />
-          <label className="checkLine">
-            <input checked={destructive} onChange={(event) => setDestructive(event.target.checked)} type="checkbox" />
-            <span>Destructive operation</span>
-          </label>
-          <button
-            className="wideAction"
-            disabled={pending || !selectorExpression.trim() || selectorVerification === "invalid"}
-            onClick={previewBulk}
-            type="button"
-          >
-            Preview targets
-          </button>
-        </div>
-        </div>
-
-        <div className="timeline">
-          <ShieldCheck size={18} />
-          <div>
-            <strong>{bulkPreview ? `${bulkPreview.target_count} targets` : "No preview"}</strong>
-            <span>
-              {bulkPreview?.confirmation_required
-                ? "Destructive dispatch requires confirmation"
-                : "Resolved target set appears here"}
-            </span>
-          </div>
-        </div>
-      </div>
-      )}
-    </section>
-  );
+  return buildPrivilegeAssertion({
+    intent: canonicalDbPrivilegeIntent({
+      action,
+      confirmed: true,
+      resolvedTargets,
+      selectorExpression,
+      target,
+    }),
+    privilegeMaterial,
+  });
 }

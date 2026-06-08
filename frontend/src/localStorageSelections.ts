@@ -2,7 +2,7 @@ const LOCAL_STORAGE_APP_PREFIX = "vpsman.";
 const PRESERVED_LOCAL_STORAGE_KEYS = new Set([
   "vpsman.accessToken",
   "vpsman.authVault",
-  "vpsman.proofVault",
+  "vpsman.privilegeVault",
   "vpsman.refreshToken",
 ]);
 

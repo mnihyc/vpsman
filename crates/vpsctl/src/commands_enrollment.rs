@@ -3,13 +3,12 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use vpsman_common::{
-    derive_super_key, generate_noise_keypair, AgentAuthConfig, AgentBackupConfig, AgentConfig,
-    AgentExecutionConfig, AgentNetworkConfig, AgentNoiseConfig, AgentNoiseMode,
-    AgentTelemetryConfig, AgentUpdateConfig, ServerEndpoint,
+    generate_noise_keypair, AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig,
+    AgentNetworkConfig, AgentNoiseConfig, AgentNoiseMode, AgentTelemetryConfig, AgentUpdateConfig,
+    ServerEndpoint,
 };
 
 use crate::http::{http_get, http_post_json};
-use crate::proof::{load_super_password, load_super_salt_hex};
 
 pub(crate) fn enrollment_tokens(api_url: &str, token: Option<&str>) -> Result<()> {
     println!("{}", http_get(api_url, "/api/v1/enrollment-tokens", token)?);
@@ -18,10 +17,6 @@ pub(crate) fn enrollment_tokens(api_url: &str, token: Option<&str>) -> Result<()
 
 pub(crate) struct EnrollmentTokenCreateOptions {
     pub(crate) ttl_secs: u64,
-    pub(crate) purpose: String,
-    pub(crate) allowed_client_id: Option<String>,
-    pub(crate) confirmed_reenrollment: bool,
-    pub(crate) preserve_existing_assignments: bool,
     pub(crate) default_tags: Vec<String>,
     pub(crate) default_display_name: Option<String>,
     pub(crate) unmanaged_update_enabled: bool,
@@ -45,10 +40,10 @@ pub(crate) fn enrollment_token_create(
             token,
             &serde_json::json!({
                 "ttl_secs": options.ttl_secs,
-                "purpose": options.purpose,
-                "allowed_client_id": options.allowed_client_id,
-                "confirmed_reenrollment": options.confirmed_reenrollment,
-                "preserve_existing_assignments": options.preserve_existing_assignments,
+                "purpose": "provision",
+                "allowed_client_id": null,
+                "confirmed_reenrollment": false,
+                "preserve_existing_assignments": true,
                 "default_tags": options.default_tags,
                 "default_display_name": options.default_display_name,
                 "unmanaged_update_enabled": options.unmanaged_update_enabled,
@@ -170,16 +165,12 @@ fn encode_path(value: &str) -> String {
 pub(crate) fn enroll_claim(
     api_url: &str,
     enrollment_token: String,
-    client_id: Option<String>,
     client_public_key_hex: String,
 ) -> Result<()> {
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "token": enrollment_token,
         "client_public_key_hex": client_public_key_hex,
     });
-    if let Some(client_id) = client_id {
-        body["client_id"] = serde_json::Value::String(client_id);
-    }
     println!(
         "{}",
         http_post_json(api_url, "/api/v1/enrollments/claim", None, &body,)?
@@ -191,24 +182,12 @@ pub(crate) fn enroll_claim(
 pub(crate) fn enroll_config(
     api_url: &str,
     enrollment_token: String,
-    client_id: Option<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
     command_timeout_secs: u64,
     output: Option<PathBuf>,
 ) -> Result<()> {
     let keypair = generate_noise_keypair()?;
-    let response = claim_enrollment(api_url, enrollment_token, client_id, keypair.public_hex())?;
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let salt = hex::decode(&salt_hex).context("super-password salt is not valid hex")?;
-    let proof_key_hex = hex::encode(derive_super_key(&password, &salt));
-    let config = render_agent_config(
-        &response,
-        keypair.private_hex(),
-        proof_key_hex,
-        command_timeout_secs,
-    )?;
+    let response = claim_enrollment(api_url, enrollment_token, keypair.public_hex())?;
+    let config = render_agent_config(&response, keypair.private_hex(), command_timeout_secs)?;
     let rendered = toml::to_string_pretty(&config).context("failed to render agent TOML config")?;
 
     if let Some(path) = output {
@@ -222,16 +201,12 @@ pub(crate) fn enroll_config(
 fn claim_enrollment(
     api_url: &str,
     enrollment_token: String,
-    client_id: Option<String>,
     client_public_key_hex: String,
 ) -> Result<ClaimEnrollmentResponse> {
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "token": enrollment_token,
         "client_public_key_hex": client_public_key_hex,
     });
-    if let Some(client_id) = client_id {
-        body["client_id"] = serde_json::Value::String(client_id);
-    }
     let response_body = http_post_json(api_url, "/api/v1/enrollments/claim", None, &body)?;
     serde_json::from_str(&response_body).context("failed to parse enrollment claim response")
 }
@@ -239,7 +214,6 @@ fn claim_enrollment(
 fn render_agent_config(
     response: &ClaimEnrollmentResponse,
     client_private_key_hex: String,
-    proof_key_hex: String,
     command_timeout_secs: u64,
 ) -> Result<AgentConfig> {
     if response.noise_mode == AgentNoiseMode::EnrolledIk
@@ -259,7 +233,6 @@ fn render_agent_config(
             server_public_key_hex: response.gateway_server_public_key_hex.clone(),
         },
         auth: AgentAuthConfig {
-            proof_key_hex: Some(proof_key_hex),
             server_ed25519_public_key_hex: response.server_ed25519_public_key_hex.clone(),
             discovery_trusted_server_ed25519_public_keys_hex: response
                 .discovery_trusted_server_ed25519_public_keys_hex
@@ -273,7 +246,8 @@ fn render_agent_config(
         network: AgentNetworkConfig::default(),
         telemetry_light_secs: response.telemetry_light_secs.max(5),
         telemetry_full_secs: response.telemetry_full_secs.max(5),
-        tags: response.tags.clone(),
+        // Keep panel aliases and tags server-side. The agent only needs its opaque id.
+        tags: Vec::new(),
     })
 }
 
@@ -304,7 +278,6 @@ struct ClaimEnrollmentResponse {
     discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
     telemetry_light_secs: u64,
     telemetry_full_secs: u64,
-    tags: Vec<String>,
     #[serde(default)]
     update: AgentUpdateConfig,
 }
@@ -317,7 +290,6 @@ mod tests {
     fn renders_enrolled_agent_config_without_server_side_private_key() {
         let response: ClaimEnrollmentResponse = serde_json::from_value(serde_json::json!({
             "client_id": "client-a",
-            "display_name": "Edge A",
             "tcp_endpoints": [{
                 "label": "primary",
                 "tcp_addr": "198.51.100.10:9443",
@@ -330,14 +302,12 @@ mod tests {
             "discovery_trusted_server_ed25519_public_keys_hex": ["55".repeat(32)],
             "telemetry_light_secs": 15,
             "telemetry_full_secs": 60,
-            "tags": ["edge"],
         }))
         .unwrap();
-        let config = render_agent_config(&response, "33".repeat(32), "44".repeat(32), 45).unwrap();
+        let config = render_agent_config(&response, "33".repeat(32), 45).unwrap();
         let rendered = toml::to_string(&config).unwrap();
         let client_private_key_hex = "33".repeat(32);
         let gateway_public_key_hex = "11".repeat(32);
-        let proof_key_hex = "44".repeat(32);
 
         assert_eq!(config.noise.mode, AgentNoiseMode::EnrolledIk);
         assert_eq!(config.display_name, "client-a");
@@ -350,15 +320,11 @@ mod tests {
             Some(gateway_public_key_hex.as_str())
         );
         assert_eq!(
-            config.auth.proof_key_hex.as_deref(),
-            Some(proof_key_hex.as_str())
-        );
-        assert_eq!(
             config.auth.discovery_trusted_server_ed25519_public_keys_hex,
             vec!["55".repeat(32)]
         );
         assert_eq!(config.auth.command_timeout_secs, 45);
-        assert!(!rendered.contains("Edge A"));
+        assert!(config.tags.is_empty());
         assert!(rendered.contains("client_private_key_hex"));
         assert!(!rendered.contains("enrollment_token"));
     }
@@ -375,15 +341,12 @@ mod tests {
             discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
             telemetry_light_secs: 15,
             telemetry_full_secs: 60,
-            tags: Vec::new(),
             update: AgentUpdateConfig::default(),
         };
 
-        assert!(
-            render_agent_config(&response, "33".repeat(32), "44".repeat(32), 30)
-                .unwrap_err()
-                .to_string()
-                .contains("missing gateway server public key")
-        );
+        assert!(render_agent_config(&response, "33".repeat(32), 30)
+            .unwrap_err()
+            .to_string()
+            .contains("missing gateway server public key"));
     }
 }

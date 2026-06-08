@@ -1,6 +1,12 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
-import type { CreateScheduleRequest, ScheduleRecord } from "../types";
+import { apiDelete, apiGet, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
+import type {
+  CreateScheduleRequest,
+  DeferScheduleRequest,
+  SchedulePrivilegeMutationRequest,
+  ScheduleRecord,
+  UpdateScheduleRequest,
+} from "../types";
 
 export function useSchedulesData(
   apiToken: string,
@@ -42,8 +48,62 @@ export function useSchedulesData(
     [apiToken, loadSchedules, onAuditChanged],
   );
 
+  const updateSchedule = useCallback(
+    async (scheduleId: string, request: UpdateScheduleRequest) => {
+      await apiPut<ScheduleRecord>(`/api/v1/schedules/${scheduleId}`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
+  const enableSchedule = useCallback(
+    async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
+      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/enable`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
+  const disableSchedule = useCallback(
+    async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
+      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/disable`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
+  const deferSchedule = useCallback(
+    async (scheduleId: string, request: DeferScheduleRequest) => {
+      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/defer`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
+  const applyScheduleNow = useCallback(
+    async (scheduleId: string) => {
+      await apiPost(`/api/v1/schedules/${scheduleId}/apply-now`, apiToken, {});
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
+  const deleteSchedule = useCallback(
+    async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
+      await apiDelete(`/api/v1/schedules/${scheduleId}`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
   return {
     createSchedule,
+    updateSchedule,
+    enableSchedule,
+    disableSchedule,
+    deferSchedule,
+    applyScheduleNow,
+    deleteSchedule,
     loadSchedules,
     schedules,
     schedulesError,

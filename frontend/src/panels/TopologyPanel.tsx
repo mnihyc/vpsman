@@ -23,7 +23,7 @@ import type {
   TunnelPlanRecord,
 } from "../types";
 import type { PromoteTunnelPlanToAdapterRequest } from "../typesTopology";
-import type { ProofMaterial } from "../proof";
+import type { PrivilegeMaterial } from "../privilege";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
@@ -66,12 +66,12 @@ export function TopologyPanel({
   onLoadOutputs,
   onLoadTargets,
   onOpenJobDetails,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onPromoteTelemetryTunnel,
   onPromoteTunnelPlanToAdapter,
   onRefresh,
-  proofMaterial,
-  setProofMaterial,
+  privilegeMaterial,
+  setPrivilegeMaterial,
   telemetryTunnels,
   topologyGraph,
   tunnelPlans,
@@ -96,12 +96,12 @@ export function TopologyPanel({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
   onPromoteTunnelPlanToAdapter: (request: PromoteTunnelPlanToAdapterRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
@@ -532,9 +532,9 @@ export function TopologyPanel({
           onCreateJob={onCreateJob}
           onLoadTargets={onLoadTargets}
           onOpenJobDetails={onOpenJobDetails}
-          onOpenProofUnlock={onOpenProofUnlock}
-          proofMaterial={proofMaterial}
-          setProofMaterial={setProofMaterial}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
           tunnelPlans={tunnelPlans}
         />
       )}
@@ -544,10 +544,10 @@ export function TopologyPanel({
           onCreateJob={onCreateJob}
           onLoadTargets={onLoadTargets}
           onOpenJobDetails={onOpenJobDetails}
-          onOpenProofUnlock={onOpenProofUnlock}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           ospfUpdatePlans={ospfUpdatePlans}
-          proofMaterial={proofMaterial}
-          setProofMaterial={setProofMaterial}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
           tunnelPlans={tunnelPlans}
         />
       )}

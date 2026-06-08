@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::time::{self, Duration};
 use vpsman_common::{
-    backend_config_proof_payload, payload_hash, render_backend_config_for_endpoint,
+    backend_config_signature_payload, payload_hash, render_backend_config_for_endpoint,
     render_tunnel_endpoint_config, AgentConfig, CommandOutput, OutputStream, TunnelBackendFile,
     TunnelConfigBackend, TunnelEndpointConfig, TunnelEndpointSide, TunnelPlan, MANAGED_BIRD2_FILE,
     MANAGED_IFUPDOWN_FILE, MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
@@ -124,7 +124,7 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
     }
     if let Some(config_sha256_hex) = input.config_sha256_hex {
         verify_expected_hash(
-            &backend_config_proof_payload(&backend_config),
+            &backend_config_signature_payload(&backend_config),
             config_sha256_hex,
             "network apply",
             "backend_config",

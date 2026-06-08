@@ -1,11 +1,16 @@
 import { useMemo, useState } from "react";
 import { Gauge, ShieldCheck } from "lucide-react";
-import { waitForBulkJobTargets, type BulkJobProgress } from "../../bulkJobProgress";
+import {
+  formatTargetAvailabilitySummary,
+  targetPreflightUnavailable,
+  waitForBulkJobTargets,
+  type BulkJobProgress,
+} from "../../bulkJobProgress";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
-import { ProofVaultBox } from "../../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { buildEnvelopesForOperation, type ProofMaterial } from "../../proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { buildNetworkOspfCostUpdateOperation } from "../../topologyApply";
 import type {
@@ -26,27 +31,26 @@ export function TopologyOspfUpdateControls({
   onCreateJob,
   onLoadTargets,
   onOpenJobDetails,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   ospfUpdatePlans,
-  proofMaterial,
-  setProofMaterial,
+  privilegeMaterial,
+  setPrivilegeMaterial,
   tunnelPlans,
 }: {
   agents: AgentView[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedPlanId, setSelectedPlanId] = useState(() => ospfUpdatePlans[0]?.plan_id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [timeoutSecs, setTimeoutSecs] = useState(60);
-  const [proofTtlSecs, setProofTtlSecs] = useState(300);
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
@@ -74,7 +78,7 @@ export function TopologyOspfUpdateControls({
       ? `OSPF result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
         ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
-      : proofMaterial
+      : privilegeMaterial
         ? "Ready"
         : "Locked");
   const canSubmit =
@@ -83,19 +87,14 @@ export function TopologyOspfUpdateControls({
     !!selectedUpdatePlan &&
     !!selectedTunnelPlan &&
     !!targetClientId &&
-    !!proofMaterial &&
+    !!privilegeMaterial &&
     selectedUpdatePlan.current_ospf_cost !== selectedUpdatePlan.recommended_ospf_cost;
-  const connectedTargets = mutationTargets.filter((target) => target.status === "connected").length;
-  const unavailableTargets = Math.max(0, mutationTargets.length - connectedTargets);
   const confirmationItems = [
     { label: "Operation", value: "OSPF cost update" },
     { label: "Selector", value: targetClientId ? selectorExpressionForClientIds([targetClientId]) : "-" },
     {
       label: "Targets",
-      value:
-        unavailableTargets > 0
-          ? `${mutationTargets.length} resolved (${connectedTargets} connected, ${unavailableTargets} unavailable)`
-          : `${mutationTargets.length} resolved`,
+      value: formatTargetAvailabilitySummary(mutationTargets),
     },
     { label: "Plan", value: selectedUpdatePlan?.plan_name ?? "-" },
     { label: "Endpoint", value: side },
@@ -106,7 +105,7 @@ export function TopologyOspfUpdateControls({
         : "-",
     },
     { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
-    { label: "Proof TTL", value: `${clampInteger(proofTtlSecs, 15, 3600)}s` },
+    { label: "Privilege unlock", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
     { label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" },
   ];
 
@@ -131,8 +130,8 @@ export function TopologyOspfUpdateControls({
       if (!selectedUpdatePlan || !selectedTunnelPlan || !targetClientId) {
         throw new Error("Select an OSPF update plan");
       }
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       const builtOperation = await buildNetworkOspfCostUpdateOperation(
         selectedTunnelPlan.plan,
@@ -141,27 +140,30 @@ export function TopologyOspfUpdateControls({
         selectedUpdatePlan.recommended_ospf_cost,
       );
       const endpointTarget = builtOperation.endpoint.localClientId;
-      const builtProof = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds([endpointTarget]);
+      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+      const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: [endpointTarget],
+        commandType: "network_ospf_cost_update",
+        forceUnprivileged,
         operation: builtOperation.operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs: boundedTimeoutSecs,
       });
       const job = await onCreateJob({
         argv: [],
-        selector_expression: selectorExpressionForClientIds([endpointTarget]),
+        selector_expression: selectorExpression,
         command: "network_ospf_cost_update",
         confirmed: true,
         destructive: true,
-        envelope: null,
-        envelopes: builtProof.envelopes,
         operation: builtOperation.operation,
         force_unprivileged: forceUnprivileged,
         privileged: true,
-        timeout_secs: clampInteger(timeoutSecs, 1, 3600),
+        privilege_assertion: builtPrivilege.privilegeAssertion,
+        timeout_secs: boundedTimeoutSecs,
       });
-      setLastPayloadHash(builtProof.payloadHashHex);
+      setLastPayloadHash(builtPrivilege.payloadHashHex);
       setLastJob(job);
       await trackOspfProgress(job, resolveAgentsById(agents, [endpointTarget]));
     });
@@ -177,7 +179,7 @@ export function TopologyOspfUpdateControls({
       failed: 0,
       jobId: job.job_id,
       retrieved: 0,
-      unavailable: targets.filter((target) => target.status !== "connected").length,
+      unavailable: targets.filter(targetPreflightUnavailable).length,
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
@@ -244,17 +246,6 @@ export function TopologyOspfUpdateControls({
               value={timeoutSecs}
             />
           </label>
-          <label>
-            <span>Proof TTL seconds</span>
-            <input
-              aria-label="OSPF update proof TTL seconds"
-              max={3600}
-              min={15}
-              onChange={(event) => setProofTtlSecs(Number(event.target.value))}
-              type="number"
-              value={proofTtlSecs}
-            />
-          </label>
         </div>
         {selectedUpdatePlan && (
           <div className="operationNote">
@@ -307,17 +298,17 @@ export function TopologyOspfUpdateControls({
           </button>
         </div>
       </div>
-      <ProofVaultBox
+      <PrivilegeVaultBox
         clearVaultLabel="Clear OSPF vault"
         labelPrefix="OSPF"
         lastPayloadHash={lastPayloadHash}
-        lockProofLabel="Lock OSPF proof"
-        onOpenUnlock={onOpenProofUnlock}
-        onProofMaterialChange={setProofMaterial}
-        proofMaterial={proofMaterial}
+        lockPrivilegeLabel="Lock OSPF privilege"
+        onOpenUnlock={onOpenPrivilegeUnlock}
+        onPrivilegeMaterialChange={setPrivilegeMaterial}
+        privilegeMaterial={privilegeMaterial}
         unlockRedirectLabel="Unlock OSPF"
         unlockLabel="Unlock OSPF"
-        useProofLabel="Use OSPF proof"
+        usePrivilegeLabel="Unlock OSPF privilege"
       />
     </section>
   );

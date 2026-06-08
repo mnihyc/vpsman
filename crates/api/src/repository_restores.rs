@@ -114,9 +114,9 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        proof_scope,
-                        proof_command_id,
-                        proof_expires_unix,
+                        signed_command_scope,
+                        signed_command_id,
+                        signed_command_expires_unix,
                         note,
                         created_at::text AS created_at
                     FROM restore_plans
@@ -187,9 +187,9 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        proof_scope,
-                        proof_command_id,
-                        proof_expires_unix,
+                        signed_command_scope,
+                        signed_command_id,
+                        signed_command_expires_unix,
                         note,
                         created_at::text AS created_at
                     FROM restore_plans
@@ -241,9 +241,9 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        proof_scope,
-                        proof_command_id,
-                        proof_expires_unix,
+                        signed_command_scope,
+                        signed_command_id,
+                        signed_command_expires_unix,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -270,7 +270,7 @@ impl Repository {
         operator: &AuthContext,
         status: RestorePlanStatus,
     ) -> Result<RestorePlanView> {
-        let proof_expires_unix = envelope.proof.as_ref().map(|proof| proof.expires_unix);
+        let signed_command_expires_unix = None;
         let view = RestorePlanView {
             id: Uuid::new_v4(),
             actor_id: Some(operator.operator.id),
@@ -282,9 +282,9 @@ impl Repository {
             destination_root: request.destination_root.clone(),
             status: status.as_str().to_string(),
             payload_hash: payload_hash.to_string(),
-            proof_scope: envelope.scope.clone(),
-            proof_command_id: Some(envelope.command_id),
-            proof_expires_unix,
+            signed_command_scope: envelope.scope.clone(),
+            signed_command_id: Some(envelope.command_id),
+            signed_command_expires_unix,
             note: request.note.clone(),
             created_at: unix_now().to_string(),
         };
@@ -313,9 +313,9 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        proof_scope,
-                        proof_command_id,
-                        proof_expires_unix,
+                        signed_command_scope,
+                        signed_command_id,
+                        signed_command_expires_unix,
                         note
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -332,9 +332,9 @@ impl Repository {
                 .bind(&view.destination_root)
                 .bind(&view.status)
                 .bind(&view.payload_hash)
-                .bind(&view.proof_scope)
-                .bind(view.proof_command_id)
-                .bind(proof_expires_unix.map(|value| value as i64))
+                .bind(&view.signed_command_scope)
+                .bind(view.signed_command_id)
+                .bind(signed_command_expires_unix.map(|value| value as i64))
                 .bind(&view.note)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -413,8 +413,8 @@ impl Repository {
 }
 
 fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> {
-    let proof_expires_unix = row
-        .try_get::<Option<i64>, _>("proof_expires_unix")?
+    let signed_command_expires_unix = row
+        .try_get::<Option<i64>, _>("signed_command_expires_unix")?
         .map(|value| value.max(0) as u64);
     let status: String = row.try_get("status")?;
     Ok(RestorePlanView {
@@ -430,9 +430,9 @@ fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> 
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
         payload_hash: row.try_get("payload_hash")?,
-        proof_scope: row.try_get("proof_scope")?,
-        proof_command_id: row.try_get("proof_command_id")?,
-        proof_expires_unix,
+        signed_command_scope: row.try_get("signed_command_scope")?,
+        signed_command_id: row.try_get("signed_command_id")?,
+        signed_command_expires_unix,
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
@@ -469,9 +469,9 @@ fn restore_plan_metadata(
         "destination_root": &view.destination_root,
         "status": &view.status,
         "payload_hash": &view.payload_hash,
-        "proof_scope": &view.proof_scope,
-        "proof_command_id": view.proof_command_id,
-        "proof_expires_unix": view.proof_expires_unix,
+        "signed_command_scope": &view.signed_command_scope,
+        "signed_command_id": view.signed_command_id,
+        "signed_command_expires_unix": view.signed_command_expires_unix,
         "confirmed": confirmed,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
@@ -494,7 +494,6 @@ fn restore_rejection_metadata(
         "destination_root": &request.destination_root,
         "confirmed": request.confirmed,
         "payload_hash": payload_hash,
-        "has_envelope": request.envelope.is_some(),
         "reason": reason,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,

@@ -30,21 +30,52 @@ CREATE TABLE clients (
     id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     public_key BYTEA NOT NULL,
-    status TEXT NOT NULL DEFAULT 'unknown',
+    status TEXT NOT NULL DEFAULT 'offline',
     agent_version TEXT,
+    internal_build_number BIGINT NOT NULL DEFAULT 1,
     os_release TEXT,
     arch TEXT,
     capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    registration_ip INET,
+    last_ip INET,
     last_seen_at TIMESTAMPTZ,
+    stale_since TIMESTAMPTZ,
+    stale_reason TEXT,
+    stale_build_number BIGINT,
     hidden_at TIMESTAMPTZ,
     hidden_by UUID REFERENCES operators(id) ON DELETE SET NULL,
     hidden_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT clients_status_check CHECK (status IN ('online', 'offline', 'stale')),
+    CONSTRAINT clients_internal_build_number_check CHECK (internal_build_number >= 1),
+    CONSTRAINT clients_stale_build_number_check CHECK (stale_build_number IS NULL OR stale_build_number >= 1)
 );
 
 CREATE INDEX clients_visible_status_idx
     ON clients (status, last_seen_at DESC)
     WHERE hidden_at IS NULL;
+
+CREATE INDEX clients_visible_last_ip_idx
+    ON clients (last_ip)
+    WHERE hidden_at IS NULL;
+
+CREATE TABLE client_status_history (
+    id UUID PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    reason TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT client_status_history_from_check
+        CHECK (from_status IS NULL OR from_status IN ('online', 'offline', 'stale')),
+    CONSTRAINT client_status_history_to_check
+        CHECK (to_status IN ('online', 'offline', 'stale')),
+    CONSTRAINT client_status_history_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
+);
+
+CREATE INDEX client_status_history_client_created_idx
+    ON client_status_history (client_id, created_at DESC);
 
 CREATE TABLE tags (
     id UUID PRIMARY KEY,

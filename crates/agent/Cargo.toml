@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -32,3 +33,6 @@ uuid.workspace = true
 vpsman-common = { path = "../common" }
 webpki-roots.workspace = true
 x25519-dalek.workspace = true
+
+[build-dependencies]
+vpsman-build-support = { path = "../../build/build-support" }

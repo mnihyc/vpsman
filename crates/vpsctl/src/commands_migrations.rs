@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     commands_backups::restore_run_with_credentials,
     http::{http_get, http_post_json},
-    proof::{load_super_password, load_super_salt_hex},
+    privilege::{load_super_password, load_super_salt_hex},
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -65,7 +65,7 @@ pub(crate) fn migration_run(
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -82,7 +82,7 @@ pub(crate) fn migration_run(
         note,
         &password,
         &salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed,
         force_unprivileged,
@@ -101,7 +101,7 @@ pub(crate) fn migration_run_with_credentials(
     note: Option<String>,
     password: &str,
     salt_hex: &str,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -135,7 +135,7 @@ pub(crate) fn migration_run_with_credentials(
         plan.destination_root,
         password,
         salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         true,
         force_unprivileged,

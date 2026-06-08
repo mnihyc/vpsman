@@ -29,7 +29,7 @@ type ConsoleShellProps = {
   agents: AgentView[];
   apiToken: string;
   children: ReactNode;
-  connectedRatio: string;
+  onlineRatio: string;
   draftSavedFleetViewName: string;
   filteredAgentCount: number;
   fleetQuery: string;
@@ -41,13 +41,13 @@ type ConsoleShellProps = {
   onDeleteSavedFleetView: () => void;
   onFleetQueryChange: (query: string) => void;
   onOpenAccessControls: () => void;
-  onLockProof: () => void;
+  onLockPrivilege: () => void;
   onSaveFleetView: () => void;
   onSelectSubpage: (subpage: string) => void;
   onSelectView: (view: ActiveView) => void;
   onSavedFleetViewNameChange: (name: string) => void;
   operatorPreferencesReady: boolean;
-  proofUnlocked: boolean;
+  privilegeUnlocked: boolean;
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
 };
@@ -59,7 +59,7 @@ export function ConsoleShell({
   agents,
   apiToken,
   children,
-  connectedRatio,
+  onlineRatio,
   draftSavedFleetViewName,
   filteredAgentCount,
   fleetQuery,
@@ -70,14 +70,14 @@ export function ConsoleShell({
   onClearSession,
   onDeleteSavedFleetView,
   onFleetQueryChange,
-  onLockProof,
+  onLockPrivilege,
   onOpenAccessControls,
   onSaveFleetView,
   onSelectSubpage,
   onSelectView,
   onSavedFleetViewNameChange,
   operatorPreferencesReady,
-  proofUnlocked,
+  privilegeUnlocked,
   savedFleetViews,
   summary,
 }: ConsoleShellProps) {
@@ -281,12 +281,12 @@ export function ConsoleShell({
                 <span>Session</span>
               </button>
             )}
-            {proofUnlocked ? (
+            {privilegeUnlocked ? (
               <button
-                aria-label="Lock proof"
+                aria-label="Lock privilege"
                 className="secondaryAction"
-                onClick={onLockProof}
-                title="Lock proof in browser memory"
+                onClick={onLockPrivilege}
+                title="Lock privilege unlock in browser memory"
                 type="button"
               >
                 <LockKeyhole size={18} />
@@ -294,7 +294,7 @@ export function ConsoleShell({
               </button>
             ) : (
               <button
-                aria-label="Open proof unlock"
+                aria-label="Open privilege unlock"
                 className="primaryAction"
                 onClick={onOpenAccessControls}
                 type="button"
@@ -315,10 +315,12 @@ export function ConsoleShell({
             <p>{heroCopy || activeSubpageDescription}</p>
           </div>
           <div className="quickStats">
-            <Metric label="Connected" value={String(summary.connected)} tone="green" />
+            <Metric label="Online" value={String(summary.online)} tone="green" />
+            <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
+            <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
             <Metric label="Warnings" value={String(summary.warnings)} tone="yellow" />
             <Metric label="Jobs" value={String(summary.running_jobs)} tone="blue" />
-            <Metric label="Online" value={connectedRatio} tone="green" />
+            <Metric label="Online %" value={onlineRatio} tone="green" />
           </div>
         </section>
 

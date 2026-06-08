@@ -1,24 +1,16 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::PathBuf,
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::PathBuf, thread, time::Duration};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::{CommandEnvelope, JobCommand};
+use vpsman_common::JobCommand;
 
 use crate::{
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_get_bytes, http_post_json},
     jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest},
-    proof::{
-        build_command_envelopes_for_clients, build_envelopes_for_job_command, load_super_password,
-        load_super_salt_hex,
-    },
-    util::read_json_file,
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 pub(crate) fn jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
@@ -66,21 +58,15 @@ pub(crate) fn job_create(
     pty: bool,
     clients: Vec<String>,
     tags: Vec<String>,
-    envelope_file: Option<PathBuf>,
-    envelopes_file: Option<PathBuf>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     privileged: bool,
     destructive: bool,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
-    let envelope = read_json_file::<CommandEnvelope>(envelope_file.as_ref())?;
-    let mut envelopes =
-        read_json_file::<HashMap<String, CommandEnvelope>>(envelopes_file.as_ref())?
-            .unwrap_or_default();
     let effective_argv = if argv.is_empty() {
         vec![command.clone()]
     } else {
@@ -90,30 +76,42 @@ pub(crate) fn job_create(
         argv: effective_argv.clone(),
         pty: true,
     });
-    if privileged && envelope.is_none() && envelopes.is_empty() {
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let privilege_assertion = if privileged {
         let password = load_super_password(&password_env)?;
         let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-        let target_ids =
-            resolve_target_ids(api_url, token, &clients, &tags, destructive, confirmed)?;
-        let (_payload_hash_hex, built_envelopes) = if let Some(operation) = &operation {
-            build_envelopes_for_job_command(
-                &target_ids,
-                operation,
-                &password,
-                &salt_hex,
-                proof_ttl_secs,
-            )?
+        let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+        let assertion_command = if let Some(operation) = &operation {
+            operation.clone()
         } else {
-            build_command_envelopes_for_clients(
+            JobCommand::Shell {
+                argv: effective_argv.clone(),
+                pty: false,
+            }
+        };
+        Some(
+            build_privilege_for_job_command(
                 &target_ids,
-                &effective_argv,
+                &assertion_command,
+                if operation.is_some() {
+                    "shell_pty"
+                } else {
+                    "shell_argv"
+                },
+                &selector_expression,
                 &password,
                 &salt_hex,
-                proof_ttl_secs,
+                privilege_ttl_secs,
+                timeout_secs,
+                None,
+                force_unprivileged,
+                true,
             )?
-        };
-        envelopes = built_envelopes;
-    }
+            .privilege_assertion,
+        )
+    } else {
+        None
+    };
     println!(
         "{}",
         http_post_json(
@@ -124,15 +122,13 @@ pub(crate) fn job_create(
                 "command": command,
                 "argv": if operation.is_some() { Vec::<String>::new() } else { argv },
                 "operation": operation,
-                "clients": clients,
-                "tags": tags,
+                "selector_expression": selector_expression,
                 "privileged": privileged,
                 "destructive": destructive,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
-                "envelope": envelope,
-                "envelopes": envelopes,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -149,7 +145,7 @@ pub(crate) fn job_shell(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
@@ -166,7 +162,7 @@ pub(crate) fn job_shell(
             tags: &tags,
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
-            proof_ttl_secs,
+            privilege_ttl_secs,
             timeout_secs,
             confirmed,
             force_unprivileged: false,
@@ -640,12 +636,7 @@ mod tests {
         ] {
             assert!(is_terminal_job_status(status));
         }
-        for status in [
-            "dispatching",
-            "running",
-            "cancel_requested",
-            "approval_required",
-        ] {
+        for status in ["dispatching", "running", "cancel_requested"] {
             assert!(!is_terminal_job_status(status));
         }
     }

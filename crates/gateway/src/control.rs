@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::{
@@ -9,8 +9,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 use vpsman_common::{
-    GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
-    GatewayCommandDispatchResult,
+    verify_privilege_assertion, GatewayCommandCancel, GatewayCommandCancelResult,
+    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
 };
 
 use crate::{
@@ -28,8 +29,12 @@ pub(crate) async fn run_control_listener(args: Args, state: GatewayState) -> Res
         let (stream, peer) = listener.accept().await?;
         let state = state.clone();
         let internal_token = args.internal_token.clone();
+        let privilege_verifier_key_hex = args.privilege_verifier_key_hex.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_control_connection(stream, state, internal_token).await {
+            if let Err(error) =
+                handle_control_connection(stream, state, internal_token, privilege_verifier_key_hex)
+                    .await
+            {
                 warn!(%peer, %error, "gateway control request failed");
             }
         });
@@ -40,12 +45,15 @@ async fn handle_control_connection(
     mut stream: TcpStream,
     state: GatewayState,
     internal_token: Option<String>,
+    privilege_verifier_key_hex: Option<String>,
 ) -> Result<()> {
     let request = read_http_request(&mut stream).await?;
     if request.method != "POST"
         || !matches!(
             request.path.as_str(),
-            "/internal/v1/gateway/command" | "/internal/v1/gateway/command-cancel"
+            "/internal/v1/gateway/command"
+                | "/internal/v1/gateway/command-cancel"
+                | "/internal/v1/gateway/privilege/verify"
         )
     {
         write_http_json(
@@ -83,7 +91,7 @@ async fn handle_control_connection(
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
-    } else {
+    } else if request.path == "/internal/v1/gateway/command-cancel" {
         let cancel: GatewayCommandCancel = match serde_json::from_slice(&request.body) {
             Ok(cancel) => cancel,
             Err(error) => {
@@ -100,8 +108,70 @@ async fn handle_control_connection(
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
+    } else {
+        let verification: GatewayPrivilegeVerification = match serde_json::from_slice(&request.body)
+        {
+            Ok(verification) => verification,
+            Err(error) => {
+                write_http_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &serde_json::json!({"error": format!("invalid_privilege_verification:{error}")}),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        match verify_gateway_privilege(&state, privilege_verifier_key_hex.as_deref(), verification)
+            .await
+        {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_privilege_error(&mut stream, error).await?,
+        }
     }
     Ok(())
+}
+
+async fn verify_gateway_privilege(
+    state: &GatewayState,
+    verifier_key_hex: Option<&str>,
+    verification: GatewayPrivilegeVerification,
+) -> Result<GatewayPrivilegeVerificationResult> {
+    let verifier_key = decode_verifier_key(verifier_key_hex)?;
+    let now_unix = unix_now();
+    let mut replay_cache = state.privilege_assertions.lock().await;
+    let intent_hash_hex = verify_privilege_assertion(
+        &verifier_key,
+        &verification.intent,
+        &verification.assertion,
+        now_unix,
+        &mut replay_cache,
+    )
+    .map_err(|error| anyhow!("privilege_assertion_{error:?}"))?;
+    Ok(GatewayPrivilegeVerificationResult {
+        approved: true,
+        intent_hash_hex,
+        message: "approved".to_string(),
+    })
+}
+
+fn decode_verifier_key(value: Option<&str>) -> Result<[u8; 32]> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("privilege verifier is not configured")?;
+    let bytes = hex::decode(value).context("privilege verifier key must be hex")?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("privilege verifier key must be 32 bytes"))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 async fn dispatch_gateway_command(
@@ -114,7 +184,7 @@ async fn dispatch_gateway_command(
         .await
         .get(&dispatch.client_id)
         .map(|session| session.sender.clone())
-        .ok_or_else(|| anyhow!("agent_not_connected:{}", dispatch.client_id))?;
+        .ok_or_else(|| anyhow!("agent_not_online:{}", dispatch.client_id))?;
     let (response_tx, response_rx) = oneshot::channel();
     sender
         .send(GatewayCommand {
@@ -139,7 +209,7 @@ async fn cancel_gateway_command(
         .await
         .get(&cancel.client_id)
         .map(|session| session.cancel_sender.clone())
-        .ok_or_else(|| anyhow!("agent_not_connected:{}", cancel.client_id))?;
+        .ok_or_else(|| anyhow!("agent_not_online:{}", cancel.client_id))?;
     let (response_tx, response_rx) = oneshot::channel();
     sender
         .send(GatewayCancelMessage {
@@ -158,10 +228,24 @@ async fn cancel_gateway_command(
 
 async fn write_gateway_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {
     let message = error.to_string();
-    let status = if message.contains("agent_not_connected") {
+    let status = if message.contains("agent_not_online") {
         "404 Not Found"
     } else if message.contains("timed out") {
         "504 Gateway Timeout"
+    } else {
+        "500 Internal Server Error"
+    };
+    write_http_json(stream, status, &serde_json::json!({"error": message})).await
+}
+
+async fn write_privilege_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {
+    let message = error.to_string();
+    let status = if message.contains("not configured") {
+        "503 Service Unavailable"
+    } else if message.contains(&format!("{:?}", PrivilegeAssertionError::Replay)) {
+        "409 Conflict"
+    } else if message.contains("privilege_assertion_") {
+        "403 Forbidden"
     } else {
         "500 Internal Server Error"
     };

@@ -301,21 +301,21 @@ export function DashboardPanel({
             </div>
             {summary && (
               <ConsoleStatusBadge tone={summary.warnings > 0 || summary.stale > 0 ? "warning" : "ok"}>
-                {summary.connected}/{summary.total} connected
+                {summary.online}/{summary.total} online
               </ConsoleStatusBadge>
             )}
           </div>
           <div className="dashboardCardGrid operationalGrid">
             <DashboardMetricCard
-              detail={`${summary?.connected ?? 0} connected, ${summary?.stale ?? 0} stale`}
+              detail={`${summary?.online ?? 0} online, ${summary?.stale ?? 0} stale`}
               icon={<Server size={19} />}
               label="Fleet health"
               onClick={() =>
                 openDrawer({
-                  description: "Connection state across enrolled VPS clients.",
+                  description: "Online, offline, and stale status across VPS clients.",
                   drilldown: fallbackDrilldown,
                   metrics: [
-                    { label: "Connected", tone: "ok", value: String(summary?.connected ?? 0) },
+                    { label: "Online", tone: "ok", value: String(summary?.online ?? 0) },
                     { label: "Total", value: String(summary?.total ?? 0) },
                     { label: "Stale", tone: summary?.stale ? "warning" : "ok", value: String(summary?.stale ?? 0) },
                     { label: "Warnings", tone: summary?.warnings ? "warning" : "ok", value: String(summary?.warnings ?? 0) },
@@ -324,7 +324,7 @@ export function DashboardPanel({
                 })
               }
               tone={summary && summary.stale > 0 ? "warning" : "ok"}
-              value={summary ? `${connectedPercent(summary.connected, summary.total)}%` : "No data"}
+              value={summary ? `${onlinePercent(summary.online, summary.total)}%` : "No data"}
             />
             <DashboardMetricCard
               detail={`${operations?.critical_alerts ?? 0} critical, ${operations?.warning_alerts ?? 0} warning`}
@@ -838,7 +838,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
   if (cluster.kind === "date") {
     return [
       { label: "Telemetry samples", value: String(cluster.total) },
-      { label: "Completed backups", tone: "ok", value: String(cluster.connected) },
+      { label: "Completed backups", tone: "ok", value: String(cluster.online) },
       { label: "Pending backups", tone: cluster.stale ? "info" : "neutral", value: String(cluster.stale) },
       { label: "Alerts", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
       { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
@@ -846,7 +846,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
     ];
   }
   return [
-    { label: "Connected", tone: "ok", value: `${cluster.connected}/${cluster.total}` },
+    { label: "Online", tone: "ok", value: `${cluster.online}/${cluster.total}` },
     { label: "Stale", tone: cluster.stale ? "warning" : "ok", value: String(cluster.stale) },
     { label: "Warnings", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
     { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
@@ -858,7 +858,7 @@ function clusterSummary(cluster: DashboardLabelClusterRecord): string {
   if (cluster.kind === "date") {
     return `${cluster.total} samples, ${cluster.warnings} alerts`;
   }
-  return `${cluster.connected}/${cluster.total} connected`;
+  return `${cluster.online}/${cluster.total} online`;
 }
 
 function maxNetworkPoint(points: Array<{ rx_bps: number; tx_bps: number }>): number {
@@ -898,8 +898,8 @@ function sortedUniqueTimes(times: string[]): string[] {
   return Array.from(new Set(times)).sort((left, right) => Date.parse(left) - Date.parse(right));
 }
 
-function connectedPercent(connected: number, total: number): number {
-  return total > 0 ? Math.round((connected / total) * 100) : 0;
+function onlinePercent(online: number, total: number): number {
+  return total > 0 ? Math.round((online / total) * 100) : 0;
 }
 
 function formatLoad(value: number | null | undefined): string {
@@ -1029,7 +1029,7 @@ function fallbackGroupOptions() {
     { description: "country:* tag distribution", label: "Countries", value: "countries" },
     { description: "provider:* tag distribution", label: "Providers", value: "providers" },
     { description: "One group per VPS in the selected scope", label: "VPS clients", value: "clients" },
-    { description: "Connected, stale, enrolled, and other client states", label: "Status", value: "status" },
+    { description: "Online, offline, and stale client states", label: "Status", value: "status" },
     { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
   ] satisfies Array<{ description: string; label: string; value: DashboardPreferences["groupBy"] }>;
 }

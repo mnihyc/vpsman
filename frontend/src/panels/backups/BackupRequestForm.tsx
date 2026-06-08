@@ -8,42 +8,36 @@ import { formatVpsName } from "../../utils";
 type BackupRequestFormProps = {
   agents: AgentView[];
   clientId: string;
-  confirmed: boolean;
+  confirmationOpen: boolean;
   includeConfig: boolean;
   note: string;
   onClientIdChange: (value: string) => void;
-  onConfirmedChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onNoteChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
-  onProofTtlSecsChange: (value: number) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   pathsCount: number;
   pathsText: string;
   pending: boolean;
-  proofReady: boolean;
-  proofTtlSecs: number;
+  privilegeReady: boolean;
   selectedAgentName: string | null;
 };
 
 export function BackupRequestForm({
   agents,
   clientId,
-  confirmed,
+  confirmationOpen,
   includeConfig,
   note,
   onClientIdChange,
-  onConfirmedChange,
   onIncludeConfigChange,
   onNoteChange,
   onPathsTextChange,
-  onProofTtlSecsChange,
   onSubmit,
   pathsCount,
   pathsText,
   pending,
-  proofReady,
-  proofTtlSecs,
+  privilegeReady,
   selectedAgentName,
 }: BackupRequestFormProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -80,35 +74,22 @@ export function BackupRequestForm({
           <input aria-label="Backup note" onChange={(event) => onNoteChange(event.target.value)} placeholder="pre-migration snapshot" value={note} />
         </label>
         <div className="dispatchControls">
-          <label>
-            <span>Proof TTL</span>
-            <input
-              aria-label="Backup proof TTL seconds"
-              max={3600}
-              min={15}
-              onChange={(event) => onProofTtlSecsChange(Number(event.target.value))}
-              type="number"
-              value={proofTtlSecs}
-            />
-          </label>
           <label className="checkLine inlineCheck">
             <input checked={includeConfig} onChange={(event) => onIncludeConfigChange(event.target.checked)} type="checkbox" />
             <span>Include agent config</span>
           </label>
         </div>
-        <label className="checkLine">
-          <input checked={confirmed} onChange={(event) => onConfirmedChange(event.target.checked)} type="checkbox" />
-          <span>Confirmed</span>
-        </label>
         <div className="backupScopeList">
           <DatabaseBackup size={18} />
           <span>{includeConfig ? "config" : "no config"}</span>
           <span>{pathsCount} path{pathsCount === 1 ? "" : "s"}</span>
         </div>
-        <button className="primaryAction" disabled={pending || !proofReady || !clientId} type="submit">
-          <Play size={17} />
-          Request backup
-        </button>
+        {!confirmationOpen && (
+          <button className="primaryAction" disabled={pending || !privilegeReady || !clientId} type="submit">
+            <Play size={17} />
+            Request backup
+          </button>
+        )}
       </form>
     </>
   );

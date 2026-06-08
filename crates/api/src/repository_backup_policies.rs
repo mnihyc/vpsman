@@ -8,10 +8,10 @@ use vpsman_common::{payload_hash, JobCommand};
 use crate::{
     model::{
         AuditLogView, AuthContext, BackupPolicyMetadata, BackupPolicyPrunePolicyView,
-        BackupPolicyView, BackupRequestStatus, CreateBackupPolicyRequest, CreateScheduleRequest,
-        ScheduleView,
+        BackupPolicyView, BackupRequestStatus, CreateBackupPolicyRequest, ScheduleView,
     },
     repository::Repository,
+    repository_schedules::ScheduleCreateInput,
     unix_now,
 };
 
@@ -50,7 +50,7 @@ impl Repository {
             .unwrap_or(DEFAULT_BACKUP_POLICY_RETENTION_DAYS);
         let keep_last = request.keep_last.unwrap_or(DEFAULT_BACKUP_POLICY_KEEP_LAST);
         let rotation_generation = normalize_policy_generation(request.rotation_generation);
-        let schedule_request = CreateScheduleRequest {
+        let schedule_request = ScheduleCreateInput {
             name: request.name,
             operation: JobCommand::Backup {
                 paths: request.paths,
@@ -60,15 +60,17 @@ impl Repository {
                     .map(|value| value.to_ascii_lowercase()),
             },
             selector_expression: request.selector_expression,
-            interval_secs: request.interval_secs,
-            start_at_unix: request.start_at_unix,
+            cron_expr: request.cron_expr,
+            timezone: request.timezone,
             enabled: request.enabled,
             catch_up_policy: request.catch_up_policy,
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
         };
-        let schedule = self.create_schedule(schedule_request, operator).await?;
+        let schedule = self
+            .create_schedule_record(schedule_request, operator)
+            .await?;
         let metadata = self
             .upsert_backup_policy_metadata(
                 schedule.id,
@@ -387,7 +389,9 @@ impl Repository {
         let audit_metadata = serde_json::json!({
             "name": &schedule.name,
             "selector_expression": &schedule.selector_expression,
-            "interval_secs": schedule.interval_secs,
+            "cron_expr": &schedule.cron_expr,
+            "timezone": &schedule.timezone,
+            "next_runs": &schedule.next_runs,
             "retention_days": metadata.retention_days,
             "keep_last": metadata.keep_last,
             "rotation_generation": &metadata.rotation_generation,
@@ -557,7 +561,9 @@ fn backup_policy_view(
         retention_days: metadata.retention_days,
         keep_last: metadata.keep_last,
         rotation_generation: metadata.rotation_generation,
-        interval_secs: schedule.interval_secs,
+        cron_expr: schedule.cron_expr,
+        timezone: schedule.timezone,
+        next_runs: schedule.next_runs,
         catch_up_policy: schedule.catch_up_policy,
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,

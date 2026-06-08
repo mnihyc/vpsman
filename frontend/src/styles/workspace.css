@@ -924,7 +924,7 @@
 .dispatchForm input,
 .dispatchForm select,
 .dispatchForm textarea,
-.proofManager input {
+.privilegeManager input {
   width: 100%;
   min-height: 38px;
   border: 1px solid #dfe3eb;
@@ -944,7 +944,7 @@
 .dispatchForm input:focus,
 .dispatchForm select:focus,
 .dispatchForm textarea:focus,
-.proofManager input:focus {
+.privilegeManager input:focus {
   border-color: #1a73e8;
 }
 

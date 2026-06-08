@@ -71,6 +71,21 @@ pub(crate) fn http_delete(
     http_request(base_url, "DELETE", path, bearer_token, None)
 }
 
+pub(crate) fn http_delete_json(
+    base_url: &str,
+    path: &str,
+    bearer_token: Option<&str>,
+    value: &serde_json::Value,
+) -> Result<String> {
+    http_request(
+        base_url,
+        "DELETE",
+        path,
+        bearer_token,
+        Some(serde_json::to_vec(value)?),
+    )
+}
+
 pub(crate) fn http_post_json(
     base_url: &str,
     path: &str,
@@ -80,6 +95,21 @@ pub(crate) fn http_post_json(
     http_request(
         base_url,
         "POST",
+        path,
+        bearer_token,
+        Some(serde_json::to_vec(value)?),
+    )
+}
+
+pub(crate) fn http_put_json(
+    base_url: &str,
+    path: &str,
+    bearer_token: Option<&str>,
+    value: &serde_json::Value,
+) -> Result<String> {
+    http_request(
+        base_url,
+        "PUT",
         path,
         bearer_token,
         Some(serde_json::to_vec(value)?),
@@ -218,8 +248,9 @@ fn build_request_with_len(
     extra_headers: &[(&str, String)],
 ) -> Result<String> {
     let mut request = format!(
-        "{method} {request_path} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: vpsctl/{}\r\nConnection: close\r\nAccept: application/json\r\n",
-        env!("CARGO_PKG_VERSION")
+        "{method} {request_path} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: vpsctl/{} build/{}\r\nConnection: close\r\nAccept: application/json\r\n",
+        env!("CARGO_PKG_VERSION"),
+        crate::build_info::CLI_BUILD_NUMBER
     );
     if let Some(token) = bearer_token {
         request.push_str(&format!("Authorization: Bearer {token}\r\n"));

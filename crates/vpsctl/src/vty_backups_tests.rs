@@ -69,7 +69,7 @@ fn parses_vty_backup_policy_upsert() {
         "--include-config",
         "--recipient-public-key-hex",
         &recipient,
-        "--interval=3600",
+        "--cron=0,3,*,*,*",
         "--retention-days=45",
         "--keep-last=12",
         "--rotation-generation=keyring/v2",
@@ -86,7 +86,7 @@ fn parses_vty_backup_policy_upsert() {
         request.recipient_public_key_hex.as_deref(),
         Some(recipient.as_str())
     );
-    assert_eq!(request.interval_secs, 3600);
+    assert_eq!(request.cron_expr, "0 3 * * *");
     assert_eq!(request.retention_days, Some(45));
     assert_eq!(request.keep_last, Some(12));
     assert_eq!(request.rotation_generation.as_deref(), Some("keyring/v2"));

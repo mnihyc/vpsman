@@ -145,10 +145,6 @@
     grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr);
   }
 
-  .proofRotationGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr);
-  }
-
   .rolloutGrid {
     grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 90px;
   }
@@ -187,8 +183,8 @@
   .rolloutPolicyForm,
   .sourceArtifactControls,
   .templateToolbar,
-  .proofFields,
-  .inlineProof,
+  .privilegeFields,
+  .inlinePrivilege,
   .supervisorOperation {
     grid-template-columns: 1fr;
   }
@@ -278,10 +274,9 @@
     .supervisorInventoryGrid span:nth-child(4),
     .supervisorInventoryGrid span:nth-child(5),
     .supervisorInventoryGrid span:nth-child(6),
-    .proofRotationGrid span:nth-child(4),
-    .proofRotationGrid span:nth-child(5),
     .gatewaySessionGrid span:nth-child(4),
     .targetHistoryGrid span:nth-child(4),
+    .targetHistoryGrid span:nth-child(5),
     .topologyEvidenceGrid span:nth-child(4),
     .topologyGraphEdgeRow span:nth-child(4),
     .topologyGraphEdgeRow span:nth-child(5),
@@ -489,10 +484,6 @@
     grid-template-columns: minmax(0, 1fr) 104px;
   }
 
-  .proofRotationGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
   .operatorGrid {
     grid-template-columns: minmax(0, 1fr) 104px;
   }
@@ -583,12 +574,29 @@
   }
 
   .tagGrid,
+  .tagRegistryGrid,
+  .tagAssignmentGrid,
+  .configJobGrid,
   .dataSourcePresetGrid,
   .dataSourceStatusGrid {
     grid-template-columns: minmax(0, 1fr) 76px;
   }
 
+  .metricGrid,
+  .configRuleWorkspace,
+  .configApplyGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .tagCreateForm .formRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .dataSourcePresetGrid span:nth-child(2),
+  .tagRegistryGrid span:nth-child(2),
+  .tagAssignmentGrid span:nth-child(2),
+  .tagAssignmentGrid span:nth-child(3),
+  .configJobGrid span:nth-child(3),
   .dataSourceStatusGrid span:nth-child(2) {
     display: none;
   }
@@ -611,9 +619,6 @@
     .gatewaySessionGrid span:nth-child(3),
     .keyLifecycleGrid span:nth-child(3),
     .keyLifecycleGrid span:nth-child(4),
-    .proofRotationGrid span:nth-child(3),
-    .proofRotationGrid span:nth-child(4),
-    .proofRotationGrid span:nth-child(5),
     .rolloutGrid span:nth-child(3),
     .releaseGrid span:nth-child(3),
     .supervisorInventoryGrid span:nth-child(3),
@@ -658,6 +663,10 @@
   }
 
   .confirmationPromptBody dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .executionFailureReason {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -175,3 +175,48 @@ pub(crate) struct DataSourceStatusView {
     pub(crate) evidence: serde_json::Value,
     pub(crate) assigned_at: String,
 }
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HotConfigRuleTemplateView {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) category: String,
+    pub(crate) domain: String,
+    pub(crate) description: String,
+    pub(crate) field_schema: serde_json::Value,
+    pub(crate) raw_generator_body: String,
+    pub(crate) docs_metadata: serde_json::Value,
+    pub(crate) built_in: bool,
+    pub(crate) actor_id: Option<Uuid>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UpsertHotConfigRuleTemplateRequest {
+    pub(crate) id: Option<Uuid>,
+    pub(crate) name: String,
+    pub(crate) category: String,
+    pub(crate) domain: String,
+    pub(crate) description: String,
+    pub(crate) field_schema: serde_json::Value,
+    pub(crate) raw_generator_body: String,
+    pub(crate) docs_metadata: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RenderHotConfigRuleTemplateRequest {
+    #[serde(default)]
+    pub(crate) values: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HotConfigRuleTemplateRenderView {
+    pub(crate) template_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) toml: String,
+    pub(crate) patch: serde_json::Value,
+    pub(crate) affected_sections: Vec<String>,
+    pub(crate) docs_metadata: serde_json::Value,
+    pub(crate) generated_at: String,
+}

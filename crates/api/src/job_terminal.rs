@@ -11,6 +11,8 @@ pub(crate) fn validate_terminal_open(
     session_id: uuid::Uuid,
     argv: &[String],
     cwd: Option<&str>,
+    user: Option<&str>,
+    user_policy: vpsman_common::TerminalUserPolicy,
     cols: u16,
     rows: u16,
     idle_timeout_secs: u32,
@@ -27,6 +29,10 @@ pub(crate) fn validate_terminal_open(
             return Err(ApiError::bad_request("terminal_cwd_invalid"));
         }
     }
+    if let Some(user) = user {
+        validate_terminal_user(user)?;
+    }
+    let _ = user_policy;
     validate_terminal_dimensions(cols, rows)?;
     if !(MIN_TERMINAL_IDLE_TIMEOUT_SECS..=MAX_TERMINAL_IDLE_TIMEOUT_SECS)
         .contains(&idle_timeout_secs)
@@ -41,6 +47,19 @@ pub(crate) fn validate_terminal_open(
         return Err(ApiError::bad_request(
             "terminal_flow_window_bytes_out_of_range",
         ));
+    }
+    Ok(())
+}
+
+fn validate_terminal_user(user: &str) -> Result<(), ApiError> {
+    if user.is_empty() || user.len() > 64 {
+        return Err(ApiError::bad_request("terminal_user_invalid"));
+    }
+    if !user
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(ApiError::bad_request("terminal_user_invalid"));
     }
     Ok(())
 }

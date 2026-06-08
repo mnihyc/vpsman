@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vpsman_common::CommandEnvelope;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct AgentUpdateRolloutTargetView {
@@ -40,8 +37,6 @@ pub(crate) struct AgentUpdateRolloutView {
     pub(crate) automation_blocker: Option<String>,
     pub(crate) automation_targets: Vec<String>,
     pub(crate) automation_updated_at: Option<String>,
-    pub(crate) activation_delegations: Vec<AgentUpdateActivationDelegationView>,
-    pub(crate) rollback_delegations: Vec<AgentUpdateRollbackDelegationView>,
     pub(crate) targets: Vec<AgentUpdateRolloutTargetView>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -53,110 +48,6 @@ pub(crate) struct AgentUpdateRolloutControlRequest {
     pub(crate) paused: Option<bool>,
     pub(crate) pause_reason: Option<String>,
     pub(crate) automation_health_gate: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct AgentUpdateRollbackDelegationView {
-    pub(crate) rollout_id: Uuid,
-    pub(crate) action: String,
-    pub(crate) rollback_sha256_hex: Option<String>,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) payload_hash: String,
-    pub(crate) target_count: i32,
-    pub(crate) ready_count: i32,
-    pub(crate) dispatching_count: i32,
-    pub(crate) dispatched_count: i32,
-    pub(crate) expired_count: i32,
-    pub(crate) failed_count: i32,
-    pub(crate) proof_expires_unix_min: Option<i64>,
-    pub(crate) proof_expires_unix_max: Option<i64>,
-    pub(crate) dispatch_job_id: Option<Uuid>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct AgentUpdateActivationDelegationView {
-    pub(crate) rollout_id: Uuid,
-    pub(crate) action: String,
-    pub(crate) staged_sha256_hex: String,
-    pub(crate) restart_agent: bool,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) payload_hash: String,
-    pub(crate) target_count: i32,
-    pub(crate) ready_count: i32,
-    pub(crate) dispatching_count: i32,
-    pub(crate) dispatched_count: i32,
-    pub(crate) expired_count: i32,
-    pub(crate) failed_count: i32,
-    pub(crate) proof_expires_unix_min: Option<i64>,
-    pub(crate) proof_expires_unix_max: Option<i64>,
-    pub(crate) dispatch_job_id: Option<Uuid>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AgentUpdateRollbackDelegatedProofRecord {
-    pub(crate) id: Uuid,
-    pub(crate) rollout_id: Uuid,
-    pub(crate) client_id: String,
-    pub(crate) action: String,
-    pub(crate) payload_hash: String,
-    pub(crate) rollback_sha256_hex: Option<String>,
-    pub(crate) staged_sha256_hex: Option<String>,
-    pub(crate) restart_agent: bool,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) envelope: CommandEnvelope,
-    pub(crate) proof_expires_unix: i64,
-    pub(crate) status: String,
-    pub(crate) dispatch_job_id: Option<Uuid>,
-    pub(crate) actor_id: Option<Uuid>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AgentUpdateRollbackDelegationClaim {
-    pub(crate) delegation_ids: Vec<Uuid>,
-    pub(crate) rollout_id: Uuid,
-    pub(crate) actor_id: Option<Uuid>,
-    pub(crate) rollback_sha256_hex: Option<String>,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) payload_hash: String,
-    pub(crate) clients: Vec<String>,
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AgentUpdateActivationDelegationClaim {
-    pub(crate) delegation_ids: Vec<Uuid>,
-    pub(crate) rollout_id: Uuid,
-    pub(crate) actor_id: Option<Uuid>,
-    pub(crate) staged_sha256_hex: String,
-    pub(crate) restart_agent: bool,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) payload_hash: String,
-    pub(crate) clients: Vec<String>,
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct AgentUpdateRollbackDelegationRequest {
-    pub(crate) confirmed: bool,
-    pub(crate) rollback_sha256_hex: Option<String>,
-    #[serde(default)]
-    pub(crate) force_unprivileged: bool,
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct AgentUpdateActivationDelegationRequest {
-    pub(crate) confirmed: bool,
-    pub(crate) restart_agent: bool,
-    #[serde(default)]
-    pub(crate) force_unprivileged: bool,
-    pub(crate) envelopes: HashMap<String, CommandEnvelope>,
 }
 
 #[derive(Clone, Debug, Serialize)]

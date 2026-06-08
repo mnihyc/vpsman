@@ -8,11 +8,10 @@ use vpsman_common::{
 };
 
 use crate::{
-    commands_config::{
-        auth_rotation_proof_key_hex, normalize_rotation_generation, validate_update_input,
-    },
+    commands_config::validate_update_input,
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_post_json},
-    proof::build_envelopes_for_job_command,
+    privilege::build_privilege_for_job_command,
     util::percent_encode_query_value,
     vty_jobs::VtyJobSelection,
 };
@@ -22,15 +21,17 @@ pub(crate) struct VtyHotConfigRequest {
     config_file: PathBuf,
     selection: VtyJobSelection,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct VtyDataSourceHotConfigApplyRequest {
     client_id: String,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     confirmed: bool,
+    force_unprivileged: bool,
 }
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ pub(crate) struct VtyAgentUpdateRequest {
     canary_count: Option<u16>,
     selection: VtyJobSelection,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
 
@@ -52,7 +53,7 @@ pub(crate) struct VtyAgentUpdateActivateRequest {
     restart_agent: bool,
     selection: VtyJobSelection,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
 
@@ -61,19 +62,8 @@ pub(crate) struct VtyAgentUpdateRollbackRequest {
     rollback_sha256_hex: Option<String>,
     selection: VtyJobSelection,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct VtySuperPasswordRotateRequest {
-    new_proof_key_hex: Option<String>,
-    new_password_env: Option<String>,
-    new_super_salt_hex: Option<String>,
-    rotation_generation: Option<String>,
-    selection: VtyJobSelection,
-    timeout_secs: u64,
-    proof_ttl_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,113 +76,11 @@ struct VtyTarget {
     id: String,
 }
 
-pub(crate) fn parse_vty_super_password_rotate(
-    tokens: &[&str],
-) -> Result<VtySuperPasswordRotateRequest> {
-    let mut new_proof_key_hex = None;
-    let mut new_password_env = None;
-    let mut new_super_salt_hex = None;
-    let mut rotation_generation = None;
-    let mut timeout_secs = 30_u64;
-    let mut proof_ttl_secs = 300_u64;
-    let mut target_tokens = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--new-proof-key-hex" => {
-                new_proof_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--new-proof-key-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--new-password-env" => {
-                new_password_env = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--new-password-env requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--new-super-salt-hex" => {
-                new_super_salt_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--new-super-salt-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--rotation-generation" => {
-                rotation_generation = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--rotation-generation requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--timeout" => {
-                timeout_secs = tokens
-                    .get(index + 1)
-                    .context("--timeout requires a value")?
-                    .parse()
-                    .context("--timeout must be an integer")?;
-                index += 2;
-            }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
-                    .get(index + 1)
-                    .context("--proof-ttl requires a value")?
-                    .parse()
-                    .context("--proof-ttl must be an integer")?;
-                index += 2;
-            }
-            value if value.starts_with("--") && value != "--confirmed" => {
-                anyhow::bail!("unknown super-password-rotate flag {value}");
-            }
-            value => {
-                target_tokens.push(value);
-                index += 1;
-            }
-        }
-    }
-    validate_config_dispatch_bounds(timeout_secs, proof_ttl_secs, "super-password-rotate")?;
-    if let Some(value) = new_proof_key_hex.as_deref() {
-        validate_hex32(value, "--new-proof-key-hex")?;
-    }
-    normalize_rotation_generation(rotation_generation.as_deref())?;
-    let selection = VtyJobSelection::parse(&target_tokens)?;
-    anyhow::ensure!(
-        selection.confirmed,
-        "super-password-rotate requires --confirmed because it changes privileged proof material"
-    );
-    anyhow::ensure!(
-        new_proof_key_hex.is_some() || new_password_env.is_some(),
-        "super-password-rotate requires --new-proof-key-hex or --new-password-env"
-    );
-    anyhow::ensure!(
-        !(new_proof_key_hex.is_some() && new_password_env.is_some()),
-        "use either --new-proof-key-hex or --new-password-env, not both"
-    );
-    Ok(VtySuperPasswordRotateRequest {
-        new_proof_key_hex,
-        new_password_env,
-        new_super_salt_hex,
-        rotation_generation,
-        selection,
-        timeout_secs,
-        proof_ttl_secs,
-    })
-}
-
 pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigRequest> {
     let mut config_file = None;
     let mut timeout_secs = 30_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -213,13 +101,17 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
             }
             value if value.starts_with("--") && value != "--confirmed" => {
                 anyhow::bail!("unknown hot-config flag {value}");
@@ -235,8 +127,8 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
         "hot-config --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&proof_ttl_secs),
-        "hot-config --proof-ttl must be between 1 and 3600"
+        (1..=3600).contains(&privilege_ttl_secs),
+        "hot-config --privilege-ttl must be between 1 and 3600"
     );
     let selection = VtyJobSelection::parse(&target_tokens)?;
     anyhow::ensure!(
@@ -247,7 +139,8 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
         config_file: config_file.context("hot-config requires --config-file <path>")?,
         selection,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
     })
 }
 
@@ -256,8 +149,9 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
 ) -> Result<VtyDataSourceHotConfigApplyRequest> {
     let mut client_id = None;
     let mut timeout_secs = 30_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
+    let mut force_unprivileged = false;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
@@ -278,16 +172,20 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--confirmed" => {
                 confirmed = true;
+                index += 1;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
                 index += 1;
             }
             value => {
@@ -295,7 +193,11 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, proof_ttl_secs, "data-source-hot-config-apply")?;
+    validate_config_dispatch_bounds(
+        timeout_secs,
+        privilege_ttl_secs,
+        "data-source-hot-config-apply",
+    )?;
     let client_id = client_id.context("data-source-hot-config-apply requires --client-id <id>")?;
     anyhow::ensure!(
         !client_id.is_empty() && client_id.len() <= 128,
@@ -308,8 +210,9 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
     Ok(VtyDataSourceHotConfigApplyRequest {
         client_id,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         confirmed,
+        force_unprivileged,
     })
 }
 
@@ -320,7 +223,7 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
     let mut artifact_signing_key_hex = None;
     let mut canary_count = None;
     let mut timeout_secs = 300_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -380,12 +283,12 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
                 );
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--force-unprivileged" => {
@@ -406,8 +309,8 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         "agent-update --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&proof_ttl_secs),
-        "agent-update --proof-ttl must be between 1 and 3600"
+        (1..=3600).contains(&privilege_ttl_secs),
+        "agent-update --privilege-ttl must be between 1 and 3600"
     );
     if let Some(canary_count) = canary_count {
         anyhow::ensure!(
@@ -436,7 +339,7 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         canary_count,
         selection,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         force_unprivileged,
     })
 }
@@ -446,7 +349,7 @@ pub(crate) fn parse_vty_agent_update_activate(
 ) -> Result<VtyAgentUpdateActivateRequest> {
     let mut staged_sha256_hex = None;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut restart_agent = false;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -470,12 +373,12 @@ pub(crate) fn parse_vty_agent_update_activate(
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--restart-agent" => {
@@ -495,7 +398,7 @@ pub(crate) fn parse_vty_agent_update_activate(
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, proof_ttl_secs, "agent-update-activate")?;
+    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-activate")?;
     let staged_sha256_hex =
         staged_sha256_hex.context("agent-update-activate requires --staged-sha256-hex <sha256>")?;
     let staged_sha256_hex = validate_sha256(&staged_sha256_hex, "--staged-sha256-hex")?;
@@ -509,7 +412,7 @@ pub(crate) fn parse_vty_agent_update_activate(
         restart_agent,
         selection,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         force_unprivileged,
     })
 }
@@ -519,7 +422,7 @@ pub(crate) fn parse_vty_agent_update_rollback(
 ) -> Result<VtyAgentUpdateRollbackRequest> {
     let mut rollback_sha256_hex = None;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -542,12 +445,12 @@ pub(crate) fn parse_vty_agent_update_rollback(
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--force-unprivileged" => {
@@ -563,7 +466,7 @@ pub(crate) fn parse_vty_agent_update_rollback(
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, proof_ttl_secs, "agent-update-rollback")?;
+    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-rollback")?;
     let rollback_sha256_hex = rollback_sha256_hex
         .as_deref()
         .map(|value| validate_sha256(value, "--rollback-sha256-hex"))
@@ -577,7 +480,7 @@ pub(crate) fn parse_vty_agent_update_rollback(
         rollback_sha256_hex,
         selection,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         force_unprivileged,
     })
 }
@@ -610,6 +513,8 @@ pub(crate) fn submit_vty_hot_config(
         .map_err(|message| anyhow::anyhow!("invalid hot config: {message}"))?;
     let operation = JobCommand::HotConfig {
         toml: toml_document,
+        preserve_redacted: None,
+        base_config_sha256_hex: None,
     };
 
     submit_vty_config_operation(
@@ -621,9 +526,9 @@ pub(crate) fn submit_vty_hot_config(
         operation,
         request.selection,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         None,
-        false,
+        request.force_unprivileged,
     )
 }
 
@@ -668,9 +573,9 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
         operation,
         selection,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         None,
-        false,
+        request.force_unprivileged,
     )
 }
 
@@ -696,7 +601,7 @@ pub(crate) fn submit_vty_agent_update(
         operation,
         request.selection,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         request.canary_count,
         request.force_unprivileged,
     )
@@ -721,7 +626,7 @@ pub(crate) fn submit_vty_agent_update_activate(
         },
         request.selection,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         None,
         request.force_unprivileged,
     )
@@ -745,46 +650,15 @@ pub(crate) fn submit_vty_agent_update_rollback(
         },
         request.selection,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         None,
         request.force_unprivileged,
     )
 }
 
-pub(crate) fn submit_vty_super_password_rotate(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    request: VtySuperPasswordRotateRequest,
-) -> Result<String> {
-    let new_proof_key_hex = auth_rotation_proof_key_hex(
-        request.new_proof_key_hex.as_deref(),
-        request.new_password_env.as_deref(),
-        request.new_super_salt_hex.as_deref(),
-    )?;
-    let operation = JobCommand::AuthProofKeyRotate {
-        new_proof_key_hex,
-        rotation_generation: normalize_rotation_generation(request.rotation_generation.as_deref())?,
-    };
-    submit_vty_config_operation(
-        api_url,
-        token,
-        password,
-        salt_hex,
-        "auth_proof_key_rotate",
-        operation,
-        request.selection,
-        request.timeout_secs,
-        request.proof_ttl_secs,
-        None,
-        false,
-    )
-}
-
 fn validate_config_dispatch_bounds(
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     command: &str,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -792,19 +666,10 @@ fn validate_config_dispatch_bounds(
         "{command} --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&proof_ttl_secs),
-        "{command} --proof-ttl must be between 1 and 3600"
+        (1..=3600).contains(&privilege_ttl_secs),
+        "{command} --privilege-ttl must be between 1 and 3600"
     );
     Ok(())
-}
-
-fn validate_hex32(value: &str, label: &str) -> Result<String> {
-    let value = value.trim().to_ascii_lowercase();
-    anyhow::ensure!(
-        value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit),
-        "{label} must be 64 hex characters"
-    );
-    Ok(value)
 }
 
 fn validate_sha256(value: &str, label: &str) -> Result<String> {
@@ -852,7 +717,7 @@ fn submit_vty_config_operation(
     operation: JobCommand,
     selection: VtyJobSelection,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     canary_count: Option<u16>,
     force_unprivileged: bool,
 ) -> Result<String> {
@@ -861,10 +726,7 @@ fn submit_vty_config_operation(
         "/api/v1/bulk/resolve",
         token,
         &serde_json::json!({
-            "clients": &selection.clients,
-            "tags": &selection.tags,
-            "destructive": false,
-            "confirmed": selection.confirmed,
+            "selector_expression": selector_expression_from_targets(&selection.clients, &selection.tags),
         }),
     )?;
     let resolved: VtyBulkResolveResponse =
@@ -878,12 +740,19 @@ fn submit_vty_config_operation(
         !client_ids.is_empty(),
         "{command_label} resolved no targets; provide at least one matching target"
     );
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    let privilege = build_privilege_for_job_command(
         &client_ids,
         &operation,
+        command_label,
+        &selector_expression,
         password,
         salt_hex,
-        proof_ttl_secs,
+        privilege_ttl_secs,
+        timeout_secs,
+        canary_count.map(i32::from),
+        force_unprivileged,
+        true,
     )?;
 
     http_post_json(
@@ -894,16 +763,14 @@ fn submit_vty_config_operation(
             "command": command_label,
             "argv": [],
             "operation": operation,
-            "clients": selection.clients,
-            "tags": selection.tags,
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": false,
             "confirmed": selection.confirmed,
             "force_unprivileged": force_unprivileged,
             "timeout_secs": timeout_secs,
             "canary_count": canary_count,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -913,7 +780,6 @@ mod tests {
     use super::{
         parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_rollback,
         parse_vty_data_source_hot_config_apply, parse_vty_hot_config,
-        parse_vty_super_password_rotate,
     };
     use ed25519_dalek::SigningKey;
     use vpsman_common::sign_update_artifact_hash;
@@ -927,8 +793,9 @@ mod tests {
             "tag:bgp",
             "--timeout",
             "45",
-            "--proof-ttl",
+            "--privilege-ttl",
             "120",
+            "--force-unprivileged",
             "--confirmed",
         ])
         .unwrap();
@@ -940,7 +807,8 @@ mod tests {
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["bgp", "id:edge-a"]);
         assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.proof_ttl_secs, 120);
+        assert_eq!(request.privilege_ttl_secs, 120);
+        assert!(request.force_unprivileged);
         assert!(request.selection.confirmed);
     }
 
@@ -956,88 +824,23 @@ mod tests {
             "edge-a",
             "--timeout",
             "45",
-            "--proof-ttl",
+            "--privilege-ttl",
             "120",
+            "--force-unprivileged",
             "--confirmed",
         ])
         .unwrap();
 
         assert_eq!(request.client_id, "edge-a");
         assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.proof_ttl_secs, 120);
+        assert_eq!(request.privilege_ttl_secs, 120);
+        assert!(request.force_unprivileged);
         assert!(request.confirmed);
     }
 
     #[test]
     fn rejects_unconfirmed_data_source_hot_config_apply() {
         assert!(parse_vty_data_source_hot_config_apply(&["--client-id", "edge-a"]).is_err());
-    }
-
-    #[test]
-    fn parses_super_password_rotate_request() {
-        let request = parse_vty_super_password_rotate(&[
-            "--new-proof-key-hex",
-            &"cc".repeat(32),
-            "--rotation-generation",
-            "2026-q2",
-            "id:edge-a",
-            "--timeout",
-            "45",
-            "--proof-ttl",
-            "120",
-            "--confirmed",
-        ])
-        .unwrap();
-
-        assert_eq!(request.new_proof_key_hex, Some("cc".repeat(32)));
-        assert_eq!(request.rotation_generation.as_deref(), Some("2026-q2"));
-        assert!(request.selection.clients.is_empty());
-        assert_eq!(request.selection.tags, vec!["id:edge-a"]);
-        assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.proof_ttl_secs, 120);
-        assert!(request.selection.confirmed);
-
-        let derived = parse_vty_super_password_rotate(&[
-            "--new-password-env",
-            "VPSMAN_NEXT_PASSWORD",
-            "--new-super-salt-hex",
-            "01020304",
-            "tag:bgp",
-            "--confirmed",
-        ])
-        .unwrap();
-        assert_eq!(
-            derived.new_password_env.as_deref(),
-            Some("VPSMAN_NEXT_PASSWORD")
-        );
-        assert_eq!(derived.new_super_salt_hex.as_deref(), Some("01020304"));
-        assert_eq!(derived.selection.tags, vec!["bgp"]);
-    }
-
-    #[test]
-    fn rejects_bad_super_password_rotate_request() {
-        assert!(parse_vty_super_password_rotate(&[
-            "--new-proof-key-hex",
-            &"cc".repeat(32),
-            "tag:bgp"
-        ])
-        .is_err());
-        assert!(parse_vty_super_password_rotate(&[
-            "--new-proof-key-hex",
-            "not-a-key",
-            "tag:bgp",
-            "--confirmed",
-        ])
-        .is_err());
-        assert!(parse_vty_super_password_rotate(&[
-            "--new-proof-key-hex",
-            &"cc".repeat(32),
-            "--new-password-env",
-            "VPSMAN_NEXT_PASSWORD",
-            "tag:bgp",
-            "--confirmed",
-        ])
-        .is_err());
     }
 
     #[test]
@@ -1060,7 +863,7 @@ mod tests {
             "id:edge-a",
             "--timeout",
             "300",
-            "--proof-ttl",
+            "--privilege-ttl",
             "120",
             "--force-unprivileged",
             "--confirmed",
@@ -1075,7 +878,7 @@ mod tests {
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert_eq!(request.timeout_secs, 300);
-        assert_eq!(request.proof_ttl_secs, 120);
+        assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
     }
 

@@ -18,8 +18,6 @@ pub(crate) const DEFAULT_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS: i32 = 900;
 pub(crate) const ROLLOUT_HEALTH_GATE_HEARTBEAT_VERIFIED: &str = "heartbeat_verified";
 pub(crate) const ROLLOUT_HEALTH_GATE_MANUAL_AFTER_CANARY: &str = "manual_after_canary";
 pub(crate) const ROLLOUT_HEALTH_GATE_MANUAL_ONLY: &str = "manual_only";
-pub(crate) const ROLLOUT_DELEGATED_ACTION_ROLLBACK: &str = "agent_update_rollback";
-pub(crate) const ROLLOUT_DELEGATED_ACTION_ACTIVATE: &str = "agent_update_activate";
 
 pub(crate) fn rollout_status_for_job_status(job_status: &str) -> &'static str {
     match job_status {
@@ -169,8 +167,6 @@ pub(crate) async fn record_memory_agent_update_rollout(
             automation_blocker: None,
             automation_targets: Vec::new(),
             automation_updated_at: None,
-            activation_delegations: Vec::new(),
-            rollback_delegations: Vec::new(),
             targets,
             created_at: created_at.to_string(),
             updated_at: created_at.to_string(),
@@ -348,14 +344,10 @@ impl Repository {
                         .cmp(&left.created_at)
                         .then_with(|| right.id.cmp(&left.id))
                 });
-                let mut rollouts = rollouts
+                let rollouts = rollouts
                     .into_iter()
                     .take(limit as usize)
                     .collect::<Vec<_>>();
-                for rollout in &mut rollouts {
-                    self.attach_agent_update_delegation_summaries(rollout)
-                        .await?;
-                }
                 Ok(rollouts)
             }
             Self::Postgres(pool) => {
@@ -401,7 +393,7 @@ impl Repository {
                     let targets = self.list_agent_update_rollout_targets(rollout_id).await?;
                     let (completed_count, failed_count, pending_count) =
                         rollout_target_summary(&targets);
-                    let mut rollout = AgentUpdateRolloutView {
+                    let rollout = AgentUpdateRolloutView {
                         id: rollout_id,
                         job_id: row.try_get("job_id")?,
                         actor_id: row.try_get("actor_id")?,
@@ -429,14 +421,10 @@ impl Repository {
                         automation_blocker: row.try_get("automation_blocker")?,
                         automation_targets: row.try_get("automation_targets")?,
                         automation_updated_at: row.try_get("automation_updated_at")?,
-                        activation_delegations: Vec::new(),
-                        rollback_delegations: Vec::new(),
                         targets,
                         created_at: row.try_get("created_at")?,
                         updated_at: row.try_get("updated_at")?,
                     };
-                    self.attach_agent_update_delegation_summaries(&mut rollout)
-                        .await?;
                     rollouts.push(rollout);
                 }
                 Ok(rollouts)
@@ -571,17 +559,13 @@ impl Repository {
     ) -> Result<Option<AgentUpdateRolloutView>> {
         match self {
             Self::Memory(memory) => {
-                let mut rollout = memory
+                let rollout = memory
                     .agent_update_rollouts
                     .read()
                     .await
                     .iter()
                     .find(|rollout| rollout.id == rollout_id)
                     .cloned();
-                if let Some(rollout) = &mut rollout {
-                    self.attach_agent_update_delegation_summaries(rollout)
-                        .await?;
-                }
                 Ok(rollout)
             }
             Self::Postgres(pool) => {
@@ -626,7 +610,7 @@ impl Repository {
                 let targets = self.list_agent_update_rollout_targets(rollout_id).await?;
                 let (completed_count, failed_count, pending_count) =
                     rollout_target_summary(&targets);
-                let mut rollout = AgentUpdateRolloutView {
+                let rollout = AgentUpdateRolloutView {
                     id: rollout_id,
                     job_id: row.try_get("job_id")?,
                     actor_id: row.try_get("actor_id")?,
@@ -654,14 +638,10 @@ impl Repository {
                     automation_blocker: row.try_get("automation_blocker")?,
                     automation_targets: row.try_get("automation_targets")?,
                     automation_updated_at: row.try_get("automation_updated_at")?,
-                    activation_delegations: Vec::new(),
-                    rollback_delegations: Vec::new(),
                     targets,
                     created_at: row.try_get("created_at")?,
                     updated_at: row.try_get("updated_at")?,
                 };
-                self.attach_agent_update_delegation_summaries(&mut rollout)
-                    .await?;
                 Ok(Some(rollout))
             }
         }

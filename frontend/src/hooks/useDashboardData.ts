@@ -114,6 +114,9 @@ export function useDashboardData(activeView: ActiveView) {
     }
     if (activeView === "Fleet") {
       void inventory.loadTagInventory();
+    } else if (activeView === "Config") {
+      void inventory.loadTagInventory();
+      void jobs.loadJobs();
     } else if (activeView === "Tags") {
       void inventory.loadTagInventory();
     } else if (activeView === "Jobs") {
@@ -122,6 +125,7 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadTagInventory();
     } else if (activeView === "Schedules") {
       void schedules.loadSchedules();
+      void jobs.loadJobs();
       void inventory.loadTagInventory();
     } else if (activeView === "Topology") {
       void topology.loadTunnelPlans();
@@ -298,6 +302,7 @@ export function useDashboardData(activeView: ActiveView) {
     apiToken,
     assignDataSourcePreset: inventory.assignDataSourcePreset,
     assignTag: inventory.assignTag,
+    bulkMutateTags: inventory.bulkMutateTags,
     auditError: audit.auditError,
     auditLoading: audit.auditLoading,
     audits: audit.audits,
@@ -335,18 +340,21 @@ export function useDashboardData(activeView: ActiveView) {
     createJob: jobs.createJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
     createAgentUpdateRolloutPolicy: jobs.createAgentUpdateRolloutPolicy,
-    delegateAgentUpdateRollback: jobs.delegateAgentUpdateRollback,
     updateAgentUpdateRolloutControl: jobs.updateAgentUpdateRolloutControl,
     uploadAgentUpdateArtifact: jobs.uploadAgentUpdateArtifact,
     createDataSourcePreset: inventory.createDataSourcePreset,
     createSchedule: schedules.createSchedule,
+    updateSchedule: schedules.updateSchedule,
+    enableSchedule: schedules.enableSchedule,
+    disableSchedule: schedules.disableSchedule,
+    deferSchedule: schedules.deferSchedule,
+    applyScheduleNow: schedules.applyScheduleNow,
+    deleteSchedule: schedules.deleteSchedule,
     createTag: inventory.createTag,
     createTunnelPlan: topology.createTunnelPlan,
     promoteTelemetryTunnel: topology.promoteTelemetryTunnel,
     promoteTunnelPlanToAdapter: topology.promoteTunnelPlanToAdapter,
-    delegateAgentUpdateActivation: jobs.delegateAgentUpdateActivation,
     disableTotp: access.disableTotp,
-    dispatchScheduledJob: jobs.dispatchScheduledJob,
     handleAuth,
     handleAuthVaultUnlock,
     jobs: jobs.jobs,
@@ -357,7 +365,6 @@ export function useDashboardData(activeView: ActiveView) {
     jobsError: jobs.jobsError,
     jobsLoading: jobs.jobsLoading,
     keyLifecycleReport: access.keyLifecycleReport,
-    proofRotations: access.proofRotations,
     processSupervisorInventory: jobs.processSupervisorInventory,
     fileTransfers: jobs.fileTransfers,
     fileTransferSources: jobs.fileTransferSources,
@@ -414,6 +421,8 @@ export function useDashboardData(activeView: ActiveView) {
     dataSourceAssignments: inventory.dataSourceAssignments,
     dataSourcePresets: inventory.dataSourcePresets,
     dataSourceStatus: inventory.dataSourceStatus,
+    deleteHotConfigRuleTemplate: inventory.deleteHotConfigRuleTemplate,
+    deleteTag: inventory.deleteTag,
     dashboardOverview: dashboardOverview.dashboardOverview,
     dashboardOverviewError: dashboardOverview.dashboardOverviewError,
     dashboardOverviewLoading: dashboardOverview.dashboardOverviewLoading,
@@ -424,6 +433,7 @@ export function useDashboardData(activeView: ActiveView) {
     updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,
     diffDataSourcePreset: inventory.diffDataSourcePreset,
     renderDataSourceHotConfig: inventory.renderDataSourceHotConfig,
+    renderHotConfigRuleTemplate: inventory.renderHotConfigRuleTemplate,
     resolveBulkPreview: inventory.resolveBulkPreview,
     resolveJobTargets: inventory.resolveJobTargets,
     revokeClientKey: access.revokeClientKey,
@@ -440,12 +450,14 @@ export function useDashboardData(activeView: ActiveView) {
     tags: inventory.tags,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
+    hotConfigRuleTemplates: inventory.hotConfigRuleTemplates,
     telemetryRollups: fleet.telemetryRollups,
     topologyError: topology.topologyError,
     topologyGraph: topology.topologyGraph,
     topologyLoading: topology.topologyLoading,
     tunnelPlans: topology.tunnelPlans,
     updateDataSourcePreset: inventory.updateDataSourcePreset,
+    upsertHotConfigRuleTemplate: inventory.upsertHotConfigRuleTemplate,
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,

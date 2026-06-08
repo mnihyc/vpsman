@@ -1,119 +1,22 @@
 use anyhow::{Context, Result};
-use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
-    commands_schedules::schedule_dispatch_with_material, http::http_post_json,
-    vty_jobs::VtyJobSelection,
+    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
+    http::http_post_json,
+    privilege::build_privilege_for_schedule,
+    vty_jobs::{VtyJobSelection, VtyPrivilegeContext},
 };
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct VtyScheduleDispatchRequest {
-    pub(crate) job_id: String,
-    pub(crate) proof_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
-    pub(crate) force_unprivileged: bool,
-    pub(crate) confirmed: bool,
-}
-
-pub(crate) fn parse_vty_schedule_dispatch(tokens: &[&str]) -> Result<VtyScheduleDispatchRequest> {
-    anyhow::ensure!(
-        !tokens.is_empty(),
-        "schedule-dispatch requires <job_uuid> [--confirmed]"
-    );
-    let job_id = tokens[0].to_string();
-    Uuid::parse_str(&job_id).context("schedule-dispatch job id must be a UUID")?;
-    let mut timeout_secs = 30_u64;
-    let mut proof_ttl_secs = 300_u64;
-    let mut force_unprivileged = false;
-    let mut confirmed = false;
-    let mut index = 1;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--confirmed" => {
-                confirmed = true;
-                index += 1;
-            }
-            "--force-unprivileged" => {
-                force_unprivileged = true;
-                index += 1;
-            }
-            "--timeout" => {
-                let value = tokens
-                    .get(index + 1)
-                    .context("--timeout requires a value between 1 and 3600")?;
-                timeout_secs = parse_bounded_u64(value, "--timeout", 1, 3600)?;
-                index += 2;
-            }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    value.trim_start_matches("--timeout="),
-                    "--timeout",
-                    1,
-                    3600,
-                )?;
-                index += 1;
-            }
-            "--proof-ttl" => {
-                let value = tokens
-                    .get(index + 1)
-                    .context("--proof-ttl requires a value between 1 and 3600")?;
-                proof_ttl_secs = parse_bounded_u64(value, "--proof-ttl", 1, 3600)?;
-                index += 2;
-            }
-            value if value.starts_with("--proof-ttl=") => {
-                proof_ttl_secs = parse_bounded_u64(
-                    value.trim_start_matches("--proof-ttl="),
-                    "--proof-ttl",
-                    1,
-                    3600,
-                )?;
-                index += 1;
-            }
-            value => anyhow::bail!("unknown schedule-dispatch option {value}"),
-        }
-    }
-    anyhow::ensure!(
-        confirmed,
-        "schedule-dispatch requires --confirmed because it executes a frozen privileged run"
-    );
-    Ok(VtyScheduleDispatchRequest {
-        job_id,
-        proof_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
-        confirmed,
-    })
-}
-
-pub(crate) fn submit_vty_schedule_dispatch(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    request: VtyScheduleDispatchRequest,
-) -> Result<String> {
-    schedule_dispatch_with_material(
-        api_url,
-        token,
-        &request.job_id,
-        password,
-        salt_hex,
-        request.proof_ttl_secs,
-        request.timeout_secs,
-        request.force_unprivileged,
-        request.confirmed,
-    )
-}
 
 pub(crate) fn submit_vty_schedule_create(
     api_url: &str,
     token: Option<&str>,
     name: &str,
-    interval_secs: u64,
+    cron_expr: &str,
     command: &str,
     selection: VtyJobSelection,
     options: &VtyScheduleCreateOptions,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<String> {
     validate_schedule_policy(
         &options.catch_up_policy,
@@ -121,25 +24,53 @@ pub(crate) fn submit_vty_schedule_create(
         options.retry_delay_secs,
         options.max_failures,
     )?;
+    let operation = JobCommand::Shell {
+        argv: vec![command.to_string()],
+        pty: false,
+    };
+    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    anyhow::ensure!(
+        !selector_expression.is_empty(),
+        "schedule-create requires at least one target selector"
+    );
+    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let privilege_assertion = build_privilege_for_schedule(
+        "schedule.create",
+        None,
+        name,
+        &operation,
+        "shell_argv",
+        &selector_expression,
+        &target_ids,
+        cron_expr,
+        "UTC",
+        true,
+        &options.catch_up_policy,
+        options.catch_up_limit,
+        options.retry_delay_secs,
+        options.max_failures,
+        None,
+        false,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        300,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/schedules",
         token,
         &serde_json::json!({
             "name": name,
-            "operation": JobCommand::Shell {
-                argv: vec![command.to_string()],
-                pty: false,
-            },
-            "clients": selection.clients,
-            "tags": selection.tags,
-            "interval_secs": interval_secs,
-            "start_at_unix": null,
+            "operation": operation,
+            "selector_expression": selector_expression,
+            "cron_expr": cron_expr,
+            "timezone": "UTC",
             "enabled": true,
             "catch_up_policy": &options.catch_up_policy,
             "catch_up_limit": options.catch_up_limit,
             "retry_delay_secs": options.retry_delay_secs,
             "max_failures": options.max_failures,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -309,52 +240,9 @@ fn parse_bounded_i64(value: &str, flag: &str, min: i64, max: i64) -> Result<i64>
     Ok(parsed)
 }
 
-fn parse_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64> {
-    let parsed = value
-        .parse::<u64>()
-        .with_context(|| format!("{flag} must be an integer"))?;
-    anyhow::ensure!(
-        (min..=max).contains(&parsed),
-        "{flag} must be between {min} and {max}"
-    );
-    Ok(parsed)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_vty_schedule_create_options, parse_vty_schedule_dispatch};
-
-    #[test]
-    fn parses_schedule_dispatch_request() {
-        let request = parse_vty_schedule_dispatch(&[
-            "8f38c322-7987-4ffe-9206-9a01144ef9d9",
-            "--timeout",
-            "45",
-            "--proof-ttl=120",
-            "--force-unprivileged",
-            "--confirmed",
-        ])
-        .unwrap();
-
-        assert_eq!(request.job_id, "8f38c322-7987-4ffe-9206-9a01144ef9d9");
-        assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.proof_ttl_secs, 120);
-        assert!(request.force_unprivileged);
-        assert!(request.confirmed);
-    }
-
-    #[test]
-    fn rejects_schedule_dispatch_without_confirmation_or_bad_values() {
-        assert!(parse_vty_schedule_dispatch(&["8f38c322-7987-4ffe-9206-9a01144ef9d9"]).is_err());
-        assert!(parse_vty_schedule_dispatch(&[
-            "8f38c322-7987-4ffe-9206-9a01144ef9d9",
-            "--timeout",
-            "0",
-            "--confirmed",
-        ])
-        .is_err());
-        assert!(parse_vty_schedule_dispatch(&["not-a-uuid", "--confirmed"]).is_err());
-    }
+    use super::parse_vty_schedule_create_options;
 
     #[test]
     fn parses_schedule_create_policy_options() {

@@ -1,6 +1,9 @@
 mod api_client;
+mod build_info;
 mod control;
 mod state;
+
+use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -53,6 +56,8 @@ pub(crate) struct Args {
     api_url: Option<String>,
     #[arg(long, env = "VPSMAN_INTERNAL_TOKEN")]
     internal_token: Option<String>,
+    #[arg(long, env = "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX")]
+    privilege_verifier_key_hex: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_ID", default_value = "local-dev-gateway")]
     gateway_id: String,
 }
@@ -74,6 +79,11 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = Args::parse();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        server_build_number = build_info::server_build_number(),
+        "gateway build metadata"
+    );
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     validate_gateway_runtime_mode(&args)?;
     let state = GatewayState::default();
@@ -111,6 +121,24 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
 }
 
 fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
+    let verifier_key = args
+        .privilege_verifier_key_hex
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if verifier_key.is_none() && !args.debug_internal_test_mode {
+        anyhow::bail!(
+            "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX is required. Missing privilege verifier material is allowed only with VPSMAN_DEBUG_INTERNAL_TEST_MODE=true for internal tests."
+        );
+    }
+    if let Some(verifier_key) = verifier_key {
+        let bytes =
+            hex::decode(verifier_key).context("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX must be hex")?;
+        anyhow::ensure!(
+            bytes.len() == 32,
+            "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX must be a 32-byte hex key"
+        );
+    }
     if args.noise_mode == GatewayNoiseMode::DevXx {
         if !args.debug_internal_test_mode {
             anyhow::bail!(
@@ -136,17 +164,23 @@ async fn run_agent_listener(args: Args, state: GatewayState) -> Result<()> {
         let args = args.clone();
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_agent(stream, args, state).await {
+            if let Err(error) = handle_agent(stream, peer, args, state).await {
                 warn!(%peer, %error, "agent session ended with error");
             }
         });
     }
 }
 
-async fn handle_agent(stream: TcpStream, args: Args, state: GatewayState) -> Result<()> {
+async fn handle_agent(
+    stream: TcpStream,
+    peer: SocketAddr,
+    args: Args,
+    state: GatewayState,
+) -> Result<()> {
     let mut stream = accept_noise_stream(stream, &args).await?;
     let control = GatewayControlClient::new(args.api_url.clone(), args.internal_token.clone());
     let noise_public_key_hex = stream.remote_static().map(hex::encode);
+    let remote_ip = peer.ip().to_string();
     let session_id = uuid::Uuid::new_v4();
     let mut client_id = None::<String>;
     let (command_tx, mut command_rx) = mpsc::channel::<GatewayCommand>(8);
@@ -166,6 +200,7 @@ async fn handle_agent(stream: TcpStream, args: Args, state: GatewayState) -> Res
                     state: &state,
                     control: &control,
                     noise_public_key_hex: noise_public_key_hex.clone(),
+                    remote_ip: &remote_ip,
                     session_id,
                     command_tx: &command_tx,
                     cancel_tx: &cancel_tx,
@@ -182,6 +217,7 @@ async fn handle_agent(stream: TcpStream, args: Args, state: GatewayState) -> Res
                 };
                 let client_id = client_id.clone().unwrap_or_default();
                 let job_id = command.request.job_id;
+                let command_version = command.request.command_version;
                 if let Err(error) = write_json_frame(
                     &mut stream,
                     MessageKind::Command,
@@ -197,6 +233,7 @@ async fn handle_agent(stream: TcpStream, args: Args, state: GatewayState) -> Res
                 pending_command = Some(PendingCommand {
                     client_id,
                     job_id,
+                    command_version,
                     ack: None,
                     outputs: Vec::new(),
                     next_output_seq: 0,
@@ -228,6 +265,7 @@ async fn handle_agent(stream: TcpStream, args: Args, state: GatewayState) -> Res
             client_id,
             session_id,
             noise_public_key_hex,
+            remote_ip: Some(remote_ip),
             reason: result.as_ref().err().map(session_end_reason),
         };
         control
@@ -256,6 +294,7 @@ struct AgentFrameContext<'a> {
     state: &'a GatewayState,
     control: &'a GatewayControlClient,
     noise_public_key_hex: Option<String>,
+    remote_ip: &'a str,
     session_id: uuid::Uuid,
     command_tx: &'a mpsc::Sender<GatewayCommand>,
     cancel_tx: &'a mpsc::Sender<GatewayCommandCancel>,
@@ -280,6 +319,7 @@ async fn handle_agent_frame(
             let ingest = GatewayAgentHelloIngest {
                 gateway_id: context.args.gateway_id.clone(),
                 noise_public_key_hex: context.noise_public_key_hex.clone(),
+                remote_ip: Some(context.remote_ip.to_string()),
                 hello: hello.clone(),
             };
             context
@@ -300,6 +340,7 @@ async fn handle_agent_frame(
                 client_id: hello.client_id.clone(),
                 session_id: context.session_id,
                 noise_public_key_hex: context.noise_public_key_hex.clone(),
+                remote_ip: Some(context.remote_ip.to_string()),
                 reason: None,
             };
             context
@@ -308,6 +349,8 @@ async fn handle_agent_frame(
                 .await;
             let reply = ServerHello {
                 server_id: context.args.gateway_id.clone(),
+                server_version: env!("CARGO_PKG_VERSION").to_string(),
+                server_build_number: crate::build_info::server_build_number(),
                 accepted: true,
                 message: "accepted".to_string(),
                 telemetry_light_secs: 15,
@@ -325,6 +368,7 @@ async fn handle_agent_frame(
             );
             let ingest = GatewayTelemetryIngest {
                 gateway_id: context.args.gateway_id.clone(),
+                remote_ip: Some(context.remote_ip.to_string()),
                 telemetry,
             };
             context

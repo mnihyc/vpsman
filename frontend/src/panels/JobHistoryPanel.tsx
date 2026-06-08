@@ -5,22 +5,16 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { CrudPager } from "../components/CrudPager";
-import { ProofVaultBox } from "../components/ProofVaultBox";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
-  buildEnvelopesForOperation,
-  buildEnvelopesForPayloadHash,
-  type ProofMaterial,
-} from "../proof";
+  buildPrivilegeForJobOperation,
+  type PrivilegeMaterial,
+} from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentView,
-  AgentUpdateActivationDelegationRecord,
-  AgentUpdateActivationDelegationRequest,
   AgentUpdateReleaseRecord,
-  AgentUpdateRollbackDelegationRecord,
-  AgentUpdateRollbackDelegationRequest,
   AgentUpdateRolloutControlRequest,
   AgentUpdateRolloutPolicyRecord,
   AgentUpdateRolloutRecord,
@@ -32,7 +26,6 @@ import type {
   CreateJobResponse,
   CreateAgentUpdateRolloutPolicyRequest,
   CreateAgentUpdateReleaseRequest,
-  DispatchScheduledJobRequest,
   JobHistoryRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
@@ -151,9 +144,6 @@ export function JobHistoryPanel({
   onCreateFileTransferHandoff,
   onUploadAgentUpdateArtifact,
   onCreateJob,
-  onDispatchScheduledJob,
-  onDelegateAgentUpdateActivation,
-  onDelegateAgentUpdateRollback,
   onDownloadFileBundle,
   onDownloadOutputArtifact,
   onDownloadFileTransferSource,
@@ -162,7 +152,7 @@ export function JobHistoryPanel({
   onLoadOutputComparison,
   onLoadTerminalReplay,
   onLoadTargets,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onRefresh,
   onResolveTargets,
   onSaveFileTransferHandoff,
@@ -172,9 +162,9 @@ export function JobHistoryPanel({
   onUploadFileTransferSource,
   onUpsertCommandTemplate,
   pendingSelectedJobId,
-  proofMaterial,
+  privilegeMaterial,
   processSupervisorInventory,
-  setProofMaterial,
+  setPrivilegeMaterial,
   terminalSessions,
 }: {
   activeSubpage: string;
@@ -208,18 +198,6 @@ export function JobHistoryPanel({
     request: UploadAgentUpdateArtifactRequest,
   ) => Promise<AgentUpdateReleaseRecord>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onDispatchScheduledJob: (
-    jobId: string,
-    request: DispatchScheduledJobRequest,
-  ) => Promise<CreateJobResponse>;
-  onDelegateAgentUpdateActivation: (
-    rolloutId: string,
-    request: AgentUpdateActivationDelegationRequest,
-  ) => Promise<AgentUpdateActivationDelegationRecord>;
-  onDelegateAgentUpdateRollback: (
-    rolloutId: string,
-    request: AgentUpdateRollbackDelegationRequest,
-  ) => Promise<AgentUpdateRollbackDelegationRecord>;
   onDownloadOutputArtifact: (
     jobId: string,
     clientId: string,
@@ -239,7 +217,7 @@ export function JobHistoryPanel({
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
   onResolveTargets: (
     selection: JobTargetSelection,
@@ -266,9 +244,9 @@ export function JobHistoryPanel({
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
   pendingSelectedJobId?: string | null;
-  proofMaterial: ProofMaterial | null;
+  privilegeMaterial: PrivilegeMaterial | null;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -289,15 +267,7 @@ export function JobHistoryPanel({
   const [targetsLoading, setTargetsLoading] = useState(false);
   const [outputsLoading, setOutputsLoading] = useState(false);
   const [comparisonLoading, setComparisonLoading] = useState(false);
-  const [proofTtlSecs, setProofTtlSecs] = useState(300);
-  const [approvalError, setApprovalError] = useState<string | null>(null);
-  const [approvalPending, setApprovalPending] = useState(false);
-  const [approvalPendingJobId, setApprovalPendingJobId] = useState<
-    string | null
-  >(null);
-  const [forceScheduledUnprivileged, setForceScheduledUnprivileged] =
-    useState(false);
-  const [lastApprovalHash, setLastApprovalHash] = useState<string | null>(null);
+  const [lastPrivilegeActionHash, setLastPrivilegeActionHash] = useState<string | null>(null);
   const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
   const [rolloutRestartAgent, setRolloutRestartAgent] = useState(false);
   const [rolloutForceUnprivileged, setRolloutForceUnprivileged] =
@@ -332,7 +302,7 @@ export function JobHistoryPanel({
   const [artifactPendingKey, setArtifactPendingKey] = useState<string | null>(
     null,
   );
-  const scheduledApprovalCount = jobs.filter(isScheduledApprovalJob).length;
+  const scheduleRunJobs = jobs.filter((job) => job.command_type.startsWith("scheduled_"));
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -442,23 +412,6 @@ export function JobHistoryPanel({
             >
               {displayToken(job.status)}
             </span>
-            {isScheduledApprovalJob(job) && (
-              <button
-                aria-label="Approve scheduled job"
-                className="secondaryAction compactAction"
-                disabled={approvalPending || !proofMaterial}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void approveScheduledJob(job);
-                }}
-                type="button"
-              >
-                <ShieldCheck size={14} />
-                <span>
-                  {approvalPendingJobId === job.id ? "Approving" : "Approve"}
-                </span>
-              </button>
-            )}
             {isCancelableJob(job) && (
               <button
                 aria-label={
@@ -508,12 +461,12 @@ export function JobHistoryPanel({
         header: "Privilege",
         size: 105,
         minSize: 90,
-        sortValue: (job) => (job.privileged ? "proof" : "none"),
+        sortValue: (job) => (job.privileged ? "privileged" : "none"),
         searchValue: (job) =>
-          job.privileged ? "proof privileged" : "none unprivileged",
+          job.privileged ? "privileged" : "none unprivileged",
         cell: (job) => (
           <span className={job.privileged ? "status info" : "status neutral"}>
-            {job.privileged ? "proof" : "none"}
+            {job.privileged ? "privileged" : "none"}
           </span>
         ),
       },
@@ -539,12 +492,9 @@ export function JobHistoryPanel({
       },
     ],
     [
-      approvalPending,
-      approvalPendingJobId,
       cancelPending,
       cancelPendingJobId,
       openTargets,
-      proofMaterial,
     ],
   );
 
@@ -581,45 +531,6 @@ export function JobHistoryPanel({
       void openTargets(lastJobOutputEvent.job_id);
     }
   }, [lastJobOutputEvent, openTargets, selectedJobId]);
-
-  async function approveScheduledJob(job: JobHistoryRecord) {
-    setApprovalPendingJobId(job.id);
-    await runPanelAction(setApprovalPending, setApprovalError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
-      }
-      const [latestJob, latestTargets] = await Promise.all([
-        onLoadJob(job.id),
-        onLoadTargets(job.id),
-      ]);
-      if (!isScheduledApprovalJob(latestJob)) {
-        throw new Error("Scheduled job is not waiting for approval");
-      }
-      const approvalTargets = latestTargets
-        .filter((target) => target.status === "approval_required")
-        .map((target) => target.client_id);
-      if (approvalTargets.length === 0) {
-        throw new Error("Scheduled job has no waiting targets");
-      }
-      const built = await buildEnvelopesForPayloadHash({
-        clientIds: approvalTargets,
-        payloadHashHex: latestJob.payload_hash,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
-      });
-      setLastApprovalHash(built.payloadHashHex);
-      await onDispatchScheduledJob(job.id, {
-        confirmed: true,
-        timeout_secs: 30,
-        force_unprivileged: forceScheduledUnprivileged,
-        envelope: null,
-        envelopes: built.envelopes,
-      });
-      await openTargets(job.id);
-    });
-    setApprovalPendingJobId(null);
-  }
 
   async function cancelPendingJob(job: JobHistoryRecord) {
     setCancelPendingJobId(job.id);
@@ -669,8 +580,8 @@ export function JobHistoryPanel({
       setRolloutActionPending,
       setRolloutActionError,
       async () => {
-        if (!proofMaterial) {
-          throw new Error("Proof is locked");
+        if (!privilegeMaterial) {
+          throw new Error("Privilege unlock is locked");
         }
         const batchSize = Math.max(
           1,
@@ -694,16 +605,19 @@ export function JobHistoryPanel({
               type: "agent_update_activate",
               staged_sha256_hex: rollout.artifact_sha256_hex,
             } as const);
-        const built = await buildEnvelopesForOperation({
+        const clientSelector = selectorExpressionForClientIds(clientIds);
+        const built = await buildPrivilegeForJobOperation({
           clientIds,
+          commandType: "agent_update_activate",
+          forceUnprivileged: rolloutForceUnprivileged,
           operation,
-          proofTtlSecs,
-          superPassword: proofMaterial.superPassword,
-          superSaltHex: proofMaterial.superSaltHex,
+          privilegeMaterial,
+          selectorExpression: clientSelector,
+          timeoutSecs: 60,
         });
-        setLastApprovalHash(built.payloadHashHex);
+        setLastPrivilegeActionHash(built.payloadHashHex);
         await onCreateJob({
-          selector_expression: selectorExpressionForClientIds(clientIds),
+          selector_expression: clientSelector,
           destructive: false,
           confirmed: true,
           command: "agent_update_activate",
@@ -719,8 +633,7 @@ export function JobHistoryPanel({
             resume_outputs: true,
             cancel_on_disconnect: false,
           },
-          envelope: null,
-          envelopes: built.envelopes,
+          privilege_assertion: built.privilegeAssertion,
         });
       },
     );
@@ -733,8 +646,8 @@ export function JobHistoryPanel({
       setRolloutActionPending,
       setRolloutActionError,
       async () => {
-        if (!proofMaterial) {
-          throw new Error("Proof is locked");
+        if (!privilegeMaterial) {
+          throw new Error("Privilege unlock is locked");
         }
         const clientIds = selectRolloutClients(rollout, [
           "activation_pending_restart",
@@ -748,16 +661,19 @@ export function JobHistoryPanel({
           );
         }
         const operation = { type: "agent_update_rollback" } as const;
-        const built = await buildEnvelopesForOperation({
+        const clientSelector = selectorExpressionForClientIds(clientIds);
+        const built = await buildPrivilegeForJobOperation({
           clientIds,
+          commandType: "agent_update_rollback",
+          forceUnprivileged: rolloutForceUnprivileged,
           operation,
-          proofTtlSecs,
-          superPassword: proofMaterial.superPassword,
-          superSaltHex: proofMaterial.superSaltHex,
+          privilegeMaterial,
+          selectorExpression: clientSelector,
+          timeoutSecs: 60,
         });
-        setLastApprovalHash(built.payloadHashHex);
+        setLastPrivilegeActionHash(built.payloadHashHex);
         await onCreateJob({
-          selector_expression: selectorExpressionForClientIds(clientIds),
+          selector_expression: clientSelector,
           destructive: false,
           confirmed: true,
           command: "agent_update_rollback",
@@ -773,88 +689,7 @@ export function JobHistoryPanel({
             resume_outputs: true,
             cancel_on_disconnect: false,
           },
-          envelope: null,
-          envelopes: built.envelopes,
-        });
-      },
-    );
-    setRolloutActionId(null);
-  }
-
-  async function delegateRolloutActivation(rollout: AgentUpdateRolloutRecord) {
-    setRolloutActionId(rollout.id);
-    await runPanelAction(
-      setRolloutActionPending,
-      setRolloutActionError,
-      async () => {
-        if (!proofMaterial) {
-          throw new Error("Proof is locked");
-        }
-        const clientIds = selectRolloutActivationDelegationClients(rollout);
-        if (clientIds.length === 0) {
-          throw new Error(
-            "No rollout targets are available for activation delegation",
-          );
-        }
-        const operation = rolloutRestartAgent
-          ? ({
-              type: "agent_update_activate",
-              staged_sha256_hex: rollout.artifact_sha256_hex,
-              restart_agent: true,
-            } as const)
-          : ({
-              type: "agent_update_activate",
-              staged_sha256_hex: rollout.artifact_sha256_hex,
-            } as const);
-        const built = await buildEnvelopesForOperation({
-          clientIds,
-          maxProofTtlSecs: 86_400,
-          operation,
-          proofTtlSecs,
-          superPassword: proofMaterial.superPassword,
-          superSaltHex: proofMaterial.superSaltHex,
-        });
-        setLastApprovalHash(built.payloadHashHex);
-        await onDelegateAgentUpdateActivation(rollout.id, {
-          confirmed: true,
-          restart_agent: rolloutRestartAgent,
-          force_unprivileged: rolloutForceUnprivileged,
-          envelopes: built.envelopes,
-        });
-      },
-    );
-    setRolloutActionId(null);
-  }
-
-  async function delegateRolloutRollback(rollout: AgentUpdateRolloutRecord) {
-    setRolloutActionId(rollout.id);
-    await runPanelAction(
-      setRolloutActionPending,
-      setRolloutActionError,
-      async () => {
-        if (!proofMaterial) {
-          throw new Error("Proof is locked");
-        }
-        const clientIds = selectRolloutDelegationClients(rollout);
-        if (clientIds.length === 0) {
-          throw new Error(
-            "No rollout targets are available for rollback delegation",
-          );
-        }
-        const operation = { type: "agent_update_rollback" } as const;
-        const built = await buildEnvelopesForOperation({
-          clientIds,
-          maxProofTtlSecs: 86_400,
-          operation,
-          proofTtlSecs,
-          superPassword: proofMaterial.superPassword,
-          superSaltHex: proofMaterial.superSaltHex,
-        });
-        setLastApprovalHash(built.payloadHashHex);
-        await onDelegateAgentUpdateRollback(rollout.id, {
-          confirmed: true,
-          force_unprivileged: rolloutForceUnprivileged,
-          envelopes: built.envelopes,
+          privilege_assertion: built.privilegeAssertion,
         });
       },
     );
@@ -902,11 +737,11 @@ export function JobHistoryPanel({
           onLoadOutputs={onLoadOutputs}
           onLoadTargets={onLoadTargets}
           onOpenJobDetails={openSubmittedJobDetails}
-          onOpenProofUnlock={onOpenProofUnlock}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onResolveTargets={onResolveTargets}
           onUpsertCommandTemplate={onUpsertCommandTemplate}
-          proofMaterial={proofMaterial}
-          setProofMaterial={setProofMaterial}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
         />
       )}
       {jobSubpage === "files" && (
@@ -919,10 +754,9 @@ export function JobHistoryPanel({
             setMultiFileInitialPath(path);
             onSelectSubpage?.("multi_files");
           }}
-          onOpenProofUnlock={onOpenProofUnlock}
-          proofMaterial={proofMaterial}
-          proofTtlSecs={proofTtlSecs}
-          setProofMaterial={setProofMaterial}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
         />
       )}
       {jobSubpage === "multi_files" && (
@@ -935,11 +769,10 @@ export function JobHistoryPanel({
           onLoadOutputs={onLoadOutputs}
           onLoadTargets={onLoadTargets}
           onOpenJobDetails={openSubmittedJobDetails}
-          onOpenProofUnlock={onOpenProofUnlock}
+          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onResolveTargets={onResolveTargets}
-          proofMaterial={proofMaterial}
-          proofTtlSecs={proofTtlSecs}
-          setProofMaterial={setProofMaterial}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
         />
       )}
       {jobSubpage === "updates" && (
@@ -963,21 +796,13 @@ export function JobHistoryPanel({
               void controlRollout(rollout, request)
             }
             onCreatePolicy={onCreateAgentUpdateRolloutPolicy}
-            onDelegateActivation={(rollout) =>
-              void delegateRolloutActivation(rollout)
-            }
-            onDelegateRollback={(rollout) =>
-              void delegateRolloutRollback(rollout)
-            }
             onForceUnprivilegedChange={setRolloutForceUnprivileged}
-            onProofTtlSecsChange={setProofTtlSecs}
             onRefresh={onRefresh}
             onRestartAgentChange={setRolloutRestartAgent}
             onRollbackTargets={(rollout) =>
               void rollbackRolloutTargets(rollout)
             }
-            proofMaterial={proofMaterial}
-            proofTtlSecs={proofTtlSecs}
+            privilegeMaterial={privilegeMaterial}
             restartAgent={rolloutRestartAgent}
             forceUnprivileged={rolloutForceUnprivileged}
             policies={agentUpdateRolloutPolicies}
@@ -1029,11 +854,11 @@ export function JobHistoryPanel({
             onLoadOutputs={onLoadOutputs}
             onLoadTargets={onLoadTargets}
             onOpenJobDetails={openSubmittedJobDetails}
-            onOpenProofUnlock={onOpenProofUnlock}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onResolveTargets={onResolveTargets}
             onUpsertCommandTemplate={onUpsertCommandTemplate}
-            proofMaterial={proofMaterial}
-            setProofMaterial={setProofMaterial}
+            privilegeMaterial={privilegeMaterial}
+            setPrivilegeMaterial={setPrivilegeMaterial}
           />
         </div>
       )}
@@ -1048,7 +873,7 @@ export function JobHistoryPanel({
                     cancelError ??
                     (loading
                       ? "Refreshing command records"
-                      : "Latest proof-gated requests")}
+                      : "Latest privileged requests")}
                 </span>
               </div>
               <button
@@ -1071,15 +896,6 @@ export function JobHistoryPanel({
                   label: "Copy job IDs",
                   onSelect: (rows) =>
                     void copyText(rows.map((job) => job.id).join("\n")),
-                },
-                {
-                  label: "Approve selected",
-                  disabled: (rows) =>
-                    !proofMaterial || !rows.some(isScheduledApprovalJob),
-                  onSelect: (rows) =>
-                    rows
-                      .filter(isScheduledApprovalJob)
-                      .forEach((job) => void approveScheduledJob(job)),
                 },
                 {
                   label: "Cancel selected",
@@ -1137,6 +953,7 @@ export function JobHistoryPanel({
                     value: (target) => clientLabel(target.client_id),
                   },
                   { label: "Status", value: (target) => target.status },
+                  { label: "Reason", value: (target) => target.message ?? "" },
                   { label: "Exit", value: (target) => target.exit_code },
                   {
                     label: "Completed",
@@ -1164,6 +981,7 @@ export function JobHistoryPanel({
                     <div className="historyRow heading targetHistoryGrid">
                       <span>Client</span>
                       <span>Status</span>
+                      <span>Reason</span>
                       <span>Exit</span>
                       <span>Completed</span>
                     </div>
@@ -1181,6 +999,7 @@ export function JobHistoryPanel({
                         >
                           {target.status}
                         </span>
+                        <span title={target.message ?? undefined}>{target.message ?? "-"}</span>
                         <span>{target.exit_code ?? "-"}</span>
                         <span>
                           {target.completed_at
@@ -1482,77 +1301,63 @@ export function JobHistoryPanel({
       )}
       {jobSubpage === "approvals" && (
         <div className="jobConsoleStack">
-          {scheduledApprovalCount > 0 || agentUpdateRollouts.length > 0 ? (
-            <div className="scheduledApprovalPanel">
-              <div className="sectionHeader compact">
-                <h2>Privileged approvals</h2>
-                <span>
-                  {approvalError ??
-                    rolloutActionError ??
-                    cancelError ??
-                    `${scheduledApprovalCount} scheduled waiting`}
-                </span>
+          <div className="fleetPanel scheduleRunsPanel">
+            <div className="sectionHeader compact">
+              <div>
+                <h2>Schedule runs</h2>
+                <span>{cancelError ?? `${scheduleRunJobs.length} worker-created due runs`}</span>
               </div>
-              <div className="approvalControls">
-                <label>
-                  <span>Proof TTL</span>
-                  <input
-                    aria-label="Scheduled approval proof TTL seconds"
-                    max={3600}
-                    min={15}
-                    onChange={(event) =>
-                      setProofTtlSecs(Number(event.target.value))
-                    }
-                    type="number"
-                    value={proofTtlSecs}
-                  />
-                </label>
-                <label className="checkLine">
-                  <input
-                    aria-label="Force unprivileged scheduled best effort"
-                    checked={forceScheduledUnprivileged}
-                    onChange={(event) =>
-                      setForceScheduledUnprivileged(event.target.checked)
-                    }
-                    type="checkbox"
-                  />
-                  <span>Force unprivileged best effort</span>
-                </label>
-              </div>
-              <ProofVaultBox
-                clearVaultLabel="Clear approval vault"
-                labelPrefix="Approval"
-                lastPayloadHash={lastApprovalHash}
-                lockProofLabel="Lock approval proof"
-                onOpenUnlock={onOpenProofUnlock}
-                onProofMaterialChange={setProofMaterial}
-                proofMaterial={proofMaterial}
-                unlockRedirectLabel="Unlock approval proof"
-                unlockLabel="Unlock approval proof"
-                useProofLabel="Use approval proof"
-              />
+              <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
+                Refresh
+              </button>
             </div>
-          ) : (
-            <div className="fleetPanel">
+            {scheduleRunJobs.length > 0 ? (
+              <div className="table historyTable">
+                <div className="historyRow scheduledRunGrid heading">
+                  <span>Run</span>
+                  <span>Status</span>
+                  <span>Targets</span>
+                  <span>Created</span>
+                  <span>Actions</span>
+                </div>
+                {scheduleRunJobs.map((job) => (
+                  <div className="historyRow scheduledRunGrid" key={job.id}>
+                    <span className="historyPrimary">
+                      <strong>{job.command_type.replace(/^scheduled_/, "")}</strong>
+                      <small>{shortId(job.id)} · {shortHash(job.payload_hash)}</small>
+                    </span>
+                    <span className={`status ${statusClass(job.status)}`}>{job.status}</span>
+                    <span>{job.target_count}</span>
+                    <span>{formatTime(job.created_at)}</span>
+                    <span className="inlineActions">
+                      <button className="secondaryAction compactAction" onClick={() => void openTargets(job.id)} type="button">
+                        Open
+                      </button>
+                      {isActiveCancelableJob(job) && (
+                        <button
+                          className="secondaryAction dangerAction compactAction"
+                          disabled={cancelPending || cancelPendingJobId === job.id}
+                          onClick={() => void cancelPendingJob(job)}
+                          type="button"
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
               <div className="emptyState">
                 <ShieldCheck size={22} />
-                <strong>No privileged approvals</strong>
-                <span>
-                  No scheduled jobs or rollout actions are waiting for proof.
-                </span>
+                <strong>No schedule runs yet</strong>
+                <span>Due schedule jobs are created and dispatched by worker automation.</span>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </section>
-  );
-}
-
-function isScheduledApprovalJob(job: JobHistoryRecord): boolean {
-  return (
-    job.status === "approval_required" &&
-    job.command_type.startsWith("scheduled_")
   );
 }
 
@@ -1568,7 +1373,7 @@ async function copyText(value: string) {
 }
 
 function isCancelableJob(job: JobHistoryRecord): boolean {
-  return isScheduledApprovalJob(job) || isActiveCancelableJob(job);
+  return isActiveCancelableJob(job);
 }
 
 function outputCompareBasisLabel(value: string): string {

@@ -431,7 +431,7 @@ mod tests {
         tokio::fs::write(&selected_path, b"selected secret contents")
             .await
             .unwrap();
-        tokio::fs::write(&config_path, b"proof_key_hex = \"secret-proof-key\"")
+        tokio::fs::write(&config_path, b"server_ed25519_public_key_hex = \"secret\"")
             .await
             .unwrap();
         let recipient_secret = StaticSecret::from([7_u8; 32]);
@@ -466,7 +466,7 @@ mod tests {
             .collect::<Vec<_>>();
         let artifact_text = String::from_utf8_lossy(&artifact_bytes);
         assert!(!artifact_text.contains("selected secret contents"));
-        assert!(!artifact_text.contains("secret-proof-key"));
+        assert!(!artifact_text.contains("secret-privilege-key"));
 
         let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
         assert_eq!(artifact.format, BACKUP_ARTIFACT_FORMAT);
@@ -502,7 +502,7 @@ mod tests {
         tokio::fs::write(&selected_path, &selected_data)
             .await
             .unwrap();
-        tokio::fs::write(&config_path, b"proof_key_hex = \"secret-proof-key\"")
+        tokio::fs::write(&config_path, b"server_ed25519_public_key_hex = \"secret\"")
             .await
             .unwrap();
         let recipient_secret = StaticSecret::from([11_u8; 32]);
@@ -549,7 +549,7 @@ mod tests {
         assert!(status["chunk_count"].as_u64().unwrap() >= 1);
 
         let artifact_text = String::from_utf8_lossy(&artifact_bytes);
-        assert!(!artifact_text.contains("secret-proof-key"));
+        assert!(!artifact_text.contains("secret-privilege-key"));
         let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
         let archive = decrypt_artifact(&recipient_secret, &artifact);
         assert_eq!(archive.client_id, "client-stream");

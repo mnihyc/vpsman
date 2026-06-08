@@ -3,6 +3,12 @@ import { expect, test, type Locator } from "@playwright/test";
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
 const preferences = {
+  bulk_output_compare_mode: "binary",
+  dashboard_curve_exclusions: [],
+  dashboard_network_top_limit: 8,
+  dashboard_resource_top_limit: 8,
+  enrollment_install_command_template:
+    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
   language: "en",
   sidebar_subpanel_default: "active",
   timezone: null,
@@ -70,7 +76,7 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
     }
     await route.fulfill({
       contentType: "application/json",
-      json: { connected: 1, running_jobs: 0, total: 1, warnings: 0 },
+      json: { online: 1, offline: 0, stale: 0, running_jobs: 0, total: 1, warnings: 0 },
     });
   });
   await page.route("**/api/v1/dashboard/overview**", async (route) => {
@@ -112,7 +118,7 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
           sampled_clients: 0,
         },
         scope: { kind: "all", label: "All VPS", matched_clients: 1, query: null, value: null },
-        summary: { connected: 1, running_jobs: 0, stale: 0, total: 1, warnings: 0 },
+        summary: { online: 1, offline: 0, stale: 0, running_jobs: 0, total: 1, warnings: 0 },
         time_range: {
           end_at: "2026-06-05T20:44:58Z",
           end_unix: 1780692298,
@@ -144,7 +150,7 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
           },
           display_name: "vault-edge-01",
           id: "vault-agent-01",
-          status: "connected",
+          status: "online",
           tags: ["edge"],
         },
       ],

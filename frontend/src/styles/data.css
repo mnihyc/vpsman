@@ -553,7 +553,11 @@
 }
 
 .targetHistoryGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(170px, 0.8fr) 80px minmax(160px, 0.8fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(180px, 1fr) 70px minmax(160px, 0.8fr);
+}
+
+.scheduledRunGrid {
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) 80px minmax(160px, 0.8fr) minmax(150px, 0.6fr);
 }
 
 .gatewaySessionGrid {
@@ -607,6 +611,186 @@
     minmax(120px, 0.65fr)
     minmax(120px, 0.65fr)
     minmax(150px, 0.8fr);
+}
+
+.metricGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  padding: 18px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.metricCard {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.metricCard strong {
+  color: #202124;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.metricCard span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: normal;
+}
+
+.configJobGrid {
+  grid-template-columns: 110px minmax(170px, 1fr) 120px minmax(160px, 0.8fr);
+}
+
+.tagRegistryGrid {
+  grid-template-columns: minmax(220px, 1fr) 100px minmax(130px, 0.55fr);
+}
+
+.tagAssignmentGrid {
+  grid-template-columns: minmax(190px, 0.9fr) 100px minmax(260px, 1.25fr) minmax(220px, 0.9fr);
+}
+
+.configRuleWorkspace,
+.configApplyGrid {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  align-items: start;
+}
+
+.configRuleWorkspace {
+  grid-template-columns: minmax(230px, 0.45fr) minmax(0, 1fr);
+}
+
+.configApplyGrid {
+  grid-template-columns: minmax(320px, 0.8fr) minmax(380px, 1fr);
+}
+
+.configApplyGrid > .executionResultPanel,
+.configApplyGrid > .confirmationPrompt {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.ruleCardGrid,
+.ruleCategory,
+.ruleEditor,
+.configTomlEditor,
+.tagCreateForm {
+  min-width: 0;
+}
+
+.ruleCardGrid,
+.ruleCategory {
+  display: grid;
+  gap: 8px;
+}
+
+.ruleCard {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  text-align: left;
+}
+
+.ruleCard.activeAction {
+  border-color: #1a73e8;
+  background: #edf4ff;
+}
+
+.ruleCard span,
+.ruleCard small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ruleCard small {
+  display: block;
+  margin-top: 3px;
+  color: #5f6368;
+  white-space: nowrap;
+}
+
+.ruleCard em {
+  flex: 0 0 auto;
+  color: #5f6368;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ruleEditor textarea,
+.configTomlEditor textarea {
+  width: 100%;
+  min-width: 0;
+  font-family: "Roboto Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tagCreateForm .formRow {
+  grid-template-columns: minmax(240px, 1fr) minmax(140px, 0.4fr);
+}
+
+.tagChipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tagRemoveChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 150px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #f8fafd;
+  color: #3c4043;
+}
+
+.tagRemoveChip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineTagAdd {
+  grid-template-columns: minmax(120px, 1fr) auto;
+}
+
+.privilegeGateBox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #5f6368;
+  font-size: 13px;
 }
 
 .presetManagementGrid {
@@ -827,6 +1011,40 @@
   gap: 4px;
 }
 
+.networkInterfacesPanel > div {
+  min-width: 0;
+}
+
+.interfaceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.networkInterfaceList {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.networkInterfaceRow {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.8fr) minmax(140px, 1.2fr) minmax(180px, 2fr) minmax(120px, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+.networkInterfaceRow strong,
+.networkInterfaceRow span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .sideForm {
   margin: 18px;
 }
@@ -865,10 +1083,6 @@
 }
 
 .targetDetail {
-  border-top: 1px solid #dfe3eb;
-}
-
-.scheduledApprovalPanel {
   border-top: 1px solid #dfe3eb;
 }
 

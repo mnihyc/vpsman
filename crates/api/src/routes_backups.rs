@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use vpsman_common::{encode_json, payload_hash, JobCommand};
+use vpsman_common::{encode_json, payload_hash, CommandEnvelope, JobCommand};
 
 use crate::{
     backup_artifact_crypto::prepare_backup_archive_for_restore,
@@ -17,7 +17,7 @@ use crate::{
     },
     backup_upload_sessions::backup_upload_sessions,
     error::ApiError,
-    job_request::{validate_file_path, validate_unsigned_command_envelope},
+    job_request::validate_file_path,
     model::{
         BackupArtifactHandoffRequest, BackupArtifactHandoffView, BackupArtifactUploadChunkRequest,
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
@@ -27,6 +27,7 @@ use crate::{
         ListQuery, PrepareBackupArtifactRestoreRequest, PreparedBackupArtifactRestoreView,
         RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
     },
+    privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     routes_schedules::validate_schedule_request,
     security::operator_has_scope,
     selector_expression::id_selector_expression,
@@ -162,33 +163,37 @@ pub(crate) async fn create_backup_request(
     let payload = encode_json(&command)
         .map_err(|error| ApiError::from(anyhow!("failed to encode backup command: {error}")))?;
     let command_hash = payload_hash(&payload);
-    let envelope = match request.envelope.as_ref() {
-        Some(envelope) => envelope,
-        None => {
-            state
-                .repo
-                .record_rejected_backup_request(
-                    &request,
-                    &command_hash,
-                    &operator,
-                    "backup_proof_required",
-                )
-                .await?;
-            return Err(ApiError::forbidden("backup_proof_required"));
-        }
-    };
-    if validate_unsigned_command_envelope(envelope, &request.client_id, &command_hash).is_err() {
+    let resolved_targets = vec![request.client_id.clone()];
+    let selector_expression = id_selector_expression(&request.client_id);
+    let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
+        selector_expression: &selector_expression,
+        command_type: "backup",
+        operation_payload_hash: &command_hash,
+        resolved_targets: &resolved_targets,
+        timeout_secs: 30,
+        canary_count: None,
+        force_unprivileged: false,
+        privileged: true,
+    });
+    if let Err(error) = verify_privilege_intent(
+        &state,
+        &privilege_intent,
+        request.privilege_assertion.clone(),
+    )
+    .await
+    {
         state
             .repo
             .record_rejected_backup_request(
                 &request,
                 &command_hash,
                 &operator,
-                "invalid_backup_proof_envelope",
+                "backup_privilege_verification_failed",
             )
             .await?;
-        return Err(ApiError::forbidden("invalid_backup_proof_envelope"));
+        return Err(error);
     }
+    let envelope = metadata_command_envelope(&request.client_id, &command_hash);
 
     Ok((
         StatusCode::CREATED,
@@ -198,7 +203,7 @@ pub(crate) async fn create_backup_request(
                 .record_backup_request(
                     &request,
                     &command_hash,
-                    envelope,
+                    &envelope,
                     &operator,
                     BackupRequestStatus::RequestedMetadataOnly,
                 )
@@ -782,13 +787,14 @@ pub(crate) fn validate_create_backup_policy_request(
                 .map(|value| value.to_ascii_lowercase()),
         },
         selector_expression: request.selector_expression.clone(),
-        interval_secs: request.interval_secs,
-        start_at_unix: request.start_at_unix,
+        cron_expr: request.cron_expr.clone(),
+        timezone: request.timezone.clone(),
         enabled: request.enabled,
         catch_up_policy: request.catch_up_policy.clone(),
         catch_up_limit: request.catch_up_limit,
         retry_delay_secs: request.retry_delay_secs,
         max_failures: request.max_failures,
+        privilege_assertion: None,
     };
     validate_schedule_request(&schedule_request)?;
     let retention_days = request.retention_days.unwrap_or(30);
@@ -855,8 +861,6 @@ async fn ensure_single_backup_client(
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: id_selector_expression(&request.client_id),
-            destructive: false,
-            confirmed: true,
         })
         .await?;
     if resolved.target_count == 1 && resolved.targets[0].id == request.client_id {
@@ -874,6 +878,18 @@ fn backup_command(request: &CreateBackupRequest) -> JobCommand {
             .recipient_public_key_hex
             .clone()
             .map(|value| value.to_ascii_lowercase()),
+    }
+}
+
+fn metadata_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
+    let now = unix_now();
+    CommandEnvelope {
+        command_id: uuid::Uuid::new_v4(),
+        scope: format!("client:{client_id}"),
+        payload_hash_hex: command_hash.to_string(),
+        signed_unix: now,
+        expires_unix: now.saturating_add(300),
+        server_signature: Vec::new(),
     }
 }
 

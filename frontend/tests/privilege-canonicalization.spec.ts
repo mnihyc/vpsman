@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { canonicalOperationJson } from "../src/proof";
+import { buildPrivilegeForJobOperation, canonicalOperationJson } from "../src/privilege";
 import type { JobOperation } from "../src/types";
 
-test("canonical proof payload omits skipped optional fields", () => {
+test("canonical privilege payload omits skipped optional fields", () => {
   const terminalOpen: JobOperation = {
     type: "terminal_open",
     session_id: "61616161-2222-4333-8444-555555555555",
@@ -14,7 +14,7 @@ test("canonical proof payload omits skipped optional fields", () => {
     flow_window_bytes: 65536,
   };
   expect(canonicalOperationJson(terminalOpen)).toBe(
-    '{"type":"terminal_open","session_id":"61616161-2222-4333-8444-555555555555","argv":["/bin/sh","-l"],"cols":120,"rows":30,"idle_timeout_secs":1800,"flow_window_bytes":65536}',
+    '{"type":"terminal_open","session_id":"61616161-2222-4333-8444-555555555555","argv":["/bin/sh","-l"],"user_policy":"fail","cols":120,"rows":30,"idle_timeout_secs":1800,"flow_window_bytes":65536}',
   );
 
   const filePush: JobOperation = {
@@ -67,4 +67,27 @@ test("canonical restore payload keeps non-skipped null archive fields", () => {
   expect(canonicalOperationJson(restore)).toBe(
     '{"type":"restore","source_backup_request_id":"11111111-2222-4333-8444-555555555555","paths":["/etc/app.conf"],"include_config":false,"destination_root":null,"archive_base64":null,"archive_size_bytes":null,"archive_sha256_hex":null}',
   );
+});
+
+test("generated privilege assertions carry a request-bound timestamp", async () => {
+  const beforeUnix = Math.floor(Date.now() / 1000);
+  const built = await buildPrivilegeForJobOperation({
+    clientIds: ["agent-sfo-01"],
+    commandType: "shell_argv",
+    operation: { type: "shell", argv: ["/bin/true"], pty: false },
+    privilegeMaterial: {
+      superPassword: "local-super-password",
+      superSaltHex: "01020304",
+    },
+    selectorExpression: "id:agent-sfo-01",
+    timeoutSecs: 30,
+  });
+  const afterUnix = Math.floor(Date.now() / 1000);
+  const assertion = built.privilegeAssertion;
+
+  expect(assertion.issued_unix).toBeGreaterThanOrEqual(beforeUnix);
+  expect(assertion.issued_unix).toBeLessThanOrEqual(afterUnix);
+  expect(assertion.expires_unix).toBe(assertion.issued_unix + 300);
+  expect(assertion.nonce_hex).toMatch(/^[0-9a-f]{32}$/);
+  expect(assertion.assertion_hex).toMatch(/^[0-9a-f]{64}$/);
 });

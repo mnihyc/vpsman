@@ -1,8 +1,7 @@
 use super::*;
-use std::collections::HashMap;
 use vpsman_common::{
-    sign_privilege_proof, verify_command_envelope, verify_discovery_document_signature, AgentHello,
-    AgentNoiseMode, CommandEnvelope, JobCommand, PrivilegeReplayCache,
+    verify_command_envelope, verify_discovery_document_signature, AgentHello, AgentNoiseMode,
+    GatewayAgentHelloIngest, JobCommand, PrivilegeReplayCache,
 };
 
 #[test]
@@ -50,6 +49,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -65,22 +65,17 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "provider:provider-a || country:US".to_string(),
-            destructive: true,
-            confirmed: false,
         })
         .await
         .unwrap();
 
     assert_eq!(targets.target_count, 1);
-    assert!(targets.confirmation_required);
     assert_eq!(targets.targets[0].id, "client-a");
 
     let explicit_tag_selector = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "tag:provider:provider-a && provider:provider-a && country:US"
                 .to_string(),
-            destructive: false,
-            confirmed: false,
         })
         .await
         .unwrap();
@@ -90,8 +85,6 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let inner_any = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "id:client-a".to_string(),
-            destructive: false,
-            confirmed: false,
         })
         .await
         .unwrap();
@@ -101,8 +94,6 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let inner_all = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "name:client-a && provider:provider-a && country:US".to_string(),
-            destructive: false,
-            confirmed: false,
         })
         .await
         .unwrap();
@@ -112,12 +103,67 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
     let mismatch = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "id:client-a && country:DE".to_string(),
-            destructive: false,
-            confirmed: false,
         })
         .await
         .unwrap();
     assert_eq!(mismatch.target_count, 0);
+}
+
+#[tokio::test]
+async fn stale_agent_clears_only_after_changed_internal_build_hello() {
+    fn hello(build: u64) -> GatewayAgentHelloIngest {
+        GatewayAgentHelloIngest {
+            gateway_id: "gateway-a".to_string(),
+            noise_public_key_hex: None,
+            remote_ip: Some("203.0.113.10".to_string()),
+            hello: AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                internal_build_number: build,
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                capabilities: Default::default(),
+            },
+        }
+    }
+
+    let repo = Repository::Memory(MemoryState::default());
+    repo.upsert_agent_hello(&hello(1)).await.unwrap();
+    repo.mark_agent_stale(
+        "client-a",
+        "agent_rejected_unsupported_shell_argv_command_version",
+        serde_json::json!({"job_id": Uuid::nil()}),
+    )
+    .await
+    .unwrap();
+
+    let stale = repo.agent_by_id("client-a").await.unwrap();
+    assert_eq!(stale.status, "stale");
+    assert_eq!(
+        stale.stale_reason.as_deref(),
+        Some("agent_rejected_unsupported_shell_argv_command_version")
+    );
+
+    repo.upsert_agent_hello(&hello(1)).await.unwrap();
+    assert_eq!(repo.agent_by_id("client-a").await.unwrap().status, "stale");
+
+    repo.upsert_agent_hello(&hello(2)).await.unwrap();
+    let recovered = repo.agent_by_id("client-a").await.unwrap();
+    assert_eq!(recovered.status, "online");
+    assert_eq!(recovered.internal_build_number, 2);
+    assert!(recovered.stale_since.is_none());
+    assert!(recovered.stale_reason.is_none());
+
+    let audit_actions = repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.action)
+        .collect::<Vec<_>>();
+    assert!(audit_actions.contains(&"agent.status_stale".to_string()));
+    assert!(audit_actions.contains(&"agent.status_online".to_string()));
 }
 
 #[tokio::test]
@@ -133,6 +179,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -192,8 +239,6 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
     let targets = repo
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: "id:client-delete || provider:alpha".to_string(),
-            destructive: false,
-            confirmed: true,
         })
         .await
         .unwrap();
@@ -263,7 +308,6 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
             &EnrollmentSettings::default(),
             &ClaimEnrollmentRequest {
                 token: created.token.clone(),
-                client_id: None,
                 client_public_key_hex: "11".repeat(32),
             },
         )
@@ -277,17 +321,17 @@ async fn enrollment_token_claim_records_client_key_and_consumes_token() {
 
     assert_eq!(response.client_id, assigned_client_id);
     assert_eq!(response.noise_mode, AgentNoiseMode::EnrolledIk);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].id, response.client_id);
+    assert_eq!(agents[0].status, "offline");
     assert_eq!(
-        response.tags,
+        agents[0].tags,
         vec![
             "bgp".to_string(),
             "country:US".to_string(),
             "edge".to_string(),
         ]
     );
-    assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].id, response.client_id);
-    assert_eq!(agents[0].status, "enrolled");
     assert_eq!(listed_tokens.len(), 1);
     assert_eq!(listed_tokens[0].token_prefix, created.token_prefix);
     assert_eq!(
@@ -334,7 +378,6 @@ async fn enrollment_token_rejects_reuse_and_never_lists_plaintext_token() {
         .unwrap();
     let request = ClaimEnrollmentRequest {
         token: created.token.clone(),
-        client_id: None,
         client_public_key_hex: "22".repeat(32),
     };
 
@@ -414,7 +457,6 @@ async fn gateway_identity_validation_uses_enrolled_client_public_key() {
         &EnrollmentSettings::default(),
         &ClaimEnrollmentRequest {
             token: created.token,
-            client_id: None,
             client_public_key_hex: "55".repeat(32),
         },
     )
@@ -447,6 +489,7 @@ async fn rejected_job_records_frozen_target_results() {
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
                 update_heartbeat: None,
+                internal_build_number: 1,
                 capabilities: Default::default(),
             },
         )
@@ -474,10 +517,9 @@ async fn rejected_job_records_frozen_target_results() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let job_id = repo
@@ -511,6 +553,7 @@ async fn rejected_job_freezes_tag_targets() {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -544,10 +587,9 @@ async fn rejected_job_freezes_tag_targets() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let job_id = repo
@@ -566,25 +608,15 @@ async fn rejected_job_freezes_tag_targets() {
 }
 
 #[test]
-fn server_signs_proof_bearing_envelope_for_resolved_target() {
+fn server_signs_command_envelope_for_resolved_target() {
     let signing_key = SigningKey::from_bytes(&[3_u8; 32]);
-    let proof_key = [7_u8; 32];
     let command = JobCommand::Shell {
         argv: vec!["true".to_string()],
         pty: false,
     };
     let command_payload = encode_json(&command).unwrap();
     let command_hash = payload_hash(&command_payload);
-    let command_id = Uuid::new_v4();
     let scope = "client:client-a";
-    let proof = sign_privilege_proof(
-        &proof_key,
-        command_id,
-        scope,
-        &command_hash,
-        &[9_u8; 16],
-        unix_now() + 300,
-    );
     let request = CreateJobRequest {
         selector_expression: "id:client-a".to_string(),
         destructive: false,
@@ -596,25 +628,17 @@ fn server_signs_proof_bearing_envelope_for_resolved_target() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: Some(CommandEnvelope {
-            command_id,
-            scope: scope.to_string(),
-            payload_hash_hex: command_hash.clone(),
-            proof: Some(proof),
-            server_signature: vec![1, 2, 3],
-        }),
-        envelopes: HashMap::new(),
     };
 
     let signed = request
         .signed_envelopes_for_targets(&["client-a".to_string()], &command_hash, &signing_key)
         .unwrap();
     let envelope = signed.get("client-a").unwrap();
-    assert_ne!(envelope.server_signature, vec![1, 2, 3]);
+    assert!(!envelope.server_signature.is_empty());
     assert!(verify_command_envelope(
-        &proof_key,
         &signing_key.verifying_key(),
         scope,
         &command_payload,
@@ -640,10 +664,9 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "file_pull");
@@ -669,10 +692,9 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let command = request.job_command().unwrap();
@@ -701,10 +723,9 @@ fn file_pull_job_command_requires_absolute_path() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let error = request.job_command().unwrap_err();
@@ -729,10 +750,9 @@ fn file_browser_job_commands_use_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "file_list_dir");
@@ -763,10 +783,9 @@ fn file_browser_job_commands_validate_paths_and_limits() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     assert_eq!(
         request.job_command().unwrap_err().code,
@@ -800,10 +819,9 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "shell_script");
@@ -828,10 +846,9 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let error = request.job_command().unwrap_err();
@@ -857,10 +874,9 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "user_sessions");
@@ -883,10 +899,9 @@ fn process_list_job_command_uses_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "process_list");
@@ -909,10 +924,9 @@ fn process_list_job_command_bounds_limit() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     let error = request.job_command().unwrap_err();
@@ -944,10 +958,9 @@ async fn dispatching_job_records_and_updates_target_results() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -966,6 +979,7 @@ async fn dispatching_job_records_and_updates_target_results() {
         &TargetDispatchOutcome {
             status: "completed".to_string(),
             exit_code: Some(0),
+            command_version: Some(1),
             accepted: true,
             message: "ok".to_string(),
             outputs: vec![
@@ -1181,6 +1195,7 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
             &TargetDispatchOutcome {
                 status: "completed".to_string(),
                 exit_code: Some(0),
+                command_version: Some(1),
                 accepted: true,
                 message: "ok".to_string(),
                 outputs: outputs.clone(),
@@ -1252,10 +1267,9 @@ fn test_job_request(clients: &[&str]) -> CreateJobRequest {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     }
 }
 
@@ -1290,6 +1304,7 @@ async fn record_test_output(
         &TargetDispatchOutcome {
             status: status.to_string(),
             exit_code,
+            command_version: Some(1),
             accepted: true,
             message: status.to_string(),
             outputs: outputs.clone(),

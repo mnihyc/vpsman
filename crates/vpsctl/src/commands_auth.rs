@@ -113,22 +113,6 @@ pub(crate) fn operator_sessions(api_url: &str, token: Option<&str>, limit: u16) 
     Ok(())
 }
 
-pub(crate) fn super_password_rotations(
-    api_url: &str,
-    token: Option<&str>,
-    limit: u16,
-) -> Result<()> {
-    println!(
-        "{}",
-        http_get(
-            api_url,
-            &format!("/api/v1/auth/proof-rotations?limit={}", limit.clamp(1, 200)),
-            token,
-        )?
-    );
-    Ok(())
-}
-
 pub(crate) fn operator_session_revoke(
     api_url: &str,
     token: Option<&str>,

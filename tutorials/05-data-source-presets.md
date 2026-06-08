@@ -72,7 +72,7 @@ Render the selected config fragment for a VPS before dispatching hot config:
 cargo run -p vpsctl -- data-source-hot-config --client-id edge-01
 ```
 
-Apply selected preset config through proof-gated hot config:
+Apply selected preset config through privileged hot config:
 
 ```sh
 cargo run -p vpsctl -- data-source-hot-config-apply --client-id edge-01 --confirmed
@@ -84,7 +84,7 @@ cargo run -p vpsctl -- data-source-hot-config-apply --client-id edge-01 --confir
 sources such as telemetry and tunnel traffic report samples when available.
 Workflow-only sources such as process inventory, user sessions, latency probes,
 speed tests, and command execution policy report `ready_on_demand` with the
-proof-gated workflow and sanitized selected-policy evidence. Process inventory
+privileged workflow and sanitized selected-policy evidence. Process inventory
 rows also show whether the agent can enforce process limits, cannot report that
 yet, or is running unprivileged and will degrade root-only limit operations
 unless the operator forces a best-effort run:
@@ -95,7 +95,7 @@ cargo run -p vpsctl -- data-source-status --domain command_execution_policy
 ```
 
 Use this before debugging a host. It tells you which preset the VPS is using
-without exposing env values, proof material, command output, or object-store
+without exposing env values, privilege material, command output, or object-store
 paths.
 
 ## Clone, Test, And Update

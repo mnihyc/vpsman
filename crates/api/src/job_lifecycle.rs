@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 pub(crate) const CANCELED_STATUS: &str = "canceled";
 pub(crate) const CANCEL_REQUESTED_STATUS: &str = "cancel_requested";
-pub(crate) const CANCELABLE_PENDING_STATUSES: &[&str] = &["approval_required"];
+pub(crate) const CANCELABLE_PENDING_STATUSES: &[&str] = &[];
 pub(crate) const CANCELABLE_ACTIVE_STATUSES: &[&str] = &["dispatching", CANCEL_REQUESTED_STATUS];
 
 #[derive(Clone, Debug)]

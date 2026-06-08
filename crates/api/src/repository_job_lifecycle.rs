@@ -49,13 +49,12 @@ impl Repository {
                     .iter_mut()
                     .filter(|target| target.job_id == job_id)
                 {
-                    if matches!(target.status.as_str(), "approval_required" | "queued") {
+                    if target.status == "queued" {
                         target.status = CANCELED_STATUS.to_string();
                         target.completed_at = Some(now.clone());
                         canceled_targets += 1;
                     }
                 }
-                memory.scheduled_jobs.write().await.remove(&job_id);
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -123,7 +122,7 @@ impl Repository {
                     UPDATE job_targets
                     SET status = $2, completed_at = now()
                     WHERE job_id = $1
-                      AND status IN ('approval_required', 'queued')
+                      AND status = 'queued'
                     "#,
                 )
                 .bind(job_id)

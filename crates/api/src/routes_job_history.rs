@@ -19,9 +19,8 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     model::{
-        AuditLogView, AuthProofRotationHistoryView, HistoryQuery, JobHistoryView, JobOutputView,
-        JobTargetView, ListQuery, NetworkObservationTrendView, NetworkObservationView,
-        ProcessSupervisorInventoryView,
+        AuditLogView, HistoryQuery, JobHistoryView, JobOutputView, JobTargetView, ListQuery,
+        NetworkObservationTrendView, NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     state::AppState,
@@ -57,20 +56,6 @@ pub(crate) async fn list_jobs(
 ) -> Result<Json<Vec<JobHistoryView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
     Ok(Json(state.repo.query_jobs(&query).await?))
-}
-
-pub(crate) async fn list_auth_proof_rotations(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<Vec<AuthProofRotationHistoryView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .list_auth_proof_rotation_history(limit_or_default(query.limit))
-            .await?,
-    ))
 }
 
 pub(crate) async fn get_job(

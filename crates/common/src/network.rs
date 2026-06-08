@@ -5,7 +5,7 @@ mod models;
 mod planner;
 
 pub use backends::{
-    backend_config_proof_payload, render_backend_config_for_endpoint,
+    backend_config_signature_payload, render_backend_config_for_endpoint,
     render_tunnel_endpoint_backend_config,
 };
 pub use cost::{effective_bandwidth_tier, observed_bandwidth_tier, observed_ospf_cost, ospf_cost};

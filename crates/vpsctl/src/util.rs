@@ -1,31 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use anyhow::{Context, Result};
-
-pub(crate) fn read_json_file<T: serde::de::DeserializeOwned>(
-    path: Option<&PathBuf>,
-) -> Result<Option<T>> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read JSON file {}", path.display()))?;
-    Ok(Some(serde_json::from_str(&content).with_context(|| {
-        format!("failed to parse JSON file {}", path.display())
-    })?))
-}
-
-pub(crate) fn ensure_payload_hash(value: &str) -> Result<()> {
-    anyhow::ensure!(
-        value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit),
-        "--payload-hash-hex must be a 64-character SHA-256 hex digest"
-    );
-    Ok(())
-}
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()

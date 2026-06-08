@@ -2,11 +2,7 @@ import { useCallback, useState } from "react";
 import { apiGet, apiGetBlob, apiPost, apiPostBinary, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
-  AgentUpdateActivationDelegationRecord,
-  AgentUpdateActivationDelegationRequest,
   AgentUpdateReleaseRecord,
-  AgentUpdateRollbackDelegationRecord,
-  AgentUpdateRollbackDelegationRequest,
   AgentUpdateRolloutControlRequest,
   AgentUpdateRolloutPolicyRecord,
   AgentUpdateRolloutRecord,
@@ -18,7 +14,6 @@ import type {
   CreateHostedAgentUpdateReleaseRequest,
   CreateJobRequest,
   CreateJobResponse,
-  DispatchScheduledJobRequest,
   JobHistoryRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
@@ -489,47 +484,6 @@ export function useJobsData(
     [apiToken, loadAgentUpdateRollouts, onAuditChanged],
   );
 
-  const delegateAgentUpdateRollback = useCallback(
-    async (rolloutId: string, request: AgentUpdateRollbackDelegationRequest) => {
-      const response = await apiPost<AgentUpdateRollbackDelegationRecord>(
-        `/api/v1/agent-update-rollouts/${encodeURIComponent(rolloutId)}/rollback-delegation`,
-        apiToken,
-        request,
-      );
-      await loadAgentUpdateRollouts();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
-  );
-
-  const delegateAgentUpdateActivation = useCallback(
-    async (rolloutId: string, request: AgentUpdateActivationDelegationRequest) => {
-      const response = await apiPost<AgentUpdateActivationDelegationRecord>(
-        `/api/v1/agent-update-rollouts/${encodeURIComponent(rolloutId)}/activation-delegation`,
-        apiToken,
-        request,
-      );
-      await loadAgentUpdateRollouts();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
-  );
-
-  const dispatchScheduledJob = useCallback(
-    async (jobId: string, request: DispatchScheduledJobRequest) => {
-      const response = await apiPost<CreateJobResponse>(
-        `/api/v1/jobs/${encodeURIComponent(jobId)}/dispatch-scheduled`,
-        apiToken,
-        request,
-      );
-      void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
-      return response;
-    },
-    [apiToken, loadJobs, onAuditChanged, onFleetChanged],
-  );
-
   const cancelJob = useCallback(
     async (jobId: string, request: CancelJobRequest) => {
       const response = await apiPost<CancelJobResponse>(
@@ -547,8 +501,6 @@ export function useJobsData(
     cancelJob,
     createAgentUpdateRelease,
     createAgentUpdateRolloutPolicy,
-    delegateAgentUpdateActivation,
-    delegateAgentUpdateRollback,
     updateAgentUpdateRolloutControl,
     uploadAgentUpdateArtifact,
     streamAgentUpdateArtifact,
@@ -558,7 +510,6 @@ export function useJobsData(
     agentUpdateReleases,
     agentUpdateRolloutPolicies,
     agentUpdateRollouts,
-    dispatchScheduledJob,
     fileTransfers,
     fileTransferSources,
     jobs,

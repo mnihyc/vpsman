@@ -68,17 +68,6 @@ pub(crate) struct TotpConfirmCommand {
 pub(crate) struct EnrollmentTokenCreateCommand {
     #[arg(long, default_value_t = 1800)]
     pub(crate) ttl_secs: u64,
-    #[arg(long, default_value = "provision")]
-    pub(crate) purpose: String,
-    #[arg(
-        long,
-        help = "existing client id for rebuild re-enrollment tokens only"
-    )]
-    pub(crate) allowed_client_id: Option<String>,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed_reenrollment: bool,
-    #[arg(long, default_value_t = true)]
-    pub(crate) preserve_existing_assignments: bool,
     #[arg(long, value_delimiter = ',')]
     pub(crate) default_tags: Vec<String>,
     #[arg(long)]
@@ -139,11 +128,6 @@ pub(crate) struct ClientKeyRevokeCommand {
 pub(crate) struct EnrollClaimCommand {
     #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
     pub(crate) token: String,
-    #[arg(
-        long,
-        help = "existing client id only when claiming a rebuild re-enrollment token"
-    )]
-    pub(crate) client_id: Option<String>,
     #[arg(long)]
     pub(crate) client_public_key_hex: String,
 }
@@ -152,15 +136,6 @@ pub(crate) struct EnrollClaimCommand {
 pub(crate) struct EnrollConfigCommand {
     #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
     pub(crate) token: String,
-    #[arg(
-        long,
-        help = "existing client id only when claiming a rebuild re-enrollment token"
-    )]
-    pub(crate) client_id: Option<String>,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 30)]
     pub(crate) command_timeout_secs: u64,
     #[arg(long = "output-file")]
@@ -462,11 +437,13 @@ pub(crate) struct DataSourceHotConfigApplyCommand {
     #[arg(long)]
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) force_unprivileged: bool,
 }
 
 #[derive(Debug, Args)]
@@ -541,10 +518,6 @@ pub(crate) struct BulkResolveCommand {
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
-    #[arg(long, default_value_t = false)]
-    pub(crate) destructive: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -561,10 +534,8 @@ pub(crate) struct ScheduleCreateCommand {
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
-    #[arg(long)]
-    pub(crate) interval_secs: u64,
-    #[arg(long)]
-    pub(crate) start_at_unix: Option<u64>,
+    #[arg(long, default_value = "0 * * * *")]
+    pub(crate) cron_expr: String,
     #[arg(long, default_value_t = false)]
     pub(crate) disabled: bool,
     #[arg(long, default_value = "skip_missed")]
@@ -578,19 +549,47 @@ pub(crate) struct ScheduleCreateCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct ScheduleDispatchCommand {
+pub(crate) struct ScheduleUpdateCommand {
     #[arg(long)]
-    pub(crate) job_id: String,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
+    pub(crate) schedule_id: String,
     #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) name: String,
+    #[arg(long)]
+    pub(crate) command: String,
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) argv: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) pty: bool,
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) clients: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) tags: Vec<String>,
+    #[arg(long, default_value = "0 * * * *")]
+    pub(crate) cron_expr: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) disabled: bool,
+    #[arg(long, default_value = "skip_missed")]
+    pub(crate) catch_up_policy: String,
+    #[arg(long, default_value_t = 1)]
+    pub(crate) catch_up_limit: i32,
     #[arg(long, default_value_t = 300)]
-    pub(crate) proof_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
-    pub(crate) timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) force_unprivileged: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
+    pub(crate) retry_delay_secs: i64,
+    #[arg(long, default_value_t = 3)]
+    pub(crate) max_failures: i32,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ScheduleMutationCommand {
+    #[arg(long)]
+    pub(crate) schedule_id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ScheduleDeferCommand {
+    #[arg(long)]
+    pub(crate) schedule_id: String,
+    #[arg(long)]
+    pub(crate) deferred_until: String,
+    #[arg(long)]
+    pub(crate) reason: Option<String>,
 }

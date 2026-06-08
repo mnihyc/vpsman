@@ -1,6 +1,6 @@
 use super::*;
 use vpsman_common::{
-    backend_config_proof_payload, plan_tunnel, render_tunnel_endpoint_backend_config,
+    backend_config_signature_payload, plan_tunnel, render_tunnel_endpoint_backend_config,
     AgentNetworkConfig, BandwidthTier, OspfCostPolicy, TunnelConfigBackend, TunnelKind,
     TunnelPlanInput,
 };
@@ -71,7 +71,7 @@ async fn applies_managed_network_files_with_backups() {
 }
 
 #[tokio::test]
-async fn applies_netplan_backend_files_with_config_proof_hash() {
+async fn applies_netplan_backend_files_with_config_signature_hash() {
     let job_id = uuid::Uuid::new_v4();
     let root = std::env::temp_dir().join(format!("vpsman-network-netplan-{job_id}"));
     let netplan_path = root.join("etc/netplan/90-vpsman-tunnels.yaml");
@@ -90,7 +90,7 @@ async fn applies_netplan_backend_files_with_config_proof_hash() {
         TunnelConfigBackend::Netplan,
     )
     .unwrap();
-    let config_hash = payload_hash(&backend_config_proof_payload(&backend_config));
+    let config_hash = payload_hash(&backend_config_signature_payload(&backend_config));
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),

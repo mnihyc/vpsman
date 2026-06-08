@@ -8,7 +8,11 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
+croner.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,3 +22,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vpsman-common = { path = "../common" }
+vpsman-server-build-info = { path = "../server-build-info" }

@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -10,8 +10,8 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
-async function unlockProof(page: Page, subpage: string) {
-  await unlockProofFromTop(page);
+async function unlockPrivilege(page: Page, subpage: string) {
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Jobs", subpage);
 }
 
@@ -22,7 +22,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
   await openConsoleSubpage(page, "Jobs", "Files");
   await expect(page.getByRole("heading", { name: "File browser" })).toBeVisible();
-  await unlockProof(page, "Files");
+  await unlockPrivilege(page, "Files");
 
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
@@ -96,7 +96,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await page.evaluate(() => localStorage.removeItem("vpsman.multiFile.selectorExpression"));
   await openConsoleSubpage(page, "Jobs", "Multi files");
   await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
-  await unlockProof(page, "Multi files");
+  await unlockPrivilege(page, "Multi files");
 
   await activate(page.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
@@ -106,9 +106,9 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await activate(page.getByRole("button", { name: "Run bulk action" }));
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "2 VPSs" })).toBeVisible();
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "unavailable" })).toBeVisible();
-  await expect(page.getByLabel("Execution result").getByText("partial success: 2 done, 1 unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Download all" })).toBeVisible();
+  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
+  await expect(page.getByLabel("Execution result").getByText("partial success: 2 done, 1 failed", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download Archive" })).toHaveCount(1);
 
   await activate(page.getByRole("button", { name: "Upload files" }));
   await page.getByLabel("Bulk file destination path").fill("/etc/app.conf");
@@ -123,7 +123,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await activate(page.getByRole("button", { name: "Run bulk action" }));
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "2 VPSs" })).toBeVisible();
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "unavailable" })).toBeVisible();
+  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
   await expect(page.getByText("skip existing")).toBeVisible();
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileBrowserJobs);
   const read = requests.find((request: any) => request.operation?.type === "file_download");

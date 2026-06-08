@@ -2,13 +2,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use vpsman_common::{
-    backend_config_proof_payload, payload_hash, plan_tunnel, render_tunnel_endpoint_backend_config,
-    render_tunnel_endpoint_config, BandwidthTier, JobCommand, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelPlan,
+    backend_config_signature_payload, payload_hash, plan_tunnel,
+    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
+    JobCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
 };
 
 use crate::{
-    http::http_post_json, proof::build_envelopes_for_job_command, vty_jobs::VtyProofContext,
+    commands_schedules::selector_expression_from_targets, http::http_post_json,
+    privilege::build_privilege_for_job_command, vty_jobs::VtyPrivilegeContext,
 };
 
 pub(crate) use crate::vty_tunnel_plan::{parse_vty_tunnel_plan, VtyTunnelPlanRequest};
@@ -19,7 +20,7 @@ pub(crate) struct VtyTunnelApplyRequest {
     pub(crate) side: TunnelEndpointSide,
     pub(crate) backend: TunnelConfigBackend,
     pub(crate) timeout_secs: u64,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -264,7 +265,7 @@ fn parse_vty_tunnel_change(
     let mut side = None::<TunnelEndpointSide>;
     let mut backend = TunnelConfigBackend::Ifupdown;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut force_unprivileged = false;
 
@@ -328,8 +329,8 @@ fn parse_vty_tunnel_change(
                 )?;
                 index += 1;
             }
-            "--proof-ttl" | "--proof-ttl-secs" => {
-                proof_ttl_secs = parse_bounded_u64(
+            "--privilege-ttl" | "--privilege-ttl-secs" => {
+                privilege_ttl_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
@@ -337,15 +338,19 @@ fn parse_vty_tunnel_change(
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--proof-ttl=") => {
-                proof_ttl_secs =
-                    parse_bounded_u64(flag_value(value, "--proof-ttl="), "--proof-ttl", 1, 3600)?;
+            value if value.starts_with("--privilege-ttl=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    flag_value(value, "--privilege-ttl="),
+                    "--privilege-ttl",
+                    1,
+                    3600,
+                )?;
                 index += 1;
             }
-            value if value.starts_with("--proof-ttl-secs=") => {
-                proof_ttl_secs = parse_bounded_u64(
-                    flag_value(value, "--proof-ttl-secs="),
-                    "--proof-ttl-secs",
+            value if value.starts_with("--privilege-ttl-secs=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    flag_value(value, "--privilege-ttl-secs="),
+                    "--privilege-ttl-secs",
                     1,
                     3600,
                 )?;
@@ -363,7 +368,7 @@ fn parse_vty_tunnel_change(
         side: required(side, "--side")?,
         backend,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         confirmed,
         force_unprivileged,
     })
@@ -372,7 +377,7 @@ fn parse_vty_tunnel_change(
 pub(crate) fn submit_vty_tunnel_apply(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelApplyRequest,
 ) -> Result<String> {
     let plan_text = std::fs::read_to_string(&request.plan_file)
@@ -386,43 +391,31 @@ pub(crate) fn submit_vty_tunnel_apply(
         plan: Box::new(plan),
         side: request.side,
         config_backend: request.backend,
-        config_sha256_hex: Some(payload_hash(&backend_config_proof_payload(&backend_config))),
+        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
+            &backend_config,
+        ))),
         ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &proof_context.password,
-        &proof_context.salt_hex,
-        request.proof_ttl_secs,
-    )?;
-
-    http_post_json(
+    submit_vty_network_job(
         api_url,
-        "/api/v1/jobs",
         token,
-        &serde_json::json!({
-            "command": "network_apply",
-            "argv": [],
-            "clients": [endpoint.local_client_id],
-            "tags": [],
-            "privileged": true,
-            "destructive": true,
-            "confirmed": request.confirmed,
-            "force_unprivileged": request.force_unprivileged,
-            "timeout_secs": request.timeout_secs,
-            "operation": operation,
-            "envelope": null,
-            "envelopes": envelopes,
-        }),
+        privilege_context,
+        "network_apply",
+        vec![endpoint.local_client_id],
+        operation,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        true,
+        request.confirmed,
+        request.force_unprivileged,
     )
 }
 
 pub(crate) fn submit_vty_tunnel_status(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelStatusRequest,
 ) -> Result<String> {
     let plan_text = std::fs::read_to_string(&request.plan_file)
@@ -434,38 +427,25 @@ pub(crate) fn submit_vty_tunnel_status(
         plan: Box::new(plan),
         side: request.side,
     };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &proof_context.password,
-        &proof_context.salt_hex,
-        request.proof_ttl_secs,
-    )?;
-
-    http_post_json(
+    submit_vty_network_job(
         api_url,
-        "/api/v1/jobs",
         token,
-        &serde_json::json!({
-            "command": "network_status",
-            "argv": [],
-            "clients": [endpoint.local_client_id],
-            "tags": [],
-            "privileged": true,
-            "destructive": false,
-            "confirmed": false,
-            "timeout_secs": request.timeout_secs,
-            "operation": operation,
-            "envelope": null,
-            "envelopes": envelopes,
-        }),
+        privilege_context,
+        "network_status",
+        vec![endpoint.local_client_id],
+        operation,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        false,
+        false,
+        false,
     )
 }
 
 pub(crate) fn submit_vty_tunnel_rollback(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelRollbackRequest,
 ) -> Result<String> {
     let plan_text = std::fs::read_to_string(&request.plan_file)
@@ -477,31 +457,64 @@ pub(crate) fn submit_vty_tunnel_rollback(
         plan: Box::new(plan),
         side: request.side,
     };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
-        &operation,
-        &proof_context.password,
-        &proof_context.salt_hex,
-        request.proof_ttl_secs,
-    )?;
+    submit_vty_network_job(
+        api_url,
+        token,
+        privilege_context,
+        "network_rollback",
+        vec![endpoint.local_client_id],
+        operation,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        true,
+        request.confirmed,
+        request.force_unprivileged,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn submit_vty_network_job(
+    api_url: &str,
+    token: Option<&str>,
+    privilege_context: &VtyPrivilegeContext,
+    command_label: &str,
+    target_clients: Vec<String>,
+    operation: JobCommand,
+    ttl_secs: u64,
+    timeout_secs: u64,
+    destructive: bool,
+    confirmed: bool,
+    force_unprivileged: bool,
+) -> Result<String> {
+    let selector_expression = selector_expression_from_targets(&target_clients, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_clients,
+        &operation,
+        command_label,
+        &selector_expression,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/jobs",
         token,
         &serde_json::json!({
-            "command": "network_rollback",
+            "command": command_label,
             "argv": [],
-            "clients": [endpoint.local_client_id],
-            "tags": [],
+            "selector_expression": selector_expression,
             "privileged": true,
-            "destructive": true,
-            "confirmed": request.confirmed,
-            "force_unprivileged": request.force_unprivileged,
-            "timeout_secs": request.timeout_secs,
+            "destructive": destructive,
+            "confirmed": confirmed,
+            "force_unprivileged": force_unprivileged,
+            "timeout_secs": timeout_secs,
             "operation": operation,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -574,7 +587,7 @@ mod tests {
             "right",
             "--backend=netplan",
             "--timeout=120",
-            "--proof-ttl",
+            "--privilege-ttl",
             "90",
             "--force-unprivileged",
             "--confirmed",
@@ -588,7 +601,7 @@ mod tests {
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.backend, TunnelConfigBackend::Netplan);
         assert_eq!(request.timeout_secs, 120);
-        assert_eq!(request.proof_ttl_secs, 90);
+        assert_eq!(request.privilege_ttl_secs, 90);
         assert!(request.confirmed);
         assert!(request.force_unprivileged);
     }
@@ -677,7 +690,7 @@ mod tests {
             "--plan-file=/tmp/plan.json",
             "--side=left",
             "--timeout-secs=180",
-            "--proof-ttl-secs=120",
+            "--privilege-ttl-secs=120",
             "--force-unprivileged",
             "--confirmed",
         ])
@@ -689,7 +702,7 @@ mod tests {
         );
         assert_eq!(request.side, TunnelEndpointSide::Left);
         assert_eq!(request.timeout_secs, 180);
-        assert_eq!(request.proof_ttl_secs, 120);
+        assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.confirmed);
         assert!(request.force_unprivileged);
     }
@@ -700,7 +713,7 @@ mod tests {
             "--plan-file=/tmp/plan.json",
             "--side=right",
             "--timeout=45",
-            "--proof-ttl=75",
+            "--privilege-ttl=75",
         ])
         .unwrap();
 
@@ -710,7 +723,7 @@ mod tests {
         );
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.timeout_secs, 45);
-        assert_eq!(request.proof_ttl_secs, 75);
+        assert_eq!(request.privilege_ttl_secs, 75);
         assert!(!request.confirmed);
         assert!(!request.force_unprivileged);
     }

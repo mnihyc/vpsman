@@ -9,17 +9,16 @@ type RestorePlanFormProps = {
   agents: AgentView[];
   backups: BackupRequestRecord[];
   clientLabel: (clientId: string) => string;
+  confirmationOpen: boolean;
   onDestinationRootChange: (value: string) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onNoteChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
-  onRestoreConfirmedChange: (value: boolean) => void;
   onSourceIdChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onTargetIdChange: (value: string) => void;
   pending: boolean;
-  proofReady: boolean;
-  restoreConfirmed: boolean;
+  privilegeReady: boolean;
   restoreDestinationRoot: string;
   restoreIncludeConfig: boolean;
   restoreNote: string;
@@ -34,17 +33,16 @@ export function RestorePlanForm({
   agents,
   backups,
   clientLabel,
+  confirmationOpen,
   onDestinationRootChange,
   onIncludeConfigChange,
   onNoteChange,
   onPathsTextChange,
-  onRestoreConfirmedChange,
   onSourceIdChange,
   onSubmit,
   onTargetIdChange,
   pending,
-  proofReady,
-  restoreConfirmed,
+  privilegeReady,
   restoreDestinationRoot,
   restoreIncludeConfig,
   restoreNote,
@@ -111,19 +109,17 @@ export function RestorePlanForm({
           <input checked={restoreIncludeConfig} onChange={(event) => onIncludeConfigChange(event.target.checked)} type="checkbox" />
           <span>Include agent config</span>
         </label>
-        <label className="checkLine">
-          <input checked={restoreConfirmed} onChange={(event) => onRestoreConfirmedChange(event.target.checked)} type="checkbox" />
-          <span>Confirmed metadata plan</span>
-        </label>
         <div className="backupScopeList">
           <RotateCcw size={18} />
           <span>{restoreIncludeConfig ? "config" : "no config"}</span>
           <span>{restorePathsCount} path{restorePathsCount === 1 ? "" : "s"}</span>
         </div>
-        <button className="primaryAction" disabled={pending || !proofReady || !restoreSourceId || !restoreTargetId} type="submit">
-          <RotateCcw size={17} />
-          Plan restore
-        </button>
+        {!confirmationOpen && (
+          <button className="primaryAction" disabled={pending || !privilegeReady || !restoreSourceId || !restoreTargetId} type="submit">
+            <RotateCcw size={17} />
+            Plan restore
+          </button>
+        )}
       </form>
     </>
   );

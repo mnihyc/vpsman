@@ -3,8 +3,9 @@ use serde::Deserialize;
 use vpsman_common::JobCommand;
 
 use crate::{
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_post_json},
-    proof::build_envelopes_for_job_command,
+    privilege::build_privilege_for_job_command,
 };
 
 #[derive(Debug)]
@@ -14,7 +15,7 @@ pub(crate) struct VtyAgentUpdateRolloutActivateRequest {
     clients: Vec<String>,
     restart_agent: bool,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
 
@@ -24,25 +25,7 @@ pub(crate) struct VtyAgentUpdateRolloutRollbackRequest {
     rollback_sha256_hex: Option<String>,
     clients: Vec<String>,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
-    force_unprivileged: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct VtyAgentUpdateRolloutDelegateRollbackRequest {
-    rollout_id: String,
-    rollback_sha256_hex: Option<String>,
-    clients: Vec<String>,
-    proof_ttl_secs: u64,
-    force_unprivileged: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct VtyAgentUpdateRolloutDelegateActivationRequest {
-    rollout_id: String,
-    clients: Vec<String>,
-    restart_agent: bool,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
 
@@ -107,16 +90,6 @@ pub(crate) fn is_vty_agent_update_rollout_rollback_command(command: &str) -> boo
         || command.starts_with("agent-update-rollout-rollback ")
 }
 
-pub(crate) fn is_vty_agent_update_rollout_delegate_rollback_command(command: &str) -> bool {
-    command == "agent-update-rollout-delegate-rollback"
-        || command.starts_with("agent-update-rollout-delegate-rollback ")
-}
-
-pub(crate) fn is_vty_agent_update_rollout_delegate_activation_command(command: &str) -> bool {
-    command == "agent-update-rollout-delegate-activation"
-        || command.starts_with("agent-update-rollout-delegate-activation ")
-}
-
 pub(crate) fn is_vty_agent_update_rollout_control_command(command: &str) -> bool {
     command == "agent-update-rollout-control"
         || command.starts_with("agent-update-rollout-control ")
@@ -129,7 +102,7 @@ pub(crate) fn parse_vty_agent_update_rollout_activate(
     let mut batch_size = None;
     let mut clients = Vec::new();
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut restart_agent = false;
     let mut force_unprivileged = false;
@@ -172,12 +145,12 @@ pub(crate) fn parse_vty_agent_update_rollout_activate(
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--confirmed" => {
@@ -197,7 +170,7 @@ pub(crate) fn parse_vty_agent_update_rollout_activate(
     }
     validate_config_dispatch_bounds(
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         "agent-update-rollout-activate",
     )?;
     if let Some(batch_size) = batch_size {
@@ -218,7 +191,7 @@ pub(crate) fn parse_vty_agent_update_rollout_activate(
         clients,
         restart_agent,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         force_unprivileged,
     })
 }
@@ -230,7 +203,7 @@ pub(crate) fn parse_vty_agent_update_rollout_rollback(
     let mut rollback_sha256_hex = None;
     let mut clients = Vec::new();
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut force_unprivileged = false;
     let mut index = 0;
@@ -271,12 +244,12 @@ pub(crate) fn parse_vty_agent_update_rollout_rollback(
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--proof-ttl" => {
-                proof_ttl_secs = tokens
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
                     .get(index + 1)
-                    .context("--proof-ttl requires a value")?
+                    .context("--privilege-ttl requires a value")?
                     .parse()
-                    .context("--proof-ttl must be an integer")?;
+                    .context("--privilege-ttl must be an integer")?;
                 index += 2;
             }
             "--confirmed" => {
@@ -292,7 +265,7 @@ pub(crate) fn parse_vty_agent_update_rollout_rollback(
     }
     validate_config_dispatch_bounds(
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         "agent-update-rollout-rollback",
     )?;
     clients.sort();
@@ -306,160 +279,7 @@ pub(crate) fn parse_vty_agent_update_rollout_rollback(
         rollback_sha256_hex,
         clients,
         timeout_secs,
-        proof_ttl_secs,
-        force_unprivileged,
-    })
-}
-
-pub(crate) fn parse_vty_agent_update_rollout_delegate_rollback(
-    tokens: &[&str],
-) -> Result<VtyAgentUpdateRolloutDelegateRollbackRequest> {
-    let mut rollout_id = None;
-    let mut rollback_sha256_hex = None;
-    let mut clients = Vec::new();
-    let mut proof_ttl_secs = 3600_u64;
-    let mut force_unprivileged = false;
-    let mut confirmed = false;
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--rollout-id" => {
-                rollout_id = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollout-id requires an id")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--rollback-sha256-hex" => {
-                rollback_sha256_hex = Some(validate_sha256(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollback-sha256-hex requires a value")?,
-                    "--rollback-sha256-hex",
-                )?);
-                index += 2;
-            }
-            "--client" => {
-                clients.push(
-                    tokens
-                        .get(index + 1)
-                        .context("--client requires a client id")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--proof-ttl" | "--proof-ttl-secs" => {
-                proof_ttl_secs = tokens
-                    .get(index + 1)
-                    .context("--proof-ttl requires a value")?
-                    .parse()
-                    .context("--proof-ttl must be an integer")?;
-                index += 2;
-            }
-            "--force-unprivileged" => {
-                force_unprivileged = true;
-                index += 1;
-            }
-            "--confirmed" => {
-                confirmed = true;
-                index += 1;
-            }
-            other => anyhow::bail!("unknown agent-update-rollout-delegate-rollback option {other}"),
-        }
-    }
-    anyhow::ensure!(
-        (15..=86_400).contains(&proof_ttl_secs),
-        "agent-update-rollout-delegate-rollback --proof-ttl must be between 15 and 86400"
-    );
-    clients.sort();
-    clients.dedup();
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-delegate-rollback requires --confirmed because it escrows privileged rollback proofs"
-    );
-    Ok(VtyAgentUpdateRolloutDelegateRollbackRequest {
-        rollout_id: rollout_id
-            .context("agent-update-rollout-delegate-rollback requires --rollout-id")?,
-        rollback_sha256_hex,
-        clients,
-        proof_ttl_secs,
-        force_unprivileged,
-    })
-}
-
-pub(crate) fn parse_vty_agent_update_rollout_delegate_activation(
-    tokens: &[&str],
-) -> Result<VtyAgentUpdateRolloutDelegateActivationRequest> {
-    let mut rollout_id = None;
-    let mut clients = Vec::new();
-    let mut restart_agent = false;
-    let mut proof_ttl_secs = 3600_u64;
-    let mut force_unprivileged = false;
-    let mut confirmed = false;
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--rollout-id" => {
-                rollout_id = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollout-id requires an id")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--client" => {
-                clients.push(
-                    tokens
-                        .get(index + 1)
-                        .context("--client requires a client id")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--restart-agent" => {
-                restart_agent = true;
-                index += 1;
-            }
-            "--proof-ttl" | "--proof-ttl-secs" => {
-                proof_ttl_secs = tokens
-                    .get(index + 1)
-                    .context("--proof-ttl requires a value")?
-                    .parse()
-                    .context("--proof-ttl must be an integer")?;
-                index += 2;
-            }
-            "--force-unprivileged" => {
-                force_unprivileged = true;
-                index += 1;
-            }
-            "--confirmed" => {
-                confirmed = true;
-                index += 1;
-            }
-            other => {
-                anyhow::bail!("unknown agent-update-rollout-delegate-activation option {other}")
-            }
-        }
-    }
-    anyhow::ensure!(
-        (15..=86_400).contains(&proof_ttl_secs),
-        "agent-update-rollout-delegate-activation --proof-ttl must be between 15 and 86400"
-    );
-    clients.sort();
-    clients.dedup();
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-delegate-activation requires --confirmed because it escrows privileged activation proofs"
-    );
-    Ok(VtyAgentUpdateRolloutDelegateActivationRequest {
-        rollout_id: rollout_id
-            .context("agent-update-rollout-delegate-activation requires --rollout-id")?,
-        clients,
-        restart_agent,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         force_unprivileged,
     })
 }
@@ -808,7 +628,7 @@ pub(crate) fn submit_vty_agent_update_rollout_activate(
         },
         clients,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         request.force_unprivileged,
     )
 }
@@ -846,83 +666,8 @@ pub(crate) fn submit_vty_agent_update_rollout_rollback(
         },
         clients,
         request.timeout_secs,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
         request.force_unprivileged,
-    )
-}
-
-pub(crate) fn submit_vty_agent_update_rollout_delegate_rollback(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    command: &str,
-) -> Result<String> {
-    let parts = command.split_whitespace().skip(1).collect::<Vec<_>>();
-    let request = parse_vty_agent_update_rollout_delegate_rollback(&parts)?;
-    let rollout = load_vty_rollout(api_url, token, &request.rollout_id)?;
-    let clients = select_vty_rollout_delegation_targets(&rollout, &request.clients)?;
-    let operation = JobCommand::AgentUpdateRollback {
-        rollback_sha256_hex: request.rollback_sha256_hex.clone(),
-    };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        &clients,
-        &operation,
-        password,
-        salt_hex,
-        request.proof_ttl_secs,
-    )?;
-    http_post_json(
-        api_url,
-        &format!(
-            "/api/v1/agent-update-rollouts/{}/rollback-delegation",
-            crate::util::percent_encode_path_segment(&request.rollout_id)
-        ),
-        token,
-        &serde_json::json!({
-            "confirmed": true,
-            "rollback_sha256_hex": request.rollback_sha256_hex,
-            "force_unprivileged": request.force_unprivileged,
-            "envelopes": envelopes,
-        }),
-    )
-}
-
-pub(crate) fn submit_vty_agent_update_rollout_delegate_activation(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    command: &str,
-) -> Result<String> {
-    let parts = command.split_whitespace().skip(1).collect::<Vec<_>>();
-    let request = parse_vty_agent_update_rollout_delegate_activation(&parts)?;
-    let rollout = load_vty_rollout(api_url, token, &request.rollout_id)?;
-    let clients = select_vty_rollout_activation_delegation_targets(&rollout, &request.clients)?;
-    let operation = JobCommand::AgentUpdateActivate {
-        staged_sha256_hex: rollout.artifact_sha256_hex.clone(),
-        restart_agent: request.restart_agent,
-    };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        &clients,
-        &operation,
-        password,
-        salt_hex,
-        request.proof_ttl_secs,
-    )?;
-    http_post_json(
-        api_url,
-        &format!(
-            "/api/v1/agent-update-rollouts/{}/activation-delegation",
-            crate::util::percent_encode_path_segment(&request.rollout_id)
-        ),
-        token,
-        &serde_json::json!({
-            "confirmed": true,
-            "restart_agent": request.restart_agent,
-            "force_unprivileged": request.force_unprivileged,
-            "envelopes": envelopes,
-        }),
     )
 }
 
@@ -958,7 +703,7 @@ pub(crate) fn submit_vty_agent_update_rollout_control(
 
 fn validate_config_dispatch_bounds(
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     command: &str,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -966,8 +711,8 @@ fn validate_config_dispatch_bounds(
         "{command} --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&proof_ttl_secs),
-        "{command} --proof-ttl must be between 1 and 3600"
+        (1..=3600).contains(&privilege_ttl_secs),
+        "{command} --privilege-ttl must be between 1 and 3600"
     );
     Ok(())
 }
@@ -1069,74 +814,6 @@ fn select_vty_rollout_targets(
     Ok(clients)
 }
 
-fn select_vty_rollout_delegation_targets(
-    rollout: &VtyAgentUpdateRolloutRecord,
-    explicit_clients: &[String],
-) -> Result<Vec<String>> {
-    let rollout_clients = rollout
-        .targets
-        .iter()
-        .map(|target| target.client_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let mut clients = if explicit_clients.is_empty() {
-        let automation_targets = rollout
-            .automation_targets
-            .iter()
-            .filter(|client_id| rollout_clients.contains(*client_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if automation_targets.is_empty() {
-            rollout_clients.iter().cloned().collect()
-        } else {
-            automation_targets
-        }
-    } else {
-        for client_id in explicit_clients {
-            anyhow::ensure!(
-                rollout_clients.contains(client_id),
-                "--client {client_id} is not part of this rollout"
-            );
-        }
-        explicit_clients.to_vec()
-    };
-    clients.sort();
-    clients.dedup();
-    anyhow::ensure!(
-        !clients.is_empty(),
-        "no rollout targets are available for rollback delegation"
-    );
-    Ok(clients)
-}
-
-fn select_vty_rollout_activation_delegation_targets(
-    rollout: &VtyAgentUpdateRolloutRecord,
-    explicit_clients: &[String],
-) -> Result<Vec<String>> {
-    let rollout_clients = rollout
-        .targets
-        .iter()
-        .map(|target| target.client_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let mut clients = if explicit_clients.is_empty() {
-        rollout_clients.iter().cloned().collect()
-    } else {
-        for client_id in explicit_clients {
-            anyhow::ensure!(
-                rollout_clients.contains(client_id),
-                "--client {client_id} is not part of this rollout"
-            );
-        }
-        explicit_clients.to_vec()
-    };
-    clients.sort();
-    clients.dedup();
-    anyhow::ensure!(
-        !clients.is_empty(),
-        "no rollout targets are available for activation delegation"
-    );
-    Ok(clients)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn submit_vty_rollout_operation(
     api_url: &str,
@@ -1147,11 +824,23 @@ fn submit_vty_rollout_operation(
     operation: JobCommand,
     clients: Vec<String>,
     timeout_secs: u64,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     force_unprivileged: bool,
 ) -> Result<String> {
-    let (_payload_hash_hex, envelopes) =
-        build_envelopes_for_job_command(&clients, &operation, password, salt_hex, proof_ttl_secs)?;
+    let selector_expression = selector_expression_from_targets(&clients, &[]);
+    let privilege = build_privilege_for_job_command(
+        &clients,
+        &operation,
+        command_label,
+        &selector_expression,
+        password,
+        salt_hex,
+        privilege_ttl_secs,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/jobs",
@@ -1160,15 +849,13 @@ fn submit_vty_rollout_operation(
             "command": command_label,
             "argv": [],
             "operation": operation,
-            "clients": clients,
-            "tags": [],
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": false,
             "confirmed": true,
             "force_unprivileged": force_unprivileged,
             "timeout_secs": timeout_secs,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -1177,16 +864,11 @@ fn submit_vty_rollout_operation(
 mod tests {
     use super::{
         is_vty_agent_update_rollout_activate_command, is_vty_agent_update_rollout_control_command,
-        is_vty_agent_update_rollout_delegate_activation_command,
-        is_vty_agent_update_rollout_delegate_rollback_command,
         is_vty_agent_update_rollout_policies_command,
         is_vty_agent_update_rollout_policy_create_command,
         is_vty_agent_update_rollout_rollback_command, is_vty_agent_update_rollouts_command,
         parse_vty_agent_update_rollout_activate, parse_vty_agent_update_rollout_control,
-        parse_vty_agent_update_rollout_delegate_activation,
-        parse_vty_agent_update_rollout_delegate_rollback,
         parse_vty_agent_update_rollout_policy_create, parse_vty_agent_update_rollout_rollback,
-        select_vty_rollout_activation_delegation_targets, select_vty_rollout_delegation_targets,
         select_vty_rollout_targets, submit_vty_agent_update_rollout_policies,
         submit_vty_agent_update_rollouts, VtyAgentUpdateRolloutRecord,
         VtyAgentUpdateRolloutTargetRecord,
@@ -1208,12 +890,6 @@ mod tests {
         ));
         assert!(is_vty_agent_update_rollout_rollback_command(
             "agent-update-rollout-rollback --rollout-id abc --confirmed"
-        ));
-        assert!(is_vty_agent_update_rollout_delegate_rollback_command(
-            "agent-update-rollout-delegate-rollback --rollout-id abc --confirmed"
-        ));
-        assert!(is_vty_agent_update_rollout_delegate_activation_command(
-            "agent-update-rollout-delegate-activation --rollout-id abc --confirmed"
         ));
         assert!(is_vty_agent_update_rollout_control_command(
             "agent-update-rollout-control --rollout-id abc --pause --confirmed"
@@ -1266,42 +942,6 @@ mod tests {
         assert_eq!(rollback.rollback_sha256_hex, Some("cc".repeat(32)));
         assert_eq!(rollback.clients, vec!["edge-a"]);
         assert!(rollback.force_unprivileged);
-
-        let delegation = parse_vty_agent_update_rollout_delegate_rollback(&[
-            "--rollout-id",
-            "rollout-a",
-            "--rollback-sha256-hex",
-            &"dd".repeat(32),
-            "--client",
-            "edge-b",
-            "--proof-ttl-secs",
-            "7200",
-            "--force-unprivileged",
-            "--confirmed",
-        ])
-        .unwrap();
-        assert_eq!(delegation.rollout_id, "rollout-a");
-        assert_eq!(delegation.rollback_sha256_hex, Some("dd".repeat(32)));
-        assert_eq!(delegation.clients, vec!["edge-b"]);
-        assert_eq!(delegation.proof_ttl_secs, 7200);
-        assert!(delegation.force_unprivileged);
-
-        let activation_delegation = parse_vty_agent_update_rollout_delegate_activation(&[
-            "--rollout-id",
-            "rollout-a",
-            "--client",
-            "edge-b",
-            "--restart-agent",
-            "--proof-ttl-secs",
-            "7200",
-            "--confirmed",
-        ])
-        .unwrap();
-        assert_eq!(activation_delegation.rollout_id, "rollout-a");
-        assert_eq!(activation_delegation.clients, vec!["edge-b"]);
-        assert!(activation_delegation.restart_agent);
-        assert_eq!(activation_delegation.proof_ttl_secs, 7200);
-        assert!(!activation_delegation.force_unprivileged);
 
         let control = parse_vty_agent_update_rollout_control(&[
             "--rollout-id",
@@ -1416,14 +1056,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, vec!["client-b"]);
-
-        let delegated = select_vty_rollout_delegation_targets(&rollout, &[]).unwrap();
-        assert_eq!(delegated, vec!["client-b"]);
-        let activation_delegated =
-            select_vty_rollout_activation_delegation_targets(&rollout, &[]).unwrap();
-        assert_eq!(activation_delegated, vec!["client-a", "client-b"]);
-        assert!(
-            select_vty_rollout_delegation_targets(&rollout, &["client-c".to_string()]).is_err()
-        );
     }
 }

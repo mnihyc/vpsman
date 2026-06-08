@@ -1,11 +1,22 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
-import { waitForBulkJobTargets, type BulkJobProgress } from "../bulkJobProgress";
+import {
+  formatTargetAvailabilitySummary,
+  targetPreflightUnavailable,
+  waitForBulkJobTargets,
+  type BulkJobProgress,
+} from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
-import { ProofVaultBox } from "../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { readFilePushPayload, sha256Hex } from "../fileTransfer";
-import { buildEnvelopesForOperation, deriveSuperKeyHex, parseCommandArgv, type ProofMaterial } from "../proof";
+import {
+  buildPrivilegeAssertion,
+  canonicalJobPrivilegeIntent,
+  operationPayloadHashHex,
+  parseCommandArgv,
+  type PrivilegeMaterial,
+} from "../privilege";
 import { DEFAULT_JOB_BACKUP_PATHS, DEFAULT_TERMINAL_ARGV } from "../presets/jobOperationPresets";
 import {
   runBrowserResumableDownload,
@@ -18,7 +29,6 @@ import {
 import {
   buildOperation,
   clampInteger,
-  commandMinProtocolVersion,
   operationCommandLabel,
   parseBackupPaths,
   supervisorReady,
@@ -57,11 +67,6 @@ export type TerminalComposerAction = {
   session: TerminalSessionRecord;
 };
 
-function randomSaltHex(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 function formatArgvForInput(argv: string[]): string {
   return argv.map(shellQuoteArg).join(" ");
 }
@@ -71,6 +76,16 @@ function shellQuoteArg(value: string): string {
     return value;
   }
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function commandTypeForApi(operation: CreateJobRequest["operation"]): string {
+  if (!operation) {
+    return "shell_argv";
+  }
+  if (operation.type === "shell") {
+    return operation.pty ? "shell_pty" : "shell_argv";
+  }
+  return operation.type;
 }
 
 function readLocalString(key: string): string {
@@ -134,11 +149,11 @@ export function JobDispatchPanel({
   onLoadOutputs,
   onLoadTargets,
   onOpenJobDetails,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onResolveTargets,
   onUpsertCommandTemplate,
-  proofMaterial,
-  setProofMaterial,
+  privilegeMaterial,
+  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
@@ -151,11 +166,11 @@ export function JobDispatchPanel({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
-  proofMaterial: ProofMaterial | null;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const [mode, setMode] = useState<DispatchMode>("shell");
   const [commandText, setCommandText] = useState("");
@@ -165,6 +180,8 @@ export function JobDispatchPanel({
   const [terminalSessionId, setTerminalSessionId] = useState<string>(() => crypto.randomUUID());
   const [terminalArgv, setTerminalArgv] = useState(DEFAULT_TERMINAL_ARGV);
   const [terminalCwd, setTerminalCwd] = useState("");
+  const [terminalUser, setTerminalUser] = useState("");
+  const [terminalUserPolicy, setTerminalUserPolicy] = useState<"fail" | "fallback">("fail");
   const [terminalCols, setTerminalCols] = useState(120);
   const [terminalRows, setTerminalRows] = useState(40);
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
@@ -196,9 +213,6 @@ export function JobDispatchPanel({
   const [templateScopeValue, setTemplateScopeValue] = useState("");
   const [templatePending, setTemplatePending] = useState(false);
   const [hotConfigToml, setHotConfigToml] = useState("");
-  const [rotationPassword, setRotationPassword] = useState("");
-  const [rotationSaltHex, setRotationSaltHex] = useState(() => randomSaltHex());
-  const [rotationGeneration, setRotationGeneration] = useState("");
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
   const [updateArtifactSignatureHex, setUpdateArtifactSignatureHex] = useState("");
@@ -221,9 +235,6 @@ export function JobDispatchPanel({
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
   const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(JOB_SELECTOR_STORAGE_KEY));
   const [timeoutSecs, setTimeoutSecs] = useState(30);
-  const [proofTtlSecs, setProofTtlSecs] = useState(300);
-  const [destructive, setDestructive] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
@@ -248,6 +259,8 @@ export function JobDispatchPanel({
     setTerminalSessionId(session.session_id);
     setTerminalArgv(session.argv.length > 0 ? formatArgvForInput(session.argv) : DEFAULT_TERMINAL_ARGV);
     setTerminalCwd(session.cwd ?? "");
+    setTerminalUser("");
+    setTerminalUserPolicy("fail");
     setTerminalCols(session.cols ?? 120);
     setTerminalRows(session.rows ?? 40);
     setTerminalIdleTimeoutSecs(session.idle_timeout_secs ?? 1800);
@@ -288,8 +301,6 @@ export function JobDispatchPanel({
     const timeout = window.setTimeout(() => {
       void onResolveTargets({
         selector_expression: selectorExpression.trim(),
-        destructive,
-        confirmed,
       })
         .then((response) => {
           if (canceled) {
@@ -312,7 +323,7 @@ export function JobDispatchPanel({
       canceled = true;
       window.clearTimeout(timeout);
     };
-  }, [agents.length, confirmed, destructive, onResolveTargets, selectorExpression, selectorParse.error]);
+  }, [agents.length, mode, onResolveTargets, selectorExpression, selectorParse.error]);
 
   const parsedArgv = useMemo(() => {
     try {
@@ -323,12 +334,11 @@ export function JobDispatchPanel({
   }, [commandText]);
 
   const filePullReady = filePath.startsWith("/");
-  const filePushReady = filePushPath.startsWith("/") && !!filePushSource && confirmed;
+  const filePushReady = filePushPath.startsWith("/") && !!filePushSource;
   const fileTransferUploadReady =
     filePushPath.startsWith("/") &&
-    confirmed &&
     (fileTransferUploadSourceKind === "local-file" ? !!filePushSource : !!fileTransferSourceArtifactId);
-  const fileTransferDownloadReady = filePath.startsWith("/") && confirmed;
+  const fileTransferDownloadReady = filePath.startsWith("/");
   const backupReady = backupIncludeConfig || parseBackupPaths(backupPathsText).length > 0;
   const updateSignatureReady =
     (!updateArtifactSignatureHex.trim() && !updateArtifactSigningKeyHex.trim()) ||
@@ -350,30 +360,22 @@ export function JobDispatchPanel({
                 : mode === "file_transfer_download"
                   ? fileTransferDownloadReady
                   : mode === "hot_config"
-                    ? hotConfigToml.trim().length > 0 && confirmed
-                    : mode === "auth_rotate"
-                      ? rotationPassword.length > 0 &&
-                        rotationSaltHex.trim().length > 0 &&
-                        rotationSaltHex.trim().length % 2 === 0 &&
-                        /^[0-9a-fA-F]+$/.test(rotationSaltHex.trim()) &&
-                        confirmed
-                      : mode === "agent_update"
+                    ? hotConfigToml.trim().length > 0
+                    : mode === "agent_update"
                         ? updateArtifactUrl.startsWith("https://") &&
                           /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim()) &&
-                          updateSignatureReady &&
-                          confirmed
+                          updateSignatureReady
                         : mode === "agent_update_check"
-                          ? updateCheckVersionUrl.trim().length > 0 && confirmed
+                          ? updateCheckVersionUrl.trim().length > 0
                           : mode === "agent_update_activate"
-                            ? /^[0-9a-fA-F]{64}$/.test(updateActivationSha256Hex.trim()) && confirmed
+                            ? /^[0-9a-fA-F]{64}$/.test(updateActivationSha256Hex.trim())
                             : mode === "agent_update_rollback"
                               ? (!updateRollbackSha256Hex.trim() ||
-                                  /^[0-9a-fA-F]{64}$/.test(updateRollbackSha256Hex.trim())) &&
-                                confirmed
+                                  /^[0-9a-fA-F]{64}$/.test(updateRollbackSha256Hex.trim()))
                               : mode === "process_supervisor"
                                 ? supervisorReady(supervisorAction, supervisorName, supervisorArgv)
                                 : mode === "backup"
-                                  ? backupReady && confirmed
+                                  ? backupReady
                                   : true;
   const expressionTargets = useMemo(
     () => (selectorParse.error ? [] : agentsMatchingExpression(agents, selectorExpression)),
@@ -382,27 +384,25 @@ export function JobDispatchPanel({
   const selectedTargetCount = expressionTargets.length;
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
+  const operationNeedsConfirmation = operationRequiresConfirmation(mode);
   const impactTargets = preview?.targets ?? expressionTargets;
-  const minCommandProtocolVersion = commandMinProtocolVersion(mode);
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const confirmationTargets = preview?.targets ?? expressionTargets;
-  const confirmationConnectedTargets = confirmationTargets.filter((target) => target.status === "connected").length;
-  const confirmationUnavailableTargets = Math.max(0, confirmationTargets.length - confirmationConnectedTargets);
   const dispatchConfirmationItems = [
     { label: "Operation", value: operationCommandLabel(mode, commandText) },
     { label: "Selector", value: selectorExpression.trim() || "-" },
     {
       label: "Targets",
-      value:
-        confirmationUnavailableTargets > 0
-          ? `${confirmationTargets.length} resolved (${confirmationConnectedTargets} connected, ${confirmationUnavailableTargets} unavailable)`
-          : `${confirmationTargets.length} resolved`,
+      value: formatTargetAvailabilitySummary(confirmationTargets),
     },
     { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
-    { label: "Proof TTL", value: `${clampInteger(proofTtlSecs, 15, 3600)}s` },
     {
-      label: "Mode",
-      value: destructive ? "Destructive" : forceUnprivileged ? "Forced best effort" : "Standard",
+      label: "Privilege",
+      value: privilegeMaterial ? "Unlocked locally" : "Locked",
+    },
+    {
+      label: "Execution",
+      value: forceUnprivileged ? "Forced best effort" : operationNeedsConfirmation ? "Privileged mutation" : "Standard",
     },
     ...(mode.startsWith("agent_update") ? [{ label: "Canary", value: clampInteger(updateCanaryCount, 0, 10000) || "none" }] : []),
   ];
@@ -414,12 +414,12 @@ export function JobDispatchPanel({
         ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
       : preview
         ? `${preview.target_count} resolved targets`
-        : proofMaterial
+        : privilegeMaterial
           ? "Ready"
           : "Locked");
 
-  function lockProof() {
-    setProofMaterial(null);
+  function lockPrivilege() {
+    setPrivilegeMaterial(null);
     setActionError(null);
   }
 
@@ -443,8 +443,8 @@ export function JobDispatchPanel({
   function submitJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setActionError(null);
-    if (!proofMaterial) {
-      setActionError("Proof is locked");
+    if (!privilegeMaterial) {
+      setActionError("Privilege unlock is locked");
       return;
     }
     if (selectorParse.error) {
@@ -493,6 +493,8 @@ export function JobDispatchPanel({
         setTerminalSessionId(crypto.randomUUID());
         setTerminalArgv(formatArgvForInput(operation.argv));
         setTerminalCwd(operation.cwd ?? "");
+        setTerminalUser(operation.user ?? "");
+        setTerminalUserPolicy(operation.user_policy ?? "fail");
         setTerminalCols(operation.cols);
         setTerminalRows(operation.rows);
         setTerminalIdleTimeoutSecs(operation.idle_timeout_secs);
@@ -556,6 +558,8 @@ export function JobDispatchPanel({
         terminalSessionId,
         terminalArgv,
         terminalCwd,
+        terminalUser,
+        terminalUserPolicy,
         terminalCols,
         terminalRows,
         terminalReplayFromSeq,
@@ -573,8 +577,6 @@ export function JobDispatchPanel({
         supervisorEnv,
         supervisorLogBytes,
         hotConfigToml,
-        "",
-        rotationGeneration,
         updateArtifactUrl,
         updateSha256Hex,
         updateArtifactSignatureHex,
@@ -598,8 +600,8 @@ export function JobDispatchPanel({
         command_type: operationCommandLabel(mode, commandText),
         operation,
         defaults: {
-          confirmed,
-          destructive,
+          confirmed: operationNeedsConfirmation,
+          destructive: operationNeedsConfirmation,
           force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
           timeout_secs: clampInteger(timeoutSecs, 1, 3600),
         },
@@ -612,15 +614,12 @@ export function JobDispatchPanel({
     setDispatchPromptOpen(false);
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
-      if (!proofMaterial) {
-        throw new Error("Proof is locked");
+      if (!privilegeMaterial) {
+        throw new Error("Privilege unlock is locked");
       }
       if (mode === "file_transfer_upload") {
         const resolved = await onResolveTargets(targetSelection());
         setPreview(resolved);
-        if (resolved.confirmation_required) {
-          throw new Error("Resumable upload requires confirmation");
-        }
         const clientIds = resolved.targets.map((target) => target.id);
         const uploadSourceFile =
           fileTransferUploadSourceKind === "source-artifact"
@@ -632,7 +631,7 @@ export function JobDispatchPanel({
             : filePushSource;
         const commitJob = await runBrowserResumableUpload({
           clientIds,
-          confirmed,
+          confirmed: true,
           createJob: onCreateJob,
           file: uploadSourceFile,
           loadJob: onLoadJob,
@@ -641,8 +640,7 @@ export function JobDispatchPanel({
           multiTargetPolicy: fileTransferMultiTargetPolicy,
           existingPolicy: fileTransferExistingPolicy,
           path: filePushPath,
-          proofMaterial,
-          proofTtlSecs,
+          privilegeMaterial,
           rateLimitKbps: fileTransferRateLimit,
           chunkSizeBytes: fileTransferChunkSize,
           resumeToken: fileTransferResumeToken,
@@ -662,13 +660,10 @@ export function JobDispatchPanel({
       if (mode === "file_transfer_download") {
         const resolved = await onResolveTargets(targetSelection());
         setPreview(resolved);
-        if (resolved.confirmation_required) {
-          throw new Error("Resumable download requires confirmation");
-        }
         const clientIds = resolved.targets.map((target) => target.id);
         const startJob = await runBrowserResumableDownload({
           clientIds,
-          confirmed,
+          confirmed: true,
           createJob: onCreateJob,
           downloadName: fileTransferDownloadName,
           downloadSink: fileTransferDownloadSink,
@@ -676,8 +671,7 @@ export function JobDispatchPanel({
           loadJob: onLoadJob,
           loadOutputs: onLoadOutputs,
           path: filePath,
-          proofMaterial,
-          proofTtlSecs,
+          privilegeMaterial,
           rateLimitKbps: fileTransferRateLimit,
           chunkSizeBytes: fileTransferChunkSize,
           resumeToken: fileTransferResumeToken,
@@ -695,8 +689,6 @@ export function JobDispatchPanel({
         return;
       }
       const filePushPayload = mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
-      const rotationProofKeyHex =
-        mode === "auth_rotate" ? await deriveSuperKeyHex(rotationPassword, rotationSaltHex) : "";
       const operation = buildOperation(
         mode,
         commandText,
@@ -706,6 +698,8 @@ export function JobDispatchPanel({
         terminalSessionId,
         terminalArgv,
         terminalCwd,
+        terminalUser,
+        terminalUserPolicy,
         terminalCols,
         terminalRows,
         terminalReplayFromSeq,
@@ -723,8 +717,6 @@ export function JobDispatchPanel({
         supervisorEnv,
         supervisorLogBytes,
         hotConfigToml,
-        rotationProofKeyHex,
-        rotationGeneration,
         updateArtifactUrl,
         updateSha256Hex,
         updateArtifactSignatureHex,
@@ -741,54 +733,45 @@ export function JobDispatchPanel({
         filePushMode,
         filePushPayload,
       );
-      if (
-        (mode === "hot_config" ||
-          mode === "agent_update" ||
-          mode === "agent_update_check" ||
-          mode === "agent_update_activate" ||
-          mode === "agent_update_rollback" ||
-          mode === "auth_rotate" ||
-          mode === "file_push" ||
-          mode === "backup") &&
-        !confirmed
-      ) {
-        throw new Error(`${operationCommandLabel(mode, commandText)} dispatch requires confirmation`);
-      }
       const resolved = await onResolveTargets(targetSelection());
       setPreview(resolved);
-      if (resolved.confirmation_required) {
-        throw new Error("Destructive dispatch requires confirmation");
-      }
       const clientIds = resolved.targets.map((target) => target.id);
-      const built = await buildEnvelopesForOperation({
-        clientIds,
-        operation,
-        proofTtlSecs,
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+      const payloadHashHex = await operationPayloadHashHex(operation);
+      const commandType = commandTypeForApi(operation);
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalJobPrivilegeIntent({
+          selectorExpression,
+          commandType,
+          operationPayloadHash: payloadHashHex,
+          resolvedTargets: clientIds,
+          timeoutSecs: clampInteger(timeoutSecs, 1, 3600),
+          canaryCount: clampInteger(updateCanaryCount, 0, 10000) || null,
+          forceUnprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
+          privileged: true,
+        }),
+        privilegeMaterial,
       });
       const nextJob = await onCreateJob({
         selector_expression: selectorExpression.trim(),
-        destructive,
-        confirmed,
-        command: operationCommandLabel(mode, commandText),
+        destructive: operationNeedsConfirmation,
+        confirmed: operationNeedsConfirmation,
+        command: commandType,
         argv: mode === "shell" && operation.type === "shell" ? operation.argv : [],
         operation,
         timeout_secs: clampInteger(timeoutSecs, 1, 3600),
         canary_count: clampInteger(updateCanaryCount, 0, 10000) || null,
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
         privileged: true,
-        idempotency_key: `panel:${mode}:${built.payloadHashHex.slice(0, 16)}:${clientIds.join(".").slice(0, 72)}`,
+        privilege_assertion: privilegeAssertion,
+        idempotency_key: `panel:${mode}:${payloadHashHex.slice(0, 16)}:${clientIds.join(".").slice(0, 72)}`,
         reconnect_policy: {
           duplicate_delivery: "ignore_completed",
           resume_outputs: true,
           cancel_on_disconnect: false,
         },
-        envelope: null,
-        envelopes: built.envelopes,
       });
       setLastJob(nextJob);
-      setLastPayloadHash(built.payloadHashHex);
+      setLastPayloadHash(payloadHashHex);
       await trackDispatchProgress(nextJob, resolved.targets);
     });
   }
@@ -803,7 +786,7 @@ export function JobDispatchPanel({
       failed: 0,
       jobId: job.job_id,
       retrieved: 0,
-      unavailable: targets.filter((target) => target.status !== "connected").length,
+      unavailable: targets.filter(targetPreflightUnavailable).length,
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
@@ -820,8 +803,6 @@ export function JobDispatchPanel({
   function targetSelection(): JobTargetSelection {
     return {
       selector_expression: selectorExpression.trim(),
-      destructive,
-      confirmed,
     };
   }
 
@@ -832,8 +813,8 @@ export function JobDispatchPanel({
           <h2>Dispatch command</h2>
           <span>{status}</span>
         </div>
-        {proofMaterial ? (
-          <button className="secondaryAction" onClick={lockProof} type="button">
+        {privilegeMaterial ? (
+          <button className="secondaryAction" onClick={lockPrivilege} type="button">
             <LockKeyhole size={17} />
             Lock
           </button>
@@ -911,6 +892,8 @@ export function JobDispatchPanel({
           terminalCloseReason={terminalCloseReason}
           terminalCols={terminalCols}
           terminalCwd={terminalCwd}
+          terminalUser={terminalUser}
+          terminalUserPolicy={terminalUserPolicy}
           terminalFlowWindowBytes={terminalFlowWindowBytes}
           terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
           terminalInputSeq={terminalInputSeq}
@@ -934,9 +917,6 @@ export function JobDispatchPanel({
           hotConfigToml={hotConfigToml}
           mode={mode}
           processLimit={processLimit}
-          rotationGeneration={rotationGeneration}
-          rotationPassword={rotationPassword}
-          rotationSaltHex={rotationSaltHex}
           setCommandText={setCommandText}
           setShellPty={setShellPty}
           setShellScript={setShellScript}
@@ -945,6 +925,8 @@ export function JobDispatchPanel({
           setTerminalCloseReason={setTerminalCloseReason}
           setTerminalCols={setTerminalCols}
           setTerminalCwd={setTerminalCwd}
+          setTerminalUser={setTerminalUser}
+          setTerminalUserPolicy={setTerminalUserPolicy}
           setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
           setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
           setTerminalInputSeq={setTerminalInputSeq}
@@ -968,9 +950,6 @@ export function JobDispatchPanel({
           setFileTransferSessionId={setFileTransferSessionId}
           setHotConfigToml={setHotConfigToml}
           setProcessLimit={setProcessLimit}
-          setRotationGeneration={setRotationGeneration}
-          setRotationPassword={setRotationPassword}
-          setRotationSaltHex={setRotationSaltHex}
           setSupervisorAction={setSupervisorAction}
           setSupervisorArgv={setSupervisorArgv}
           setSupervisorCwd={setSupervisorCwd}
@@ -1023,7 +1002,6 @@ export function JobDispatchPanel({
         />
         <TargetImpactPreview
           forceUnprivileged={supportsForceUnprivileged ? forceUnprivileged : false}
-          minCommandProtocolVersion={minCommandProtocolVersion}
           mode={impactMode}
           targets={impactTargets}
         />
@@ -1040,13 +1018,7 @@ export function JobDispatchPanel({
         )}
         <DispatchOptions
           canaryCount={updateCanaryCount}
-          confirmed={confirmed}
-          destructive={destructive}
-          proofTtlSecs={proofTtlSecs}
           setCanaryCount={setUpdateCanaryCount}
-          setConfirmed={setConfirmed}
-          setDestructive={setDestructive}
-          setProofTtlSecs={setProofTtlSecs}
           setTimeoutSecs={setTimeoutSecs}
           timeoutSecs={timeoutSecs}
         />
@@ -1060,7 +1032,7 @@ export function JobDispatchPanel({
           open={dispatchPromptOpen}
           pending={pending}
           title="Confirm job dispatch"
-          tone={destructive ? "danger" : "normal"}
+          tone={operationNeedsConfirmation ? "danger" : "normal"}
         />
 
         {visibleDispatchProgress && (
@@ -1072,25 +1044,27 @@ export function JobDispatchPanel({
           />
         )}
 
-        <div className="dispatchActions">
-          <button
-            className="secondaryAction"
-            disabled={pending || dispatchPromptOpen || selectedTargetCount === 0}
-            onClick={previewTargets}
-            type="button"
-          >
-            <CheckCircle2 size={17} />
-            Preview
-          </button>
-          <button
-            className="primaryAction"
-            disabled={pending || dispatchPromptOpen || !operationReady || selectedTargetCount === 0 || !proofMaterial}
-            type="submit"
-          >
-            <Play size={17} />
-            Dispatch
-          </button>
-        </div>
+        {!dispatchPromptOpen && (
+          <div className="dispatchActions">
+            <button
+              className="secondaryAction"
+              disabled={pending || selectedTargetCount === 0}
+              onClick={previewTargets}
+              type="button"
+            >
+              <CheckCircle2 size={17} />
+              Preview
+            </button>
+            <button
+              className="primaryAction"
+              disabled={pending || !operationReady || selectedTargetCount === 0 || !privilegeMaterial}
+              type="submit"
+            >
+              <Play size={17} />
+              Dispatch
+            </button>
+          </div>
+        )}
         {transferProgress && (
           <div
             className="transferProgress"
@@ -1112,11 +1086,11 @@ export function JobDispatchPanel({
         )}
       </form>
 
-      <ProofVaultBox
+      <PrivilegeVaultBox
         lastPayloadHash={lastPayloadHash}
-        onOpenUnlock={onOpenProofUnlock}
-        onProofMaterialChange={setProofMaterial}
-        proofMaterial={proofMaterial}
+        onOpenUnlock={onOpenPrivilegeUnlock}
+        onPrivilegeMaterialChange={setPrivilegeMaterial}
+        privilegeMaterial={privilegeMaterial}
       />
     </section>
   );
@@ -1124,6 +1098,20 @@ export function JobDispatchPanel({
 
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function operationRequiresConfirmation(mode: DispatchMode): boolean {
+  return (
+    mode === "file_push" ||
+    mode === "file_transfer_upload" ||
+    mode === "file_transfer_download" ||
+    mode === "hot_config" ||
+    mode === "agent_update" ||
+    mode === "agent_update_check" ||
+    mode === "agent_update_activate" ||
+    mode === "agent_update_rollback" ||
+    mode === "backup"
+  );
 }
 
 function blurActiveElement() {

@@ -158,8 +158,14 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
             AgentView {
                 id: "left-a".to_string(),
                 display_name: "left-a".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
             AgentView {
@@ -167,6 +173,12 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
                 display_name: "right-b".to_string(),
                 status: "stale".to_string(),
                 tags: vec!["bgp".to_string(), "provider:test".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
         ]);
@@ -288,7 +300,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     );
     assert_eq!(
         graph.edges[0].server_drift_reasons,
-        vec!["endpoint_not_connected:right-b:stale".to_string()]
+        vec!["endpoint_not_online:right-b:stale".to_string()]
     );
     assert_eq!(graph.edges[0].sample_count, 2);
     assert_eq!(graph.edges[0].degraded_count, 1);
@@ -313,8 +325,14 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
             AgentView {
                 id: "left-a".to_string(),
                 display_name: "left-a".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
             AgentView {
@@ -322,6 +340,12 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
                 display_name: "right-b".to_string(),
                 status: "offline".to_string(),
                 tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
         ]);
@@ -373,7 +397,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
     );
     assert_eq!(
         graph.edges[0].server_drift_reasons,
-        vec!["endpoint_not_connected:right-b:offline".to_string()]
+        vec!["endpoint_not_online:right-b:offline".to_string()]
     );
     let right = graph
         .nodes
@@ -391,15 +415,27 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
             AgentView {
                 id: "left-a".to_string(),
                 display_name: "left-a".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
             AgentView {
                 id: "right-b".to_string(),
                 display_name: "right-b".to_string(),
-                status: "connected".to_string(),
+                status: "online".to_string(),
                 tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                stale_since: None,
+                stale_reason: None,
                 capabilities: Default::default(),
             },
         ]);

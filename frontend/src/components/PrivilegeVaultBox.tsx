@@ -1,102 +1,102 @@
 import { useState } from "react";
 import { LockKeyhole, Save, ShieldCheck, Trash2 } from "lucide-react";
-import { normalizeHex, type ProofMaterial } from "../proof";
-import { clearProofVault, hasProofVault, loadProofVault, saveProofVault } from "../vault";
+import { normalizeHex, type PrivilegeMaterial } from "../privilege";
+import { clearPrivilegeVault, hasPrivilegeVault, loadPrivilegeVault, savePrivilegeVault } from "../vault";
 import { runPanelAction, shortHash } from "../utils";
 
-type ProofVaultBoxProps = {
+type PrivilegeVaultBoxProps = {
   labelPrefix?: string;
   lastPayloadHash: string | null;
-  onProofMaterialChange: (material: ProofMaterial | null) => void;
+  onPrivilegeMaterialChange: (material: PrivilegeMaterial | null) => void;
   onOpenUnlock?: () => void;
   onVaultAvailabilityChange?: (available: boolean) => void;
-  proofMaterial: ProofMaterial | null;
+  privilegeMaterial: PrivilegeMaterial | null;
   clearVaultLabel?: string;
-  lockProofLabel?: string;
+  lockPrivilegeLabel?: string;
   unlockRedirectLabel?: string;
   unlockLabel?: string;
-  useProofLabel?: string;
+  usePrivilegeLabel?: string;
 };
 
-export function ProofVaultBox({
+export function PrivilegeVaultBox({
   clearVaultLabel = "Clear vault",
   labelPrefix = "",
   lastPayloadHash,
-  lockProofLabel = "Lock proof",
+  lockPrivilegeLabel = "Lock privilege",
   onOpenUnlock,
-  onProofMaterialChange,
+  onPrivilegeMaterialChange,
   onVaultAvailabilityChange,
-  proofMaterial,
+  privilegeMaterial,
   unlockRedirectLabel = "Unlock",
   unlockLabel = "Unlock",
-  useProofLabel = "Use proof",
-}: ProofVaultBoxProps) {
+  usePrivilegeLabel = "Unlock privilege",
+}: PrivilegeVaultBoxProps) {
   const [superPassword, setSuperPassword] = useState("");
   const [superSaltHex, setSuperSaltHex] = useState("");
   const [vaultPassphrase, setVaultPassphrase] = useState("");
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
   const [saveToVault, setSaveToVault] = useState(false);
-  const [vaultAvailable, setVaultAvailable] = useState(() => hasProofVault());
+  const [vaultAvailable, setVaultAvailable] = useState(() => hasPrivilegeVault());
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const proofStatus = vaultAvailable ? "Encrypted vault locked" : "Locked";
+  const privilegeStatus = vaultAvailable ? "Encrypted vault locked" : "Locked";
   const label = (value: string) => {
     if (!labelPrefix) {
       return value;
     }
     if (value === "Super password") {
-      return `${labelPrefix} proof secret`;
+      return `${labelPrefix} privilege secret`;
     }
     if (value === "Super salt hex") {
-      return `${labelPrefix} proof salt`;
+      return `${labelPrefix} privilege salt`;
     }
-    return `${labelPrefix} proof ${value.toLowerCase()}`;
+    return `${labelPrefix} privilege ${value.toLowerCase()}`;
   };
 
   async function unlockVault() {
     await runPanelAction(setPending, setActionError, async () => {
-      onProofMaterialChange(await loadProofVault(unlockPassphrase));
+      onPrivilegeMaterialChange(await loadPrivilegeVault(unlockPassphrase));
       setUnlockPassphrase("");
     });
   }
 
-  async function activateEnteredProof() {
+  async function activateEnteredPrivilege() {
     await runPanelAction(setPending, setActionError, async () => {
       const material = {
         superPassword,
         superSaltHex: normalizeHex(superSaltHex),
       };
       if (saveToVault) {
-        await saveProofVault(material, vaultPassphrase);
+        await savePrivilegeVault(material, vaultPassphrase);
         setVaultAvailable(true);
         onVaultAvailabilityChange?.(true);
         setVaultPassphrase("");
       }
-      onProofMaterialChange(material);
+      onPrivilegeMaterialChange(material);
       setSuperPassword("");
       setSuperSaltHex("");
     });
   }
 
-  function lockProof() {
-    onProofMaterialChange(null);
+  function lockPrivilege() {
+    onPrivilegeMaterialChange(null);
     setActionError(null);
   }
 
   function removeVault() {
-    clearProofVault();
+    clearPrivilegeVault();
     setVaultAvailable(false);
     onVaultAvailabilityChange?.(false);
-    onProofMaterialChange(null);
+    onPrivilegeMaterialChange(null);
     setActionError(null);
   }
 
-  if (proofMaterial) {
+  if (privilegeMaterial) {
     return (
-      <div className="proofManager compactProofManager">
-        <button className="secondaryAction" onClick={lockProof} type="button">
+      <div className="privilegeManager compactPrivilegeManager">
+        <button className="secondaryAction" onClick={lockPrivilege} type="button">
           <LockKeyhole size={17} />
-          {lockProofLabel}
+          {lockPrivilegeLabel}
         </button>
       </div>
     );
@@ -104,12 +104,12 @@ export function ProofVaultBox({
 
   if (onOpenUnlock) {
     return (
-      <div className="proofManager">
-        <div className="proofStatus">
+      <div className="privilegeManager">
+        <div className="privilegeStatus">
           <ShieldCheck size={18} />
           <div>
-            <strong>{actionError ?? proofStatus}</strong>
-            <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Proof required"}</span>
+            <strong>{actionError ?? privilegeStatus}</strong>
+            <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Privilege unlock required"}</span>
           </div>
         </div>
         <button className="secondaryAction" onClick={onOpenUnlock} type="button">
@@ -121,18 +121,18 @@ export function ProofVaultBox({
   }
 
   return (
-    <div className="proofManager">
-      <div className="proofStatus">
+    <div className="privilegeManager">
+      <div className="privilegeStatus">
         <ShieldCheck size={18} />
         <div>
-          <strong>{actionError ?? proofStatus}</strong>
-          <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Envelope-only local proof"}</span>
+          <strong>{actionError ?? privilegeStatus}</strong>
+          <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Local privilege unlock"}</span>
         </div>
       </div>
 
-      <div className="proofForms">
+      <div className="privilegeForms">
         {vaultAvailable && (
-          <div className="inlineProof">
+          <div className="inlinePrivilege">
             <input
               aria-label={label("Vault passphrase")}
               onChange={(event) => setUnlockPassphrase(event.target.value)}
@@ -146,7 +146,7 @@ export function ProofVaultBox({
             </button>
           </div>
         )}
-        <div className="proofFields">
+        <div className="privilegeFields">
           <input
             aria-label={label("Super password")}
             onChange={(event) => setSuperPassword(event.target.value)}
@@ -177,11 +177,11 @@ export function ProofVaultBox({
         <button
           className="secondaryAction"
           disabled={pending || !superPassword || !superSaltHex || (saveToVault && !vaultPassphrase)}
-          onClick={activateEnteredProof}
+          onClick={activateEnteredPrivilege}
           type="button"
         >
           <Save size={17} />
-          {useProofLabel}
+          {usePrivilegeLabel}
         </button>
       </div>
 

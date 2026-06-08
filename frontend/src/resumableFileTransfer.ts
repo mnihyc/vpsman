@@ -9,7 +9,7 @@ import {
   sha256Hex,
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
-import { buildEnvelopesForOperation, type ProofMaterial } from "./proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privilege";
 import { selectorExpressionForClientIds } from "./searchExpression";
 import type { CreateJobRequest, CreateJobResponse, FileExistingPolicy, JobHistoryRecord, JobOutputRecord, JobOperation } from "./types";
 
@@ -45,8 +45,7 @@ export type ResumableUploadRequest = {
   multiTargetPolicy?: BrowserTransferMultiTargetPolicy;
   existingPolicy?: FileExistingPolicy;
   path: string;
-  proofMaterial: ProofMaterial;
-  proofTtlSecs: number;
+  privilegeMaterial: PrivilegeMaterial;
   rateLimitKbps: number;
   chunkSizeBytes: number;
   resumeToken?: string;
@@ -75,8 +74,7 @@ export type ResumableDownloadRequest = {
   loadJob: (jobId: string) => Promise<JobHistoryRecord>;
   loadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   path: string;
-  proofMaterial: ProofMaterial;
-  proofTtlSecs: number;
+  privilegeMaterial: PrivilegeMaterial;
   rateLimitKbps: number;
   chunkSizeBytes: number;
   resumeToken?: string;
@@ -476,26 +474,28 @@ async function submitTransferStep(
   operation: JobOperation,
   targetClientIds: string[] = request.clientIds,
 ): Promise<CreateJobResponse> {
-  const built = await buildEnvelopesForOperation({
+  const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+  const timeoutSecs = clampInteger(request.timeoutSecs, 1, 3600);
+  const built = await buildPrivilegeForJobOperation({
     clientIds: targetClientIds,
+    commandType: command,
     operation,
-    proofTtlSecs: request.proofTtlSecs,
-    superPassword: request.proofMaterial.superPassword,
-    superSaltHex: request.proofMaterial.superSaltHex,
+    privilegeMaterial: request.privilegeMaterial,
+    selectorExpression,
+    timeoutSecs,
   });
   return request.createJob({
     argv: [],
-    selector_expression: selectorExpressionForClientIds(targetClientIds),
+    selector_expression: selectorExpression,
     destructive: false,
     confirmed: request.confirmed,
     command,
     operation,
-    timeout_secs: clampInteger(request.timeoutSecs, 1, 3600),
+    timeout_secs: timeoutSecs,
     canary_count: null,
     force_unprivileged: false,
     privileged: true,
-    envelope: null,
-    envelopes: built.envelopes,
+    privilege_assertion: built.privilegeAssertion,
   });
 }
 

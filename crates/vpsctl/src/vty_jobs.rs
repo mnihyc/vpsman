@@ -3,12 +3,13 @@ use serde::Deserialize;
 use vpsman_common::JobCommand;
 
 use crate::{
+    commands_schedules::selector_expression_from_targets,
     http::http_post_json,
-    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct VtyProofContext {
+pub(crate) struct VtyPrivilegeContext {
     pub(crate) enabled: bool,
     pub(crate) password: String,
     pub(crate) salt_hex: String,
@@ -32,7 +33,7 @@ pub(crate) struct VtyJobSelection {
     pub(crate) confirmed: bool,
 }
 
-impl VtyProofContext {
+impl VtyPrivilegeContext {
     pub(crate) fn from_env() -> Result<Self> {
         let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
         let salt_hex = load_super_salt_hex(None)?;
@@ -77,7 +78,7 @@ impl VtyJobSelection {
 pub(crate) fn vty_create_job(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     command: &str,
     pty: bool,
     selection: VtyJobSelection,
@@ -89,7 +90,7 @@ pub(crate) fn vty_create_job(
     vty_submit_operation(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         if pty { "shell_pty" } else { command },
         &operation,
         selection,
@@ -100,7 +101,7 @@ pub(crate) fn vty_create_job(
 pub(crate) fn vty_create_shell_script(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     script: &str,
     selection: VtyJobSelection,
 ) -> Result<String> {
@@ -111,7 +112,7 @@ pub(crate) fn vty_create_shell_script(
     vty_submit_operation(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         "shell_script",
         &operation,
         selection,
@@ -122,7 +123,7 @@ pub(crate) fn vty_create_shell_script(
 pub(crate) fn vty_submit_operation(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     command_label: &str,
     operation: &JobCommand,
     selection: VtyJobSelection,
@@ -131,7 +132,7 @@ pub(crate) fn vty_submit_operation(
     vty_submit_operation_with_force(
         api_url,
         token,
-        proof_context,
+        privilege_context,
         command_label,
         operation,
         selection,
@@ -144,7 +145,7 @@ pub(crate) fn vty_submit_operation(
 pub(crate) fn vty_submit_operation_with_force(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     command_label: &str,
     operation: &JobCommand,
     selection: VtyJobSelection,
@@ -156,10 +157,7 @@ pub(crate) fn vty_submit_operation_with_force(
         "/api/v1/bulk/resolve",
         token,
         &serde_json::json!({
-            "clients": &selection.clients,
-            "tags": &selection.tags,
-            "destructive": selection.destructive,
-            "confirmed": selection.confirmed,
+            "selector_expression": selector_expression_from_targets(&selection.clients, &selection.tags),
         }),
     )?;
     let resolved: VtyBulkResolveResponse =
@@ -173,12 +171,19 @@ pub(crate) fn vty_submit_operation_with_force(
         !client_ids.is_empty(),
         "{command_label} resolved no targets; provide at least one matching target"
     );
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(&selection.clients, &selection.tags);
+    let privilege = build_privilege_for_job_command(
         &client_ids,
         operation,
-        &proof_context.password,
-        &proof_context.salt_hex,
+        command_label,
+        &selector_expression,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
         300,
+        timeout_secs,
+        None,
+        force_unprivileged,
+        true,
     )?;
 
     http_post_json(
@@ -189,15 +194,13 @@ pub(crate) fn vty_submit_operation_with_force(
             "command": command_label,
             "argv": [],
             "operation": operation,
-            "clients": selection.clients,
-            "tags": selection.tags,
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": selection.destructive,
             "confirmed": selection.confirmed,
             "force_unprivileged": force_unprivileged,
             "timeout_secs": timeout_secs,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }

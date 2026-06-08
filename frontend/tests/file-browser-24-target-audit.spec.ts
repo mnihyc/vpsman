@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { activate, openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
+import { activate, openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -14,7 +14,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
   await openConsoleSubpage(page, "Jobs", "Multi files");
   await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
-  await unlockProof(page);
+  await unlockPrivilege(page);
 
   await activate(page.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
@@ -28,15 +28,19 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "pushed" }).filter({ hasText: "22/24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "pushed" }).filter({ hasText: "23/24" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "doing" }).filter({ hasText: "0" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "22" })).toBeVisible();
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unavailable" }).filter({ hasText: "2" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "failed" }).filter({ hasText: "1" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unavailable" }).filter({ hasText: "1" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "disconnected" })).toBeVisible();
-  await expect(resultPanel.getByText("partial success: 22 done, 2 unavailable", { exact: true })).toBeVisible();
+  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "offline" })).toBeVisible();
+  await expect(resultPanel.getByText("partial success: 22 done, 1 failed, 1 unavailable", { exact: true })).toBeVisible();
+  const reasons = resultPanel.getByLabel("Failed target reasons");
+  await expect(reasons.getByText("stale: file download command_version mismatch", { exact: true })).toBeVisible();
+  await expect(reasons.getByText("edge-us-22", { exact: true })).toBeVisible();
   await expect(page.getByText("Same hierarchy and content")).toBeVisible();
   await expect(page.getByText("Same hash")).toBeVisible();
   await expect(page.getByText("Content preview")).toBeVisible();
@@ -45,7 +49,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(page.getByText("edge-us-23", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-23" }).first()).toHaveAttribute("title", "a0000023-target-23");
   await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-23_a0000023" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Download all" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download Archive" })).toHaveCount(1);
 
   const layout = await collectLayoutSignals(page, ".multiFilePanel");
   expect(layout.horizontalOverflowPx).toBeLessThanOrEqual(1);
@@ -60,7 +64,7 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
   await page.goto("/");
   await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
   await openConsoleSubpage(page, "Jobs", "Multi files");
-  await unlockProof(page);
+  await unlockPrivilege(page);
   await activate(page.getByRole("button", { name: "Preview" }));
 
   await page.getByLabel("Bulk file path").fill("/same-tree-diff/");
@@ -89,14 +93,13 @@ async function installTwentyFourTargetFileMock(page: Page) {
         can_apply_process_limits: true,
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: true,
-        command_protocol_version: 1,
         effective_uid: 0,
         privilege_mode: "root",
         unprivileged_hint: null,
       },
       display_name: `edge-us-${String(index).padStart(2, "0")}`,
       id: `a${String(index).padStart(7, "0")}-target-${String(index).padStart(2, "0")}`,
-      status: index === 22 ? "stale" : index === 23 ? "disconnected" : "connected",
+      status: index === 22 ? "stale" : index === 23 ? "offline" : "online",
       tags: ["provider:alpha", "country:US", "edge"],
     }));
     const jobOutputs: Record<string, unknown[]> = {};
@@ -168,8 +171,6 @@ async function installTwentyFourTargetFileMock(page: Page) {
         const body = await readJsonBody(input, init);
         const targets = matchingTargets((body as { selector_expression?: string } | null)?.selector_expression);
         return jsonResponse({
-          confirmation_required: false,
-          destructive: false,
           target_count: targets.length,
           targets,
         });
@@ -179,7 +180,7 @@ async function installTwentyFourTargetFileMock(page: Page) {
         const operation = (body as { operation?: { type?: string; path?: string } } | null)?.operation;
         if (operation?.type === "file_download") {
           const targets = matchingTargets((body as { selector_expression?: string } | null)?.selector_expression);
-          const outputTargets = targets.filter((agent) => agent.status === "connected");
+          const outputTargets = targets.filter((agent) => agent.status === "online");
           const jobId = `99999999-8888-4777-9666-${String(counter).padStart(12, "0")}`;
           counter += 1;
           jobOutputs[jobId] = outputTargets.flatMap((agent, index) => {
@@ -210,13 +211,18 @@ async function installTwentyFourTargetFileMock(page: Page) {
           const outputIds = new Set(outputTargets.map((agent) => agent.id));
           jobTargets[jobId] = targets.map((agent) => ({
             client_id: agent.id,
-            completed_at: "2026-06-02T10:11:00Z",
-            exit_code: outputIds.has(agent.id) ? 0 : null,
+            completed_at: agent.status === "offline" ? null : "2026-06-02T10:11:00Z",
+            exit_code: outputIds.has(agent.id) ? 0 : agent.status === "stale" ? 2 : null,
             job_id: jobId,
-            started_at: outputIds.has(agent.id) ? "2026-06-02T10:10:59Z" : null,
-            status: outputIds.has(agent.id) ? "completed" : "dispatch_failed",
+            message: outputIds.has(agent.id)
+              ? "completed"
+              : agent.status === "stale"
+                ? "stale: file download command_version mismatch"
+                : "agent offline",
+            started_at: outputIds.has(agent.id) || agent.status === "stale" ? "2026-06-02T10:10:59Z" : null,
+            status: outputIds.has(agent.id) ? "completed" : agent.status === "stale" ? "failed" : "dispatch_failed",
           }));
-          return jsonResponse({ accepted_targets: outputTargets.length, job_id: jobId, status: "accepted" });
+          return jsonResponse({ accepted_targets: targets.filter((agent) => agent.status !== "offline").length, job_id: jobId, status: "accepted" });
         }
       }
       const targetMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/targets$/);
@@ -242,8 +248,8 @@ async function installTwentyFourTargetFileMock(page: Page) {
   });
 }
 
-async function unlockProof(page: Page) {
-  await unlockProofFromTop(page);
+async function unlockPrivilege(page: Page) {
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Jobs", "Multi files");
 }
 

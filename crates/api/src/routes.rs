@@ -1,7 +1,7 @@
 use axum::{
     extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
-    Router,
+    Json, Router,
 };
 
 use crate::{
@@ -50,21 +50,23 @@ use crate::{
         validate_agent_identity,
     },
     routes_inventory::{
-        assign_agent_tag, assign_data_source_preset, clone_data_source_preset,
-        create_data_source_preset, create_tag, delete_agent, diff_data_source_preset,
-        fleet_summary, list_agents, list_data_source_assignments, list_data_source_presets,
-        list_data_source_status, list_gateway_sessions, list_tags, list_telemetry_network_rates,
-        list_telemetry_rollups, list_telemetry_tunnels, render_data_source_hot_config,
-        resolve_bulk_targets, test_data_source_preset, update_agent_alias,
-        update_data_source_preset,
+        assign_agent_tag, assign_data_source_preset, bulk_mutate_tags, clone_data_source_preset,
+        create_data_source_preset, create_tag, delete_agent, delete_hot_config_rule_template,
+        delete_tag, diff_data_source_preset, fleet_summary, list_agents,
+        list_data_source_assignments, list_data_source_presets, list_data_source_status,
+        list_gateway_sessions, list_hot_config_rule_templates, list_tags,
+        list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
+        render_data_source_hot_config, render_hot_config_rule_template, resolve_bulk_targets,
+        test_data_source_preset, update_agent_alias, update_data_source_preset,
+        upsert_hot_config_rule_template,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_job_output_artifact, get_job,
-        list_audit_logs, list_auth_proof_rotations, list_job_outputs, list_job_targets, list_jobs,
+        list_audit_logs, list_job_outputs, list_job_targets, list_jobs,
         list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
-    routes_jobs::{cancel_job, create_job, dispatch_scheduled_job},
+    routes_jobs::{cancel_job, create_job},
     routes_migrations::{create_migration_link, list_migration_links},
     routes_network::{
         create_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
@@ -75,11 +77,11 @@ use crate::{
     routes_rollout_policies::{
         create_agent_update_rollout_policy, list_agent_update_rollout_policies,
     },
-    routes_rollouts::{
-        list_agent_update_rollouts, record_agent_update_activation_delegation,
-        record_agent_update_rollback_delegation, update_agent_update_rollout_control,
+    routes_rollouts::{list_agent_update_rollouts, update_agent_update_rollout_control},
+    routes_schedules::{
+        apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
+        enable_schedule, list_schedules, update_schedule,
     },
-    routes_schedules::{create_schedule, list_schedules},
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
         create_agent_update_release, create_hosted_agent_update_release,
@@ -94,6 +96,7 @@ use crate::{
 pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/v1/build-info", get(build_info))
         .route(
             "/.well-known/vpsman/endpoints.json",
             get(discovery_endpoints),
@@ -107,10 +110,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/totp/setup", post(setup_operator_totp))
         .route("/api/v1/auth/totp/confirm", post(confirm_operator_totp))
         .route("/api/v1/auth/totp/disable", post(disable_operator_totp))
-        .route(
-            "/api/v1/auth/proof-rotations",
-            get(list_auth_proof_rotations),
-        )
         .route(
             "/api/v1/operators",
             get(list_operators).post(create_operator),
@@ -182,6 +181,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/history/export", get(export_history))
         .route("/api/v1/tags", get(list_tags).post(create_tag))
+        .route("/api/v1/tags/bulk", post(bulk_mutate_tags))
+        .route("/api/v1/tags/{tag}", delete(delete_tag))
         .route(
             "/api/v1/data-source-presets",
             get(list_data_source_presets).post(create_data_source_preset),
@@ -211,6 +212,18 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/data-source-hot-config",
             get(render_data_source_hot_config),
         )
+        .route(
+            "/api/v1/hot-config/rule-templates",
+            get(list_hot_config_rule_templates).post(upsert_hot_config_rule_template),
+        )
+        .route(
+            "/api/v1/hot-config/rule-templates/{template_id}",
+            delete(delete_hot_config_rule_template),
+        )
+        .route(
+            "/api/v1/hot-config/rule-templates/{template_id}/render",
+            post(render_hot_config_rule_template),
+        )
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
         .route("/api/v1/bulk/resolve", post(resolve_bulk_targets))
@@ -230,14 +243,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/agent-update-rollouts/{rollout_id}/control",
             post(update_agent_update_rollout_control),
-        )
-        .route(
-            "/api/v1/agent-update-rollouts/{rollout_id}/rollback-delegation",
-            post(record_agent_update_rollback_delegation),
-        )
-        .route(
-            "/api/v1/agent-update-rollouts/{rollout_id}/activation-delegation",
-            post(record_agent_update_activation_delegation),
         )
         .route(
             "/api/v1/agent-update-releases",
@@ -267,10 +272,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
-        .route(
-            "/api/v1/jobs/{job_id}/dispatch-scheduled",
-            post(dispatch_scheduled_job),
-        )
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route("/api/v1/jobs/{job_id}/outputs", get(list_job_outputs))
         .route(
@@ -335,6 +336,26 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/schedules",
             get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}",
+            put(update_schedule).delete(delete_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/enable",
+            post(enable_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/disable",
+            post(disable_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/defer",
+            post(defer_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/apply-now",
+            post(apply_schedule_now),
         )
         .route(
             "/api/v1/tunnel-plans",
@@ -430,4 +451,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn build_info() -> Json<crate::build_info::BuildInfoView> {
+    Json(crate::build_info::server_build_info())
 }

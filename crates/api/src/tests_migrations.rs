@@ -1,10 +1,7 @@
 use axum::{extract::State, http::HeaderMap, Json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
-use vpsman_common::{
-    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_proof, AgentHello,
-    CommandEnvelope, JobCommand,
-};
+use vpsman_common::AgentHello;
 
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -15,7 +12,6 @@ use crate::{
     routes_migrations::{create_migration_link, validate_create_migration_link},
     routes_restores::create_restore_plan,
     state::{AppState, EnrollmentSettings},
-    unix_now,
 };
 
 #[test]
@@ -109,6 +105,7 @@ async fn seeded_migration_repo() -> Repository {
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
                     update_heartbeat: None,
+                    internal_build_number: 1,
                     capabilities: Default::default(),
                 },
             )
@@ -126,14 +123,7 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
         recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
-        envelope: Some(command_envelope(
-            "source-client",
-            &JobCommand::Backup {
-                paths: vec!["/etc/hostname".to_string()],
-                include_config: true,
-                recipient_public_key_hex: None,
-            },
-        )),
+        privilege_assertion: None,
     };
     let (_, Json(view)) = create_backup_request(
         State(test_state(repo.clone())),
@@ -146,18 +136,6 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
 }
 
 async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -> Uuid {
-    let command = JobCommand::Restore {
-        source_backup_request_id: source_backup_id,
-        paths: vec!["/etc/hostname".to_string()],
-        include_config: true,
-        destination_root: Some("/restore".to_string()),
-        archive_path: None,
-        archive_base64: None,
-        archive_size_bytes: None,
-        archive_sha256_hex: None,
-        dry_run: false,
-        post_restore_argv: Vec::new(),
-    };
     let request = CreateRestorePlanRequest {
         source_backup_request_id: source_backup_id,
         target_client_id: "rebuilt-client".to_string(),
@@ -166,7 +144,7 @@ async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -
         destination_root: Some("/restore".to_string()),
         confirmed: true,
         note: Some("restore to rebuilt node".to_string()),
-        envelope: Some(command_envelope("rebuilt-client", &command)),
+        privilege_assertion: None,
     };
     let (_, Json(view)) = create_restore_plan(
         State(test_state(repo.clone())),
@@ -184,7 +162,7 @@ fn test_state(repo: Repository) -> AppState {
         repo,
         events,
         internal_token: None,
-        gateway: GatewayDispatchClient::default(),
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
         enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
@@ -194,27 +172,5 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
-    }
-}
-
-fn command_envelope(client_id: &str, command: &JobCommand) -> CommandEnvelope {
-    let payload_hash_hex = payload_hash(&encode_json(command).unwrap());
-    let command_id = Uuid::new_v4();
-    let scope = format!("client:{client_id}");
-    let super_key = derive_super_key("correct horse", b"migration-test");
-    let proof = sign_privilege_proof(
-        &super_key,
-        command_id,
-        &scope,
-        &payload_hash_hex,
-        &random_nonce(),
-        unix_now() + 60,
-    );
-    CommandEnvelope {
-        command_id,
-        scope,
-        payload_hash_hex,
-        proof: Some(proof),
-        server_signature: Vec::new(),
     }
 }

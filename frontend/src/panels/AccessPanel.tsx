@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Ban, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
-import { ProofVaultBox } from "../components/ProofVaultBox";
-import { clearProofVault, hasProofVault } from "../vault";
+import { Ban, Copy, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
 import { CrudPager } from "../components/CrudPager";
+import { renderEnrollmentInstallCommand } from "../enrollmentInstallCommand";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
-  AuthProofRotationHistoryRecord,
   GatewaySessionRecord,
   OperatorSessionRecord,
   OperatorView,
@@ -19,7 +20,7 @@ import type {
   EnrollmentTokenView,
   KeyLifecycleReportView,
 } from "../typesAccess";
-import type { ProofMaterial } from "../proof";
+import type { PrivilegeMaterial } from "../privilege";
 import {
   clientDisplayNameFromMap,
   clientLifecycleNameMap,
@@ -31,9 +32,10 @@ import {
 } from "../utils";
 
 const DEFAULT_UNMANAGED_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
-const accessSubpages = ["Overview", "Server", "VPS clients", "Gateway"] as const;
+const accessSubpages = ["Overview", "Operators", "Privilege unlock", "VPS clients", "Gateway"] as const;
 
 type AccessSubpage = (typeof accessSubpages)[number];
+type AccessConfirmationAction = "rebuild-token" | "key-revoke";
 
 type AccessPanelProps = {
   activeSubpage: string;
@@ -57,18 +59,18 @@ type AccessPanelProps = {
   keyLifecycleReport: KeyLifecycleReportView | null;
   operatorSessions: OperatorSessionRecord[];
   operators: OperatorView[];
-  proofMaterial: ProofMaterial | null;
-  proofRotations: AuthProofRotationHistoryRecord[];
+  privilegeMaterial: PrivilegeMaterial | null;
   sessionVaultAvailable: boolean;
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   wsState: string;
 };
 
 function accessSubpageFromRoute(subpage: string): AccessSubpage {
   switch (subpage) {
     case "operators":
-    case "proof":
-      return "Server";
+      return "Operators";
+    case "privilege":
+      return "Privilege unlock";
     case "clients":
       return "VPS clients";
     case "gateway":
@@ -100,15 +102,14 @@ export function AccessPanel({
   keyLifecycleReport,
   operatorSessions,
   operators,
-  proofMaterial,
-  proofRotations,
+  privilegeMaterial,
   sessionVaultAvailable,
-  setProofMaterial,
+  setPrivilegeMaterial,
   wsState,
 }: AccessPanelProps) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(accessSubpageFromRoute(routeSubpage));
-  const [vaultAvailable, setVaultAvailable] = useState(() => hasProofVault());
+  const [vaultAvailable, setVaultAvailable] = useState(() => hasPrivilegeVault());
   const [newOperatorUsername, setNewOperatorUsername] = useState("");
   const [newOperatorPassword, setNewOperatorPassword] = useState("");
   const [newOperatorRole, setNewOperatorRole] = useState("operator");
@@ -131,17 +132,17 @@ export function AccessPanel({
   const [tokenUnmanagedUpdateJitterSecs, setTokenUnmanagedUpdateJitterSecs] = useState("86400");
   const [tokenUnmanagedUpdateActivate, setTokenUnmanagedUpdateActivate] = useState(true);
   const [tokenUnmanagedUpdateRestartAgent, setTokenUnmanagedUpdateRestartAgent] = useState(true);
-  const [tokenConfirmed, setTokenConfirmed] = useState(false);
   const [tokenPending, setTokenPending] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [createdToken, setCreatedToken] = useState<CreateEnrollmentTokenResponse | null>(null);
+  const [installCommandCopied, setInstallCommandCopied] = useState(false);
   const [revokeClientId, setRevokeClientId] = useState("");
   const [revokeReason, setRevokeReason] = useState("");
-  const [revokeConfirmed, setRevokeConfirmed] = useState(false);
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<AccessConfirmationAction | null>(null);
   const sessionState = apiToken ? "Bearer session active" : "No bearer session";
-  const vaultState = proofMaterial ? "Proof unlocked" : vaultAvailable ? "Encrypted proof vault present" : "No proof vault";
+  const vaultState = privilegeMaterial ? "Privilege unlocked" : vaultAvailable ? "Encrypted privilege vault present" : "No privilege vault";
   const tokenStorageState = apiToken ? (sessionVaultAvailable ? "encrypted vault" : "memory only") : "none";
   const canManageOperators = operator?.role === "admin";
   const canCreateOperator =
@@ -153,23 +154,43 @@ export function AccessPanel({
     Number.parseInt(tokenUnmanagedUpdateIntervalSecs, 10) >= 300 &&
     Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10) >= 0 &&
     (!tokenUnmanagedUpdateEnabled || tokenUnmanagedUpdateVersionUrl.trim().length > 0) &&
-    (tokenPurpose === "provision" || (tokenClientId.trim().length > 0 && tokenConfirmed));
-  const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && revokeConfirmed && !revokePending;
+    (tokenPurpose === "provision" || tokenClientId.trim().length > 0);
+  const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const lifecycleNameById = useMemo(
     () => clientLifecycleNameMap(lifecycleClients, vpsNameDisplayMode),
     [lifecycleClients, vpsNameDisplayMode],
   );
   const lifecycleClientLabel = (clientId: string | null | undefined) => clientDisplayNameFromMap(clientId, lifecycleNameById);
+  const enrollmentInstallRender = useMemo(() => {
+    const origin = typeof window === "undefined" ? "https://panel.example.com" : window.location.origin;
+    if (createdToken) {
+      return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
+        apiUrl: origin,
+        installMode: "root",
+        token: createdToken.token,
+      });
+    }
+    return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
+      apiUrl: origin,
+      installMode: "root",
+      token: null,
+    });
+  }, [createdToken, preferences.enrollment_install_command_template]);
+  const enrollmentInstallCommand = enrollmentInstallRender.command ?? "";
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
   }, [routeSubpage]);
 
+  useEffect(() => {
+    setInstallCommandCopied(false);
+  }, [enrollmentInstallCommand]);
+
   function clearVault() {
-    clearProofVault();
+    clearPrivilegeVault();
     setVaultAvailable(false);
-    setProofMaterial(null);
+    setPrivilegeMaterial(null);
   }
 
   async function createOperator(event: FormEvent<HTMLFormElement>) {
@@ -253,15 +274,24 @@ export function AccessPanel({
     if (!canCreateEnrollmentToken) {
       return;
     }
+    if (tokenPurpose === "rebuild_reenrollment") {
+      setPendingConfirmation("rebuild-token");
+      return;
+    }
+    await executeCreateEnrollmentToken(false);
+  }
+
+  async function executeCreateEnrollmentToken(confirmedReenrollment: boolean) {
     setTokenPending(true);
     setTokenError(null);
     setCreatedToken(null);
+    setInstallCommandCopied(false);
     try {
       const response = await onCreateEnrollmentToken({
         ttl_secs: Number.parseInt(tokenTtlSecs, 10),
         purpose: tokenPurpose,
         allowed_client_id: tokenPurpose === "rebuild_reenrollment" ? tokenClientId.trim() : null,
-        confirmed_reenrollment: tokenPurpose === "rebuild_reenrollment" ? tokenConfirmed : false,
+        confirmed_reenrollment: tokenPurpose === "rebuild_reenrollment" ? confirmedReenrollment : false,
         preserve_existing_assignments: true,
         default_tags: parseScopeInput(tokenTags),
         default_display_name: tokenDisplayName.trim() || null,
@@ -275,7 +305,6 @@ export function AccessPanel({
       setCreatedToken(response);
       setTokenTags("");
       setTokenDisplayName("");
-      setTokenConfirmed(false);
       if (tokenPurpose === "provision") {
         setTokenClientId("");
       }
@@ -291,17 +320,42 @@ export function AccessPanel({
     if (!canRevokeClientKey) {
       return;
     }
+    setPendingConfirmation("key-revoke");
+  }
+
+  async function copyEnrollmentInstallCommand() {
+    if (!enrollmentInstallCommand) {
+      return;
+    }
+    await navigator.clipboard?.writeText(enrollmentInstallCommand);
+    setInstallCommandCopied(true);
+    window.setTimeout(() => setInstallCommandCopied(false), 1600);
+  }
+
+  async function executeRevokeClientKey() {
     setRevokePending(true);
     setRevokeError(null);
     try {
-      await onRevokeClientKey(revokeClientId.trim(), revokeReason.trim() || null, revokeConfirmed);
+      await onRevokeClientKey(revokeClientId.trim(), revokeReason.trim() || null, true);
       setRevokeClientId("");
       setRevokeReason("");
-      setRevokeConfirmed(false);
     } catch (error) {
       setRevokeError(error instanceof Error ? error.message : "VPS key revoke failed");
     } finally {
       setRevokePending(false);
+    }
+  }
+
+  async function confirmAccessAction() {
+    const action = pendingConfirmation;
+    if (!action) {
+      return;
+    }
+    setPendingConfirmation(null);
+    if (action === "rebuild-token") {
+      await executeCreateEnrollmentToken(true);
+    } else {
+      await executeRevokeClientKey();
     }
   }
 
@@ -350,7 +404,7 @@ export function AccessPanel({
           </div>
           <div className="accessTile">
             <LockKeyhole size={20} />
-            <span>Proof vault</span>
+            <span>Privilege unlock</span>
             <strong>{vaultState}</strong>
             <small>super password never leaves browser memory or encrypted local storage</small>
           </div>
@@ -380,31 +434,25 @@ export function AccessPanel({
                 : "re-enrollment state unavailable"}
             </small>
           </div>
-          <div className="accessTile">
-            <KeyRound size={20} />
-            <span>Proof rotations</span>
-            <strong>{canManageOperators ? `${proofRotations.length} recent` : "admin only"}</strong>
-            <small>{proofRotations[0]?.rotation_generation ?? "latest generation not recorded"}</small>
-          </div>
         </div>
       </div>
 
-      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
+      <div className="fleetPanel" hidden={activeSubpage !== "Privilege unlock"}>
         <div className="sectionHeader">
           <div>
-            <h2>Proof unlock</h2>
-            <span>{proofMaterial ? "Unlocked in browser memory" : vaultAvailable ? "Encrypted vault locked" : "Manual proof entry"}</span>
+            <h2>Privilege unlock</h2>
+            <span>{privilegeMaterial ? "Unlocked in browser memory" : vaultAvailable ? "Encrypted vault locked" : "Manual privilege entry"}</span>
           </div>
         </div>
-        <ProofVaultBox
+        <PrivilegeVaultBox
           lastPayloadHash={null}
-          onProofMaterialChange={setProofMaterial}
+          onPrivilegeMaterialChange={setPrivilegeMaterial}
           onVaultAvailabilityChange={setVaultAvailable}
-          proofMaterial={proofMaterial}
+          privilegeMaterial={privilegeMaterial}
         />
       </div>
 
-      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
+      <div className="fleetPanel" hidden={activeSubpage !== "Operators"}>
         <div className="sectionHeader">
           <div>
             <h2>Operators</h2>
@@ -455,63 +503,7 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Proof rotation history</h2>
-            <span>{canManageOperators ? `${proofRotations.length} sanitized rotation records` : "Admin role required"}</span>
-          </div>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "Generation", value: (record) => record.rotation_generation ?? "default" },
-            { label: "Status", value: (record) => `${record.status} ${record.completed_count}/${record.target_count}` },
-            { label: "Targets", value: (record) => `${record.completed_count} ${record.failed_count} ${record.pending_count}` },
-            { label: "Payload", value: (record) => record.payload_hash },
-            { label: "Created", value: (record) => record.created_at },
-          ]}
-          itemLabel="rotations"
-          items={proofRotations}
-          pageSize={8}
-          title="Proof rotation records"
-          empty={
-            <div className="emptyState">
-              <KeyRound size={22} />
-              <strong>No proof rotations</strong>
-              <span>Confirmed proof-key rotations appear here without storing new proof material.</span>
-            </div>
-          }
-        >
-          {(rotationRows) => (
-            <div className="table historyTable">
-              <div className="historyRow proofRotationGrid heading">
-                <span>Generation</span>
-                <span>Status</span>
-                <span>Targets</span>
-                <span>Payload</span>
-                <span>Created</span>
-              </div>
-              {rotationRows.map((record) => (
-                <div className="historyRow proofRotationGrid" key={record.job_id}>
-                  <span className="historyPrimary">
-                    <strong>{record.rotation_generation ?? "default generation"}</strong>
-                    <small>{shortId(record.job_id)}</small>
-                  </span>
-                  <span className={`status ${statusClass(record.status)}`}>{record.status}</span>
-                  <span className="historyPrimary">
-                    <strong>{record.completed_count}/{record.target_count} completed</strong>
-                    <small>{record.failed_count} failed / {record.pending_count} pending</small>
-                  </span>
-                  <span className="monoValue">{shortHash(record.payload_hash)}</span>
-                  <span>{formatTime(record.created_at)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "Server"}>
+      <div className="fleetPanel" hidden={activeSubpage !== "Operators"}>
         <div className="sectionHeader">
           <div>
             <h2>Operator sessions</h2>
@@ -743,16 +735,16 @@ export function AccessPanel({
         </CrudPager>
       </div>
 
-      <aside className="inspector accessInspector" hidden={activeSubpage === "Overview"}>
-        <div className="accessConfigHeading" hidden={activeSubpage !== "Server"}>
-          <strong>Server configuration</strong>
-          <span>Operators, TOTP, sessions, and local proof state</span>
+      <aside className="inspector accessInspector" hidden={activeSubpage === "Overview" || activeSubpage === "Privilege unlock"}>
+        <div className="accessConfigHeading" hidden={activeSubpage !== "Operators"}>
+          <strong>Operator configuration</strong>
+          <span>Operators, TOTP, and retained sessions</span>
         </div>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
           <h2>Create operator</h2>
           <span>{operatorActionError ?? (canManageOperators ? "Admin role" : "Admin role required")}</span>
         </div>
-        <form className="sideForm" hidden={activeSubpage !== "Server"} onSubmit={(event) => void createOperator(event)}>
+        <form className="sideForm" hidden={activeSubpage !== "Operators"} onSubmit={(event) => void createOperator(event)}>
           <input
             aria-label="Operator username"
             disabled={!canManageOperators || operatorActionPending}
@@ -792,11 +784,11 @@ export function AccessPanel({
           </button>
         </form>
 
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
           <h2>TOTP</h2>
           <span>{totpError ?? (operator?.totp_enabled ? "Enabled" : "Optional")}</span>
         </div>
-        <div className="sideForm" hidden={activeSubpage !== "Server"}>
+        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
           <input
             aria-label="TOTP password"
             autoComplete="current-password"
@@ -853,6 +845,31 @@ export function AccessPanel({
           <strong>VPS client configuration</strong>
           <span>Enrollment, rebuild tokens, default tags, and key revocation</span>
         </div>
+        <ConfirmationPrompt
+          confirmLabel={pendingConfirmation === "key-revoke" ? "Revoke key" : "Create rebuild token"}
+          detail={
+            pendingConfirmation === "key-revoke"
+              ? "Confirm revoking the current VPS key for the selected client."
+              : "Confirm issuing a rebuild re-enrollment token for the existing VPS identity."
+          }
+          items={
+            pendingConfirmation === "key-revoke"
+              ? [
+                  { label: "VPS", value: lifecycleClientLabel(revokeClientId) },
+                  { label: "Reason", value: revokeReason.trim() || "none" },
+                ]
+              : [
+                  { label: "VPS", value: lifecycleClientLabel(tokenClientId) },
+                  { label: "TTL", value: `${Number.parseInt(tokenTtlSecs, 10)}s` },
+                ]
+          }
+          onCancel={() => setPendingConfirmation(null)}
+          onConfirm={() => void confirmAccessAction()}
+          open={activeSubpage === "VPS clients" && pendingConfirmation !== null}
+          pending={tokenPending || revokePending}
+          title={pendingConfirmation === "key-revoke" ? "Revoke VPS key" : "Create rebuild token"}
+          tone="danger"
+        />
         <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
           <h2>Create token</h2>
           <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
@@ -864,7 +881,6 @@ export function AccessPanel({
             onChange={(event) => {
               const nextPurpose = event.target.value as EnrollmentTokenPurpose;
               setTokenPurpose(nextPurpose);
-              setTokenConfirmed(false);
               if (nextPurpose === "provision") {
                 setTokenClientId("");
               }
@@ -960,26 +976,37 @@ export function AccessPanel({
             />
             <span>Restart agent</span>
           </label>
-          {tokenPurpose === "rebuild_reenrollment" && (
-            <label className="inlineCheck">
-              <input
-                checked={tokenConfirmed}
-                disabled={!canManageOperators || tokenPending}
-                onChange={(event) => setTokenConfirmed(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Confirm rebuild</span>
-            </label>
+          <div className="enrollmentInstallCommand">
+            <div className="enrollmentInstallHeading">
+              <strong>Root install command</strong>
+              {enrollmentInstallRender.command && (
+                <button aria-label="Copy enrollment install command" onClick={() => void copyEnrollmentInstallCommand()} type="button">
+                  <Copy size={15} />
+                  {installCommandCopied ? "Copied" : "Copy"}
+                </button>
+              )}
+            </div>
+            {enrollmentInstallRender.command ? (
+              <code>{enrollmentInstallRender.command}</code>
+            ) : (
+              <small>{enrollmentInstallRender.error}</small>
+            )}
+            {createdToken && (
+              <>
+                <small>{enrollmentPurposeLabel(createdToken.purpose)} / {createdToken.token_prefix}</small>
+                <small>Name {enrollmentTokenDisplayName(createdToken)}</small>
+              </>
+            )}
+          </div>
+          {pendingConfirmation !== "rebuild-token" && (
+            <button className="secondaryAction" disabled={!canCreateEnrollmentToken} type="submit">
+              {tokenPurpose === "rebuild_reenrollment" ? <RotateCcw size={17} /> : <UserPlus size={17} />}
+              {tokenPurpose === "rebuild_reenrollment" ? "Rebuild token" : "Create token"}
+            </button>
           )}
-          <button className="secondaryAction" disabled={!canCreateEnrollmentToken} type="submit">
-            {tokenPurpose === "rebuild_reenrollment" ? <RotateCcw size={17} /> : <UserPlus size={17} />}
-            {tokenPurpose === "rebuild_reenrollment" ? "Rebuild token" : "Create token"}
-          </button>
           {createdToken && (
             <div className="inlineSecret enrollmentSecret">
               <strong>{createdToken.token}</strong>
-              <small>{enrollmentPurposeLabel(createdToken.purpose)} / {createdToken.token_prefix}</small>
-              <small>Name {enrollmentTokenDisplayName(createdToken)}</small>
             </div>
           )}
         </form>
@@ -1003,47 +1030,40 @@ export function AccessPanel({
             placeholder="reason"
             value={revokeReason}
           />
-          <label className="inlineCheck">
-            <input
-              checked={revokeConfirmed}
-              disabled={!canManageOperators || revokePending}
-              onChange={(event) => setRevokeConfirmed(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Confirm key revoke</span>
-          </label>
-          <button className="secondaryAction dangerAction" disabled={!canRevokeClientKey} type="submit">
-            <Ban size={17} />
-            Revoke current key
-          </button>
+          {pendingConfirmation !== "key-revoke" && (
+            <button className="secondaryAction dangerAction" disabled={!canRevokeClientKey} type="submit">
+              <Ban size={17} />
+              Revoke current key
+            </button>
+          )}
         </form>
 
-        <div className="accessConfigHeading" hidden={activeSubpage !== "Server"}>
+        <div className="accessConfigHeading" hidden={activeSubpage !== "Operators"}>
           <strong>Local panel state</strong>
-          <span>Browser session and proof vault controls</span>
+          <span>Browser session and privilege vault controls</span>
         </div>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Server"}>
+        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
           <h2>Session controls</h2>
           <span>Local browser state only</span>
         </div>
-        <div className="sideForm" hidden={activeSubpage !== "Server"}>
+        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
           <button className="secondaryAction" onClick={onClearSession} type="button">
             <KeyRound size={17} />
             Clear bearer session
           </button>
           <button className="secondaryAction dangerAction" disabled={!vaultAvailable} onClick={clearVault} type="button">
             <Trash2 size={17} />
-            Clear proof vault
+            Clear privilege vault
           </button>
         </div>
-        <div className="timeline" hidden={activeSubpage !== "Server"}>
+        <div className="timeline" hidden={activeSubpage !== "Operators"}>
           <ShieldCheck size={18} />
           <div>
             <strong>Deny by default</strong>
-            <span>Non-telemetry actions still require local proof envelopes.</span>
+            <span>Non-telemetry actions still require local privilege unlock assertions.</span>
           </div>
         </div>
-        <div className="timeline" hidden={activeSubpage !== "Server"}>
+        <div className="timeline" hidden={activeSubpage !== "Operators"}>
           <LockKeyhole size={18} />
           <div>
             <strong>Secret handling</strong>

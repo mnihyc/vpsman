@@ -7,6 +7,7 @@ mod backup_artifact_crypto;
 mod backup_auto_artifacts;
 mod backup_handoff;
 mod backup_upload_sessions;
+mod build_info;
 mod data_source_builtin_presets;
 mod error;
 mod fleet_alert_notifications;
@@ -32,6 +33,7 @@ mod model_rollout_policies;
 mod model_terminal;
 mod model_topology;
 mod object_store;
+mod privilege;
 mod repository;
 mod repository_agent_update_lifecycle;
 mod repository_agent_update_releases;
@@ -51,6 +53,7 @@ mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
 mod repository_history;
+mod repository_hot_config_rule_templates;
 mod repository_ingest;
 mod repository_inventory;
 mod repository_job_lifecycle;
@@ -63,10 +66,8 @@ mod repository_network_observations;
 mod repository_network_recommendations;
 mod repository_operator_totp;
 mod repository_restores;
-mod repository_rollout_delegations;
 mod repository_rollout_policies;
 mod repository_rollouts;
-mod repository_scheduled_jobs;
 mod repository_schedules;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
@@ -100,11 +101,9 @@ mod state;
 mod util;
 
 use anyhow::{Context, Result};
-use axum::http::StatusCode;
 use clap::Parser;
 use fleet_alerts::FleetAlertPolicy;
 use gateway_client::{decode_server_signing_key, GatewayDispatchClient};
-use model::{AuthContext, CreateJobRequest, OperatorView};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use repository_rollouts::DEFAULT_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS;
@@ -147,7 +146,7 @@ use security::{constant_time_eq, role_allows, validate_operator_role};
 use uuid::Uuid;
 #[cfg(test)]
 use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
-use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, JobCommand, ServerEndpoint};
+use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, ServerEndpoint};
 
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]
@@ -334,6 +333,12 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        server_build_number = build_info::server_build_number(),
+        "api build metadata"
+    );
+    reject_api_privilege_verifier_env()?;
     let repo = Repository::connect(
         args.postgres_url.as_deref(),
         &args.migrations_dir,
@@ -361,7 +366,7 @@ async fn main() -> Result<()> {
             );
         }
         warn!(
-            "DANGEROUS INTERNAL TEST MODE: VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; proof-gated job dispatch remains disabled"
+            "DANGEROUS INTERNAL TEST MODE: VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; privilege-gated job dispatch remains disabled"
         );
     }
     let server_ed25519_public_key_hex = server_signing_key
@@ -480,6 +485,18 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
     Ok(token.to_string())
 }
 
+fn reject_api_privilege_verifier_env() -> Result<()> {
+    if let Some(name) = forbidden_api_privilege_env_var(|name| std::env::var_os(name).is_some()) {
+        anyhow::bail!("{name} must not be present in the API environment");
+    }
+    Ok(())
+}
+
+fn forbidden_api_privilege_env_var(mut present: impl FnMut(&str) -> bool) -> Option<&'static str> {
+    const FORBIDDEN_ENV: &[&str] = &["VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX"];
+    FORBIDDEN_ENV.iter().copied().find(|name| present(name))
+}
+
 fn spawn_agent_update_rollout_reconciler(
     state: AppState,
     heartbeat_timeout_secs: u64,
@@ -506,224 +523,16 @@ fn spawn_agent_update_rollout_reconciler(
                     warn!(%error, "agent update heartbeat timeout reconciliation failed");
                 }
             }
-            match state.repo.expire_agent_update_delegated_proofs(500).await {
-                Ok(expired) if expired > 0 => {
-                    info!(expired, "delegated rollout proofs expired");
-                }
-                Ok(_) => {
-                    debug!("delegated rollout proof expiry reconciliation completed");
-                }
-                Err(error) => {
-                    warn!(%error, "delegated rollout proof expiry reconciliation failed");
-                }
-            }
-            match dispatch_delegated_rollout_rollbacks(&state).await {
-                Ok(dispatched) if dispatched > 0 => {
-                    info!(dispatched, "delegated rollout rollback jobs dispatched");
-                }
-                Ok(_) => {
-                    debug!("delegated rollout rollback reconciliation completed");
-                }
-                Err(error) => {
-                    warn!(%error, "delegated rollout rollback reconciliation failed");
-                }
-            }
-            match dispatch_delegated_rollout_activations(&state).await {
-                Ok(dispatched) if dispatched > 0 => {
-                    info!(dispatched, "delegated rollout activation jobs dispatched");
-                }
-                Ok(_) => {
-                    debug!("delegated rollout activation reconciliation completed");
-                }
-                Err(error) => {
-                    warn!(%error, "delegated rollout activation reconciliation failed");
-                }
-            }
         }
     });
 }
 
-async fn dispatch_delegated_rollout_rollbacks(state: &AppState) -> Result<usize> {
-    let claims = state
-        .repo
-        .claim_ready_agent_update_rollback_delegations(25)
-        .await?;
-    let mut dispatched = 0_usize;
-    for claim in claims {
-        let operator = delegated_rollback_operator(claim.actor_id);
-        let operation = JobCommand::AgentUpdateRollback {
-            rollback_sha256_hex: claim.rollback_sha256_hex.clone(),
-        };
-        let request = CreateJobRequest {
-            selector_expression: selector_expression::or_selector_expression(
-                claim
-                    .clients
-                    .iter()
-                    .map(|client_id| selector_expression::id_selector_expression(client_id)),
-            ),
-            destructive: false,
-            confirmed: true,
-            command: "agent_update_rollback".to_string(),
-            argv: Vec::new(),
-            operation: Some(operation),
-            timeout_secs: Some(60),
-            canary_count: None,
-            force_unprivileged: claim.force_unprivileged,
-            privileged: true,
-            idempotency_key: Some(format!(
-                "delegated:rollout-rollback:{}:{}",
-                claim.rollout_id,
-                claim.rollback_sha256_hex.as_deref().unwrap_or("default")
-            )),
-            reconnect_policy: Some(serde_json::json!({
-                "duplicate_delivery": "ignore_completed",
-                "resume_outputs": true,
-                "cancel_on_disconnect": false,
-            })),
-            envelope: None,
-            envelopes: claim.envelopes.clone(),
-        };
-        match routes_jobs::create_job_with_operator(state, &operator, request).await {
-            Ok((StatusCode::ACCEPTED, response)) => {
-                state
-                    .repo
-                    .mark_agent_update_rollback_delegations_dispatched(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        response.0.job_id,
-                    )
-                    .await?;
-                dispatched += 1;
-            }
-            Ok((status, response)) => {
-                state
-                    .repo
-                    .mark_agent_update_rollback_delegations_failed(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        &format!(
-                            "delegated rollback dispatch returned {} with job {} status {}",
-                            status, response.0.job_id, response.0.status
-                        ),
-                    )
-                    .await?;
-            }
-            Err(error) => {
-                let reason = format!("delegated rollback dispatch failed: {}", error.code);
-                state
-                    .repo
-                    .mark_agent_update_rollback_delegations_failed(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        &reason,
-                    )
-                    .await?;
-            }
-        }
-    }
-    Ok(dispatched)
-}
-
-async fn dispatch_delegated_rollout_activations(state: &AppState) -> Result<usize> {
-    let claims = state
-        .repo
-        .claim_ready_agent_update_activation_delegations(25)
-        .await?;
-    let mut dispatched = 0_usize;
-    for claim in claims {
-        let operator = delegated_rollout_operator(claim.actor_id);
-        let operation = JobCommand::AgentUpdateActivate {
-            staged_sha256_hex: claim.staged_sha256_hex.clone(),
-            restart_agent: claim.restart_agent,
-        };
-        let request = CreateJobRequest {
-            selector_expression: selector_expression::or_selector_expression(
-                claim
-                    .clients
-                    .iter()
-                    .map(|client_id| selector_expression::id_selector_expression(client_id)),
-            ),
-            destructive: false,
-            confirmed: true,
-            command: "agent_update_activate".to_string(),
-            argv: Vec::new(),
-            operation: Some(operation),
-            timeout_secs: Some(60),
-            canary_count: None,
-            force_unprivileged: claim.force_unprivileged,
-            privileged: true,
-            idempotency_key: Some(format!(
-                "delegated:rollout-activate:{}:{}",
-                claim.rollout_id, claim.staged_sha256_hex
-            )),
-            reconnect_policy: Some(serde_json::json!({
-                "duplicate_delivery": "ignore_completed",
-                "resume_outputs": true,
-                "cancel_on_disconnect": false,
-            })),
-            envelope: None,
-            envelopes: claim.envelopes.clone(),
-        };
-        match routes_jobs::create_job_with_operator(state, &operator, request).await {
-            Ok((StatusCode::ACCEPTED, response)) => {
-                state
-                    .repo
-                    .mark_agent_update_activation_delegations_dispatched(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        response.0.job_id,
-                    )
-                    .await?;
-                dispatched += 1;
-            }
-            Ok((status, response)) => {
-                state
-                    .repo
-                    .mark_agent_update_activation_delegations_failed(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        &format!(
-                            "delegated activation dispatch returned {} with job {} status {}",
-                            status, response.0.job_id, response.0.status
-                        ),
-                    )
-                    .await?;
-            }
-            Err(error) => {
-                let reason = format!("delegated activation dispatch failed: {}", error.code);
-                state
-                    .repo
-                    .mark_agent_update_activation_delegations_failed(
-                        claim.rollout_id,
-                        &claim.delegation_ids,
-                        &reason,
-                    )
-                    .await?;
-            }
-        }
-    }
-    Ok(dispatched)
-}
-
-fn delegated_rollback_operator(actor_id: Option<uuid::Uuid>) -> AuthContext {
-    delegated_rollout_operator(actor_id)
-}
-
-fn delegated_rollout_operator(actor_id: Option<uuid::Uuid>) -> AuthContext {
-    AuthContext {
-        operator: OperatorView {
-            id: actor_id.unwrap_or_else(uuid::Uuid::nil),
-            username: "rollout-automation".to_string(),
-            role: "operator".to_string(),
-            scopes: vec!["jobs:write".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: uuid::Uuid::nil(),
-    }
-}
-
 fn parse_public_gateway_endpoints(values: &[String]) -> Result<Vec<ServerEndpoint>> {
+    let values = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
     if values.is_empty() {
         return Ok(EnrollmentSettings::default().tcp_endpoints);
     }
@@ -910,7 +719,6 @@ mod tests_alerts;
 #[cfg(test)]
 mod tests_auth;
 #[cfg(test)]
-mod tests_auth_rotation;
 #[cfg(test)]
 mod tests_backups;
 #[cfg(test)]
@@ -947,8 +755,6 @@ mod tests_object_store;
 mod tests_process;
 #[cfg(test)]
 mod tests_restores;
-#[cfg(test)]
-mod tests_rollout_activation_failure;
 #[cfg(test)]
 mod tests_rollouts;
 #[cfg(test)]

@@ -1,5 +1,6 @@
 mod agent_binary_path;
 mod backup;
+mod build_info;
 mod child_process;
 mod cli;
 mod config_update;
@@ -13,6 +14,7 @@ mod file_pull;
 mod file_push;
 mod network_apply;
 mod network_hooks;
+mod network_interfaces;
 mod network_probe;
 mod network_runtime;
 mod network_speed;

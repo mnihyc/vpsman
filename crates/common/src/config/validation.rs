@@ -43,9 +43,6 @@ pub fn validate_hot_config_update(
     if updated.noise != current.noise {
         return Err("hot_config_cannot_change_noise_identity".to_string());
     }
-    if updated.auth.proof_key_hex != current.auth.proof_key_hex {
-        return Err("hot_config_cannot_change_proof_key".to_string());
-    }
     if updated.auth.server_ed25519_public_key_hex != current.auth.server_ed25519_public_key_hex {
         return Err("hot_config_cannot_change_server_signing_key".to_string());
     }
@@ -183,7 +180,6 @@ fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
 }
 
 fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
-    validate_optional_hex32(config.proof_key_hex.as_deref(), "proof_key_hex")?;
     validate_optional_hex32(
         config.server_ed25519_public_key_hex.as_deref(),
         "server_ed25519_public_key_hex",

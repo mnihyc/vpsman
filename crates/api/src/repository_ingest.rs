@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use tokio::sync::RwLock;
 use tracing::debug;
 use uuid::Uuid;
@@ -73,7 +73,52 @@ impl Repository {
                     .await
                     .contains(&event.hello.client_id)
                 {
-                    upsert_memory_agent(&memory.agents, &event.hello).await;
+                    let prior = {
+                        let agents = memory.agents.read().await;
+                        agents
+                            .iter()
+                            .find(|agent| agent.id == event.hello.client_id)
+                            .map(|agent| {
+                                (
+                                    agent.status.clone(),
+                                    agent.internal_build_number,
+                                    agent.stale_reason.clone(),
+                                )
+                            })
+                    };
+                    upsert_memory_agent_with_remote_ip(
+                        &memory.agents,
+                        &event.hello,
+                        event.remote_ip.as_deref(),
+                    )
+                    .await;
+                    if let Some((prior_status, prior_build, stale_reason)) = prior {
+                        if prior_status == "stale"
+                            && !event.hello.agent_version.is_empty()
+                            && prior_build != event.hello.internal_build_number
+                        {
+                            memory
+                                .audits
+                                .write()
+                                .await
+                                .push(crate::model::AuditLogView {
+                                    id: Uuid::new_v4(),
+                                    actor_id: None,
+                                    action: "agent.status_online".to_string(),
+                                    target: format!("client:{}", event.hello.client_id),
+                                    command_hash: None,
+                                    metadata: serde_json::json!({
+                                        "from_status": "stale",
+                                        "to_status": "online",
+                                        "reason": "agent_reconnected_with_changed_internal_build",
+                                        "stale_reason": stale_reason,
+                                        "previous_internal_build_number": prior_build,
+                                        "internal_build_number": event.hello.internal_build_number,
+                                    }),
+                                    created_at: crate::unix_now().to_string(),
+                                });
+                        }
+                    }
                 } else {
                     accepted_hello = false;
                 }
@@ -86,24 +131,77 @@ impl Repository {
                     None => Vec::new(),
                 };
                 let mut tx = pool.begin().await?;
+                let prior = sqlx::query(
+                    r#"
+                    SELECT status, internal_build_number, stale_build_number
+                    FROM clients
+                    WHERE id = $1 AND hidden_at IS NULL
+                    "#,
+                )
+                .bind(&event.hello.client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let prior_status = prior
+                    .as_ref()
+                    .and_then(|row| row.try_get::<String, _>("status").ok());
+                let prior_build = prior
+                    .as_ref()
+                    .and_then(|row| row.try_get::<i64, _>("internal_build_number").ok())
+                    .unwrap_or(1)
+                    .max(1);
+                let stale_build = prior
+                    .as_ref()
+                    .and_then(|row| row.try_get::<Option<i64>, _>("stale_build_number").ok())
+                    .flatten()
+                    .unwrap_or(prior_build)
+                    .max(1);
+                let clears_stale = prior_status.as_deref() == Some("stale")
+                    && event.hello.internal_build_number as i64 != stale_build;
                 let result = sqlx::query(
                     r#"
                     INSERT INTO clients (
                         id, display_name, public_key, status, agent_version,
-                        os_release, arch, capabilities, last_seen_at
+                        internal_build_number, os_release, arch, capabilities, registration_ip,
+                        last_ip, last_seen_at
                     )
-                    VALUES ($1, $2, $3, 'connected', $4, $5, $6, $7, now())
+                    VALUES ($1, $2, $3, 'online', $4, $5, $6, $7, $8, $9::inet, $9::inet, now())
                     ON CONFLICT (id) DO UPDATE SET
                         public_key = CASE
                             WHEN octet_length(EXCLUDED.public_key) > 0 THEN EXCLUDED.public_key
                             ELSE clients.public_key
                         END,
-                        status = 'connected',
+                        status = CASE
+                            WHEN clients.status = 'stale'
+                             AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
+                                THEN 'stale'
+                            ELSE 'online'
+                        END,
                         agent_version = EXCLUDED.agent_version,
+                        internal_build_number = EXCLUDED.internal_build_number,
                         os_release = EXCLUDED.os_release,
                         arch = EXCLUDED.arch,
                         capabilities = EXCLUDED.capabilities,
-                        last_seen_at = now()
+                        registration_ip = COALESCE(clients.registration_ip, EXCLUDED.registration_ip),
+                        last_ip = COALESCE(EXCLUDED.last_ip, clients.last_ip),
+                        last_seen_at = now(),
+                        stale_since = CASE
+                            WHEN clients.status = 'stale'
+                             AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
+                                THEN clients.stale_since
+                            ELSE NULL
+                        END,
+                        stale_reason = CASE
+                            WHEN clients.status = 'stale'
+                             AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
+                                THEN clients.stale_reason
+                            ELSE NULL
+                        END,
+                        stale_build_number = CASE
+                            WHEN clients.status = 'stale'
+                             AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
+                                THEN clients.stale_build_number
+                            ELSE NULL
+                        END
                     WHERE clients.hidden_at IS NULL
                     "#,
                 )
@@ -111,12 +209,30 @@ impl Repository {
                 .bind(&event.hello.client_id)
                 .bind(public_key)
                 .bind(&event.hello.agent_version)
+                .bind(event.hello.internal_build_number as i64)
                 .bind(&event.hello.os_release)
                 .bind(&event.hello.arch)
                 .bind(sqlx::types::Json(&event.hello.capabilities))
+                .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 accepted_hello = result.rows_affected() > 0;
+                if accepted_hello && clears_stale {
+                    record_client_status_transition_in_tx(
+                        &mut tx,
+                        &event.hello.client_id,
+                        Some("stale"),
+                        "online",
+                        "agent_reconnected_with_changed_internal_build",
+                        serde_json::json!({
+                            "old_internal_build_number": prior_build,
+                            "stale_build_number": stale_build,
+                            "new_internal_build_number": event.hello.internal_build_number,
+                            "gateway_id": &event.gateway_id,
+                        }),
+                    )
+                    .await?;
+                }
 
                 tx.commit().await?;
             }
@@ -150,12 +266,18 @@ impl Repository {
                 let hello = AgentHello {
                     client_id: event.telemetry.client_id.clone(),
                     agent_version: String::new(),
+                    internal_build_number: 1,
                     os_release: String::new(),
                     arch: String::new(),
                     update_heartbeat: None,
                     capabilities: Default::default(),
                 };
-                upsert_memory_agent(&memory.agents, &hello).await;
+                upsert_memory_agent_with_remote_ip(
+                    &memory.agents,
+                    &hello,
+                    event.remote_ip.as_deref(),
+                )
+                .await;
                 upsert_memory_telemetry_rollup(
                     &memory.telemetry_rollups,
                     &event.telemetry.client_id,
@@ -210,13 +332,112 @@ impl Repository {
                 sqlx::query(
                     r#"
                     UPDATE clients
-                    SET status = 'connected', last_seen_at = now()
+                    SET
+                        status = CASE WHEN status = 'stale' THEN status ELSE 'online' END,
+                        registration_ip = COALESCE(registration_ip, $2::inet),
+                        last_ip = COALESCE($2::inet, last_ip),
+                        last_seen_at = now()
                     WHERE id = $1 AND hidden_at IS NULL
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
+                .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn mark_agent_stale(
+        &self,
+        client_id: &str,
+        reason: &str,
+        metadata: serde_json::Value,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut agents = memory.agents.write().await;
+                if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
+                    if agent.status != "stale" {
+                        let from_status = agent.status.clone();
+                        agent.status = "stale".to_string();
+                        agent.stale_since = Some(crate::unix_now().to_string());
+                        agent.stale_reason = Some(reason.to_string());
+                        drop(agents);
+                        memory
+                            .audits
+                            .write()
+                            .await
+                            .push(crate::model::AuditLogView {
+                                id: Uuid::new_v4(),
+                                actor_id: None,
+                                action: "agent.status_stale".to_string(),
+                                target: format!("client:{client_id}"),
+                                command_hash: None,
+                                metadata: serde_json::json!({
+                                    "from_status": from_status,
+                                    "to_status": "stale",
+                                    "reason": reason,
+                                    "details": metadata,
+                                }),
+                                created_at: crate::unix_now().to_string(),
+                            });
+                    }
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let prior = sqlx::query(
+                    r#"
+                    SELECT status, internal_build_number
+                    FROM clients
+                    WHERE id = $1 AND hidden_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(prior) = prior else {
+                    tx.commit().await?;
+                    return Ok(());
+                };
+                let from_status: String = prior.try_get("status")?;
+                let internal_build_number =
+                    prior.try_get::<i64, _>("internal_build_number")?.max(1);
+                sqlx::query(
+                    r#"
+                    UPDATE clients
+                    SET
+                        status = 'stale',
+                        stale_since = COALESCE(stale_since, now()),
+                        stale_reason = $2,
+                        stale_build_number = COALESCE(stale_build_number, internal_build_number)
+                    WHERE id = $1 AND hidden_at IS NULL
+                    "#,
+                )
+                .bind(client_id)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await?;
+                if from_status != "stale" {
+                    record_client_status_transition_in_tx(
+                        &mut tx,
+                        client_id,
+                        Some(&from_status),
+                        "stale",
+                        reason,
+                        serde_json::json!({
+                            "reason": reason,
+                            "internal_build_number": internal_build_number,
+                            "details": metadata,
+                        }),
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 Ok(())
             }
@@ -718,18 +939,92 @@ fn u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
+async fn record_client_status_transition_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    from_status: Option<&str>,
+    to_status: &str,
+    reason: &str,
+    metadata: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO client_status_history (
+            id, client_id, from_status, to_status, reason, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(client_id)
+    .bind(from_status)
+    .bind(to_status)
+    .bind(reason)
+    .bind(metadata.clone())
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("agent.status_{to_status}"))
+    .bind(format!("client:{client_id}"))
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) async fn upsert_memory_agent(agents: &Arc<RwLock<Vec<AgentView>>>, hello: &AgentHello) {
+    upsert_memory_agent_with_remote_ip(agents, hello, None).await;
+}
+
+pub(crate) async fn upsert_memory_agent_with_remote_ip(
+    agents: &Arc<RwLock<Vec<AgentView>>>,
+    hello: &AgentHello,
+    remote_ip: Option<&str>,
+) {
     let mut agents = agents.write().await;
+    let now = crate::unix_now().to_string();
     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == hello.client_id) {
-        agent.status = "connected".to_string();
+        if agent.status != "stale"
+            || (!hello.agent_version.is_empty()
+                && agent.internal_build_number != hello.internal_build_number)
+        {
+            agent.status = "online".to_string();
+            agent.stale_since = None;
+            agent.stale_reason = None;
+        }
+        if agent.registration_ip.is_none() {
+            agent.registration_ip = remote_ip.map(str::to_string);
+        }
+        if let Some(remote_ip) = remote_ip {
+            agent.last_ip = Some(remote_ip.to_string());
+        }
+        agent.last_seen_at = Some(now);
+        if !hello.agent_version.is_empty() {
+            agent.internal_build_number = hello.internal_build_number.max(1);
+        }
         agent.capabilities = hello.capabilities.clone();
         return;
     }
     agents.push(AgentView {
         id: hello.client_id.clone(),
         display_name: hello.client_id.clone(),
-        status: "connected".to_string(),
+        status: "online".to_string(),
         tags: Vec::new(),
+        registration_ip: remote_ip.map(str::to_string),
+        last_ip: remote_ip.map(str::to_string),
+        last_seen_at: Some(now),
+        internal_build_number: hello.internal_build_number.max(1),
+        stale_since: None,
+        stale_reason: None,
         capabilities: hello.capabilities.clone(),
     });
 }

@@ -1,17 +1,62 @@
-import type { CommandEnvelope, JobOperation } from "./types";
+import type { JobOperation } from "./types";
 
 const encoder = new TextEncoder();
 const SUPER_KEY_DOMAIN = "vpsman-super-key-v1";
-const COMMAND_PROOF_DOMAIN = "vpsman-privileged-command-v1";
+const PRIVILEGE_ASSERTION_DOMAIN = "vpsman-gateway-privilege-assertion-v1";
 
-export type ProofMaterial = {
+export type PrivilegeMaterial = {
   superPassword: string;
   superSaltHex: string;
 };
 
-export type BuiltCommandEnvelopes = {
+export type BuiltJobPrivilege = {
   payloadHashHex: string;
-  envelopes: Record<string, CommandEnvelope>;
+  privilegeAssertion: PrivilegeAssertion;
+};
+
+export type PrivilegeAssertion = {
+  nonce_hex: string;
+  issued_unix: number;
+  expires_unix: number;
+  assertion_hex: string;
+};
+
+export type JobPrivilegeIntentInput = {
+  selectorExpression: string;
+  commandType: string;
+  operationPayloadHash: string;
+  resolvedTargets: string[];
+  timeoutSecs: number;
+  canaryCount?: number | null;
+  forceUnprivileged: boolean;
+  privileged: boolean;
+};
+
+export type SchedulePrivilegeIntentInput = {
+  action: string;
+  scheduleId?: string | null;
+  name: string;
+  commandType: string;
+  operationPayloadHash: string;
+  selectorExpression: string;
+  resolvedTargets: string[];
+  cronExpr: string;
+  timezone: string;
+  enabled: boolean;
+  catchUpPolicy: string;
+  catchUpLimit: number;
+  retryDelaySecs: number;
+  maxFailures: number;
+  deferredUntil?: string | null;
+  deleted: boolean;
+};
+
+export type DbPrivilegeIntentInput = {
+  action: string;
+  target: string;
+  selectorExpression?: string | null;
+  resolvedTargets?: string[];
+  confirmed: boolean;
 };
 
 export function parseCommandArgv(input: string): string[] {
@@ -64,87 +109,94 @@ export function parseCommandArgv(input: string): string[] {
   return argv;
 }
 
-export async function buildCommandEnvelopesForClients({
-  argv,
+export async function buildPrivilegeForJobOperation({
   clientIds,
-  proofTtlSecs,
-  superPassword,
-  superSaltHex,
-}: {
-  argv: string[];
-  clientIds: string[];
-  proofTtlSecs: number;
-  superPassword: string;
-  superSaltHex: string;
-}): Promise<BuiltCommandEnvelopes> {
-  if (argv.length === 0 || argv.some((part) => part.length === 0)) {
-    throw new Error("Command argv is empty");
-  }
-  return buildEnvelopesForOperation({
-    clientIds,
-    operation: { type: "shell", argv, pty: false },
-    proofTtlSecs,
-    superPassword,
-    superSaltHex,
-  });
-}
-
-export async function buildEnvelopesForOperation({
-  clientIds,
-  maxProofTtlSecs,
+  canaryCount = null,
+  commandType,
+  forceUnprivileged = false,
   operation,
-  proofTtlSecs,
-  superPassword,
-  superSaltHex,
+  privileged = true,
+  privilegeMaterial,
+  selectorExpression,
+  timeoutSecs,
+  ttlSecs = 300,
 }: {
   clientIds: string[];
-  maxProofTtlSecs?: number;
+  canaryCount?: number | null;
+  commandType: string;
+  forceUnprivileged?: boolean;
   operation: JobOperation;
-  proofTtlSecs: number;
-  superPassword: string;
-  superSaltHex: string;
-}): Promise<BuiltCommandEnvelopes> {
+  privileged?: boolean;
+  privilegeMaterial: PrivilegeMaterial;
+  selectorExpression: string;
+  timeoutSecs: number;
+  ttlSecs?: number;
+}): Promise<BuiltJobPrivilege> {
   if (clientIds.length === 0) {
     throw new Error("No resolved clients");
   }
 
-  const payload = operationPayloadBytes(operation);
-  const payloadHashHex = await sha256Hex(payload);
-  const envelopes = await buildEnvelopeMap({
+  const payloadHashHex = await operationPayloadHashHex(operation);
+  return buildPrivilegeForJobPayloadHash({
+    canaryCount,
     clientIds,
-    maxProofTtlSecs,
+    commandType,
+    forceUnprivileged,
     payloadHashHex,
-    proofTtlSecs,
-    superPassword,
-    superSaltHex,
+    privileged,
+    privilegeMaterial,
+    selectorExpression,
+    timeoutSecs,
+    ttlSecs,
   });
-
-  return { payloadHashHex, envelopes };
 }
 
-export async function buildEnvelopesForPayloadHash({
+export async function buildPrivilegeForJobPayloadHash({
+  canaryCount = null,
   clientIds,
+  commandType,
+  forceUnprivileged = false,
   payloadHashHex,
-  proofTtlSecs,
-  superPassword,
-  superSaltHex,
+  privileged = true,
+  privilegeMaterial,
+  selectorExpression,
+  timeoutSecs,
+  ttlSecs = 300,
 }: {
+  canaryCount?: number | null;
   clientIds: string[];
+  commandType: string;
+  forceUnprivileged?: boolean;
   payloadHashHex: string;
-  proofTtlSecs: number;
-  superPassword: string;
-  superSaltHex: string;
-}): Promise<BuiltCommandEnvelopes> {
+  privileged?: boolean;
+  privilegeMaterial: PrivilegeMaterial;
+  selectorExpression: string;
+  timeoutSecs: number;
+  ttlSecs?: number;
+}): Promise<BuiltJobPrivilege> {
+  if (clientIds.length === 0) {
+    throw new Error("No resolved clients");
+  }
   const normalizedPayloadHashHex = normalizeSha256Hex(payloadHashHex);
-  const envelopes = await buildEnvelopeMap({
-    clientIds,
-    payloadHashHex: normalizedPayloadHashHex,
-    proofTtlSecs,
-    superPassword,
-    superSaltHex,
+  const intent = canonicalJobPrivilegeIntent({
+    canaryCount,
+    commandType,
+    forceUnprivileged,
+    operationPayloadHash: normalizedPayloadHashHex,
+    privileged,
+    resolvedTargets: clientIds,
+    selectorExpression,
+    timeoutSecs,
   });
-
-  return { payloadHashHex: normalizedPayloadHashHex, envelopes };
+  const privilegeAssertion = await buildPrivilegeAssertion({
+    intent,
+    privilegeMaterial,
+    ttlSecs,
+  });
+  return {
+    payloadHashHex: normalizedPayloadHashHex,
+    privilegeAssertion,
+  };
 }
 
 export async function deriveSuperKeyHex(superPassword: string, superSaltHex: string): Promise<string> {
@@ -162,56 +214,92 @@ export async function deriveSuperKeyHex(superPassword: string, superSaltHex: str
   return bytesToHex(keyBytes);
 }
 
-async function buildEnvelopeMap({
-  clientIds,
-  maxProofTtlSecs = 3600,
-  payloadHashHex,
-  proofTtlSecs,
-  superPassword,
-  superSaltHex,
+export async function operationPayloadHashHex(operation: JobOperation): Promise<string> {
+  return sha256Hex(operationPayloadBytes(operation));
+}
+
+export async function buildPrivilegeAssertion({
+  intent,
+  privilegeMaterial,
+  ttlSecs = 300,
 }: {
-  clientIds: string[];
-  maxProofTtlSecs?: number;
-  payloadHashHex: string;
-  proofTtlSecs: number;
-  superPassword: string;
-  superSaltHex: string;
-}): Promise<Record<string, CommandEnvelope>> {
-  if (clientIds.length === 0) {
-    throw new Error("No resolved clients");
-  }
+  intent: string;
+  privilegeMaterial: PrivilegeMaterial;
+  ttlSecs?: number;
+}): Promise<PrivilegeAssertion> {
+  const superKey = await deriveSuperHmacKey(privilegeMaterial.superPassword, privilegeMaterial.superSaltHex);
+  const intentHashHex = await sha256Hex(encoder.encode(intent));
+  const issuedUnix = Math.floor(Date.now() / 1000);
+  const expiresUnix = issuedUnix + clampInteger(ttlSecs, 15, 300);
+  const nonce = randomBytes(16);
+  const payload = concatBytes([
+    encoder.encode(PRIVILEGE_ASSERTION_DOMAIN),
+    encoder.encode(intentHashHex),
+    nonce,
+    u64Bytes(issuedUnix),
+    u64Bytes(expiresUnix),
+  ]);
+  const assertionBytes = new Uint8Array(await cryptoProvider().subtle.sign("HMAC", superKey, bufferSource(payload)));
+  return {
+    nonce_hex: bytesToHex(nonce),
+    issued_unix: issuedUnix,
+    expires_unix: expiresUnix,
+    assertion_hex: bytesToHex(assertionBytes),
+  };
+}
 
-  const superKey = await deriveSuperHmacKey(superPassword, superSaltHex);
-  const expiresUnix = Math.floor(Date.now() / 1000) + clampInteger(proofTtlSecs, 15, maxProofTtlSecs);
-  const envelopes: Record<string, CommandEnvelope> = {};
+export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): string {
+  return JSON.stringify(
+    ordered([
+      ["version", 1],
+      ["action", "job.dispatch"],
+      ["selector_expression", input.selectorExpression.trim()],
+      ["command_type", input.commandType],
+      ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
+      ["resolved_targets", [...input.resolvedTargets].sort()],
+      ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
+      ["canary_count", input.canaryCount ?? null],
+      ["force_unprivileged", input.forceUnprivileged],
+      ["privileged", input.privileged],
+    ]),
+  );
+}
 
-  for (const clientId of clientIds) {
-    const commandId = randomUuid();
-    const scope = `client:${clientId}`;
-    const nonce = randomBytes(16);
-    const proofPayload = concatBytes([
-      encoder.encode(COMMAND_PROOF_DOMAIN),
-      uuidBytes(commandId),
-      encoder.encode(scope),
-      encoder.encode(payloadHashHex),
-      nonce,
-      u64Bytes(expiresUnix),
-    ]);
-    const proofBytes = new Uint8Array(await cryptoProvider().subtle.sign("HMAC", superKey, bufferSource(proofPayload)));
-    envelopes[clientId] = {
-      command_id: commandId,
-      scope,
-      payload_hash_hex: payloadHashHex,
-      proof: {
-        nonce_hex: bytesToHex(nonce),
-        expires_unix: expiresUnix,
-        proof_hex: bytesToHex(proofBytes),
-      },
-      server_signature: [],
-    };
-  }
+export function canonicalSchedulePrivilegeIntent(input: SchedulePrivilegeIntentInput): string {
+  return JSON.stringify(
+    ordered([
+      ["version", 1],
+      ["action", input.action],
+      ["schedule_id", input.scheduleId ?? null],
+      ["name", input.name.trim()],
+      ["command_type", input.commandType],
+      ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
+      ["selector_expression", input.selectorExpression.trim()],
+      ["resolved_targets", [...input.resolvedTargets].sort()],
+      ["cron_expr", input.cronExpr.trim()],
+      ["timezone", input.timezone],
+      ["enabled", input.enabled],
+      ["catch_up_policy", input.catchUpPolicy],
+      ["catch_up_limit", input.catchUpLimit],
+      ["retry_delay_secs", input.retryDelaySecs],
+      ["max_failures", input.maxFailures],
+      ["deferred_until", input.deferredUntil ?? null],
+      ["deleted", input.deleted],
+    ]),
+  );
+}
 
-  return envelopes;
+export function canonicalDbPrivilegeIntent(input: DbPrivilegeIntentInput): string {
+  return JSON.stringify(
+    ordered([
+      ["version", 1],
+      ["action", input.action],
+      ["target", input.target],
+      ["selector_expression", input.selectorExpression ? input.selectorExpression.trim() : null],
+      ["resolved_targets", [...(input.resolvedTargets ?? [])].sort()],
+      ["confirmed", input.confirmed],
+    ]),
+  );
 }
 
 function operationPayloadBytes(operation: JobOperation): Uint8Array {
@@ -236,6 +324,8 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["session_id", operation.session_id],
         ["argv", operation.argv],
         ["cwd", optional(operation.cwd)],
+        ["user", optional(operation.user)],
+        ["user_policy", operation.user_policy ?? "fail"],
         ["cols", operation.cols],
         ["rows", operation.rows],
         ["replay_from_seq", optional(operation.replay_from_seq)],
@@ -258,15 +348,17 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "file_pull":
     case "file_stat":
       return ordered([["type", operation.type], ["path", operation.path]]);
+    case "config_read":
+      return ordered([["type", operation.type]]);
     case "hot_config":
-    case "data_source_config_patch":
-      return ordered([["type", operation.type], ["toml", operation.toml]]);
-    case "auth_proof_key_rotate":
       return ordered([
         ["type", operation.type],
-        ["new_proof_key_hex", operation.new_proof_key_hex],
-        ["rotation_generation", optional(operation.rotation_generation)],
+        ["toml", operation.toml],
+        ["preserve_redacted", optional(operation.preserve_redacted)],
+        ["base_config_sha256_hex", optional(operation.base_config_sha256_hex)],
       ]);
+    case "data_source_config_patch":
+      return ordered([["type", operation.type], ["toml", operation.toml]]);
     case "agent_update":
       return ordered([
         ["type", operation.type],
@@ -486,6 +578,8 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "network_rollback":
     case "network_status":
       return ordered([["type", operation.type], ["plan", operation.plan as JsonValue], ["side", operation.side]]);
+    case "network_interfaces":
+      return ordered([["type", operation.type]]);
     case "network_probe":
       return ordered([["type", operation.type], ["plan", operation.plan as JsonValue], ["side", operation.side], ["count", operation.count], ["interval_ms", operation.interval_ms]]);
     case "network_speed_test":
@@ -620,29 +714,8 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function uuidBytes(uuid: string): Uint8Array {
-  const normalized = uuid.replace(/-/g, "");
-  if (normalized.length !== 32) {
-    throw new Error("Invalid UUID");
-  }
-  return hexToBytes(normalized);
-}
-
 function randomBytes(length: number): Uint8Array {
   return cryptoProvider().getRandomValues(new Uint8Array(length));
-}
-
-function randomUuid(): string {
-  const crypto = cryptoProvider();
-  if (typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  const bytes = randomBytes(16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytesToHex(bytes);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function u64Bytes(value: number): Uint8Array {

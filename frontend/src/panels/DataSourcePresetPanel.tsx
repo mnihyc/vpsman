@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
-import { ProofVaultBox } from "../components/ProofVaultBox";
+import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { buildEnvelopesForOperation, type ProofMaterial } from "../proof";
+import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
@@ -60,6 +61,7 @@ const DATA_SOURCE_DOMAINS = [
 
 const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
 const DATA_SOURCE_SELECTOR_STORAGE_KEY = "vpsman.dataSources.assignmentSelectorExpression";
+type DataSourceConfirmationAction = "assignment" | "apply" | "lifecycle-update";
 
 export function DataSourcePresetPanel({
   activeSubpage,
@@ -71,13 +73,13 @@ export function DataSourcePresetPanel({
   onCreateJob,
   onCreatePreset,
   onDiffPreset,
-  onOpenProofUnlock,
+  onOpenPrivilegeUnlock,
   onRenderHotConfig,
   onTestPreset,
   onUpdatePreset,
-  proofMaterial,
+  privilegeMaterial,
   presets,
-  setProofMaterial,
+  setPrivilegeMaterial,
 }: {
   activeSubpage: "presets" | "status";
   agents: AgentView[];
@@ -88,13 +90,13 @@ export function DataSourcePresetPanel({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreatePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
   onDiffPreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
-  onOpenProofUnlock: () => void;
+  onOpenPrivilegeUnlock: () => void;
   onRenderHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
   onTestPreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdatePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
-  proofMaterial: ProofMaterial | null;
+  privilegeMaterial: PrivilegeMaterial | null;
   presets: DataSourcePresetRecord[];
-  setProofMaterial: (material: ProofMaterial | null) => void;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [createDomain, setCreateDomain] = useState(DATA_SOURCE_DOMAINS[1]);
@@ -108,11 +110,8 @@ export function DataSourcePresetPanel({
   const [assignmentSelectorExpression, setAssignmentSelectorExpression] = useState(() =>
     readLocalString(DATA_SOURCE_SELECTOR_STORAGE_KEY, ""),
   );
-  const [confirmed, setConfirmed] = useState(false);
   const [renderClientId, setRenderClientId] = useState("");
   const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
-  const [applyConfirmed, setApplyConfirmed] = useState(false);
-  const [applyProofTtlSecs, setApplyProofTtlSecs] = useState(300);
   const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(30);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
   const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
@@ -120,13 +119,13 @@ export function DataSourcePresetPanel({
   const [lifecycleDescription, setLifecycleDescription] = useState("");
   const [lifecycleDefinitionText, setLifecycleDefinitionText] = useState(DEFAULT_DEFINITION);
   const [lifecycleCloneName, setLifecycleCloneName] = useState("");
-  const [lifecycleConfirmed, setLifecycleConfirmed] = useState(false);
   const [lastDiff, setLastDiff] = useState<DataSourcePresetDiffResponse | null>(null);
   const [lastTest, setLastTest] = useState<DataSourcePresetTestResponse | null>(null);
   const [lastUpdate, setLastUpdate] = useState<UpdateDataSourcePresetResponse | null>(null);
   const [lastAssignment, setLastAssignment] = useState<AssignDataSourcePresetResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState<DataSourceConfirmationAction | null>(null);
 
   const assignablePresets = useMemo(
     () => presets.filter((preset) => preset.domain === assignDomain),
@@ -185,7 +184,6 @@ export function DataSourcePresetPanel({
     setLifecycleDescription(lifecyclePreset.description ?? "");
     setLifecycleDefinitionText(JSON.stringify(lifecyclePreset.definition, null, 2));
     setLifecycleCloneName(defaultCloneName(lifecyclePreset.name));
-    setLifecycleConfirmed(false);
     setLastDiff(null);
     setLastTest(null);
     setLastUpdate(null);
@@ -212,8 +210,12 @@ export function DataSourcePresetPanel({
     });
   }
 
-  async function submitAssignment(event: FormEvent<HTMLFormElement>) {
+  function submitAssignment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setPendingConfirmation("assignment");
+  }
+
+  async function executeAssignment() {
     await runPanelAction(setPending, setActionError, async () => {
       if (assignmentSelectorParse.error) {
         throw new Error(`Invalid target expression: ${assignmentSelectorParse.error}`);
@@ -222,15 +224,12 @@ export function DataSourcePresetPanel({
         throw new Error("Add at least one matching VPS target");
       }
       const response = await onAssignPreset({
-        confirmed,
+        confirmed: true,
         domain: assignDomain,
         preset_id: effectivePresetId,
         selector_expression: assignmentSelectorExpression.trim(),
       });
       setLastAssignment(response);
-      if (!response.confirmation_required) {
-        setConfirmed(false);
-      }
     });
   }
 
@@ -247,41 +246,43 @@ export function DataSourcePresetPanel({
       if (!renderClientId) {
         throw new Error("Select a VPS before applying a data-source patch");
       }
-      if (!applyConfirmed) {
-        throw new Error("Confirm before applying a persistent data-source patch");
-      }
-      if (!proofMaterial) {
-        throw new Error("Unlock proof before applying a data-source patch");
+      if (!privilegeMaterial) {
+        throw new Error("Unlock privilege before applying a data-source patch");
       }
       const rendered =
         renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : await onRenderHotConfig(renderClientId);
       const operation: JobOperation = { type: "data_source_config_patch", toml: rendered.toml };
-      const built = await buildEnvelopesForOperation({
+      const selectorExpression = selectorExpressionForClientIds([renderClientId]);
+      const timeoutSecs = clampInteger(applyTimeoutSecs, 1, 3600);
+      const built = await buildPrivilegeForJobOperation({
         clientIds: [renderClientId],
+        commandType: "data_source_config_patch",
         operation,
-        proofTtlSecs: clampInteger(applyProofTtlSecs, 15, 3600),
-        superPassword: proofMaterial.superPassword,
-        superSaltHex: proofMaterial.superSaltHex,
+        privilegeMaterial,
+        selectorExpression,
+        timeoutSecs,
       });
       const response = await onCreateJob({
         argv: [],
         canary_count: null,
-        selector_expression: selectorExpressionForClientIds([renderClientId]),
+        selector_expression: selectorExpression,
         command: "data_source_config_patch",
         confirmed: true,
         destructive: false,
-        envelope: null,
-        envelopes: built.envelopes,
         force_unprivileged: false,
         operation,
         privileged: true,
-        timeout_secs: clampInteger(applyTimeoutSecs, 1, 3600),
+        privilege_assertion: built.privilegeAssertion,
+        timeout_secs: timeoutSecs,
       });
       setRenderedHotConfig(rendered);
       setLastApplyJob(response);
       setLastApplyPayloadHash(built.payloadHashHex);
-      setApplyConfirmed(false);
     });
+  }
+
+  function confirmApplyRenderedHotConfig() {
+    setPendingConfirmation("apply");
   }
 
   async function diffLifecyclePreset() {
@@ -332,24 +333,75 @@ export function DataSourcePresetPanel({
     });
   }
 
-  async function updateLifecyclePreset() {
+  function updateLifecyclePreset() {
+    setPendingConfirmation("lifecycle-update");
+  }
+
+  async function executeLifecyclePresetUpdate() {
     if (!lifecyclePreset || lifecyclePreset.built_in) {
       return;
     }
     await runPanelAction(setPending, setActionError, async () => {
       const response = await onUpdatePreset(lifecyclePreset.id, {
-        confirmed: lifecycleConfirmed,
+        confirmed: true,
         definition: parseDefinition(lifecycleDefinitionText),
         description: lifecycleDescription.trim() || null,
       });
       setLastUpdate(response);
       setLastDiff(response.diff);
       setLastTest(null);
-      if (!response.confirmation_required) {
-        setLifecycleConfirmed(false);
-      }
     });
   }
+
+  async function confirmDataSourceAction() {
+    const action = pendingConfirmation;
+    if (!action) {
+      return;
+    }
+    setPendingConfirmation(null);
+    if (action === "assignment") {
+      await executeAssignment();
+    } else if (action === "apply") {
+      await applyRenderedHotConfig();
+    } else {
+      await executeLifecyclePresetUpdate();
+    }
+  }
+
+  const dataSourceConfirmationTitle =
+    pendingConfirmation === "assignment"
+      ? "Assign data-source preset"
+      : pendingConfirmation === "apply"
+        ? "Apply data-source patch"
+        : "Update data-source preset";
+  const dataSourceConfirmationDetail =
+    pendingConfirmation === "assignment"
+      ? "Confirm the selected preset and resolved VPS assignment set."
+      : pendingConfirmation === "apply"
+        ? "Confirm the rendered hot-config patch for the selected VPS."
+        : "Confirm updating this preset for assigned VPSs.";
+  const dataSourceConfirmationItems =
+    pendingConfirmation === "assignment"
+      ? [
+          { label: "Domain", value: assignDomain },
+          { label: "Preset", value: effectivePresetId ? shortId(effectivePresetId) : "none" },
+          { label: "Targets", value: `${assignmentTargetCount}/${agents.length}` },
+        ]
+      : pendingConfirmation === "apply"
+        ? [
+            {
+              label: "VPS",
+              value: agents.find((agent) => agent.id === renderClientId)
+                ? formatVpsName(agents.find((agent) => agent.id === renderClientId) as AgentView, vpsNameDisplayMode)
+                : renderClientId || "none",
+            },
+            { label: "Timeout", value: `${clampInteger(applyTimeoutSecs, 1, 3600)}s` },
+            { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+          ]
+        : [
+            { label: "Preset", value: lifecyclePreset?.name ?? "none" },
+            { label: "Assigned", value: `${lifecyclePreset?.assigned_client_count ?? 0} VPSs` },
+          ];
 
   function changeAssignDomain(domain: string) {
     setAssignDomain(domain);
@@ -368,6 +420,17 @@ export function DataSourcePresetPanel({
 
       {showPresetManagement && (
       <div className="managementGrid presetManagementGrid">
+        <ConfirmationPrompt
+          confirmLabel="Confirm"
+          detail={dataSourceConfirmationDetail}
+          items={dataSourceConfirmationItems}
+          onCancel={() => setPendingConfirmation(null)}
+          onConfirm={() => void confirmDataSourceAction()}
+          open={pendingConfirmation !== null}
+          pending={pending}
+          title={dataSourceConfirmationTitle}
+          tone={pendingConfirmation === "apply" ? "danger" : "normal"}
+        />
         <form className="compactForm presetForm" onSubmit={submitCreate}>
           <strong>Preset definition</strong>
           <div className="formRow presetFormRow">
@@ -466,22 +529,20 @@ export function DataSourcePresetPanel({
               }
             />
           </div>
-          <label className="checkLine">
-            <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-            <span>Confirm multi-VPS assignment</span>
-          </label>
-          <button
-            className="secondaryAction"
-            disabled={
-              pending ||
-              !effectivePresetId ||
-              assignmentTargetCount === 0 ||
-              Boolean(assignmentSelectorParse.error)
-            }
-            type="submit"
-          >
-            Assign preset
-          </button>
+          {pendingConfirmation !== "assignment" && (
+            <button
+              className="secondaryAction"
+              disabled={
+                pending ||
+                !effectivePresetId ||
+                assignmentTargetCount === 0 ||
+                Boolean(assignmentSelectorParse.error)
+              }
+              type="submit"
+            >
+              Assign preset
+            </button>
+          )}
         </form>
 
         <form className="compactForm presetForm" onSubmit={previewHotConfig}>
@@ -510,7 +571,7 @@ export function DataSourcePresetPanel({
               <textarea aria-label="Rendered data-source hot-config TOML" readOnly value={renderedHotConfig.toml} />
             </div>
           )}
-          <div className="inlineProof">
+          <div className="inlinePrivilege">
             <input
               aria-label="Data-source apply timeout"
               min={1}
@@ -519,35 +580,25 @@ export function DataSourcePresetPanel({
               type="number"
               value={applyTimeoutSecs}
             />
-            <input
-              aria-label="Data-source proof TTL"
-              min={15}
-              max={3600}
-              onChange={(event) => setApplyProofTtlSecs(Number(event.target.value))}
-              type="number"
-              value={applyProofTtlSecs}
-            />
           </div>
-          <ProofVaultBox
+          <PrivilegeVaultBox
             labelPrefix="Data-source"
             lastPayloadHash={lastApplyPayloadHash}
-            onOpenUnlock={onOpenProofUnlock}
-            onProofMaterialChange={setProofMaterial}
-            proofMaterial={proofMaterial}
-            unlockRedirectLabel="Unlock data-source proof"
+            onOpenUnlock={onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
+            unlockRedirectLabel="Unlock data-source privilege"
           />
-          <label className="checkLine">
-            <input checked={applyConfirmed} onChange={(event) => setApplyConfirmed(event.target.checked)} type="checkbox" />
-            <span>Confirm persistent patch apply</span>
-          </label>
-          <button
-            className="secondaryAction"
-            disabled={pending || !renderClientId || !applyConfirmed || !proofMaterial}
-            onClick={applyRenderedHotConfig}
-            type="button"
-          >
-            Apply selected patch
-          </button>
+          {pendingConfirmation !== "apply" && (
+            <button
+              className="secondaryAction"
+              disabled={pending || !renderClientId || !privilegeMaterial}
+              onClick={confirmApplyRenderedHotConfig}
+              type="button"
+            >
+              Apply selected patch
+            </button>
+          )}
           {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} accepted</span>}
         </form>
 
@@ -583,10 +634,6 @@ export function DataSourcePresetPanel({
             onChange={(event) => setLifecycleDefinitionText(event.target.value)}
             value={lifecycleDefinitionText}
           />
-          <label className="checkLine">
-            <input checked={lifecycleConfirmed} onChange={(event) => setLifecycleConfirmed(event.target.checked)} type="checkbox" />
-            <span>Confirm preset update for assigned VPSs</span>
-          </label>
           <div className="formRow presetLifecycleActions">
             <button className="secondaryAction" disabled={pending || !lifecyclePreset} onClick={diffLifecyclePreset} type="button">
               Diff
@@ -602,14 +649,16 @@ export function DataSourcePresetPanel({
             >
               Clone
             </button>
-            <button
-              className="secondaryAction"
-              disabled={pending || !lifecyclePreset || lifecyclePreset.built_in}
-              onClick={updateLifecyclePreset}
-              type="button"
-            >
-              Update
-            </button>
+            {pendingConfirmation !== "lifecycle-update" && (
+              <button
+                className="secondaryAction"
+                disabled={pending || !lifecyclePreset || lifecyclePreset.built_in}
+                onClick={updateLifecyclePreset}
+                type="button"
+              >
+                Update
+              </button>
+            )}
           </div>
           {(lastDiff || lastTest) && (
             <div className="configPreview lifecyclePreview">
@@ -821,7 +870,7 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
   const trafficLimitPlanCount =
     typeof evidence.traffic_limit_plan_count === "number" ? evidence.traffic_limit_plan_count : null;
   const workflow = typeof evidence.workflow === "string" ? evidence.workflow : null;
-  const proofGated = typeof evidence.proof_gated === "boolean" ? evidence.proof_gated : null;
+  const privilegeGated = typeof evidence.privilege_gated === "boolean" ? evidence.privilege_gated : null;
   const environmentPolicy = typeof evidence.environment_policy === "string" ? evidence.environment_policy : null;
   const ptyPolicy = typeof evidence.pty_policy === "string" ? evidence.pty_policy : null;
   const processCleanup = typeof evidence.process_cleanup === "string" ? evidence.process_cleanup : null;
@@ -837,8 +886,8 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
   if (workflow) {
     parts.push(formatSourceToken(workflow));
   }
-  if (proofGated) {
-    parts.push("proof-gated");
+  if (privilegeGated) {
+    parts.push("privilege-unlocked");
   }
   if (environmentPolicy) {
     parts.push(`${environmentPolicy} env`);

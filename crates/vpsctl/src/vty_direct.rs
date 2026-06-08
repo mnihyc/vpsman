@@ -23,11 +23,6 @@ pub(crate) fn submit_vty_direct_command(
             "/api/v1/key-lifecycle/report",
             token,
         )?)),
-        "super-password-rotations" => Ok(Some(http_get(
-            api_url,
-            "/api/v1/auth/proof-rotations?limit=50",
-            token,
-        )?)),
         "operator-sessions" => Ok(Some(http_get(
             api_url,
             "/api/v1/operator-sessions?limit=50",
@@ -54,9 +49,6 @@ pub(crate) fn submit_vty_direct_command(
         command if command.starts_with("operator-sessions ") => {
             Ok(Some(submit_operator_sessions(api_url, token, command)?))
         }
-        command if command.starts_with("super-password-rotations ") => Ok(Some(
-            submit_super_password_rotations(api_url, token, command)?,
-        )),
         command if command.starts_with("operator-session-revoke ") => Ok(Some(
             submit_operator_session_revoke(api_url, token, command)?,
         )),
@@ -118,23 +110,6 @@ fn submit_operator_sessions(api_url: &str, token: Option<&str>, command: &str) -
         )
     } else {
         Ok("usage: operator-sessions [--limit <1-200>]".to_string())
-    }
-}
-
-fn submit_super_password_rotations(
-    api_url: &str,
-    token: Option<&str>,
-    command: &str,
-) -> Result<String> {
-    let parts = command.split_whitespace().collect::<Vec<_>>();
-    if parts.len() == 3 && parts[1] == "--limit" {
-        http_get(
-            api_url,
-            &format!("/api/v1/auth/proof-rotations?limit={}", parts[2]),
-            token,
-        )
-    } else {
-        Ok("usage: super-password-rotations [--limit <1-200>]".to_string())
     }
 }
 

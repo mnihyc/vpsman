@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage, unlockProofFromTop } from "./support/consoleNavigation";
+import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -11,23 +11,14 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
-async function checkControl(locator: Locator) {
-  await locator.evaluate((element) => {
-    const input = element as HTMLInputElement;
-    if (!input.checked) {
-      input.click();
-    }
-  });
-}
-
 async function dispatchWithPrompt(composer: Locator) {
   await activate(composer.getByRole("button", { name: "Dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
 
-async function unlockDispatchProof(page: Page) {
-  await unlockProofFromTop(page);
+async function unlockDispatchPrivilege(page: Page) {
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 }
 
@@ -39,7 +30,7 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
 
   const composer = page.locator(".commandComposer");
   await expect(composer.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
-  await unlockDispatchProof(page);
+  await unlockDispatchPrivilege(page);
   await activate(composer.getByRole("button", { name: "Resumable upload" }));
   await composer.getByLabel("Resumable upload source").setInputFiles({
     name: "payload.bin",
@@ -53,7 +44,6 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   await expect(composer.getByLabel("Resumable upload multi-target policy")).toHaveValue("same-offset");
   await composer.getByLabel("Resumable upload multi-target policy").selectOption("independent-offsets");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
-  await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable upload progress")).toContainText("Upload complete");
@@ -101,7 +91,7 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await unlockDispatchProof(page);
+  await unlockDispatchPrivilege(page);
   await activate(composer.getByRole("button", { name: "Resumable upload" }));
   await composer.getByLabel("Resumable upload producer").selectOption("source-artifact");
   await composer.getByLabel("Resumable upload source artifact").selectOption("62626262-2222-4333-8444-555555555555");
@@ -109,7 +99,6 @@ test("orchestrates browser resumable upload from retained source artifact", asyn
   await composer.getByLabel("Resumable upload mode").fill("0644");
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
-  await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable upload progress")).toContainText("Upload complete");
@@ -150,13 +139,12 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await unlockDispatchProof(page);
+  await unlockDispatchPrivilege(page);
   await activate(composer.getByRole("button", { name: "Resumable download" }));
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("browser-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
-  await checkControl(composer.getByLabel("Confirmed"));
 
   await activate(composer.getByRole("button", { name: "Dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
@@ -243,14 +231,13 @@ test("streams browser resumable download through writable file handle", async ({
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
-  await unlockDispatchProof(page);
+  await unlockDispatchPrivilege(page);
   await activate(composer.getByRole("button", { name: "Resumable download" }));
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("streamed-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
   await composer.getByLabel("Resumable download save method").selectOption("stream-to-file");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
-  await checkControl(composer.getByLabel("Confirmed"));
   await dispatchWithPrompt(composer);
 
   await expect(composer.getByLabel("Resumable download progress")).toContainText("Download complete");

@@ -70,6 +70,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) dashboard_network_top_limit: u8,
     #[serde(default = "default_bulk_output_compare_mode")]
     pub(crate) bulk_output_compare_mode: String,
+    #[serde(default = "default_enrollment_install_command_template")]
+    pub(crate) enrollment_install_command_template: String,
 }
 
 impl Default for OperatorPreferences {
@@ -83,6 +85,7 @@ impl Default for OperatorPreferences {
             dashboard_resource_top_limit: default_dashboard_top_limit(),
             dashboard_network_top_limit: default_dashboard_top_limit(),
             bulk_output_compare_mode: default_bulk_output_compare_mode(),
+            enrollment_install_command_template: default_enrollment_install_command_template(),
         }
     }
 }
@@ -115,6 +118,9 @@ impl OperatorPreferences {
                 self.bulk_output_compare_mode,
                 "binary",
                 &["binary", "text"],
+            ),
+            enrollment_install_command_template: normalize_enrollment_install_command_template(
+                self.enrollment_install_command_template,
             ),
         }
     }
@@ -163,6 +169,10 @@ fn default_bulk_output_compare_mode() -> String {
     "binary".to_string()
 }
 
+pub(crate) fn default_enrollment_install_command_template() -> String {
+    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash".to_string()
+}
+
 fn normalize_dashboard_top_limit(value: u8) -> u8 {
     value.clamp(3, 16)
 }
@@ -181,6 +191,15 @@ fn normalize_dashboard_curve_exclusions(values: Vec<String>) -> Vec<String> {
         normalized.push(trimmed.to_string());
     }
     normalized
+}
+
+fn normalize_enrollment_install_command_template(value: String) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default_enrollment_install_command_template()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

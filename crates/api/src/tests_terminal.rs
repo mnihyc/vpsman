@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashMap;
 use vpsman_common::JobCommand;
 
 #[test]
@@ -15,6 +14,8 @@ fn terminal_job_commands_use_operation_payload_and_type() {
             session_id,
             argv: vec!["/bin/sh".to_string(), "-l".to_string()],
             cwd: Some("/root".to_string()),
+            user: None,
+            user_policy: vpsman_common::TerminalUserPolicy::Fail,
             cols: 120,
             rows: 40,
             replay_from_seq: Some(7),
@@ -25,10 +26,9 @@ fn terminal_job_commands_use_operation_payload_and_type() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(request.command_type_label(), "terminal_open");
@@ -106,6 +106,8 @@ fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
             session_id: Uuid::nil(),
             argv: vec!["/bin/sh".to_string()],
             cwd: None,
+            user: None,
+            user_policy: vpsman_common::TerminalUserPolicy::Fail,
             cols: 120,
             rows: 40,
             replay_from_seq: None,
@@ -116,10 +118,9 @@ fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
         canary_count: None,
         force_unprivileged: false,
         privileged: true,
+        privilege_assertion: None,
         idempotency_key: None,
         reconnect_policy: None,
-        envelope: None,
-        envelopes: HashMap::new(),
     };
 
     assert_eq!(
@@ -131,6 +132,8 @@ fn terminal_job_commands_reject_unsafe_or_oversized_payloads() {
         session_id: Uuid::new_v4(),
         argv: vec!["sh".to_string()],
         cwd: None,
+        user: None,
+        user_policy: vpsman_common::TerminalUserPolicy::Fail,
         cols: 120,
         rows: 40,
         replay_from_seq: None,

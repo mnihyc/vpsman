@@ -1,5 +1,5 @@
 import { parseFileMode, type FilePushPayload } from "../fileTransfer";
-import { parseCommandArgv } from "../proof";
+import { parseCommandArgv } from "../privilege";
 import type { JobOperation } from "../types";
 
 export type DispatchMode =
@@ -11,7 +11,6 @@ export type DispatchMode =
   | "file_transfer_upload"
   | "file_transfer_download"
   | "hot_config"
-  | "auth_rotate"
   | "agent_update"
   | "agent_update_check"
   | "agent_update_activate"
@@ -41,6 +40,8 @@ export function buildOperation(
   terminalSessionId: string,
   terminalArgv: string,
   terminalCwd: string,
+  terminalUser: string,
+  terminalUserPolicy: "fail" | "fallback",
   terminalCols: number,
   terminalRows: number,
   terminalReplayFromSeq: string,
@@ -58,8 +59,6 @@ export function buildOperation(
   supervisorEnv: string,
   supervisorLogBytes: number,
   hotConfigToml: string,
-  rotationProofKeyHex: string,
-  rotationGeneration: string,
   updateArtifactUrl: string,
   updateSha256Hex: string,
   updateArtifactSignatureHex: string,
@@ -95,6 +94,8 @@ export function buildOperation(
       terminalSessionId,
       terminalArgv,
       terminalCwd,
+      terminalUser,
+      terminalUserPolicy,
       terminalCols,
       terminalRows,
       terminalReplayFromSeq,
@@ -154,20 +155,6 @@ export function buildOperation(
       throw new Error("Hot config TOML is required");
     }
     return { type: "hot_config", toml };
-  }
-  if (mode === "auth_rotate") {
-    const proofKeyHex = rotationProofKeyHex.trim().toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(proofKeyHex)) {
-      throw new Error("New proof key must be derived before rotation");
-    }
-    const generation = rotationGeneration.trim();
-    return generation
-      ? {
-          type: "auth_proof_key_rotate",
-          new_proof_key_hex: proofKeyHex,
-          rotation_generation: generation,
-        }
-      : { type: "auth_proof_key_rotate", new_proof_key_hex: proofKeyHex };
   }
   if (mode === "agent_update") {
     if (!updateArtifactUrl.startsWith("https://")) {
@@ -289,9 +276,6 @@ export function operationCommandLabel(mode: DispatchMode, commandText: string): 
   if (mode === "agent_update_check") {
     return "agent_update_check";
   }
-  if (mode === "auth_rotate") {
-    return "auth_proof_key_rotate";
-  }
   if (mode === "file_transfer_upload") {
     return "file_transfer_upload";
   }
@@ -299,10 +283,6 @@ export function operationCommandLabel(mode: DispatchMode, commandText: string): 
     return "file_transfer_download";
   }
   return mode;
-}
-
-export function commandMinProtocolVersion(_mode: DispatchMode): number {
-  return 1;
 }
 
 export function terminalReady(action: TerminalAction, sessionId: string, argv: string, inputText: string): boolean {
@@ -328,6 +308,8 @@ function buildTerminalOperation(
   sessionIdInput: string,
   argvInput: string,
   cwdInput: string,
+  userInput: string,
+  userPolicy: "fail" | "fallback",
   colsInput: number,
   rowsInput: number,
   replayFromSeqInput: string,
@@ -347,12 +329,15 @@ function buildTerminalOperation(
       throw new Error("Terminal executable must be an absolute path");
     }
     const cwd = cwdInput.trim();
+    const user = userInput.trim();
     const replayFromSeq = replayFromSeqInput.trim();
     return {
       type: "terminal_open",
       session_id: sessionId,
       argv,
       cwd: cwd ? cwd : null,
+      user: user ? user : null,
+      user_policy: userPolicy,
       cols: clampInteger(colsInput, 20, 240),
       rows: clampInteger(rowsInput, 5, 120),
       ...(replayFromSeq ? { replay_from_seq: clampInteger(Number(replayFromSeq), 0, Number.MAX_SAFE_INTEGER) } : {}),

@@ -1,8 +1,9 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiPost, isApiUnauthorized } from "../api";
 import type {
   AssignDataSourcePresetRequest,
   AssignDataSourcePresetResponse,
+  BulkTagMutationRequest,
   BulkResolveResponse,
   CloneDataSourcePresetRequest,
   CreateDataSourcePresetRequest,
@@ -14,10 +15,16 @@ import type {
   DataSourcePresetTestRequest,
   DataSourcePresetTestResponse,
   DataSourceStatusRecord,
+  HotConfigRuleTemplateRecord,
+  HotConfigRuleTemplateRenderRequest,
+  HotConfigRuleTemplateRenderResponse,
   JobTargetSelection,
+  PrivilegeAssertion,
+  TagMutationResponse,
   TagView,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
+  UpsertHotConfigRuleTemplateRequest,
 } from "../types";
 
 export function useInventoryData(apiToken: string, onUnauthorized: () => void, onFleetChanged: () => Promise<void>) {
@@ -25,6 +32,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [dataSourcePresets, setDataSourcePresets] = useState<DataSourcePresetRecord[]>([]);
   const [dataSourceAssignments, setDataSourceAssignments] = useState<DataSourcePresetAssignmentRecord[]>([]);
   const [dataSourceStatus, setDataSourceStatus] = useState<DataSourceStatusRecord[]>([]);
+  const [hotConfigRuleTemplates, setHotConfigRuleTemplates] = useState<HotConfigRuleTemplateRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
   const [tagsLoading, setTagsLoading] = useState(false);
 
@@ -32,16 +40,24 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     setTagsLoading(true);
     setTagsError(null);
     try {
-      const [nextTags, nextDataSourcePresets, nextDataSourceAssignments, nextDataSourceStatus] = await Promise.all([
+      const [
+        nextTags,
+        nextDataSourcePresets,
+        nextDataSourceAssignments,
+        nextDataSourceStatus,
+        nextRuleTemplates,
+      ] = await Promise.all([
         apiGet<TagView[]>("/api/v1/tags", apiToken),
         apiGet<DataSourcePresetRecord[]>("/api/v1/data-source-presets", apiToken),
         apiGet<DataSourcePresetAssignmentRecord[]>("/api/v1/data-source-assignments", apiToken),
         apiGet<DataSourceStatusRecord[]>("/api/v1/data-source-status", apiToken),
+        apiGet<HotConfigRuleTemplateRecord[]>("/api/v1/hot-config/rule-templates", apiToken),
       ]);
       setTags(nextTags);
       setDataSourcePresets(nextDataSourcePresets);
       setDataSourceAssignments(nextDataSourceAssignments);
       setDataSourceStatus(nextDataSourceStatus);
+      setHotConfigRuleTemplates(nextRuleTemplates);
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
@@ -49,6 +65,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         setDataSourcePresets([]);
         setDataSourceAssignments([]);
         setDataSourceStatus([]);
+        setHotConfigRuleTemplates([]);
         setTagsError("Operator login required");
         return;
       }
@@ -59,17 +76,46 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   }, [apiToken, onUnauthorized]);
 
   const createTag = useCallback(
-    async (name: string) => {
-      await apiPost("/api/v1/tags", apiToken, { name });
+    async (name: string, privilegeAssertion: PrivilegeAssertion) => {
+      await apiPost("/api/v1/tags", apiToken, { confirmed: true, name, privilege_assertion: privilegeAssertion });
       await loadTagInventory();
     },
     [apiToken, loadTagInventory],
   );
 
   const assignTag = useCallback(
-    async (clientId: string, tag: string) => {
-      await apiPost(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, { tag });
+    async (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => {
+      await apiPost(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, {
+        confirmed: true,
+        privilege_assertion: privilegeAssertion,
+        tag,
+      });
       await Promise.all([onFleetChanged(), loadTagInventory()]);
+    },
+    [apiToken, loadTagInventory, onFleetChanged],
+  );
+
+  const bulkMutateTags = useCallback(
+    async (request: BulkTagMutationRequest) => {
+      const response = await apiPost<TagMutationResponse>("/api/v1/tags/bulk", apiToken, request);
+      if (!response.confirmation_required) {
+        await Promise.all([onFleetChanged(), loadTagInventory()]);
+      }
+      return response;
+    },
+    [apiToken, loadTagInventory, onFleetChanged],
+  );
+
+  const deleteTag = useCallback(
+    async (tag: string, confirmed: boolean, privilegeAssertion: PrivilegeAssertion) => {
+      const response = await apiPost<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
+        confirmed,
+        privilege_assertion: privilegeAssertion,
+      });
+      if (!response.confirmation_required) {
+        await Promise.all([onFleetChanged(), loadTagInventory()]);
+      }
+      return response;
     },
     [apiToken, loadTagInventory, onFleetChanged],
   );
@@ -145,12 +191,41 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     [apiToken],
   );
 
+  const upsertHotConfigRuleTemplate = useCallback(
+    async (request: UpsertHotConfigRuleTemplateRequest) => {
+      const response = await apiPost<HotConfigRuleTemplateRecord>(
+        "/api/v1/hot-config/rule-templates",
+        apiToken,
+        request,
+      );
+      await loadTagInventory();
+      return response;
+    },
+    [apiToken, loadTagInventory],
+  );
+
+  const renderHotConfigRuleTemplate = useCallback(
+    async (templateId: string, request: HotConfigRuleTemplateRenderRequest) =>
+      apiPost<HotConfigRuleTemplateRenderResponse>(
+        `/api/v1/hot-config/rule-templates/${encodeURIComponent(templateId)}/render`,
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const deleteHotConfigRuleTemplate = useCallback(
+    async (templateId: string) => {
+      await apiDelete(`/api/v1/hot-config/rule-templates/${encodeURIComponent(templateId)}`, apiToken);
+      await loadTagInventory();
+    },
+    [apiToken, loadTagInventory],
+  );
+
   const resolveBulkPreview = useCallback(
-    async (selectorExpression: string, destructive: boolean, confirmed = false) =>
+    async (selectorExpression: string) =>
       apiPost<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, {
         selector_expression: selectorExpression,
-        destructive,
-        confirmed,
       }),
     [apiToken],
   );
@@ -164,15 +239,20 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   return {
     assignDataSourcePreset,
     assignTag,
+    bulkMutateTags,
     cloneDataSourcePreset,
     createDataSourcePreset,
     createTag,
     dataSourceAssignments,
     dataSourcePresets,
     dataSourceStatus,
+    deleteHotConfigRuleTemplate,
+    deleteTag,
     diffDataSourcePreset,
     loadTagInventory,
+    hotConfigRuleTemplates,
     renderDataSourceHotConfig,
+    renderHotConfigRuleTemplate,
     resolveBulkPreview,
     resolveJobTargets,
     testDataSourcePreset,
@@ -180,5 +260,6 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     tagsError,
     tagsLoading,
     updateDataSourcePreset,
+    upsertHotConfigRuleTemplate,
   };
 }

@@ -22,7 +22,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({ pag
 
   await login(page);
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
-  await expect(page.locator(".quickStats .metric", { hasText: "Connected" }).getByText(String(expectedTotal))).toBeVisible({
+  await expect(page.locator(".quickStats .metric", { hasText: "Online" }).getByText(String(expectedTotal))).toBeVisible({
     timeout: 30_000,
   });
   await expect(page.getByRole("heading", { name: "Operational Health" })).toBeVisible();
@@ -87,13 +87,14 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({ pag
   await maybeScreenshot(page, testInfo.project.name, "fleet");
   await expectCleanLayout(page);
 
-  await openConsoleSubpage(page, "Tags", "Targeting");
-  await expect(page.getByRole("heading", { name: "Targeting" })).toBeVisible();
-  await checkControl(page.getByLabel("provider:alpha", { exact: true }));
-  await checkControl(page.getByLabel("country:US", { exact: true }));
-  await page.getByRole("group", { name: "Bulk tag match mode" }).getByRole("button", { name: "All", exact: true }).click();
+  await openConsoleSubpage(page, "Tags", "Bulk");
+  await expect(page.getByRole("heading", { name: "Bulk tags" })).toBeVisible();
+  await page.getByRole("searchbox", { name: "Bulk tag selector expression" }).fill("provider:alpha && country:US");
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Preview targets" }).click();
-  await expect(page.getByText("2 targets")).toBeVisible();
+  await expect(page.getByText("2/24")).toBeVisible();
+  await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
+  await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
   await expectCleanLayout(page);
 
   await verifyDesktopSubpages(page);
@@ -167,15 +168,6 @@ async function expectLiveFleetTelemetry(page: Page) {
   await expect(inspector).not.toContainText(/No rollup|No rate samples|No counters|No data|unavailable/i);
 }
 
-async function checkControl(locator: Locator) {
-  await locator.evaluate((element) => {
-    const input = element as HTMLInputElement;
-    if (!input.checked) {
-      input.click();
-    }
-  });
-}
-
 async function exerciseColumnControls(page: Page, grid: Locator) {
   const nameHeader = grid.locator(".gridHeaderCell", { hasText: "Name" }).first();
   const providerHeader = grid.locator(".gridHeaderCell", { hasText: "Provider" }).first();
@@ -205,16 +197,20 @@ async function verifyDesktopSubpages(page: Page) {
     ["Fleet", "Alerts", "Fleet alerts"],
     ["Fleet", "Alert policies", "Alert policies"],
     ["Fleet", "Notifications", "Notification channels"],
-    ["Tags", "Tag registry", "Tags"],
-    ["Tags", "Data-source presets", "Data-source presets"],
-    ["Tags", "Source status", "Active source status"],
+    ["Tags", "Registry", "Tags"],
+    ["Tags", "Assignments", "Tag assignments"],
+    ["Tags", "Bulk", "Bulk tags"],
+    ["Config", "Overview", "Config overview"],
+    ["Config", "Rules", "Config rules"],
+    ["Config", "Templates", "Data-source presets"],
+    ["Config", "Status", "Active source status"],
     ["Jobs", "History", "Job history"],
     ["Jobs", "Dispatch", "Dispatch command"],
     ["Jobs", "Updates", "Agent update releases"],
     ["Jobs", "Transfer history", "File transfer sessions"],
     ["Jobs", "Terminal sessions", "Terminal sessions"],
     ["Jobs", "Processes", "Process supervisor inventory"],
-    ["Jobs", "Approvals", "No privileged approvals"],
+    ["Jobs", "Schedule runs", "Schedule runs"],
     ["Schedules", "Schedule registry", "Schedules"],
     ["Topology", "Graph", "Topology graph"],
     ["Topology", "Tunnel plans", "Tunnel plans"],
@@ -233,7 +229,7 @@ async function verifyDesktopSubpages(page: Page) {
     ["Access", "Operators", "Operators"],
     ["Access", "VPS keys", "Enrollment tokens"],
     ["Access", "Gateway", "Gateway sessions"],
-    ["Access", "Proof vault", "Proof rotation history"],
+    ["Access", "Privilege unlock", "Privilege unlock"],
   ] as const;
 
   for (const [view, subpage, heading] of subpages) {

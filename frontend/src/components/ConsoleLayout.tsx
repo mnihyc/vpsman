@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -85,17 +85,24 @@ export function ConsoleActionMenu({
 export function ConsoleCollapsibleSection({
   children,
   defaultOpen = false,
+  forceOpenKey,
   storageKey,
   summary,
   title,
 }: {
   children: ReactNode;
   defaultOpen?: boolean;
+  forceOpenKey?: string | null;
   storageKey: string;
   summary?: ReactNode;
   title: string;
 }) {
   const [open, setOpen] = useStoredBoolean(storageKey, defaultOpen);
+  useEffect(() => {
+    if (forceOpenKey) {
+      setOpen(true);
+    }
+  }, [forceOpenKey, setOpen]);
   return (
     <Collapsible.Root className="consoleCollapsible" onOpenChange={setOpen} open={open}>
       <div className="consoleCollapsibleHeader">

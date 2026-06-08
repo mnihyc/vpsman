@@ -6,14 +6,14 @@ import type { AgentView } from "../../types";
 
 type BackupPolicyFormProps = {
   agents: AgentView[];
+  cronExpr: string;
   includeConfig: boolean;
-  intervalSecs: number;
   keepLast: number;
   name: string;
-  onConfirmedChange: (value: boolean) => void;
+  confirmationOpen: boolean;
+  onCronExprChange: (value: string) => void;
   onEnabledChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
-  onIntervalSecsChange: (value: number) => void;
   onKeepLastChange: (value: number) => void;
   onNameChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
@@ -25,7 +25,6 @@ type BackupPolicyFormProps = {
   pathsCount: number;
   pathsText: string;
   pending: boolean;
-  policyConfirmed: boolean;
   policyEnabled: boolean;
   recipientPublicKeyHex: string;
   retentionDays: number;
@@ -38,14 +37,14 @@ type BackupPolicyFormProps = {
 
 export function BackupPolicyForm({
   agents,
+  cronExpr,
   includeConfig,
-  intervalSecs,
   keepLast,
   name,
-  onConfirmedChange,
+  confirmationOpen,
+  onCronExprChange,
   onEnabledChange,
   onIncludeConfigChange,
-  onIntervalSecsChange,
   onKeepLastChange,
   onNameChange,
   onPathsTextChange,
@@ -57,7 +56,6 @@ export function BackupPolicyForm({
   pathsCount,
   pathsText,
   pending,
-  policyConfirmed,
   policyEnabled,
   recipientPublicKeyHex,
   retentionDays,
@@ -116,14 +114,12 @@ export function BackupPolicyForm({
         </label>
         <div className="dispatchControls">
           <label>
-            <span>Interval</span>
+            <span>UTC cron</span>
             <input
-              aria-label="Backup policy interval seconds"
-              max={31_536_000}
-              min={1}
-              onChange={(event) => onIntervalSecsChange(Number(event.target.value))}
-              type="number"
-              value={intervalSecs}
+              aria-label="Backup policy UTC cron expression"
+              onChange={(event) => onCronExprChange(event.target.value)}
+              placeholder="0 3 * * *"
+              value={cronExpr}
             />
           </label>
           <label>
@@ -166,19 +162,18 @@ export function BackupPolicyForm({
           <input checked={policyEnabled} onChange={(event) => onEnabledChange(event.target.checked)} type="checkbox" />
           <span>Enabled</span>
         </label>
-        <label className="checkLine">
-          <input checked={policyConfirmed} onChange={(event) => onConfirmedChange(event.target.checked)} type="checkbox" />
-          <span>Confirmed</span>
-        </label>
         <div className="backupScopeList">
           <CalendarClock size={18} />
+          <span>{cronExpr.trim() || "cron required"}</span>
           <span>{includeConfig ? "config" : "no config"}</span>
           <span>{pathsCount} path{pathsCount === 1 ? "" : "s"}</span>
         </div>
-        <button className="primaryAction" disabled={pending || !name.trim() || targetCount === 0 || !targetExpressionValid} type="submit">
-          <Save size={17} />
-          Save policy
-        </button>
+        {!confirmationOpen && (
+          <button className="primaryAction" disabled={pending || !name.trim() || !cronExpr.trim() || targetCount === 0 || !targetExpressionValid} type="submit">
+            <Save size={17} />
+            Save policy
+          </button>
+        )}
       </form>
     </>
   );

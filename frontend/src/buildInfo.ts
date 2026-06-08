@@ -1,0 +1,3 @@
+declare const __VPSMAN_FRONTEND_BUILD_NUMBER__: string;
+
+export const FRONTEND_BUILD_NUMBER = __VPSMAN_FRONTEND_BUILD_NUMBER__;

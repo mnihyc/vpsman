@@ -3,8 +3,9 @@ use serde::Deserialize;
 use vpsman_common::JobCommand;
 
 use crate::{
+    commands_schedules::selector_expression_from_targets,
     http::http_post_json,
-    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 #[derive(Debug, Deserialize)]
@@ -22,18 +23,13 @@ pub(crate) fn resolve_target_ids(
     token: Option<&str>,
     clients: &[String],
     tags: &[String],
-    destructive: bool,
-    confirmed: bool,
 ) -> Result<Vec<String>> {
     let body = http_post_json(
         api_url,
         "/api/v1/bulk/resolve",
         token,
         &serde_json::json!({
-            "clients": clients,
-            "tags": tags,
-            "destructive": destructive,
-            "confirmed": confirmed,
+            "selector_expression": selector_expression_from_targets(clients, tags),
         }),
     )?;
     let response: BulkResolveResponse =
@@ -45,7 +41,7 @@ pub(crate) fn resolve_target_ids(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         !target_ids.is_empty(),
-        "job-create resolved no targets; provide explicit clients or tags with connected agents"
+        "job-create resolved no targets; provide explicit clients or tags with online agents"
     );
     Ok(target_ids)
 }
@@ -59,7 +55,7 @@ pub(crate) struct PrivilegedOperationRequest<'a> {
     pub(crate) tags: &'a [String],
     pub(crate) password_env: &'a str,
     pub(crate) super_salt_hex: Option<&'a str>,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
@@ -70,20 +66,25 @@ pub(crate) fn submit_privileged_operation(
 ) -> Result<String> {
     let password = load_super_password(request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex)?;
+    let selector_expression = selector_expression_from_targets(request.clients, request.tags);
     let target_ids = resolve_target_ids(
         request.api_url,
         request.token,
         request.clients,
         request.tags,
-        false,
-        request.confirmed,
     )?;
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let privilege = build_privilege_for_job_command(
         &target_ids,
         request.operation,
+        request.command_label,
+        &selector_expression,
         &password,
         &salt_hex,
-        request.proof_ttl_secs,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        None,
+        request.force_unprivileged,
+        true,
     )?;
     http_post_json(
         request.api_url,
@@ -93,15 +94,13 @@ pub(crate) fn submit_privileged_operation(
             "command": request.command_label,
             "argv": [],
             "operation": request.operation,
-            "clients": request.clients,
-            "tags": request.tags,
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": false,
             "confirmed": request.confirmed,
             "force_unprivileged": request.force_unprivileged,
             "timeout_secs": request.timeout_secs,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }

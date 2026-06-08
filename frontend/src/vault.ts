@@ -1,9 +1,9 @@
-import { normalizeHex, type ProofMaterial } from "./proof";
+import { normalizeHex, type PrivilegeMaterial } from "./privilege";
 import type { AuthResponse, OperatorView } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const PROOF_STORAGE_KEY = "vpsman.proofVault";
+const PRIVILEGE_STORAGE_KEY = "vpsman.privilegeVault";
 const AUTH_STORAGE_KEY = "vpsman.authVault";
 const KDF_ITERATIONS = 180_000;
 
@@ -26,12 +26,12 @@ type StoredAuthVaultPayload = {
   operator: OperatorView;
 };
 
-export function hasProofVault(): boolean {
-  return window.localStorage.getItem(PROOF_STORAGE_KEY) !== null;
+export function hasPrivilegeVault(): boolean {
+  return window.localStorage.getItem(PRIVILEGE_STORAGE_KEY) !== null;
 }
 
-export function clearProofVault(): void {
-  window.localStorage.removeItem(PROOF_STORAGE_KEY);
+export function clearPrivilegeVault(): void {
+  window.localStorage.removeItem(PRIVILEGE_STORAGE_KEY);
 }
 
 export function hasAuthVault(): boolean {
@@ -42,7 +42,7 @@ export function clearAuthVault(): void {
   window.localStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
-export async function saveProofVault(material: ProofMaterial, passphrase: string): Promise<void> {
+export async function savePrivilegeVault(material: PrivilegeMaterial, passphrase: string): Promise<void> {
   if (!passphrase) {
     throw new Error("Vault passphrase is required");
   }
@@ -54,20 +54,20 @@ export async function saveProofVault(material: ProofMaterial, passphrase: string
     superSaltHex: normalizeHex(material.superSaltHex),
   };
   const record = await encryptVaultPayload(normalizedMaterial, passphrase);
-  window.localStorage.setItem(PROOF_STORAGE_KEY, JSON.stringify(record));
+  window.localStorage.setItem(PRIVILEGE_STORAGE_KEY, JSON.stringify(record));
 }
 
-export async function loadProofVault(passphrase: string): Promise<ProofMaterial> {
+export async function loadPrivilegeVault(passphrase: string): Promise<PrivilegeMaterial> {
   if (!passphrase) {
     throw new Error("Vault passphrase is required");
   }
-  const raw = window.localStorage.getItem(PROOF_STORAGE_KEY);
+  const raw = window.localStorage.getItem(PRIVILEGE_STORAGE_KEY);
   if (!raw) {
-    throw new Error("No proof vault exists");
+    throw new Error("No privilege vault exists");
   }
-  const material = await decryptVaultPayload<Partial<ProofMaterial>>(raw, passphrase);
+  const material = await decryptVaultPayload<Partial<PrivilegeMaterial>>(raw, passphrase);
   if (typeof material.superPassword !== "string" || typeof material.superSaltHex !== "string") {
-    throw new Error("Proof vault payload is invalid");
+    throw new Error("Privilege vault payload is invalid");
   }
   return {
     superPassword: material.superPassword,
@@ -173,7 +173,7 @@ function parseVaultRecord(raw: string): StoredEncryptedVault {
     typeof record.iv_hex !== "string" ||
     typeof record.ciphertext_hex !== "string"
   ) {
-    throw new Error("Proof vault record is invalid");
+    throw new Error("Privilege vault record is invalid");
   }
   return {
     version: 1,

@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use vpsman_common::{render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan};
 
 use crate::{
-    http::http_post_json, proof::build_envelopes_for_job_command, vty_jobs::VtyProofContext,
+    commands_schedules::selector_expression_from_targets, http::http_post_json,
+    privilege::build_privilege_for_job_command, vty_jobs::VtyPrivilegeContext,
 };
 
 #[derive(Debug, PartialEq)]
@@ -14,7 +15,7 @@ pub(crate) struct VtyTunnelProbeRequest {
     pub(crate) count: u8,
     pub(crate) interval_ms: u16,
     pub(crate) timeout_secs: u64,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
 }
 
 pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRequest> {
@@ -23,7 +24,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
     let mut count = 3_u8;
     let mut interval_ms = 500_u16;
     let mut timeout_secs = 60_u64;
-    let mut proof_ttl_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
 
     let mut index = 0;
     while index < tokens.len() {
@@ -93,8 +94,8 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 )?;
                 index += 1;
             }
-            "--proof-ttl" | "--proof-ttl-secs" => {
-                proof_ttl_secs = parse_bounded_u64(
+            "--privilege-ttl" | "--privilege-ttl-secs" => {
+                privilege_ttl_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
@@ -102,15 +103,19 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--proof-ttl=") => {
-                proof_ttl_secs =
-                    parse_bounded_u64(flag_value(value, "--proof-ttl="), "--proof-ttl", 1, 3600)?;
+            value if value.starts_with("--privilege-ttl=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    flag_value(value, "--privilege-ttl="),
+                    "--privilege-ttl",
+                    1,
+                    3600,
+                )?;
                 index += 1;
             }
-            value if value.starts_with("--proof-ttl-secs=") => {
-                proof_ttl_secs = parse_bounded_u64(
-                    flag_value(value, "--proof-ttl-secs="),
-                    "--proof-ttl-secs",
+            value if value.starts_with("--privilege-ttl-secs=") => {
+                privilege_ttl_secs = parse_bounded_u64(
+                    flag_value(value, "--privilege-ttl-secs="),
+                    "--privilege-ttl-secs",
                     1,
                     3600,
                 )?;
@@ -126,14 +131,14 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
         count,
         interval_ms,
         timeout_secs,
-        proof_ttl_secs,
+        privilege_ttl_secs,
     })
 }
 
 pub(crate) fn submit_vty_tunnel_probe(
     api_url: &str,
     token: Option<&str>,
-    proof_context: &VtyProofContext,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyTunnelProbeRequest,
 ) -> Result<String> {
     let plan_text = std::fs::read_to_string(&request.plan_file)
@@ -147,12 +152,20 @@ pub(crate) fn submit_vty_tunnel_probe(
         count: request.count,
         interval_ms: request.interval_ms,
     };
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
-        std::slice::from_ref(&endpoint.local_client_id),
+    let target_clients = vec![endpoint.local_client_id];
+    let selector_expression = selector_expression_from_targets(&target_clients, &[]);
+    let privilege = build_privilege_for_job_command(
+        &target_clients,
         &operation,
-        &proof_context.password,
-        &proof_context.salt_hex,
-        request.proof_ttl_secs,
+        "network_probe",
+        &selector_expression,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        None,
+        false,
+        true,
     )?;
 
     http_post_json(
@@ -162,15 +175,13 @@ pub(crate) fn submit_vty_tunnel_probe(
         &serde_json::json!({
             "command": "network_probe",
             "argv": [],
-            "clients": [endpoint.local_client_id],
-            "tags": [],
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": false,
             "confirmed": false,
             "timeout_secs": request.timeout_secs,
             "operation": operation,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
@@ -246,7 +257,7 @@ mod tests {
             "--interval-ms",
             "750",
             "--timeout=120",
-            "--proof-ttl",
+            "--privilege-ttl",
             "90",
         ])
         .unwrap();
@@ -259,7 +270,7 @@ mod tests {
         assert_eq!(request.count, 5);
         assert_eq!(request.interval_ms, 750);
         assert_eq!(request.timeout_secs, 120);
-        assert_eq!(request.proof_ttl_secs, 90);
+        assert_eq!(request.privilege_ttl_secs, 90);
     }
 
     #[test]

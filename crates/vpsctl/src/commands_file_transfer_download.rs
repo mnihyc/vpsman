@@ -20,7 +20,7 @@ use crate::{
     },
     http::{http_get, http_get_bytes},
     jobs::resolve_target_ids,
-    proof::{load_super_password, load_super_salt_hex},
+    privilege::{load_super_password, load_super_salt_hex},
 };
 
 #[derive(Debug)]
@@ -29,7 +29,7 @@ pub(crate) struct FileTransferDownloadPlan {
     pub(crate) path: String,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) session_id: Option<Uuid>,
@@ -96,7 +96,7 @@ pub(crate) fn file_transfer_download(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     session_id: Option<Uuid>,
@@ -114,7 +114,7 @@ pub(crate) fn file_transfer_download(
         path,
         clients,
         tags,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed,
         session_id,
@@ -162,14 +162,7 @@ pub(crate) fn execute_file_transfer_download(
         &resume_token_hash,
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let target_ids = resolve_target_ids(
-        api_url,
-        token,
-        &plan.clients,
-        &plan.tags,
-        false,
-        plan.confirmed,
-    )?;
+    let target_ids = resolve_target_ids(api_url, token, &plan.clients, &plan.tags)?;
     let mut events = String::new();
     let destinations = download_destination_specs(
         &plan.destination,
@@ -185,7 +178,7 @@ pub(crate) fn execute_file_transfer_download(
             target_ids: &target_ids,
             password,
             salt_hex,
-            proof_ttl_secs: plan.proof_ttl_secs,
+            privilege_ttl_secs: plan.privilege_ttl_secs,
             timeout_secs: plan.timeout_secs,
             confirmed: plan.confirmed,
         };

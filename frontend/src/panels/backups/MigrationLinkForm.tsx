@@ -3,11 +3,12 @@ import type { BackupRequestRecord, MigrationLinkRecord, RestorePlanRecord } from
 import { shortId, statusClass } from "../../utils";
 
 type MigrationLinkFormProps = {
-  migrationConfirmed: boolean;
+  linkConfirmationOpen: boolean;
+  runConfirmationOpen: boolean;
   migrationNote: string;
   migrationRestorePlanId: string;
   pending: boolean;
-  proofReady: boolean;
+  privilegeReady: boolean;
   archivePath: string;
   clientLabel: (clientId: string) => string;
   forceUnprivileged: boolean;
@@ -18,7 +19,6 @@ type MigrationLinkFormProps = {
   restorePlans: RestorePlanRecord[];
   selectedPlan: RestorePlanRecord | null;
   sourceBackup: BackupRequestRecord | null;
-  onMigrationConfirmedChange: (value: boolean) => void;
   onMigrationNoteChange: (value: string) => void;
   onMigrationRestorePlanIdChange: (value: string) => void;
   onRunMigrationRestore: () => void;
@@ -26,11 +26,12 @@ type MigrationLinkFormProps = {
 };
 
 export function MigrationLinkForm({
-  migrationConfirmed,
+  linkConfirmationOpen,
+  runConfirmationOpen,
   migrationNote,
   migrationRestorePlanId,
   pending,
-  proofReady,
+  privilegeReady,
   archivePath,
   clientLabel,
   forceUnprivileged,
@@ -41,7 +42,6 @@ export function MigrationLinkForm({
   restorePlans,
   selectedPlan,
   sourceBackup,
-  onMigrationConfirmedChange,
   onMigrationNoteChange,
   onMigrationRestorePlanIdChange,
   onRunMigrationRestore,
@@ -79,15 +79,9 @@ export function MigrationLinkForm({
       required: true,
     },
     {
-      label: "Proof",
-      detail: proofReady ? "Ready" : "Unlock proof before running the restore",
-      ready: proofReady,
-      required: true,
-    },
-    {
-      label: "Confirmation",
-      detail: migrationConfirmed ? "Confirmed for link/run" : "Confirm before writing migration state",
-      ready: migrationConfirmed,
+      label: "Privilege",
+      detail: privilegeReady ? "Ready" : "Unlock privilege before running the restore",
+      ready: privilegeReady,
       required: true,
     },
     {
@@ -180,32 +174,28 @@ export function MigrationLinkForm({
             value={migrationNote}
           />
         </label>
-        <label className="checkboxLine">
-          <input
-            checked={migrationConfirmed}
-            onChange={(event) => onMigrationConfirmedChange(event.target.checked)}
-            type="checkbox"
-          />
-          Confirm migration link
-        </label>
       </div>
       <div className="actionRow">
-        <button
-          className="primaryAction"
-          disabled={pending || !migrationRestorePlanId || !migrationConfirmed}
-          onClick={onSubmit}
-          type="button"
-        >
-          Link migration
-        </button>
-        <button
-          className="secondaryAction"
-          disabled={pending || !migrationRestorePlanId || !migrationConfirmed || !proofReady || !artifactReady || !decryptReady}
-          onClick={onRunMigrationRestore}
-          type="button"
-        >
-          Run migration restore
-        </button>
+        {!linkConfirmationOpen && (
+          <button
+            className="primaryAction"
+            disabled={pending || !migrationRestorePlanId}
+            onClick={onSubmit}
+            type="button"
+          >
+            Link migration
+          </button>
+        )}
+        {!runConfirmationOpen && (
+          <button
+            className="secondaryAction"
+            disabled={pending || !migrationRestorePlanId || !privilegeReady || !artifactReady || !decryptReady}
+            onClick={onRunMigrationRestore}
+            type="button"
+          >
+            Run migration restore
+          </button>
+        )}
       </div>
     </section>
   );

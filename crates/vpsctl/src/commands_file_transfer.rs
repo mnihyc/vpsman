@@ -20,9 +20,10 @@ use vpsman_common::{
 
 use crate::{
     commands_file_transfers::file_transfer_source_download_path,
+    commands_schedules::selector_expression_from_targets,
     http::{http_get, http_get_bytes, http_post_json},
     jobs::resolve_target_ids,
-    proof::{build_envelopes_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
 
 #[derive(Debug)]
@@ -32,7 +33,7 @@ pub(crate) struct FileTransferUploadPlan {
     pub(crate) mode: u32,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) session_id: Option<Uuid>,
@@ -162,7 +163,7 @@ pub(crate) fn file_transfer_upload(
     tags: Vec<String>,
     password_env: String,
     super_salt_hex: Option<String>,
-    proof_ttl_secs: u64,
+    privilege_ttl_secs: u64,
     timeout_secs: u64,
     confirmed: bool,
     session_id: Option<Uuid>,
@@ -182,7 +183,7 @@ pub(crate) fn file_transfer_upload(
         mode,
         clients,
         tags,
-        proof_ttl_secs,
+        privilege_ttl_secs,
         timeout_secs,
         confirmed,
         session_id,
@@ -244,14 +245,7 @@ pub(crate) fn execute_file_transfer_upload(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    let target_ids = resolve_target_ids(
-        api_url,
-        token,
-        &plan.clients,
-        &plan.tags,
-        false,
-        plan.confirmed,
-    )?;
+    let target_ids = resolve_target_ids(api_url, token, &plan.clients, &plan.tags)?;
     let mut events = String::new();
     push_event(
         &mut events,
@@ -279,7 +273,7 @@ pub(crate) fn execute_file_transfer_upload(
         target_ids: &target_ids,
         password,
         salt_hex,
-        proof_ttl_secs: plan.proof_ttl_secs,
+        privilege_ttl_secs: plan.privilege_ttl_secs,
         timeout_secs: plan.timeout_secs,
         confirmed: plan.confirmed,
     };
@@ -341,7 +335,7 @@ pub(crate) fn execute_file_transfer_upload(
                 target_ids: &active_target_ids,
                 password,
                 salt_hex,
-                proof_ttl_secs: plan.proof_ttl_secs,
+                privilege_ttl_secs: plan.privilege_ttl_secs,
                 timeout_secs: plan.timeout_secs,
                 confirmed: plan.confirmed,
             };
@@ -401,7 +395,7 @@ pub(crate) fn execute_file_transfer_upload(
                         target_ids: &targets,
                         password,
                         salt_hex,
-                        proof_ttl_secs: plan.proof_ttl_secs,
+                        privilege_ttl_secs: plan.privilege_ttl_secs,
                         timeout_secs: plan.timeout_secs,
                         confirmed: plan.confirmed,
                     };
@@ -460,7 +454,7 @@ pub(crate) fn execute_file_transfer_upload(
                 target_ids: &active_target_ids,
                 password,
                 salt_hex,
-                proof_ttl_secs: plan.proof_ttl_secs,
+                privilege_ttl_secs: plan.privilege_ttl_secs,
                 timeout_secs: plan.timeout_secs,
                 confirmed: plan.confirmed,
             };
@@ -514,7 +508,7 @@ pub(crate) struct TransferSubmitContext<'a> {
     pub(crate) target_ids: &'a [String],
     pub(crate) password: &'a str,
     pub(crate) salt_hex: &'a str,
-    pub(crate) proof_ttl_secs: u64,
+    pub(crate) privilege_ttl_secs: u64,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
 }
@@ -524,12 +518,19 @@ pub(crate) fn submit_transfer_step(
     command_label: &str,
     operation: &JobCommand,
 ) -> Result<CreateJobResponse> {
-    let (_payload_hash_hex, envelopes) = build_envelopes_for_job_command(
+    let selector_expression = selector_expression_from_targets(ctx.target_ids, &[]);
+    let privilege = build_privilege_for_job_command(
         ctx.target_ids,
         operation,
+        command_label,
+        &selector_expression,
         ctx.password,
         ctx.salt_hex,
-        ctx.proof_ttl_secs,
+        ctx.privilege_ttl_secs,
+        ctx.timeout_secs,
+        None,
+        false,
+        true,
     )?;
     let response = http_post_json(
         ctx.api_url,
@@ -539,15 +540,13 @@ pub(crate) fn submit_transfer_step(
             "command": command_label,
             "argv": [],
             "operation": operation,
-            "clients": ctx.target_ids,
-            "tags": Vec::<String>::new(),
+            "selector_expression": selector_expression,
             "privileged": true,
             "destructive": false,
             "confirmed": ctx.confirmed,
             "force_unprivileged": false,
             "timeout_secs": ctx.timeout_secs,
-            "envelope": null,
-            "envelopes": envelopes,
+            "privilege_assertion": privilege.privilege_assertion,
         }),
     )?;
     let response: CreateJobResponse =
