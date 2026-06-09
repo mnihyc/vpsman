@@ -95,7 +95,7 @@ fn submit_agent_identity_upsert(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok(http_post_json(
+    http_post_json(
         api_url,
         "/api/v1/agent-identities",
         token,
@@ -107,13 +107,13 @@ fn submit_agent_identity_upsert(
             "replace_existing_key": has_flag(&parts, "--replace-existing-key"),
             "confirmed": has_flag(&parts, "--confirmed"),
         }),
-    )?)
+    )
 }
 
 fn submit_client_key_revoke(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let client_id = required_flag(&parts, "--client-id")?;
-    Ok(http_post_json(
+    http_post_json(
         api_url,
         &format!("/api/v1/clients/{client_id}/key-revocations"),
         token,
@@ -121,7 +121,7 @@ fn submit_client_key_revoke(api_url: &str, token: Option<&str>, command: &str) -
             "reason": optional_flag(&parts, "--reason"),
             "confirmed": has_flag(&parts, "--confirmed"),
         }),
-    )?)
+    )
 }
 
 fn required_flag(parts: &[&str], name: &str) -> Result<String> {
@@ -135,7 +135,7 @@ fn optional_flag(parts: &[&str], name: &str) -> Option<String> {
 }
 
 fn has_flag(parts: &[&str], name: &str) -> bool {
-    parts.iter().any(|part| *part == name)
+    parts.contains(&name)
 }
 
 fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {

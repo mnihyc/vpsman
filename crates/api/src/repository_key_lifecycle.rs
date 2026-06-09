@@ -36,7 +36,7 @@ impl Repository {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| client_id.as_str())
+            .unwrap_or(client_id.as_str())
             .to_string();
         let tags = normalize_tags(&request.tags);
 
@@ -384,7 +384,7 @@ impl Repository {
                 let prior_status: String = row.try_get("status")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
-                    fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
+                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
                         .await?
                 {
                     mark_postgres_agent_revoked(
@@ -442,7 +442,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 let record =
-                    fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
+                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
                         .await?
                         .context("inserted client key revocation was not readable")?;
                 tx.commit().await?;

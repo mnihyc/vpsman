@@ -319,8 +319,6 @@ fn append_agent_status_alerts(alerts: &mut Vec<FleetAlertView>, agents: &[AgentV
         }
         let severity = if agent.status == "offline" {
             "critical"
-        } else if agent.status == "never" {
-            "warning"
         } else {
             "warning"
         };

@@ -545,20 +545,6 @@ fn validate_required_hex32(value: Option<&str>, field: &str) -> Result<(), Strin
     validate_hex32(value, field)
 }
 
-fn validate_hex32_ring(values: &[String], field: &str, max_entries: usize) -> Result<(), String> {
-    if values.len() > max_entries {
-        return Err(format!("{field}_too_many"));
-    }
-    let mut normalized = std::collections::BTreeSet::new();
-    for value in values {
-        validate_hex32(value, field)?;
-        if !normalized.insert(value.trim().to_ascii_lowercase()) {
-            return Err(format!("{field}_duplicate"));
-        }
-    }
-    Ok(())
-}
-
 fn validate_hex32(value: &str, field: &str) -> Result<(), String> {
     if value.len() != 64 {
         return Err(format!("{field}_must_be_32_byte_hex"));
