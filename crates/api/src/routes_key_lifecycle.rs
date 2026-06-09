@@ -97,7 +97,9 @@ fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Resu
             "agent_identity_confirmation_required",
         ));
     }
-    validate_client_id(&request.client_id)?;
+    if let Some(client_id) = request.client_id.as_deref() {
+        validate_client_id(client_id)?;
+    }
     validate_fixed_hex32(&request.client_public_key_hex, "client_public_key_hex")?;
     if let Some(display_name) = request.display_name.as_deref() {
         validate_optional_display_name(display_name)?;

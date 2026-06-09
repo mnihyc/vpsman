@@ -67,7 +67,7 @@ pub(crate) struct TotpConfirmCommand {
 #[derive(Debug, Args)]
 pub(crate) struct AgentIdentityUpsertCommand {
     #[arg(long)]
-    pub(crate) client_id: String,
+    pub(crate) client_id: Option<String>,
     #[arg(long)]
     pub(crate) client_public_key_hex: String,
     #[arg(long)]

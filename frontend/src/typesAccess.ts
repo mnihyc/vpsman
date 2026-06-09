@@ -7,7 +7,7 @@ export type AgentIdentityView = {
 };
 
 export type UpsertAgentIdentityRequest = {
-  client_id: string;
+  client_id?: string | null;
   client_public_key_hex: string;
   display_name?: string | null;
   tags: string[];

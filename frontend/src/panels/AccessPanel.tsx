@@ -199,7 +199,6 @@ export function AccessPanel({
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
-    identityClientId.trim().length > 0 &&
     isFixedHex32(identityPublicKeyHex);
   const canRevokeClientKey =
     canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
@@ -310,9 +309,7 @@ export function AccessPanel({
     event.preventDefault();
     if (!canUpsertIdentity) {
       setIdentityError(
-        identityClientId.trim().length === 0
-          ? "Client ID is required"
-          : "Client public key must be exactly 64 hex characters",
+        "Client public key must be exactly 64 hex characters",
       );
       return;
     }
@@ -1008,7 +1005,7 @@ export function AccessPanel({
               aria-label="Agent identity client ID"
               disabled={!canManageOperators || identityPending}
               onChange={(event) => setIdentityClientId(event.target.value)}
-              placeholder="vps-edge-nrt-04"
+              placeholder="auto-generated if empty"
               value={identityClientId}
             />
           </label>

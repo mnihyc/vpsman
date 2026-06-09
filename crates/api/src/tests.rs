@@ -205,7 +205,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
     assert!(repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "client-delete".to_string(),
+                client_id: Some("client-delete".to_string()),
                 client_public_key_hex: "55".repeat(32),
                 display_name: Some("retired edge".to_string()),
                 tags: Vec::new(),
@@ -249,7 +249,7 @@ async fn gateway_identity_validation_uses_direct_client_public_key() {
     let identity = repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "direct-edge-01".to_string(),
+                client_id: Some("direct-edge-01".to_string()),
                 client_public_key_hex: "55".repeat(32),
                 display_name: Some("Direct edge 01".to_string()),
                 tags: vec!["role:edge".to_string()],

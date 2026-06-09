@@ -389,7 +389,8 @@ pub(crate) struct AgentIdentityView {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpsertAgentIdentityRequest {
-    pub(crate) client_id: String,
+    #[serde(default)]
+    pub(crate) client_id: Option<String>,
     pub(crate) client_public_key_hex: String,
     pub(crate) display_name: Option<String>,
     #[serde(default)]

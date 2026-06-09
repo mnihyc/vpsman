@@ -25,7 +25,10 @@ impl Repository {
         request: &UpsertAgentIdentityRequest,
         operator: &AuthContext,
     ) -> Result<AgentIdentityView> {
-        let client_id = request.client_id.trim();
+        let client_id = match request.client_id.as_deref() {
+            Some(id) if !id.trim().is_empty() => id.trim().to_string(),
+            _ => self.generate_auto_client_id().await?,
+        };
         let public_key = decode_public_key_hex(&request.client_public_key_hex)?;
         let public_key_sha256_hex = public_key_sha256_hex(&public_key);
         let display_name = request
@@ -33,12 +36,12 @@ impl Repository {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or(client_id)
+            .unwrap_or_else(|| client_id.as_str())
             .to_string();
         let tags = normalize_tags(&request.tags);
 
         if self
-            .is_client_key_revoked(client_id, &public_key)
+            .is_client_key_revoked(&client_id, &public_key)
             .await
             .context("failed to check agent key revocation before identity import")?
         {
@@ -47,7 +50,7 @@ impl Repository {
 
         match self {
             Self::Memory(memory) => {
-                if memory.hidden_clients.read().await.contains(client_id) {
+                if memory.hidden_clients.read().await.contains(&client_id) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
                 if memory
@@ -61,7 +64,7 @@ impl Repository {
                 {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                if let Some(existing) = memory.client_public_keys.read().await.get(client_id) {
+                if let Some(existing) = memory.client_public_keys.read().await.get(&client_id) {
                     if !existing.is_empty() && existing != &public_key && !request.replace_existing_key
                     {
                         anyhow::bail!("agent_identity_key_change_requires_replace");
@@ -146,7 +149,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                if fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
+                if fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
                     .await?
                     .is_some()
                 {
@@ -160,7 +163,7 @@ impl Repository {
                     FOR UPDATE
                     "#,
                 )
-                .bind(client_id)
+                .bind(&client_id)
                 .fetch_optional(&mut *tx)
                 .await?;
 
@@ -188,7 +191,7 @@ impl Repository {
                         WHERE id = $1 AND hidden_at IS NULL
                         "#,
                     )
-                    .bind(client_id)
+                    .bind(&client_id)
                     .bind(request.display_name.as_deref().map(str::trim).filter(|value| !value.is_empty()))
                     .bind(&public_key)
                     .execute(&mut *tx)
@@ -202,7 +205,7 @@ impl Repository {
                         VALUES ($1, $2, $3, 'offline', 1, '{}'::jsonb)
                         "#,
                     )
-                    .bind(client_id)
+                    .bind(&client_id)
                     .bind(&display_name)
                     .bind(&public_key)
                     .execute(&mut *tx)
@@ -218,7 +221,7 @@ impl Repository {
                         ON CONFLICT DO NOTHING
                         "#,
                     )
-                    .bind(client_id)
+                    .bind(&client_id)
                     .bind(tag_id)
                     .execute(&mut *tx)
                     .await?;
@@ -232,18 +235,47 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind(format!("client:{client_id}"))
+                .bind(format!("client:{}", &client_id))
                 .bind(json!({
-                    "client_id": client_id,
+                    "client_id": &client_id,
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "replace_existing_key": request.replace_existing_key,
                     "tags": tags,
                 }))
                 .execute(&mut *tx)
                 .await?;
-                let view = fetch_postgres_agent_identity(&mut tx, client_id).await?;
+                let view = fetch_postgres_agent_identity(&mut tx, &client_id).await?;
                 tx.commit().await?;
                 Ok(view)
+            }
+        }
+    }
+
+    async fn generate_auto_client_id(&self) -> Result<String> {
+        match self {
+            Self::Memory(memory) => {
+                let max_numeric = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter_map(|agent| agent.id.parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0);
+                Ok((max_numeric + 1).to_string())
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT COALESCE(MAX(id::bigint), 0) AS max_id
+                    FROM clients
+                    WHERE id ~ '^\d+$'
+                    "#,
+                )
+                .fetch_one(pool)
+                .await?;
+                let max_id: i64 = row.try_get("max_id")?;
+                Ok((max_id + 1).to_string())
             }
         }
     }
@@ -335,7 +367,7 @@ impl Repository {
                 let prior_status: String = row.try_get("status")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
-                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
+                    fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
                         .await?
                 {
                     mark_postgres_agent_revoked(
@@ -393,7 +425,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 let record =
-                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
+                    fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
                         .await?
                         .context("inserted client key revocation was not readable")?;
                 tx.commit().await?;

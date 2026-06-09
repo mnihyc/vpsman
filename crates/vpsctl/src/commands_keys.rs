@@ -32,7 +32,7 @@ pub(crate) fn signing_keygen() -> Result<()> {
 }
 
 pub(crate) struct AgentIdentityUpsertOptions {
-    pub(crate) client_id: String,
+    pub(crate) client_id: Option<String>,
     pub(crate) client_public_key_hex: String,
     pub(crate) display_name: Option<String>,
     pub(crate) tags: Vec<String>,
@@ -45,20 +45,23 @@ pub(crate) fn agent_identity_upsert(
     token: Option<&str>,
     options: AgentIdentityUpsertOptions,
 ) -> Result<()> {
+    let mut body = serde_json::json!({
+        "client_public_key_hex": options.client_public_key_hex,
+        "display_name": options.display_name,
+        "tags": options.tags,
+        "replace_existing_key": options.replace_existing_key,
+        "confirmed": options.confirmed,
+    });
+    if let Some(client_id) = options.client_id.as_deref() {
+        body["client_id"] = serde_json::Value::String(client_id.to_string());
+    }
     println!(
         "{}",
         http_post_json(
             api_url,
             "/api/v1/agent-identities",
             token,
-            &serde_json::json!({
-                "client_id": options.client_id,
-                "client_public_key_hex": options.client_public_key_hex,
-                "display_name": options.display_name,
-                "tags": options.tags,
-                "replace_existing_key": options.replace_existing_key,
-                "confirmed": options.confirmed,
-            }),
+            &body,
         )?
     );
     Ok(())

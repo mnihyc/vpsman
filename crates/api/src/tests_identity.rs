@@ -9,7 +9,7 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
     let identity = repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "edge-direct-01".to_string(),
+                client_id: Some("edge-direct-01".to_string()),
                 client_public_key_hex: "11".repeat(32),
                 display_name: Some("LAX edge direct 01".to_string()),
                 tags: vec!["role:edge".to_string(), "region:us-west".to_string()],
@@ -46,7 +46,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
     let operator = identity_operator();
     repo.upsert_agent_identity(
         &UpsertAgentIdentityRequest {
-            client_id: "edge-direct-02".to_string(),
+            client_id: Some("edge-direct-02".to_string()),
             client_public_key_hex: "22".repeat(32),
             display_name: Some("SJC edge direct 02".to_string()),
             tags: Vec::new(),
@@ -61,7 +61,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
     assert!(repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "edge-direct-02".to_string(),
+                client_id: Some("edge-direct-02".to_string()),
                 client_public_key_hex: "33".repeat(32),
                 display_name: None,
                 tags: Vec::new(),
@@ -75,7 +75,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
 
     repo.upsert_agent_identity(
         &UpsertAgentIdentityRequest {
-            client_id: "edge-direct-02".to_string(),
+            client_id: Some("edge-direct-02".to_string()),
             client_public_key_hex: "33".repeat(32),
             display_name: None,
             tags: Vec::new(),
@@ -108,7 +108,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
     assert!(repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "edge-direct-02".to_string(),
+                client_id: Some("edge-direct-02".to_string()),
                 client_public_key_hex: "33".repeat(32),
                 display_name: None,
                 tags: Vec::new(),
@@ -127,7 +127,7 @@ async fn deleted_direct_identity_cannot_be_reanimated() {
     let operator = identity_operator();
     repo.upsert_agent_identity(
         &UpsertAgentIdentityRequest {
-            client_id: "edge-direct-03".to_string(),
+            client_id: Some("edge-direct-03".to_string()),
             client_public_key_hex: "44".repeat(32),
             display_name: Some("NRT edge direct 03".to_string()),
             tags: vec!["role:edge".to_string()],
@@ -157,7 +157,7 @@ async fn deleted_direct_identity_cannot_be_reanimated() {
     assert!(repo
         .upsert_agent_identity(
             &UpsertAgentIdentityRequest {
-                client_id: "edge-direct-03".to_string(),
+                client_id: Some("edge-direct-03".to_string()),
                 client_public_key_hex: "55".repeat(32),
                 display_name: Some("new NRT edge".to_string()),
                 tags: Vec::new(),
