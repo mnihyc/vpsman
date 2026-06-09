@@ -121,8 +121,6 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         context.operator.preferences.bulk_output_compare_mode,
         "binary"
     );
-    assert_eq!(
-        context
 }
 
 #[tokio::test]

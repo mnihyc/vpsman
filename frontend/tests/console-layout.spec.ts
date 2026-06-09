@@ -669,8 +669,12 @@ test("imports direct gateway identities and revokes current keys from the access
   );
 
   await page.goto("/");
+  await openConsoleSubpage(page, "Access", "VPS clients");
+  const accessTabs = page.locator(".accessTabs");
+  await activate(accessTabs.getByRole("button", { name: "VPS clients" }));
   await activate(page.getByRole("button", { name: "Open privilege unlock" }));
-  await activate(page.getByRole("tab", { name: "VPS clients" }));
+  await openConsoleSubpage(page, "Access", "VPS clients");
+  await activate(accessTabs.getByRole("button", { name: "VPS clients" }));
 
   await expect(
     page.getByRole("heading", { name: "Gateway agent identities" }),
