@@ -128,6 +128,33 @@ impl Repository {
                                 metadata,
                             )
                             .await?;
+                        } else if prior_status == "never" {
+                            let metadata = serde_json::json!({
+                                "from_status": "never",
+                                "to_status": "online",
+                                "reason": "agent_first_connection",
+                            });
+                            memory
+                                .audits
+                                .write()
+                                .await
+                                .push(crate::model::AuditLogView {
+                                    id: Uuid::new_v4(),
+                                    actor_id: None,
+                                    action: "agent.status_online".to_string(),
+                                    target: format!("client:{}", event.hello.client_id),
+                                    command_hash: None,
+                                    metadata: metadata.clone(),
+                                    created_at: crate::unix_now().to_string(),
+                                });
+                            self.record_client_status_webhook_event(
+                                &event.hello.client_id,
+                                Some("never"),
+                                "online",
+                                "agent_first_connection",
+                                metadata,
+                            )
+                            .await?;
                         }
                     }
                 } else {
@@ -241,6 +268,19 @@ impl Repository {
                             "old_internal_build_number": prior_build,
                             "stale_build_number": stale_build,
                             "new_internal_build_number": event.hello.internal_build_number,
+                            "gateway_id": &event.gateway_id,
+                        }),
+                    )
+                    .await?;
+                }
+                if accepted_hello && prior_status.as_deref() == Some("never") {
+                    record_client_status_transition_in_tx(
+                        &mut tx,
+                        &event.hello.client_id,
+                        Some("never"),
+                        "online",
+                        "agent_first_connection",
+                        serde_json::json!({
                             "gateway_id": &event.gateway_id,
                         }),
                     )

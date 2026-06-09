@@ -461,16 +461,37 @@ async fn main() -> Result<()> {
 async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
     let result = sqlx::query(
         r#"
-        UPDATE clients
-        SET status = 'offline'
-        WHERE status = 'online'
-          AND last_seen_at < now() - make_interval(secs => $1)
+        WITH updated AS (
+            UPDATE clients
+            SET status = 'offline'
+            WHERE status = 'online'
+              AND last_seen_at < now() - make_interval(secs => $1)
+            RETURNING id
+        ),
+        inserted AS (
+            INSERT INTO webhook_events (id, event_type, client_id, metadata, created_at)
+            SELECT gen_random_uuid(), 'agent.status_offline', id,
+                jsonb_build_object(
+                    'from_status', 'online',
+                    'to_status', 'offline',
+                    'reason', 'agent_offline_timeout'
+                ),
+                now()
+            FROM updated
+        )
+        SELECT count(*) AS client_count FROM updated
         "#,
     )
     .bind(timeout_secs as f64)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(result.rows_affected())
+    let count: i64 = result.try_get("client_count")?;
+    if count > 0 {
+        let _ = sqlx::query("SELECT pg_notify('webhook_events', 'offline_detection')")
+            .execute(pool)
+            .await;
+    }
+    Ok(count as u64)
 }
 
 async fn connect_postgres(postgres_url: &str, migrations_dir: &std::path::Path) -> Result<PgPool> {
