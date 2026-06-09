@@ -1637,3 +1637,91 @@
   background: #fff;
   padding: 14px;
 }
+
+.dataTable {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+  background: #fff;
+}
+
+.dataTable th,
+.dataTable td {
+  border-bottom: 1px solid #eef1f6;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.dataTable th {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.dataTable td {
+  color: #202124;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.dataTable tr:last-child td {
+  border-bottom: 0;
+}
+
+.compactTable td,
+.compactTable th {
+  padding-block: 7px;
+}
+
+.bulkTagApplyGrid {
+  grid-template-columns: minmax(360px, 0.85fr) minmax(440px, 1.25fr);
+}
+
+.bulkTagPreviewPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  align-content: start;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.bulkTagPreviewHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.bulkTagPreviewHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.bulkTagPreviewHeader strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.bulkTagPreviewHeader span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.bulkTagPreviewEmpty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 88px;
+  border: 1px dashed #dfe3eb;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #5f6368;
+  padding: 12px;
+}

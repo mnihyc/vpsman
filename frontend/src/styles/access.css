@@ -224,3 +224,140 @@
   line-height: 1.2;
   text-transform: uppercase;
 }
+
+.accessSummaryCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  padding: 14px 18px;
+  border-top: 1px solid #eef1f6;
+  border-bottom: 1px solid #eef1f6;
+  background: #fbfcff;
+}
+
+.accessSummaryCards .summaryCard {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.accessSummaryCards .summaryCard span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.accessSummaryCards .summaryCard strong,
+.accessSummaryCards .summaryCard small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.accessSummaryCards .summaryCard strong {
+  color: #202124;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.accessSummaryCards .summaryCard small {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.subpanelTabs.accessTabs,
+.accessSubnav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0;
+  width: auto;
+  margin: 14px 18px 0;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.subpanelTabs.accessTabs button,
+.accessSubnav button {
+  min-width: 0;
+  min-height: 38px;
+  border: 0;
+  border-right: 1px solid #dfe3eb;
+  border-bottom: 1px solid #dfe3eb;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 12px;
+}
+
+.subpanelTabs.accessTabs button:hover,
+.accessSubnav button:hover {
+  background: #f8fafd;
+}
+
+.subpanelTabs.accessTabs button.active,
+.subpanelTabs.accessTabs button[aria-selected="true"],
+.accessSubnav button.active,
+.accessSubnav button.selected {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.accessMain .workspaceSection {
+  padding: 18px;
+}
+
+.accessMain .controlPanel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.accessOverviewGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.metricRows {
+  display: grid;
+  gap: 8px;
+  padding: 14px 18px 18px;
+}
+
+.metricRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(180px, 1fr);
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid #eef1f6;
+  padding-bottom: 8px;
+}
+
+.metricRow:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.metricRow span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.metricRow strong {
+  min-width: 0;
+  color: #202124;
+  overflow-wrap: anywhere;
+}

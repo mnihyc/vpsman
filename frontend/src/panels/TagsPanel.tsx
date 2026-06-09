@@ -481,6 +481,8 @@ function BulkTagPanel({
     });
   }
 
+  const previewAgents = preview?.affected ?? [];
+
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
       <div className="compactForm bulkTagMutationForm">
@@ -563,13 +565,28 @@ function BulkTagPanel({
           Apply mutation
         </button>
       </div>
-      <div className="targetChipList bulkTagPreview">
-        {(preview?.affected ?? []).map((agent) => (
-          <span className="targetChip" key={agent.id} title={agent.id}>
-            {agent.display_name}
-          </span>
-        ))}
-      </div>
+      <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
+        <div className="bulkTagPreviewHeader">
+          <div>
+            <strong>Target preview</strong>
+            <span>{preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Preview before mutation"}</span>
+          </div>
+        </div>
+        {previewAgents.length > 0 ? (
+          <div className="targetChipList bulkTagPreview">
+            {previewAgents.map((agent) => (
+              <span className="targetChip" key={agent.id} title={agent.id}>
+                {agent.display_name}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div className="bulkTagPreviewEmpty">
+            <ShieldCheck size={18} />
+            <span>{preview ? "No VPSs would change for this mutation." : "Run preview to show selected VPSs and schedule impact."}</span>
+          </div>
+        )}
+      </section>
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"
         detail={action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}

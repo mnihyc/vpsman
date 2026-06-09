@@ -43,7 +43,7 @@ const accessSubpages = [
   "Overview",
   "Operators",
   "Privilege unlock",
-  "VPS clients",
+  "VPS keys",
   "Gateway",
 ] as const;
 
@@ -95,7 +95,7 @@ function accessSubpageFromRoute(subpage: string): AccessSubpage {
     case "privilege":
       return "Privilege unlock";
     case "clients":
-      return "VPS clients";
+      return "VPS keys";
     case "gateway":
       return "Gateway";
     default:
@@ -719,7 +719,7 @@ export function AccessPanel({
           </div>
         )}
 
-        {activeSubpage === "VPS clients" && (
+        {activeSubpage === "VPS keys" && (
           <div className="workspaceSection">
             <section className="controlPanel">
               <div className="sectionHeader compact">
@@ -763,8 +763,10 @@ export function AccessPanel({
                         <tr key={client.client_id}>
                           <td title={client.client_id}>
                             {formatVpsName(
-                              client.display_name,
-                              client.client_id,
+                              {
+                                client_id: client.client_id,
+                                display_name: client.display_name,
+                              },
                               vpsNameDisplayMode,
                             )}
                           </td>
@@ -913,7 +915,7 @@ export function AccessPanel({
       <aside className="fleetPanel accessInspector">
         <div className="accessConfigHeading">
           <strong>
-            {activeSubpage === "VPS clients"
+            {activeSubpage === "VPS keys"
               ? "Direct identity actions"
               : "Access actions"}
           </strong>
@@ -988,7 +990,7 @@ export function AccessPanel({
 
         <div
           className="sectionHeader compact"
-          hidden={activeSubpage !== "VPS clients"}
+          hidden={activeSubpage !== "VPS keys"}
         >
           <h2>Import identity</h2>
           <span>
@@ -997,7 +999,7 @@ export function AccessPanel({
         </div>
         <form
           className="sideForm"
-          hidden={activeSubpage !== "VPS clients"}
+          hidden={activeSubpage !== "VPS keys"}
           onSubmit={requestIdentityImport}
         >
           <label>
@@ -1073,14 +1075,14 @@ export function AccessPanel({
 
         <div
           className="sectionHeader compact"
-          hidden={activeSubpage !== "VPS clients"}
+          hidden={activeSubpage !== "VPS keys"}
         >
           <h2>Revoke key</h2>
           <span>{revokeError ?? "Block the current gateway key"}</span>
         </div>
         <form
           className="sideForm"
-          hidden={activeSubpage !== "VPS clients"}
+          hidden={activeSubpage !== "VPS keys"}
           onSubmit={requestClientKeyRevoke}
         >
           <label>
@@ -1162,7 +1164,7 @@ export function AccessPanel({
           className="timeline"
           hidden={
             activeSubpage === "Operators" ||
-            activeSubpage === "VPS clients" ||
+            activeSubpage === "VPS keys" ||
             activeSubpage === "Gateway"
           }
         >

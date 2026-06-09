@@ -117,9 +117,9 @@ function buildTargetImpactGroups(
     { key: "ready", label: "Ready", agents: groups.ready },
     { key: "stale", label: "Stale", agents: groups.stale },
     { key: "unavailable", label: "Unavailable", agents: groups.unavailable },
-    { key: "degraded", label: "Would degrade", agents: groups.degraded },
-    { key: "forced", label: "Forced best effort", agents: groups.forced },
-    { key: "observation_only", label: "Observation only", agents: groups.observation_only },
+    { key: "degraded", label: "Degrades", agents: groups.degraded },
+    { key: "forced", label: "Best effort", agents: groups.forced },
+    { key: "observation_only", label: "Observed only", agents: groups.observation_only },
     { key: "unsupported", label: "Unsupported", agents: groups.unsupported },
   ];
 }

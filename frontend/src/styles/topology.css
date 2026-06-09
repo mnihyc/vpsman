@@ -260,3 +260,15 @@
   font-size: 12px;
   line-height: 1.35;
 }
+
+.promotionWorkflow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.promotionStageCard {
+  width: 100%;
+}
+
+.promotionStageCard .dispatchControls {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
