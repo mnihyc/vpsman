@@ -197,73 +197,7 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     ) {
         return Err(ApiError::bad_request("invalid_bulk_output_compare_mode"));
     }
-    validate_enrollment_install_command_template(
-        preferences.enrollment_install_command_template.trim(),
-    )?;
     Ok(())
-}
-
-fn validate_enrollment_install_command_template(template: &str) -> Result<(), ApiError> {
-    if template.is_empty() {
-        return Err(ApiError::bad_request(
-            "empty_enrollment_install_command_template",
-        ));
-    }
-    if template.len() > 2000 {
-        return Err(ApiError::bad_request(
-            "enrollment_install_command_template_too_long",
-        ));
-    }
-    let variables = enrollment_template_variables(template)?;
-    let allowed = ["TOKEN", "API_URL", "INSTALL_MODE"];
-    for variable in &variables {
-        if !allowed.contains(&variable.as_str()) {
-            return Err(ApiError::bad_request(
-                "unknown_enrollment_install_command_variable",
-            ));
-        }
-    }
-    if !variables.iter().any(|variable| variable == "TOKEN") {
-        return Err(ApiError::bad_request(
-            "missing_enrollment_install_command_token_variable",
-        ));
-    }
-    Ok(())
-}
-
-fn enrollment_template_variables(template: &str) -> Result<Vec<String>, ApiError> {
-    let mut variables = Vec::new();
-    let bytes = template.as_bytes();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        if bytes[index] != b'{' {
-            if bytes[index] == b'}' {
-                return Err(ApiError::bad_request(
-                    "invalid_enrollment_install_command_template",
-                ));
-            }
-            index += 1;
-            continue;
-        }
-        let start = index + 1;
-        let Some(relative_end) = template[start..].find('}') else {
-            return Err(ApiError::bad_request(
-                "invalid_enrollment_install_command_template",
-            ));
-        };
-        let end = start + relative_end;
-        let variable = &template[start..end];
-        if variable.is_empty() || variable.contains('{') {
-            return Err(ApiError::bad_request(
-                "invalid_enrollment_install_command_template",
-            ));
-        }
-        if !variables.iter().any(|stored| stored == variable) {
-            variables.push(variable.to_string());
-        }
-        index = end + 1;
-    }
-    Ok(variables)
 }
 
 pub(crate) async fn list_operators(

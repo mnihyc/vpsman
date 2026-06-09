@@ -119,7 +119,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   Access: [
     { id: "overview", label: "Overview", description: "Session, vault, key, and live stream posture" },
     { id: "operators", label: "Operators", description: "Operator accounts, sessions, and TOTP" },
-    { id: "clients", label: "VPS keys", description: "Enrollment tokens and client key lifecycle" },
+    { id: "clients", label: "VPS keys", description: "Gateway identities and client key lifecycle" },
     { id: "gateway", label: "Gateway", description: "Gateway sessions and control-plane stream state" },
     { id: "privilege", label: "Privilege unlock", description: "Local privilege unlock and vault controls" },
   ],

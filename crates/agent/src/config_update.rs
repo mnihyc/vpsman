@@ -35,7 +35,6 @@ pub(crate) fn read_redacted_config(
             "supported_sections": [
                 "display_name",
                 "tcp_endpoints",
-                "discovery_url",
                 "backup",
                 "update",
                 "execution",
@@ -153,7 +152,6 @@ fn supported_config_autocomplete() -> serde_json::Value {
         "top_level": [
             "display_name",
             "tcp_endpoints",
-            "discovery_url",
             "telemetry_light_secs",
             "telemetry_full_secs",
             "tags"

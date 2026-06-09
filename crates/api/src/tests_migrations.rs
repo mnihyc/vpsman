@@ -11,7 +11,7 @@ use crate::{
     routes_backups::create_backup_request,
     routes_migrations::{create_migration_link, validate_create_migration_link},
     routes_restores::create_restore_plan,
-    state::{AppState, EnrollmentSettings},
+    state::AppState,
 };
 
 #[test]
@@ -164,7 +164,6 @@ fn test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

@@ -83,8 +83,9 @@ VTY session and returns the prompt to `vpsman>`.
 ## Useful VTY Commands
 
 ```text
-enrollment-tokens
-reenrollment-token-create --client-id edge-01 --confirmed
+agent-identity-upsert --client-id edge-01 --client-public-key-hex <hex> --confirmed
+client-key-revoke --client-id edge-01 --confirmed
+key-lifecycle-report
 key-lifecycle-report
 client-key-revocations
 client-key-revoke --client-id edge-01 --reason rebuilt --confirmed

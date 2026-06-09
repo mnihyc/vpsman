@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    cli::Command, commands::CommandContext, commands_auth, commands_enrollment, commands_inventory,
+    cli::Command, commands::CommandContext, commands_auth, commands_inventory, commands_keys,
     commands_schedules,
 };
 
@@ -69,63 +69,27 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_auth::totp_disable(api_url, token, command.password_env, command.code_env)?;
             Ok(None)
         }
-        Command::EnrollmentTokens => {
-            commands_enrollment::enrollment_tokens(api_url, token)?;
-            Ok(None)
-        }
-        Command::EnrollmentSettings => {
-            commands_enrollment::enrollment_settings(api_url, token)?;
-            Ok(None)
-        }
-        Command::EnrollmentSettingsUpdate(command) => {
-            commands_enrollment::enrollment_settings_update(api_url, token, command.settings_file)?;
-            Ok(None)
-        }
-        Command::EnrollmentTokenCreate(command) => {
-            commands_enrollment::enrollment_token_create(
+        Command::AgentIdentityUpsert(command) => {
+            commands_keys::agent_identity_upsert(
                 api_url,
                 token,
-                commands_enrollment::EnrollmentTokenCreateOptions {
-                    ttl_secs: command.ttl_secs,
-                    default_tags: command.default_tags,
-                    default_display_name: command.default_display_name,
-                    unmanaged_update_enabled: command.unmanaged_update_enabled,
-                    unmanaged_update_version_url: command.unmanaged_update_version_url,
-                    unmanaged_update_interval_secs: command.unmanaged_update_interval_secs,
-                    unmanaged_update_jitter_secs: command.unmanaged_update_jitter_secs,
-                    unmanaged_update_activate: command.unmanaged_update_activate,
-                    unmanaged_update_restart_agent: command.unmanaged_update_restart_agent,
-                },
-            )?;
-            Ok(None)
-        }
-        Command::ReenrollmentTokenCreate(command) => {
-            commands_enrollment::reenrollment_token_create(
-                api_url,
-                token,
-                commands_enrollment::ReenrollmentTokenCreateOptions {
+                commands_keys::AgentIdentityUpsertOptions {
                     client_id: command.client_id,
-                    ttl_secs: command.ttl_secs,
-                    default_tags: command.default_tags,
-                    default_display_name: command.default_display_name,
+                    client_public_key_hex: command.client_public_key_hex,
+                    display_name: command.display_name,
+                    tags: command.tags,
+                    replace_existing_key: command.replace_existing_key,
                     confirmed: command.confirmed,
-                    preserve_existing_assignments: command.preserve_existing_assignments,
-                    unmanaged_update_enabled: command.unmanaged_update_enabled,
-                    unmanaged_update_version_url: command.unmanaged_update_version_url,
-                    unmanaged_update_interval_secs: command.unmanaged_update_interval_secs,
-                    unmanaged_update_jitter_secs: command.unmanaged_update_jitter_secs,
-                    unmanaged_update_activate: command.unmanaged_update_activate,
-                    unmanaged_update_restart_agent: command.unmanaged_update_restart_agent,
                 },
             )?;
             Ok(None)
         }
         Command::ClientKeyRevocations(command) => {
-            commands_enrollment::client_key_revocations(api_url, token, command.limit)?;
+            commands_keys::client_key_revocations(api_url, token, command.limit)?;
             Ok(None)
         }
         Command::ClientKeyRevoke(command) => {
-            commands_enrollment::client_key_revoke(
+            commands_keys::client_key_revoke(
                 api_url,
                 token,
                 command.client_id,
@@ -135,24 +99,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             Ok(None)
         }
         Command::KeyLifecycleReport => {
-            commands_enrollment::key_lifecycle_report(api_url, token)?;
-            Ok(None)
-        }
-        Command::EnrollClaim(command) => {
-            commands_enrollment::enroll_claim(
-                api_url,
-                command.token,
-                command.client_public_key_hex,
-            )?;
-            Ok(None)
-        }
-        Command::EnrollConfig(command) => {
-            commands_enrollment::enroll_config(
-                api_url,
-                command.token,
-                command.command_timeout_secs,
-                command.output_file,
-            )?;
+            commands_keys::key_lifecycle_report(api_url, token)?;
             Ok(None)
         }
         Command::Summary => {

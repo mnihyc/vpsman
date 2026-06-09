@@ -186,11 +186,6 @@ test("renders an operational cloud-console fleet workspace", async ({
     await page
       .getByLabel("Bulk output comparison default")
       .selectOption("text");
-    await page
-      .getByLabel("Enrollment install command template")
-      .fill(
-        "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
-      );
     await page.getByRole("button", { name: "Save preferences" }).click();
     const savedPreferences = await page.evaluate(() => {
       const requests = (
@@ -202,8 +197,6 @@ test("renders an operational cloud-console fleet workspace", async ({
     });
     expect(savedPreferences).toMatchObject({
       bulk_output_compare_mode: "text",
-      enrollment_install_command_template:
-        "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
       vps_name_display_mode: "name",
     });
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
@@ -214,11 +207,6 @@ test("renders an operational cloud-console fleet workspace", async ({
     await page
       .getByLabel("Bulk output comparison default")
       .selectOption("binary");
-    await page
-      .getByLabel("Enrollment install command template")
-      .fill(
-        "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
-      );
     await page.getByRole("button", { name: "Save preferences" }).click();
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
   }
@@ -672,7 +660,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   });
 });
 
-test("creates server-assigned provision tokens and bound rebuild tokens from the access panel", async ({
+test("imports direct gateway identities and revokes current keys from the access panel", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -681,189 +669,73 @@ test("creates server-assigned provision tokens and bound rebuild tokens from the
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Preferences", "Operator");
-  await page
-    .getByLabel("Enrollment install command template")
-    .fill("env URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh");
-  await page.getByRole("button", { name: "Save preferences" }).click();
-  await expect(
-    page.getByText("Enrollment install command template must include {TOKEN}"),
-  ).toBeVisible();
-  await page
-    .getByLabel("Enrollment install command template")
-    .fill(
-      "env TOKEN={TOKEN} URL={API_URL} MODE={INSTALL_MODE} bash ./enroll.sh",
-    );
-  await page.getByRole("button", { name: "Save preferences" }).click();
   await activate(page.getByRole("button", { name: "Open privilege unlock" }));
   await activate(page.getByRole("tab", { name: "VPS clients" }));
 
   await expect(
-    page.getByRole("heading", { name: "Enrollment tokens" }),
+    page.getByRole("heading", { name: "Gateway agent identities" }),
   ).toBeVisible();
-  await expect(page.getByText("vpsm12345678")).toBeVisible();
   const inspector = page.locator(".accessInspector");
-  await expect(
-    inspector.getByLabel("Enrollment token existing VPS ID"),
-  ).toHaveCount(0);
-  await expect(inspector.getByText("Enrollment runtime config")).toBeVisible();
-  await expect(
-    inspector.getByLabel("Enrollment gateway endpoints"),
-  ).toHaveValue(/gw\.ops\.example\.com:9443/);
+  await expect(inspector.getByText("Direct identity actions")).toBeVisible();
+  await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
   await inspector
-    .getByLabel("Enrollment gateway endpoints")
-    .fill(
-      [
-        "primary=gw-edge.ops.example.com:9443=10",
-        "primary-v4=198.51.100.45:9443=20",
-        "primary-v6=[2001:db8:7::45]:9443=30",
-      ].join("\n"),
-    );
+    .getByLabel("Agent identity public key hex")
+    .fill("a".repeat(64));
   await inspector
-    .getByLabel("Enrollment discovery URL")
-    .fill("https://panel.ops.example.com/.well-known/vpsman/endpoints.json");
-  await inspector.getByLabel("Enrollment gateway retry seconds").fill("60");
-  await inspector
-    .getByLabel("Enrollment gateway connect timeout seconds")
-    .fill("10");
-  await inspector
-    .getByLabel("Enrollment default update version URL")
-    .fill("https://updates.example.com/vpsman/stable/version.json");
-  await activate(
-    inspector.getByRole("button", { name: "Save enrollment config" }),
-  );
-  await expect(inspector.getByText("Enrollment config saved")).toBeVisible();
-  const enrollmentSettingsRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { enrollmentSettings: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.enrollmentSettings.at(-1);
-  });
-  expect(enrollmentSettingsRequest).toMatchObject({
-    discovery_url:
-      "https://panel.ops.example.com/.well-known/vpsman/endpoints.json",
-    gateway_connect_timeout_secs: 10,
-    gateway_retry_secs: 60,
-    tcp_endpoints: [
-      {
-        label: "primary",
-        priority: 10,
-        tcp_addr: "gw-edge.ops.example.com:9443",
-      },
-      {
-        label: "primary-v4",
-        priority: 20,
-        tcp_addr: "198.51.100.45:9443",
-      },
-      {
-        label: "primary-v6",
-        priority: 30,
-        tcp_addr: "[2001:db8:7::45]:9443",
-      },
-    ],
-    update: {
-      unmanaged_interval_secs: 86400,
-      unmanaged_version_url:
-        "https://updates.example.com/vpsman/stable/version.json",
-    },
-  });
-  await inspector.getByLabel("Enrollment token ttl").fill("1200");
-  await inspector.getByLabel("Enrollment default tags").fill("country:JP,edge");
-  await inspector
-    .getByLabel("Enrollment default display name")
+    .getByLabel("Agent identity display name")
     .fill("edge-tokyo-04");
-  await expect(
-    inspector.getByText("Create token to generate command"),
-  ).toBeVisible();
-  await expect(
-    inspector.getByRole("button", { name: "Copy enrollment install command" }),
-  ).toHaveCount(0);
-  await activate(inspector.getByRole("button", { name: "Create token" }));
-  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText(
-    "vpsm_provision_token_secret",
-  );
-  await expect(inspector.getByText("Root install command")).toBeVisible();
-  await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).toContainText("TOKEN='vpsm_provision_token_secret'");
-  await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).toContainText("MODE='root'");
-  await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).not.toContainText("{TOKEN}");
-  await expect(
-    inspector.getByRole("button", { name: "Copy enrollment install command" }),
-  ).toBeVisible();
-  await expect(inspector.getByText("Name edge-tokyo-04")).toBeVisible();
-  await expect(
-    inspector.getByText("11111111-2222-4333-8444-555555555555"),
-  ).toHaveCount(0);
-  const provisionRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { enrollmentTokens: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.enrollmentTokens.at(-1);
-  });
-  expect(provisionRequest).toMatchObject({
-    allowed_client_id: null,
-    confirmed_reenrollment: false,
-    default_display_name: "edge-tokyo-04",
-    default_tags: ["country:JP", "edge"],
-    preserve_existing_assignments: true,
-    purpose: "provision",
-    ttl_secs: 1200,
-  });
-
   await inspector
-    .getByLabel("Enrollment token purpose")
-    .selectOption("rebuild_reenrollment");
-  await inspector
-    .getByLabel("Enrollment token existing VPS ID")
-    .fill("agent-sfo-01");
-  await inspector.getByLabel("Enrollment token ttl").fill("900");
-  await inspector
-    .getByLabel("Enrollment default tags")
-    .fill("rebuilt,provider:alpha");
-  await inspector
-    .getByLabel("Enrollment default display name")
-    .fill("edge-sfo-01-rebuild");
-  await activate(inspector.getByRole("button", { name: "Rebuild token" }));
-  await expect(inspector.getByLabel("Create rebuild token")).toBeVisible();
+    .getByLabel("Agent identity tags")
+    .fill("country:JP, role:edge");
   await activate(
-    inspector
-      .getByLabel("Create rebuild token")
-      .getByRole("button", { name: "Create rebuild token" }),
-  );
-
-  await expect(inspector.locator(".enrollmentSecret strong")).toHaveText(
-    "vpsm_rebuild_token_secret",
+    inspector.getByRole("button", { name: "Import gateway identity" }),
   );
   await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).toContainText("TOKEN='vpsm_rebuild_token_secret'");
-  await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).not.toContainText("{TOKEN}");
-  const request = await page.evaluate(() => {
+    page.getByLabel("Confirm direct gateway identity import"),
+  ).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm direct gateway identity import")
+      .getByRole("button", { name: "Import identity" }),
+  );
+  await expect(inspector.getByText("edge-tokyo-04")).toBeVisible();
+  const identityRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { enrollmentTokens: unknown[] };
+        __vpsmanTestRequests: { agentIdentities: unknown[] };
       }
     ).__vpsmanTestRequests;
-    return requests.enrollmentTokens.at(-1);
+    return requests.agentIdentities.at(-1);
   });
-  expect(request).toMatchObject({
-    allowed_client_id: "agent-sfo-01",
-    confirmed_reenrollment: true,
-    default_tags: ["rebuilt", "provider:alpha"],
-    preserve_existing_assignments: true,
-    purpose: "rebuild_reenrollment",
-    ttl_secs: 900,
+  expect(identityRequest).toMatchObject({
+    client_id: "agent-tokyo-04",
+    client_public_key_hex: "a".repeat(64),
+    confirmed: true,
+    display_name: "edge-tokyo-04",
+    replace_existing_key: false,
+    tags: ["country:JP", "role:edge"],
+  });
+
+  await inspector.getByLabel("VPS key revoke VPS ID").fill("agent-sfo-01");
+  await inspector.getByLabel("VPS key revoke reason").fill("lost host rebuild");
+  await activate(inspector.getByRole("button", { name: "Revoke current key" }));
+  await expect(page.getByLabel("Confirm current key revocation")).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm current key revocation")
+      .getByRole("button", { name: "Revoke key" }),
+  );
+  const revokeRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { clientKeyRevocations: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.clientKeyRevocations.at(-1);
+  });
+  expect(revokeRequest).toMatchObject({
+    confirmed: true,
+    reason: "lost host rebuild",
   });
 });
 
@@ -1549,7 +1421,9 @@ test("prepares backup artifacts server-side before dispatching executable restor
     mimeType: "application/json",
     name: "backup-artifact.json",
   });
-  await restoreWorkflow.getByLabel("Backup private key hex").fill(privateKeyHex);
+  await restoreWorkflow
+    .getByLabel("Backup private key hex")
+    .fill(privateKeyHex);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
   await activate(restoreWorkflow.getByRole("button", { name: "Run restore" }));
   await expect(restoreWorkflow.getByLabel("Run restore")).toBeVisible();
@@ -1656,7 +1530,9 @@ test("prepares backup artifacts server-side before dispatching executable restor
   await expect(
     restoreWorkflow.getByLabel("Restore rollback target VPS ID"),
   ).toHaveValue("agent-fra-02");
-  await restoreWorkflow.getByLabel("Restore rollback timeout seconds").fill("45");
+  await restoreWorkflow
+    .getByLabel("Restore rollback timeout seconds")
+    .fill("45");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Rollback restore" }),
   );

@@ -95,22 +95,36 @@ The update script downloads release assets, verifies `SHA256SUMS`, updates
 recreates containers. It does not delete PostgreSQL or local object-storage
 data.
 
-## Remote Agent Enrollment
+## Direct Gateway Agent Install
 
-Remote VPS agents connect to the raw TCP gateway listener, not to the internal
-gateway control port and not to an HTTPS gateway URL. Keep `9444` private. For
-public agents, configure the gateway for enrolled Noise IK identity, expose or
-proxy TCP `9443` as a `host:port` endpoint, create a short-lived enrollment
-token through the HTTP(S) control-plane API, and run the deploy installer on the
-VPS. Provisioning tokens are bound to a server-assigned UUID client id when they
-are created; the agent only claims the token.
+Remote VPS agents connect to the raw TCP gateway listener. They never contact
+the browser panel, panel HTTP API, or a panel-side lookup endpoint during installation. Keep
+`9444` private. For public agents, expose or proxy only the agent TCP gateway on
+`9443`, provision each agent with gateway Noise identity material, and register
+the matching public key as a direct gateway identity.
 
-The deploy installer supports a root privileged systemd service and an
-unprivileged normal-user systemd service. The agent can hot-replace and restart
-itself during updates, but launch-on-boot is provided by the installed systemd
-unit.
+Typical flow:
 
-See `deploy/AGENT_ENROLL.md` and `deploy/enroll-agent.sh`.
+```sh
+vpsctl noise-keygen
+vpsctl agent-identity-upsert \
+  --client-id agent-nrt-04 \
+  --client-public-key-hex <agent_noise_public_key_hex> \
+  --display-name edge-nrt-04 \
+  --tags country:JP,role:edge \
+  --confirmed
+
+curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
+  VPSMAN_INSTALL_MODE=root \
+  VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
+  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
+  VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
+  VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
+  bash
+```
+
+Endpoint DNS names and priorities are part of the agent config; no separate panel-side endpoint lookup is used. See `deploy/AGENT_GATEWAY_INSTALL.md` and
+`deploy/install-agent.sh`.
 
 ## Local Build
 

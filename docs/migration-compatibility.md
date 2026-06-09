@@ -29,7 +29,7 @@ Operational rollback model:
 
 | Migration | Compatibility and rollback note |
 | --- | --- |
-| `0001_identity_access.sql` | Initial identity, agent, tag, enrollment, gateway-session, key-revocation, and audit schema. Rollback requires dropping the new database or restoring the pre-install snapshot. |
+| `0001_identity_access.sql` | Initial identity, agent, tag, gateway-session, key-revocation, and audit schema. Rollback requires dropping the new database or restoring the pre-install snapshot. |
 | `0002_jobs_schedules_commands.sql` | Initial job, schedule, output, worker-lease, and command-template schema. Rollback requires restoring the matching initial-release snapshot. |
 | `0003_telemetry_alerts_history.sql` | Initial telemetry, rollup, alert policy/state/notification, and history-retention schema. Telemetry aggregates can be recomputed after snapshot restore. |
 | `0004_backups_restores.sql` | Initial backup artifact, backup request, restore plan, migration link, and backup-policy schema. Rollback requires snapshot restore plus object-store cleanup if artifacts were written. |

@@ -65,59 +65,19 @@ pub(crate) struct TotpConfirmCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnrollmentTokenCreateCommand {
-    #[arg(long, default_value_t = 1800)]
-    pub(crate) ttl_secs: u64,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) default_tags: Vec<String>,
-    #[arg(long)]
-    pub(crate) default_display_name: Option<String>,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_enabled: bool,
-    #[arg(long)]
-    pub(crate) unmanaged_update_version_url: Option<String>,
-    #[arg(long, default_value_t = 86_400)]
-    pub(crate) unmanaged_update_interval_secs: u64,
-    #[arg(long, default_value_t = 86_400)]
-    pub(crate) unmanaged_update_jitter_secs: u64,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_activate: bool,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_restart_agent: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnrollmentSettingsUpdateCommand {
-    #[arg(long = "settings-file")]
-    pub(crate) settings_file: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ReenrollmentTokenCreateCommand {
+pub(crate) struct AgentIdentityUpsertCommand {
     #[arg(long)]
     pub(crate) client_id: String,
-    #[arg(long, default_value_t = 1800)]
-    pub(crate) ttl_secs: u64,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) default_tags: Vec<String>,
     #[arg(long)]
-    pub(crate) default_display_name: Option<String>,
+    pub(crate) client_public_key_hex: String,
+    #[arg(long)]
+    pub(crate) display_name: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) tags: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) replace_existing_key: bool,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
-    #[arg(long, default_value_t = true)]
-    pub(crate) preserve_existing_assignments: bool,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_enabled: bool,
-    #[arg(long)]
-    pub(crate) unmanaged_update_version_url: Option<String>,
-    #[arg(long, default_value_t = 86_400)]
-    pub(crate) unmanaged_update_interval_secs: u64,
-    #[arg(long, default_value_t = 86_400)]
-    pub(crate) unmanaged_update_jitter_secs: u64,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_activate: bool,
-    #[arg(long, default_value_t = true)]
-    pub(crate) unmanaged_update_restart_agent: bool,
 }
 
 #[derive(Debug, Args)]
@@ -128,24 +88,6 @@ pub(crate) struct ClientKeyRevokeCommand {
     pub(crate) reason: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnrollClaimCommand {
-    #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
-    pub(crate) token: String,
-    #[arg(long)]
-    pub(crate) client_public_key_hex: String,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EnrollConfigCommand {
-    #[arg(long, env = "VPSMAN_ENROLLMENT_TOKEN")]
-    pub(crate) token: String,
-    #[arg(long, default_value_t = 30)]
-    pub(crate) command_timeout_secs: u64,
-    #[arg(long = "output-file")]
-    pub(crate) output_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

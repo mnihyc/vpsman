@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ACCESS_TOKEN_STORAGE_KEY, REFRESH_TOKEN_STORAGE_KEY } from "../constants";
+import {
+  ACCESS_TOKEN_STORAGE_KEY,
+  REFRESH_TOKEN_STORAGE_KEY,
+} from "../constants";
 import type {
   ActiveView,
   AuthResponse,
@@ -22,11 +25,15 @@ import { useTopologyData } from "./useTopologyData";
 export function useDashboardData(activeView: ActiveView) {
   const [apiToken, setApiToken] = useState("");
   const [authRequired, setAuthRequired] = useState(false);
-  const [authVaultAvailable, setAuthVaultAvailable] = useState(() => hasAuthVault());
+  const [authVaultAvailable, setAuthVaultAvailable] = useState(() =>
+    hasAuthVault(),
+  );
   const [wsState, setWsState] = useState("connecting");
   const [lastLiveEvent, setLastLiveEvent] = useState("waiting");
-  const [lastJobOutputEvent, setLastJobOutputEvent] = useState<WsJobOutputEvent | null>(null);
-  const [lastTerminalOutputEvent, setLastTerminalOutputEvent] = useState<WsTerminalOutputEvent | null>(null);
+  const [lastJobOutputEvent, setLastJobOutputEvent] =
+    useState<WsJobOutputEvent | null>(null);
+  const [lastTerminalOutputEvent, setLastTerminalOutputEvent] =
+    useState<WsTerminalOutputEvent | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
 
   const requireAuth = useCallback(() => setAuthRequired(true), []);
@@ -35,7 +42,12 @@ export function useDashboardData(activeView: ActiveView) {
   const fleet = useFleetData(apiToken, requireAuth);
   const audit = useAuditData(apiToken, requireAuth);
   const inventory = useInventoryData(apiToken, requireAuth, fleet.loadFleet);
-  const jobs = useJobsData(apiToken, requireAuth, fleet.loadFleet, audit.loadAudits);
+  const jobs = useJobsData(
+    apiToken,
+    requireAuth,
+    fleet.loadFleet,
+    audit.loadAudits,
+  );
   const schedules = useSchedulesData(apiToken, requireAuth, audit.loadAudits);
   const topology = useTopologyData(apiToken, requireAuth, audit.loadAudits);
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
@@ -89,7 +101,9 @@ export function useDashboardData(activeView: ActiveView) {
       }
       timer = window.setTimeout(
         loadAndSchedule,
-        dashboardRefreshIntervalMs(dashboardOverview.dashboardPreferences.refreshIntervalSecs),
+        dashboardRefreshIntervalMs(
+          dashboardOverview.dashboardPreferences.refreshIntervalSecs,
+        ),
       );
     }
 
@@ -190,16 +204,25 @@ export function useDashboardData(activeView: ActiveView) {
         fleet.replaceFleetSnapshot(event.summary, event.agents);
         return;
       }
-      if (event.type === "agent_updated" || event.type === "telemetry_updated" || event.type === "job_rejected") {
+      if (
+        event.type === "agent_updated" ||
+        event.type === "telemetry_updated" ||
+        event.type === "job_rejected"
+      ) {
         void fleet.loadFleet();
       }
       if (
         activeView === "Dashboard" &&
-        (event.type === "agent_updated" || event.type === "telemetry_updated" || event.type === "job_rejected")
+        (event.type === "agent_updated" ||
+          event.type === "telemetry_updated" ||
+          event.type === "job_rejected")
       ) {
         scheduleDashboardOverviewReload();
       }
-      if (event.type === "agent_updated" || event.type === "telemetry_updated") {
+      if (
+        event.type === "agent_updated" ||
+        event.type === "telemetry_updated"
+      ) {
         void inventory.loadTagInventory();
       }
       if (event.type === "job_rejected") {
@@ -292,7 +315,11 @@ export function useDashboardData(activeView: ActiveView) {
     access.clearOperator();
     fleet.clearFleet();
     dashboardOverview.clearDashboardOverview();
-  }, [access.clearOperator, dashboardOverview.clearDashboardOverview, fleet.clearFleet]);
+  }, [
+    access.clearOperator,
+    dashboardOverview.clearDashboardOverview,
+    fleet.clearFleet,
+  ]);
 
   return {
     accessError: access.accessError,
@@ -325,7 +352,7 @@ export function useDashboardData(activeView: ActiveView) {
     confirmTotp: access.confirmTotp,
     createOperator: access.createOperator,
     updateAgentAlias: fleet.updateAgentAlias,
-    createEnrollmentToken: access.createEnrollmentToken,
+    upsertAgentIdentity: access.upsertAgentIdentity,
     createBackupRequest: backups.createBackupRequest,
     createBackupPolicy: backups.createBackupPolicy,
     createFileTransferHandoff: jobs.createFileTransferHandoff,
@@ -371,8 +398,6 @@ export function useDashboardData(activeView: ActiveView) {
     terminalSessions: jobs.terminalSessions,
     gatewaySessions: access.gatewaySessions,
     deleteAgent: fleet.deleteAgent,
-    enrollmentSettings: access.enrollmentSettings,
-    enrollmentTokens: access.enrollmentTokens,
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertStates: fleet.fleetAlertStates,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
@@ -400,7 +425,8 @@ export function useDashboardData(activeView: ActiveView) {
     loadAgentUpdateRollouts: jobs.loadAgentUpdateRollouts,
     loadJobTargets: jobs.loadJobTargets,
     updateFleetAlertState: fleet.updateFleetAlertState,
-    upsertFleetAlertNotificationChannel: fleet.upsertFleetAlertNotificationChannel,
+    upsertFleetAlertNotificationChannel:
+      fleet.upsertFleetAlertNotificationChannel,
     dispatchFleetAlertNotifications: fleet.dispatchFleetAlertNotifications,
     processFleetAlertNotifications: fleet.processFleetAlertNotifications,
     upsertWebhookRule: fleet.upsertWebhookRule,
@@ -465,7 +491,6 @@ export function useDashboardData(activeView: ActiveView) {
     topologyLoading: topology.topologyLoading,
     tunnelPlans: topology.tunnelPlans,
     updateDataSourcePreset: inventory.updateDataSourcePreset,
-    updateEnrollmentSettings: access.updateEnrollmentSettings,
     upsertHotConfigRuleTemplate: inventory.upsertHotConfigRuleTemplate,
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
@@ -475,6 +500,8 @@ export function useDashboardData(activeView: ActiveView) {
   };
 }
 
-function dashboardRefreshIntervalMs(value: DashboardRefreshIntervalSecs): number {
+function dashboardRefreshIntervalMs(
+  value: DashboardRefreshIntervalSecs,
+): number {
   return value * 1000;
 }

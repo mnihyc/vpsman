@@ -19,7 +19,7 @@ use crate::{
     routes_backups::create_backup_request,
     routes_jobs::create_job,
     routes_restores::{create_restore_plan, validate_create_restore_plan},
-    state::{AppState, EnrollmentSettings},
+    state::AppState,
 };
 
 #[test]
@@ -358,7 +358,6 @@ fn test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -384,7 +383,6 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[23_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

@@ -9,7 +9,7 @@ use vpsman_common::{
     RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelKind, TunnelPlanInput,
 };
 
-use crate::{gateway_client::GatewayDispatchClient, state::EnrollmentSettings};
+use crate::{gateway_client::GatewayDispatchClient};
 
 #[tokio::test]
 async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
@@ -183,7 +183,6 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

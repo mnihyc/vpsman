@@ -109,46 +109,6 @@ CREATE INDEX operator_sessions_access_token_hash_idx
 CREATE INDEX operator_sessions_refresh_token_hash_idx
     ON operator_sessions (refresh_token_hash);
 
-CREATE TABLE enrollment_tokens (
-    id UUID PRIMARY KEY,
-    token_hash TEXT NOT NULL UNIQUE,
-    token_prefix TEXT NOT NULL,
-    created_by UUID REFERENCES operators(id),
-    default_tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-    default_display_name TEXT,
-    expires_at TIMESTAMPTZ NOT NULL,
-    used_at TIMESTAMPTZ,
-    used_by_client_id TEXT REFERENCES clients(id),
-    purpose TEXT NOT NULL DEFAULT 'provision',
-    allowed_client_id TEXT REFERENCES clients(id),
-    requires_existing_client BOOLEAN NOT NULL DEFAULT FALSE,
-    preserve_existing_assignments BOOLEAN NOT NULL DEFAULT TRUE,
-    expected_old_public_key_sha256_hex TEXT,
-    unmanaged_update_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    unmanaged_update_version_url TEXT NOT NULL DEFAULT 'https://github.com/mnihyc/vpsman/releases/latest/download/version.json',
-    unmanaged_update_interval_secs BIGINT NOT NULL DEFAULT 86400,
-    unmanaged_update_jitter_secs BIGINT NOT NULL DEFAULT 86400,
-    unmanaged_update_activate BOOLEAN NOT NULL DEFAULT TRUE,
-    unmanaged_update_restart_agent BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX enrollment_tokens_unused_expires_idx
-    ON enrollment_tokens (expires_at)
-    WHERE used_at IS NULL;
-
-CREATE INDEX enrollment_tokens_allowed_client_idx
-    ON enrollment_tokens (allowed_client_id, created_at DESC);
-
-CREATE TABLE enrollment_runtime_settings (
-    id BOOLEAN PRIMARY KEY DEFAULT TRUE,
-    settings JSONB NOT NULL,
-    updated_by UUID REFERENCES operators(id) ON DELETE SET NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT enrollment_runtime_settings_singleton CHECK (id),
-    CONSTRAINT enrollment_runtime_settings_object CHECK (jsonb_typeof(settings) = 'object')
-);
-
 CREATE TABLE gateway_sessions (
     id UUID PRIMARY KEY,
     gateway_id TEXT NOT NULL,

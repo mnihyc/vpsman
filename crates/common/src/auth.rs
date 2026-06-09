@@ -1,6 +1,5 @@
 use std::collections::{HashSet, VecDeque};
 
-use crate::DiscoveryDocument;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -229,16 +228,6 @@ pub fn sign_command_envelope(
         .to_vec()
 }
 
-pub fn sign_discovery_document(
-    server_signing_key: &SigningKey,
-    document: &DiscoveryDocument,
-) -> Vec<u8> {
-    server_signing_key
-        .sign(&discovery_signature_payload(document))
-        .to_bytes()
-        .to_vec()
-}
-
 pub fn sign_update_artifact_hash(signing_key: &SigningKey, sha256_hex: &str) -> Vec<u8> {
     signing_key
         .sign(&update_artifact_signature_payload(sha256_hex))
@@ -268,18 +257,6 @@ pub fn verify_update_artifact_signature(
     };
     verifying_key
         .verify(&update_artifact_signature_payload(sha256_hex), &signature)
-        .is_ok()
-}
-
-pub fn verify_discovery_document_signature(
-    server_verifying_key: &VerifyingKey,
-    document: &DiscoveryDocument,
-) -> bool {
-    let Ok(signature) = Signature::from_slice(&document.signature) else {
-        return false;
-    };
-    server_verifying_key
-        .verify(&discovery_signature_payload(document), &signature)
         .is_ok()
 }
 
@@ -320,21 +297,6 @@ pub fn verify_command_envelope(
         .map_err(|_| AuthorizationError::InvalidServerSignature)?;
 
     replay_cache.remember(envelope.command_id, "server-signature")
-}
-
-fn discovery_signature_payload(document: &DiscoveryDocument) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(128 + document.endpoints.len() * 64);
-    push_len_prefixed(&mut payload, b"vpsman-discovery-document-v1");
-    payload.extend_from_slice(&document.version.to_be_bytes());
-    payload.extend_from_slice(&document.issued_unix.to_be_bytes());
-    payload.extend_from_slice(&document.expires_unix.to_be_bytes());
-    payload.extend_from_slice(&(document.endpoints.len() as u32).to_be_bytes());
-    for endpoint in &document.endpoints {
-        push_len_prefixed(&mut payload, endpoint.label.as_bytes());
-        push_len_prefixed(&mut payload, endpoint.tcp_addr.as_bytes());
-        payload.extend_from_slice(&endpoint.priority.to_be_bytes());
-    }
-    payload
 }
 
 fn command_signature_payload(envelope: &CommandEnvelope) -> Vec<u8> {
@@ -414,34 +376,6 @@ mod tests {
             ),
             Err(AuthorizationError::Replay)
         );
-    }
-
-    #[test]
-    fn discovery_document_signature_rejects_tampering() {
-        let signing = SigningKey::from_bytes(&[13_u8; 32]);
-        let mut document = DiscoveryDocument {
-            version: 1,
-            issued_unix: 100,
-            expires_unix: 160,
-            endpoints: vec![crate::ServerEndpoint {
-                label: "primary".to_string(),
-                tcp_addr: "198.51.100.10:9443".to_string(),
-                priority: 10,
-            }],
-            signature: Vec::new(),
-        };
-        document.signature = sign_discovery_document(&signing, &document);
-
-        assert!(verify_discovery_document_signature(
-            &signing.verifying_key(),
-            &document
-        ));
-
-        document.endpoints[0].tcp_addr = "203.0.113.20:9443".to_string();
-        assert!(!verify_discovery_document_signature(
-            &signing.verifying_key(),
-            &document
-        ));
     }
 
     #[test]

@@ -314,7 +314,7 @@ export function FleetWorkspace({
         cell: (agent) => (
           <span className="historyPrimary">
             <strong>{formatLastSeen(agent.last_seen_at)}</strong>
-            {!agent.last_seen_at && <small>after enrollment</small>}
+            {!agent.last_seen_at && <small>until first gateway report</small>}
           </span>
         ),
       },
@@ -576,7 +576,7 @@ export function FleetWorkspace({
                   {apiError ??
                     (scopeActive
                       ? "Adjust or clear the saved fleet view."
-                      : "Waiting for enrolled VPS agents to report in.")}
+                      : "Waiting for VPS agents to connect through gateways and report in.")}
                 </span>
               </div>
             }
@@ -2338,7 +2338,7 @@ function formatLastSeen(value: string | null | undefined): string {
 
 function formatLastSeenDetail(value: string | null | undefined): string {
   const normalized = normalizeAgentTimestamp(value);
-  return normalized ? formatTime(normalized) : "never seen after enrollment";
+  return normalized ? formatTime(normalized) : "never seen until first gateway report";
 }
 
 function normalizedLastSeenSort(value: string | null | undefined): string {

@@ -1,10 +1,21 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Ban, Copy, Fingerprint, KeyRound, LockKeyhole, RefreshCw, RotateCcw, Save, ShieldCheck, Trash2, UserPlus, UserX, Wifi } from "lucide-react";
+import {
+  Ban,
+  Fingerprint,
+  KeyRound,
+  LockKeyhole,
+  RefreshCw,
+  Save,
+  ShieldCheck,
+  Trash2,
+  UserPlus,
+  UserX,
+  Wifi,
+} from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { CrudPager } from "../components/CrudPager";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
-import { CrudPager } from "../components/CrudPager";
-import { renderEnrollmentInstallCommand } from "../enrollmentInstallCommand";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
@@ -13,32 +24,31 @@ import type {
   TotpSetupResponse,
 } from "../types";
 import type {
+  AgentIdentityView,
   ClientKeyRevocationView,
-  CreateEnrollmentTokenRequest,
-  CreateEnrollmentTokenResponse,
-  EnrollmentRuntimeSettingsView,
-  EnrollmentServerEndpoint,
-  EnrollmentTokenPurpose,
-  EnrollmentTokenView,
   KeyLifecycleReportView,
-  UpdateEnrollmentRuntimeSettingsRequest,
+  UpsertAgentIdentityRequest,
 } from "../typesAccess";
 import type { PrivilegeMaterial } from "../privilege";
 import {
   clientDisplayNameFromMap,
   clientLifecycleNameMap,
-  formatVpsName,
   formatTime,
+  formatVpsName,
   shortHash,
-  shortId,
   statusClass,
 } from "../utils";
 
-const DEFAULT_UNMANAGED_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
-const accessSubpages = ["Overview", "Operators", "Privilege unlock", "VPS clients", "Gateway"] as const;
+const accessSubpages = [
+  "Overview",
+  "Operators",
+  "Privilege unlock",
+  "VPS clients",
+  "Gateway",
+] as const;
 
 type AccessSubpage = (typeof accessSubpages)[number];
-type AccessConfirmationAction = "rebuild-token" | "key-revoke";
+type AccessConfirmationAction = "agent-identity" | "key-revoke";
 
 type AccessPanelProps = {
   activeSubpage: string;
@@ -48,19 +58,27 @@ type AccessPanelProps = {
   lastLiveEvent: string;
   loading: boolean;
   onClearSession: () => void;
-  onCreateEnrollmentToken: (request: CreateEnrollmentTokenRequest) => Promise<CreateEnrollmentTokenResponse>;
-  onCreateOperator: (username: string, role: string, password: string, scopes: string[]) => Promise<void>;
+  onCreateOperator: (
+    username: string,
+    role: string,
+    password: string,
+    scopes: string[],
+  ) => Promise<void>;
   onConfirmTotp: (password: string, code: string) => Promise<void>;
   onDisableTotp: (password: string, code: string) => Promise<void>;
   onRefresh: () => Promise<void>;
-  onRevokeClientKey: (clientId: string, reason: string | null, confirmed: boolean) => Promise<void>;
+  onRevokeClientKey: (
+    clientId: string,
+    reason: string | null,
+    confirmed: boolean,
+  ) => Promise<void>;
   onRevokeOperatorSession: (sessionId: string) => Promise<void>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
-  onUpdateEnrollmentSettings: (request: UpdateEnrollmentRuntimeSettingsRequest) => Promise<EnrollmentRuntimeSettingsView>;
+  onUpsertAgentIdentity: (
+    request: UpsertAgentIdentityRequest,
+  ) => Promise<AgentIdentityView>;
   operator: OperatorView | null;
   clientKeyRevocations: ClientKeyRevocationView[];
-  enrollmentSettings: EnrollmentRuntimeSettingsView | null;
-  enrollmentTokens: EnrollmentTokenView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
   operatorSessions: OperatorSessionRecord[];
   operators: OperatorView[];
@@ -94,18 +112,15 @@ export function AccessPanel({
   loading,
   onClearSession,
   onConfirmTotp,
-  onCreateEnrollmentToken,
   onCreateOperator,
   onDisableTotp,
   onRefresh,
   onRevokeClientKey,
   onRevokeOperatorSession,
   onSetupTotp,
-  onUpdateEnrollmentSettings,
+  onUpsertAgentIdentity,
   operator,
   clientKeyRevocations,
-  enrollmentSettings,
-  enrollmentTokens,
   keyLifecycleReport,
   operatorSessions,
   operators,
@@ -114,140 +129,84 @@ export function AccessPanel({
   setPrivilegeMaterial,
   wsState,
 }: AccessPanelProps) {
-  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(accessSubpageFromRoute(routeSubpage));
-  const [vaultAvailable, setVaultAvailable] = useState(() => hasPrivilegeVault());
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(
+    accessSubpageFromRoute(routeSubpage),
+  );
+  const [vaultAvailable, setVaultAvailable] = useState(() =>
+    hasPrivilegeVault(),
+  );
   const [newOperatorUsername, setNewOperatorUsername] = useState("");
   const [newOperatorPassword, setNewOperatorPassword] = useState("");
   const [newOperatorRole, setNewOperatorRole] = useState("operator");
   const [newOperatorScopes, setNewOperatorScopes] = useState("");
-  const [operatorActionError, setOperatorActionError] = useState<string | null>(null);
+  const [operatorActionError, setOperatorActionError] = useState<string | null>(
+    null,
+  );
   const [operatorActionPending, setOperatorActionPending] = useState(false);
   const [totpPassword, setTotpPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [totpSetup, setTotpSetup] = useState<TotpSetupResponse | null>(null);
   const [totpPending, setTotpPending] = useState(false);
   const [totpError, setTotpError] = useState<string | null>(null);
-  const [tokenPurpose, setTokenPurpose] = useState<EnrollmentTokenPurpose>("provision");
-  const [tokenClientId, setTokenClientId] = useState("");
-  const [tokenTtlSecs, setTokenTtlSecs] = useState("1800");
-  const [tokenTags, setTokenTags] = useState("");
-  const [tokenDisplayName, setTokenDisplayName] = useState("");
-  const [tokenUnmanagedUpdateEnabled, setTokenUnmanagedUpdateEnabled] = useState(true);
-  const [tokenUnmanagedUpdateVersionUrl, setTokenUnmanagedUpdateVersionUrl] = useState(DEFAULT_UNMANAGED_UPDATE_VERSION_URL);
-  const [tokenUnmanagedUpdateIntervalSecs, setTokenUnmanagedUpdateIntervalSecs] = useState("86400");
-  const [tokenUnmanagedUpdateJitterSecs, setTokenUnmanagedUpdateJitterSecs] = useState("86400");
-  const [tokenUnmanagedUpdateActivate, setTokenUnmanagedUpdateActivate] = useState(true);
-  const [tokenUnmanagedUpdateRestartAgent, setTokenUnmanagedUpdateRestartAgent] = useState(true);
-  const [settingsEndpoints, setSettingsEndpoints] = useState("");
-  const [settingsDiscoveryUrl, setSettingsDiscoveryUrl] = useState("");
-  const [settingsGatewayKey, setSettingsGatewayKey] = useState("");
-  const [settingsTrustedKeys, setSettingsTrustedKeys] = useState("");
-  const [settingsRetrySecs, setSettingsRetrySecs] = useState("60");
-  const [settingsConnectTimeoutSecs, setSettingsConnectTimeoutSecs] = useState("10");
-  const [settingsTelemetryLightSecs, setSettingsTelemetryLightSecs] = useState("15");
-  const [settingsTelemetryFullSecs, setSettingsTelemetryFullSecs] = useState("60");
-  const [settingsUpdateEnabled, setSettingsUpdateEnabled] = useState(true);
-  const [settingsUpdateVersionUrl, setSettingsUpdateVersionUrl] = useState(DEFAULT_UNMANAGED_UPDATE_VERSION_URL);
-  const [settingsUpdateIntervalSecs, setSettingsUpdateIntervalSecs] = useState("86400");
-  const [settingsUpdateJitterSecs, setSettingsUpdateJitterSecs] = useState("86400");
-  const [settingsUpdateActivate, setSettingsUpdateActivate] = useState(true);
-  const [settingsUpdateRestartAgent, setSettingsUpdateRestartAgent] = useState(true);
-  const [settingsPending, setSettingsPending] = useState(false);
-  const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [tokenPending, setTokenPending] = useState(false);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [createdToken, setCreatedToken] = useState<CreateEnrollmentTokenResponse | null>(null);
-  const [installCommandCopied, setInstallCommandCopied] = useState(false);
+  const [identityClientId, setIdentityClientId] = useState("");
+  const [identityPublicKeyHex, setIdentityPublicKeyHex] = useState("");
+  const [identityDisplayName, setIdentityDisplayName] = useState("");
+  const [identityTags, setIdentityTags] = useState("");
+  const [identityReplaceExistingKey, setIdentityReplaceExistingKey] =
+    useState(false);
+  const [identityPending, setIdentityPending] = useState(false);
+  const [identityError, setIdentityError] = useState<string | null>(null);
+  const [createdIdentity, setCreatedIdentity] =
+    useState<AgentIdentityView | null>(null);
   const [revokeClientId, setRevokeClientId] = useState("");
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<AccessConfirmationAction | null>(null);
-  const sessionState = apiToken ? "Bearer session active" : "No bearer session";
-  const vaultState = privilegeMaterial ? "Privilege unlocked" : vaultAvailable ? "Encrypted privilege vault present" : "No privilege vault";
-  const tokenStorageState = apiToken ? (sessionVaultAvailable ? "encrypted vault" : "memory only") : "none";
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<AccessConfirmationAction | null>(null);
+
   const canManageOperators = operator?.role === "admin";
-  const canCreateOperator =
-    canManageOperators && newOperatorUsername.trim().length > 0 && newOperatorPassword.length >= 12 && !operatorActionPending;
-  const canCreateEnrollmentToken =
-    canManageOperators &&
-    !tokenPending &&
-    Number.parseInt(tokenTtlSecs, 10) >= 60 &&
-    Number.parseInt(tokenUnmanagedUpdateIntervalSecs, 10) >= 300 &&
-    Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10) >= 0 &&
-    (!tokenUnmanagedUpdateEnabled || tokenUnmanagedUpdateVersionUrl.trim().length > 0) &&
-    (tokenPurpose === "provision" || tokenClientId.trim().length > 0);
-  const canSaveEnrollmentSettings =
-    canManageOperators &&
-    !settingsPending &&
-    settingsEndpoints.trim().length > 0 &&
-    integerInRange(settingsRetrySecs, 1, 3600) &&
-    integerInRange(settingsConnectTimeoutSecs, 1, 300) &&
-    integerInRange(settingsTelemetryLightSecs, 1, 3600) &&
-    integerInRange(settingsTelemetryFullSecs, 1, 3600) &&
-    Number.parseInt(settingsTelemetryFullSecs, 10) >= Number.parseInt(settingsTelemetryLightSecs, 10) &&
-    integerInRange(settingsUpdateIntervalSecs, 300, 604800) &&
-    integerInRange(settingsUpdateJitterSecs, 0, 604800) &&
-    settingsUpdateVersionUrl.trim().length > 0;
-  const canRevokeClientKey = canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
+  const sessionState = apiToken ? "Bearer session active" : "No bearer session";
+  const vaultState = privilegeMaterial
+    ? "Privilege unlocked"
+    : vaultAvailable
+      ? "Encrypted privilege vault present"
+      : "No privilege vault";
+  const tokenStorageState = apiToken
+    ? sessionVaultAvailable
+      ? "encrypted vault"
+      : "memory only"
+    : "none";
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const lifecycleNameById = useMemo(
     () => clientLifecycleNameMap(lifecycleClients, vpsNameDisplayMode),
     [lifecycleClients, vpsNameDisplayMode],
   );
-  const lifecycleClientLabel = (clientId: string | null | undefined) => clientDisplayNameFromMap(clientId, lifecycleNameById);
-  const enrollmentClaimApiUrl = typeof window === "undefined" ? "https://panel.example.com" : window.location.origin;
-  const enrollmentInstallRender = useMemo(() => {
-    if (createdToken) {
-      return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
-        apiUrl: enrollmentClaimApiUrl,
-        installMode: "root",
-        token: createdToken.token,
-      });
-    }
-    return renderEnrollmentInstallCommand(preferences.enrollment_install_command_template, {
-      apiUrl: enrollmentClaimApiUrl,
-      installMode: "root",
-      token: null,
-    });
-  }, [createdToken, enrollmentClaimApiUrl, preferences.enrollment_install_command_template]);
-  const enrollmentInstallCommand = enrollmentInstallRender.command ?? "";
+  const lifecycleClientLabel = (clientId: string | null | undefined) =>
+    clientDisplayNameFromMap(clientId, lifecycleNameById);
+  const activeGatewaySessions = gatewaySessions.filter(
+    (session) => !session.ended_at,
+  ).length;
+  const revokedClientCount = lifecycleClients.filter(
+    (client) => client.status === "revoked" || client.current_key_revoked,
+  ).length;
+  const canCreateOperator =
+    canManageOperators &&
+    newOperatorUsername.trim().length > 0 &&
+    newOperatorPassword.length >= 12 &&
+    !operatorActionPending;
+  const canUpsertIdentity =
+    canManageOperators &&
+    !identityPending &&
+    identityClientId.trim().length > 0 &&
+    isFixedHex32(identityPublicKeyHex);
+  const canRevokeClientKey =
+    canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
   }, [routeSubpage]);
-
-  useEffect(() => {
-    if (!enrollmentSettings) {
-      return;
-    }
-    setSettingsEndpoints(formatEnrollmentEndpoints(enrollmentSettings.tcp_endpoints));
-    setSettingsDiscoveryUrl(enrollmentSettings.discovery_url ?? "");
-    setSettingsGatewayKey(enrollmentSettings.gateway_server_public_key_hex ?? "");
-    setSettingsTrustedKeys(enrollmentSettings.discovery_trusted_server_ed25519_public_keys_hex.join("\n"));
-    setSettingsRetrySecs(String(enrollmentSettings.gateway_retry_secs));
-    setSettingsConnectTimeoutSecs(String(enrollmentSettings.gateway_connect_timeout_secs));
-    setSettingsTelemetryLightSecs(String(enrollmentSettings.telemetry_light_secs));
-    setSettingsTelemetryFullSecs(String(enrollmentSettings.telemetry_full_secs));
-    setSettingsUpdateEnabled(enrollmentSettings.update.unmanaged_enabled);
-    setSettingsUpdateVersionUrl(enrollmentSettings.update.unmanaged_version_url);
-    setSettingsUpdateIntervalSecs(String(enrollmentSettings.update.unmanaged_interval_secs));
-    setSettingsUpdateJitterSecs(String(enrollmentSettings.update.unmanaged_jitter_secs));
-    setSettingsUpdateActivate(enrollmentSettings.update.unmanaged_activate);
-    setSettingsUpdateRestartAgent(enrollmentSettings.update.unmanaged_restart_agent);
-    setTokenUnmanagedUpdateEnabled(enrollmentSettings.update.unmanaged_enabled);
-    setTokenUnmanagedUpdateVersionUrl(enrollmentSettings.update.unmanaged_version_url);
-    setTokenUnmanagedUpdateIntervalSecs(String(enrollmentSettings.update.unmanaged_interval_secs));
-    setTokenUnmanagedUpdateJitterSecs(String(enrollmentSettings.update.unmanaged_jitter_secs));
-    setTokenUnmanagedUpdateActivate(enrollmentSettings.update.unmanaged_activate);
-    setTokenUnmanagedUpdateRestartAgent(enrollmentSettings.update.unmanaged_restart_agent);
-    setSettingsError(null);
-  }, [enrollmentSettings]);
-
-  useEffect(() => {
-    setInstallCommandCopied(false);
-  }, [enrollmentInstallCommand]);
 
   function clearVault() {
     clearPrivilegeVault();
@@ -267,14 +226,18 @@ export function AccessPanel({
         newOperatorUsername.trim(),
         newOperatorRole,
         newOperatorPassword,
-        parseScopeInput(newOperatorScopes),
+        parseListInput(newOperatorScopes),
       );
       setNewOperatorUsername("");
       setNewOperatorPassword("");
       setNewOperatorRole("operator");
       setNewOperatorScopes("");
-    } catch (error) {
-      setOperatorActionError(error instanceof Error ? error.message : "Operator creation failed");
+    } catch (actionError) {
+      setOperatorActionError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Operator creation failed",
+      );
     } finally {
       setOperatorActionPending(false);
     }
@@ -288,8 +251,12 @@ export function AccessPanel({
     setTotpError(null);
     try {
       setTotpSetup(await onSetupTotp(totpPassword));
-    } catch (error) {
-      setTotpError(error instanceof Error ? error.message : "TOTP setup failed");
+    } catch (actionError) {
+      setTotpError(
+        actionError instanceof Error
+          ? actionError.message
+          : "TOTP setup failed",
+      );
     } finally {
       setTotpPending(false);
     }
@@ -306,8 +273,12 @@ export function AccessPanel({
       setTotpPassword("");
       setTotpCode("");
       setTotpSetup(null);
-    } catch (error) {
-      setTotpError(error instanceof Error ? error.message : "TOTP confirmation failed");
+    } catch (actionError) {
+      setTotpError(
+        actionError instanceof Error
+          ? actionError.message
+          : "TOTP confirmation failed",
+      );
     } finally {
       setTotpPending(false);
     }
@@ -324,1009 +295,794 @@ export function AccessPanel({
       setTotpPassword("");
       setTotpCode("");
       setTotpSetup(null);
-    } catch (error) {
-      setTotpError(error instanceof Error ? error.message : "TOTP disable failed");
+    } catch (actionError) {
+      setTotpError(
+        actionError instanceof Error
+          ? actionError.message
+          : "TOTP disable failed",
+      );
     } finally {
       setTotpPending(false);
     }
   }
 
-  async function createEnrollmentToken(event: FormEvent<HTMLFormElement>) {
+  function requestIdentityImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canCreateEnrollmentToken) {
+    if (!canUpsertIdentity) {
+      setIdentityError(
+        identityClientId.trim().length === 0
+          ? "Client ID is required"
+          : "Client public key must be exactly 64 hex characters",
+      );
       return;
     }
-    if (tokenPurpose === "rebuild_reenrollment") {
-      setPendingConfirmation("rebuild-token");
-      return;
-    }
-    await executeCreateEnrollmentToken(false);
+    setIdentityError(null);
+    setPendingConfirmation("agent-identity");
   }
 
-  async function executeCreateEnrollmentToken(confirmedReenrollment: boolean) {
-    setTokenPending(true);
-    setTokenError(null);
-    setCreatedToken(null);
-    setInstallCommandCopied(false);
+  async function confirmIdentityImport() {
+    if (!canUpsertIdentity) {
+      return;
+    }
+    setIdentityPending(true);
+    setIdentityError(null);
     try {
-      const response = await onCreateEnrollmentToken({
-        ttl_secs: Number.parseInt(tokenTtlSecs, 10),
-        purpose: tokenPurpose,
-        allowed_client_id: tokenPurpose === "rebuild_reenrollment" ? tokenClientId.trim() : null,
-        confirmed_reenrollment: tokenPurpose === "rebuild_reenrollment" ? confirmedReenrollment : false,
-        preserve_existing_assignments: true,
-        default_tags: parseScopeInput(tokenTags),
-        default_display_name: tokenDisplayName.trim() || null,
-        unmanaged_update_enabled: tokenUnmanagedUpdateEnabled,
-        unmanaged_update_version_url: tokenUnmanagedUpdateVersionUrl.trim() || null,
-        unmanaged_update_interval_secs: Number.parseInt(tokenUnmanagedUpdateIntervalSecs, 10),
-        unmanaged_update_jitter_secs: Number.parseInt(tokenUnmanagedUpdateJitterSecs, 10),
-        unmanaged_update_activate: tokenUnmanagedUpdateActivate,
-        unmanaged_update_restart_agent: tokenUnmanagedUpdateRestartAgent,
+      const response = await onUpsertAgentIdentity({
+        client_id: identityClientId.trim(),
+        client_public_key_hex: identityPublicKeyHex.trim().toLowerCase(),
+        display_name: identityDisplayName.trim() || null,
+        tags: parseListInput(identityTags),
+        replace_existing_key: identityReplaceExistingKey,
+        confirmed: true,
       });
-      setCreatedToken(response);
-      setTokenTags("");
-      setTokenDisplayName("");
-      if (tokenPurpose === "provision") {
-        setTokenClientId("");
-      }
-    } catch (error) {
-      setTokenError(error instanceof Error ? error.message : "Enrollment token creation failed");
+      setCreatedIdentity(response);
+      setIdentityClientId("");
+      setIdentityPublicKeyHex("");
+      setIdentityDisplayName("");
+      setIdentityTags("");
+      setIdentityReplaceExistingKey(false);
+      setPendingConfirmation(null);
+    } catch (actionError) {
+      setIdentityError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Agent identity import failed",
+      );
     } finally {
-      setTokenPending(false);
+      setIdentityPending(false);
     }
   }
 
-  async function saveEnrollmentSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canSaveEnrollmentSettings) {
-      return;
-    }
-    setSettingsPending(true);
-    setSettingsError(null);
-    try {
-      const request: UpdateEnrollmentRuntimeSettingsRequest = {
-        tcp_endpoints: parseEnrollmentEndpoints(settingsEndpoints),
-        discovery_url: settingsDiscoveryUrl.trim() || null,
-        gateway_server_public_key_hex: settingsGatewayKey.trim() || null,
-        discovery_trusted_server_ed25519_public_keys_hex: parseMultilineList(settingsTrustedKeys),
-        gateway_retry_secs: parseRequiredInteger(settingsRetrySecs, "Retry seconds"),
-        gateway_connect_timeout_secs: parseRequiredInteger(settingsConnectTimeoutSecs, "Connect timeout seconds"),
-        telemetry_light_secs: parseRequiredInteger(settingsTelemetryLightSecs, "Light telemetry seconds"),
-        telemetry_full_secs: parseRequiredInteger(settingsTelemetryFullSecs, "Full telemetry seconds"),
-        update: {
-          trusted_artifact_signing_key_hex: enrollmentSettings?.update.trusted_artifact_signing_key_hex ?? null,
-          unmanaged_enabled: settingsUpdateEnabled,
-          unmanaged_version_url: settingsUpdateVersionUrl.trim(),
-          unmanaged_interval_secs: parseRequiredInteger(settingsUpdateIntervalSecs, "Update interval seconds"),
-          unmanaged_jitter_secs: parseRequiredInteger(settingsUpdateJitterSecs, "Update jitter seconds"),
-          unmanaged_activate: settingsUpdateActivate,
-          unmanaged_restart_agent: settingsUpdateRestartAgent,
-        },
-      };
-      const response = await onUpdateEnrollmentSettings(request);
-      setSettingsEndpoints(formatEnrollmentEndpoints(response.tcp_endpoints));
-      setSettingsError("Enrollment config saved");
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : "Enrollment config update failed");
-    } finally {
-      setSettingsPending(false);
-    }
-  }
-
-  async function revokeClientKey(event: FormEvent<HTMLFormElement>) {
+  function requestClientKeyRevoke(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canRevokeClientKey) {
       return;
     }
+    setRevokeError(null);
     setPendingConfirmation("key-revoke");
   }
 
-  async function copyEnrollmentInstallCommand() {
-    if (!enrollmentInstallCommand) {
+  async function confirmClientKeyRevoke() {
+    if (!canRevokeClientKey) {
       return;
     }
-    await navigator.clipboard?.writeText(enrollmentInstallCommand);
-    setInstallCommandCopied(true);
-    window.setTimeout(() => setInstallCommandCopied(false), 1600);
-  }
-
-  async function executeRevokeClientKey() {
     setRevokePending(true);
     setRevokeError(null);
     try {
-      await onRevokeClientKey(revokeClientId.trim(), revokeReason.trim() || null, true);
+      await onRevokeClientKey(
+        revokeClientId.trim(),
+        revokeReason.trim() || null,
+        true,
+      );
       setRevokeClientId("");
       setRevokeReason("");
-    } catch (error) {
-      setRevokeError(error instanceof Error ? error.message : "VPS key revoke failed");
+      setPendingConfirmation(null);
+    } catch (actionError) {
+      setRevokeError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Client key revoke failed",
+      );
     } finally {
       setRevokePending(false);
     }
   }
 
-  async function confirmAccessAction() {
-    const action = pendingConfirmation;
-    if (!action) {
-      return;
-    }
-    setPendingConfirmation(null);
-    if (action === "rebuild-token") {
-      await executeCreateEnrollmentToken(true);
-    } else {
-      await executeRevokeClientKey();
-    }
-  }
-
   return (
-    <section className="workspace accessWorkspace">
-      <div aria-label="Access sections" className="accessSubnav" role="tablist">
-        {accessSubpages.map((subpage) => (
-          <button
-            aria-selected={activeSubpage === subpage}
-            className={activeSubpage === subpage ? "selected" : ""}
-            key={subpage}
-            onClick={() => setActiveSubpage(subpage)}
-            role="tab"
-            type="button"
-          >
-            {subpage}
-          </button>
-        ))}
-      </div>
-
-      <div className="fleetPanel accessOverviewPanel" hidden={activeSubpage !== "Overview"}>
-        <div className="sectionHeader">
+    <div className="workspace accessWorkspace">
+      <section className="fleetPanel accessMain">
+        <div className="sectionHeader heroHeader compactHeroHeader">
           <div>
-            <h2>Operator session</h2>
-            <span>{error ?? (loading ? "Loading current operator" : sessionState)}</span>
-          </div>
-          <button className="secondaryAction" onClick={() => void onRefresh()} type="button">
-            <RefreshCw size={17} />
-            Refresh
-          </button>
-        </div>
-        <div className="accessGrid">
-          <div className="accessTile">
-            <ShieldCheck size={20} />
-            <span>Operator</span>
-            <strong>{operator?.username ?? "memory-dev or unauthenticated"}</strong>
-            <small>
-              {operator ? `${operator.role} / ${operator.totp_enabled ? "TOTP on" : "TOTP off"} / ${shortId(operator.id)}` : "No operator record loaded"}
-            </small>
-          </div>
-          <div className="accessTile">
-            <KeyRound size={20} />
-            <span>API session</span>
-            <strong>{sessionState}</strong>
-            <small>token {tokenStorageState}</small>
-          </div>
-          <div className="accessTile">
-            <LockKeyhole size={20} />
-            <span>Privilege unlock</span>
-            <strong>{vaultState}</strong>
-            <small>super password never leaves browser memory or encrypted local storage</small>
-          </div>
-          <div className="accessTile">
-            <Wifi size={20} />
-            <span>Live stream</span>
-            <strong>{wsState}</strong>
-            <small>last event {lastLiveEvent}</small>
-          </div>
-          <div className="accessTile">
-            <Fingerprint size={20} />
-            <span>VPS keys</span>
-            <strong>{keyLifecycleReport ? `${keyLifecycleReport.enrolled_client_count} enrolled` : "not loaded"}</strong>
-            <small>
-              {keyLifecycleReport
-                ? `${keyLifecycleReport.current_key_revoked_count} current revoked / ${keyLifecycleReport.revocation_count} records`
-                : "admin report unavailable"}
-            </small>
-          </div>
-          <div className="accessTile">
-            <RotateCcw size={20} />
-            <span>Rebuild tokens</span>
-            <strong>{keyLifecycleReport ? `${keyLifecycleReport.active_rebuild_reenrollment_token_count} active` : "not loaded"}</strong>
-            <small>
-              {keyLifecycleReport
-                ? `${keyLifecycleReport.rebuild_reenrollment_token_count} total / ${keyLifecycleReport.discovery_trusted_server_key_count} trusted discovery keys`
-                : "re-enrollment state unavailable"}
-            </small>
-          </div>
-        </div>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "Privilege unlock"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Privilege unlock</h2>
-            <span>{privilegeMaterial ? "Unlocked in browser memory" : vaultAvailable ? "Encrypted vault locked" : "Manual privilege entry"}</span>
-          </div>
-        </div>
-        <PrivilegeVaultBox
-          lastPayloadHash={null}
-          onPrivilegeMaterialChange={setPrivilegeMaterial}
-          onVaultAvailabilityChange={setVaultAvailable}
-          privilegeMaterial={privilegeMaterial}
-        />
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "Operators"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Operators</h2>
-            <span>{operator?.role === "admin" ? `${operators.length} role records` : "Admin role required"}</span>
-          </div>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "Username", value: (record) => record.username },
-            { label: "Role", value: (record) => record.role },
-            { label: "Scopes", value: (record) => record.scopes.join(", ") },
-            { label: "TOTP", value: (record) => record.totp_enabled },
-            { label: "ID", value: (record) => record.id },
-          ]}
-          itemLabel="operators"
-          items={operators}
-          pageSize={8}
-          title="Operator records"
-          empty={
-            <div className="emptyState">
-              <ShieldCheck size={22} />
-              <strong>No operator list available</strong>
-              <span>Admin sessions can review role records here.</span>
-            </div>
-          }
-        >
-          {(operatorRows) => (
-            <div className="table historyTable">
-              <div className="historyRow operatorGrid heading">
-                <span>Username</span>
-                <span>Role</span>
-                <span>Scopes</span>
-                <span>ID</span>
-              </div>
-              {operatorRows.map((record) => (
-                <div className="historyRow operatorGrid" key={record.id}>
-                  <span className="historyPrimary">
-                    <strong>{record.username}</strong>
-                    <small>{record.id === operator?.id ? "current session" : record.totp_enabled ? "TOTP enabled" : "operator account"}</small>
-                  </span>
-                  <span className={`status ${record.role === "admin" ? "ok" : "warn"}`}>{record.role}</span>
-                  <span className="monoValue">{record.scopes.join(", ") || "default"}</span>
-                  <span className="monoValue">{shortId(record.id)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "Operators"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Operator sessions</h2>
-            <span>{operator?.role === "admin" ? `${operatorSessions.length} retained sessions` : "Admin role required"}</span>
-          </div>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "Operator", value: (session) => `${session.operator_username} ${session.operator_role}` },
-            { label: "Status", value: (session) => (session.current ? "current" : session.revoked ? "revoked" : "active") },
-            { label: "Created", value: (session) => session.created_at },
-            { label: "ID", value: (session) => session.id },
-          ]}
-          itemLabel="sessions"
-          items={operatorSessions}
-          pageSize={8}
-          title="Operator session records"
-          empty={
-            <div className="emptyState">
-              <KeyRound size={22} />
-              <strong>No operator sessions</strong>
-              <span>Admin sessions can revoke retained bearer/refresh sessions here.</span>
-            </div>
-          }
-        >
-          {(sessionRows) => (
-            <div className="table historyTable">
-              <div className="historyRow operatorSessionGrid heading">
-                <span>Operator</span>
-                <span>Status</span>
-                <span>Created</span>
-                <span>Action</span>
-              </div>
-              {sessionRows.map((session) => (
-                <div className="historyRow operatorSessionGrid" key={session.id}>
-                  <span className="historyPrimary">
-                    <strong>{session.operator_username}</strong>
-                    <small>{session.operator_role} / {shortId(session.id)}</small>
-                  </span>
-                  <span className={`status ${session.revoked ? "warn" : "ok"}`}>
-                    {session.current ? "current" : session.revoked ? "revoked" : "active"}
-                  </span>
-                  <span>{formatTime(session.created_at)}</span>
-                  <button
-                    className="secondaryAction compactAction dangerAction"
-                    disabled={session.current || session.revoked || !canManageOperators}
-                    onClick={() => void onRevokeOperatorSession(session.id)}
-                    type="button"
-                  >
-                    <UserX size={15} />
-                    Revoke
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "VPS clients"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Enrollment tokens</h2>
-            <span>{canManageOperators ? `${enrollmentTokens.length} retained token policies` : "Admin role required"}</span>
-          </div>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "Token", value: (record) => record.token_prefix },
-            { label: "Policy", value: (record) => `${record.purpose} ${enrollmentTokenDisplayName(record)}` },
-            { label: "Status", value: (record) => (record.used_at ? `used ${lifecycleClientLabel(record.used_by_client_id)}` : "available") },
-            { label: "Defaults", value: enrollmentTokenDefaultsLabel },
-            { label: "Expires", value: (record) => record.expires_at },
-          ]}
-          itemLabel="tokens"
-          items={enrollmentTokens}
-          pageSize={8}
-          title="Enrollment token records"
-          empty={
-            <div className="emptyState">
-              <KeyRound size={22} />
-              <strong>No enrollment tokens</strong>
-              <span>Admin sessions can create provisioning and rebuild tokens.</span>
-            </div>
-          }
-        >
-          {(tokenRows) => (
-            <div className="table historyTable">
-              <div className="historyRow enrollmentTokenGrid heading">
-                <span>Token</span>
-                <span>Policy</span>
-                <span>Status</span>
-                <span>Defaults</span>
-              </div>
-              {tokenRows.map((record) => (
-                <div className="historyRow enrollmentTokenGrid" key={record.id}>
-                  <span className="historyPrimary">
-                    <strong>{record.token_prefix}</strong>
-                    <small>expires {formatTime(record.expires_at)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{enrollmentPurposeLabel(record.purpose)}</strong>
-                    <small>{enrollmentTokenDisplayName(record)}</small>
-                  </span>
-                  <span className={`status ${record.used_at ? "warn" : "ok"}`}>
-                    {record.used_at ? `used by ${lifecycleClientLabel(record.used_by_client_id)}` : "available"}
-                  </span>
-                  <span className="monoValue">{enrollmentTokenDefaultsLabel(record) || "none"}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "VPS clients"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Key lifecycle</h2>
+            <h2>Access control</h2>
             <span>
-              {keyLifecycleReport
-                ? `${keyLifecycleReport.current_key_revoked_count} current revocations / ${clientKeyRevocations.length} recent records`
-                : "Admin role required"}
+              {error ??
+                (loading
+                  ? "Refreshing access records"
+                  : "Operators, direct gateway agent identities, and active sessions")}
             </span>
           </div>
-        </div>
-        <CrudPager
-          fields={[
-            { label: "VPS", value: (client) => formatVpsName(client, vpsNameDisplayMode) },
-            { label: "Key", value: (client) => client.current_public_key_sha256_hex },
-            { label: "Status", value: (client) => `${client.status} ${client.current_key_revoked ? "revoked" : ""}` },
-            { label: "Revoked", value: (client) => `${client.latest_revoked_at ?? ""} ${client.latest_revocation_reason ?? ""}` },
-          ]}
-          itemLabel="VPSs"
-          items={lifecycleClients}
-          pageSize={10}
-          title="Key lifecycle records"
-          empty={
-            <div className="emptyState">
-              <Fingerprint size={22} />
-              <strong>No lifecycle report</strong>
-              <span>Admin sessions can review enrolled keys and revocation records here.</span>
-            </div>
-          }
-        >
-          {(clientRows) => (
-            <div className="table historyTable">
-              <div className="historyRow keyLifecycleGrid heading">
-                <span>VPS</span>
-                <span>Current key</span>
-                <span>Status</span>
-                <span>Latest revoke</span>
-              </div>
-              {clientRows.map((client) => (
-                <div className="historyRow keyLifecycleGrid" key={client.client_id}>
-                  <span className="historyPrimary">
-                    <strong>{formatVpsName(client, vpsNameDisplayMode)}</strong>
-                    <small>{client.status}</small>
-                  </span>
-                  <span className="monoValue">{client.current_public_key_sha256_hex ? shortHash(client.current_public_key_sha256_hex) : "no key"}</span>
-                  <span className={`status ${client.current_key_revoked ? "warn" : statusClass(client.status)}`}>
-                    {client.current_key_revoked ? "revoked" : client.status}
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{client.latest_revoked_at ? formatTime(client.latest_revoked_at) : "none"}</strong>
-                    <small>{client.latest_revocation_reason ?? "no current-key revocation"}</small>
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
-
-      <div className="fleetPanel" hidden={activeSubpage !== "Gateway"}>
-        <div className="sectionHeader">
-          <div>
-            <h2>Gateway sessions</h2>
-            <span>{gatewaySessions.length} retained TCP lifecycle records</span>
-          </div>
-          <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
+          <button
+            className="secondaryAction"
+            disabled={loading}
+            onClick={() => void onRefresh()}
+            type="button"
+          >
             <RefreshCw size={17} />
             Refresh
           </button>
         </div>
-        <CrudPager
-          fields={[
-            { label: "VPS", value: (session) => lifecycleClientLabel(session.client_id) },
-            { label: "Status", value: (session) => `${session.status} ${session.end_reason ?? ""}` },
-            { label: "Gateway", value: (session) => session.gateway_id },
-            { label: "Last seen", value: (session) => session.last_seen_at },
-          ]}
-          itemLabel="sessions"
-          items={gatewaySessions}
-          pageSize={10}
-          title="Gateway session records"
-          empty={
-            <div className="emptyState">
-              <Wifi size={22} />
-              <strong>No gateway sessions</strong>
-              <span>Noise-over-TCP agent session starts and ends will appear here.</span>
-            </div>
-          }
-        >
-          {(gatewayRows) => (
-            <div className="table historyTable">
-              <div className="historyRow heading gatewaySessionGrid">
-                <span>VPS</span>
-                <span>Status</span>
-                <span>Gateway</span>
-                <span>Last seen</span>
-              </div>
-              {gatewayRows.map((session) => (
-                <div className="historyRow gatewaySessionGrid" key={session.id}>
-                  <span className="historyPrimary">
-                    <strong>{lifecycleClientLabel(session.client_id)}</strong>
-                    <small>{shortId(session.id)}</small>
-                  </span>
-                  <span className={`status ${statusClass(session.status)}`}>{session.status}</span>
-                  <span className="historyPrimary">
-                    <strong>{session.gateway_id}</strong>
-                    <small>{session.end_reason ?? "active route"}</small>
-                  </span>
-                  <span>{formatTime(session.last_seen_at)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </CrudPager>
-      </div>
 
-      <aside className="inspector accessInspector" hidden={activeSubpage === "Overview" || activeSubpage === "Privilege unlock"}>
-        <div className="accessConfigHeading" hidden={activeSubpage !== "Operators"}>
-          <strong>Operator configuration</strong>
-          <span>Operators, TOTP, and retained sessions</span>
+        <div className="accessSummaryCards denseSummaryCards">
+          <SummaryCard
+            label="Operator"
+            value={operator?.username ?? "anonymous"}
+            detail={operator?.role ?? "not signed in"}
+          />
+          <SummaryCard
+            label="Session"
+            value={sessionState}
+            detail={`token in ${tokenStorageState}`}
+          />
+          <SummaryCard
+            label="Privilege"
+            value={vaultState}
+            detail="request-bound assertions only"
+          />
+          <SummaryCard
+            label="Gateway"
+            value={`${activeGatewaySessions} active`}
+            detail={`${gatewaySessions.length} recent sessions`}
+          />
+          <SummaryCard
+            label="Agent identities"
+            value={`${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length}`}
+            detail={`${revokedClientCount} revoked/current blocked`}
+          />
         </div>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
+
+        <nav className="subpanelTabs accessTabs" aria-label="Access subpanels">
+          {accessSubpages.map((subpage) => (
+            <button
+              className={activeSubpage === subpage ? "active" : ""}
+              key={subpage}
+              onClick={() => setActiveSubpage(subpage)}
+              type="button"
+            >
+              {subpage}
+            </button>
+          ))}
+        </nav>
+
+        {activeSubpage === "Overview" && (
+          <div className="workspaceSection accessOverviewGrid">
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Security posture</h2>
+                <span>Direct gateway identity, no panel claim workflow</span>
+              </div>
+              <div className="metricRows">
+                <MetricRow
+                  label="Server signing public key"
+                  value={
+                    keyLifecycleReport?.server_ed25519_public_key_configured
+                      ? "configured"
+                      : "not configured"
+                  }
+                />
+                <MetricRow
+                  label="Direct identity clients"
+                  value={String(
+                    keyLifecycleReport?.direct_identity_client_count ??
+                      lifecycleClients.length,
+                  )}
+                />
+                <MetricRow
+                  label="Revoked key records"
+                  value={String(
+                    keyLifecycleReport?.revocation_count ??
+                      clientKeyRevocations.length,
+                  )}
+                />
+                <MetricRow
+                  label="Current keys blocked"
+                  value={String(
+                    keyLifecycleReport?.current_key_revoked_count ?? 0,
+                  )}
+                />
+                <MetricRow label="WebSocket" value={wsState} />
+                <MetricRow label="Last event" value={lastLiveEvent || "none"} />
+              </div>
+            </section>
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Operational model</h2>
+                <span>
+                  Gateway endpoints are selected from provisioned endpoint
+                  priorities
+                </span>
+              </div>
+              <p className="formNoteText">
+                Agents are installed with their Noise private key, client ID,
+                trusted gateway server key, and prioritized gateway endpoints.
+                The browser panel can register the matching public identity for
+                inventory visibility, but it never issues claim tokens and
+                agents never call the panel for runtime configuration.
+              </p>
+            </section>
+          </div>
+        )}
+
+        {activeSubpage === "Operators" && (
+          <div className="workspaceSection">
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Operators</h2>
+                <span>{operators.length} configured</span>
+              </div>
+              <CrudPager
+                fields={[
+                  { label: "Username", value: (item) => item.username },
+                  { label: "Role", value: (item) => item.role },
+                  { label: "Scopes", value: (item) => item.scopes.join(" ") },
+                ]}
+                itemLabel="operators"
+                items={operators}
+                pageSize={8}
+                storageKey="vpsman.access.operators"
+                title="Operators"
+              >
+                {(pagedOperators) => (
+                  <table className="dataTable compactTable">
+                    <thead>
+                      <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>Scopes</th>
+                        <th>TOTP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedOperators.map((item) => (
+                        <tr key={item.id}>
+                          <td>{item.username}</td>
+                          <td>
+                            <span
+                              className={`statusPill ${statusClass(item.role)}`}
+                            >
+                              {item.role}
+                            </span>
+                          </td>
+                          <td>
+                            {item.scopes.length > 0
+                              ? item.scopes.join(", ")
+                              : "all role defaults"}
+                          </td>
+                          <td>{item.totp_enabled ? "enabled" : "off"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CrudPager>
+            </section>
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Operator sessions</h2>
+                <span>{operatorSessions.length} recent sessions</span>
+              </div>
+              <CrudPager
+                fields={[
+                  {
+                    label: "Operator",
+                    value: (item) => item.operator_username,
+                  },
+                  { label: "Role", value: (item) => item.operator_role },
+                  { label: "Revoked", value: (item) => item.revoked },
+                ]}
+                itemLabel="sessions"
+                items={operatorSessions}
+                pageSize={8}
+                storageKey="vpsman.access.operatorSessions"
+                title="Operator sessions"
+              >
+                {(pagedSessions) => (
+                  <table className="dataTable compactTable">
+                    <thead>
+                      <tr>
+                        <th>Operator</th>
+                        <th>Created</th>
+                        <th>Expires</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedSessions.map((session) => (
+                        <tr key={session.id}>
+                          <td>{session.operator_username}</td>
+                          <td>{formatTime(session.created_at)}</td>
+                          <td>{formatTime(session.expires_at)}</td>
+                          <td>
+                            {session.current
+                              ? "current"
+                              : session.revoked
+                                ? "revoked"
+                                : "active"}
+                          </td>
+                          <td>
+                            <button
+                              className="secondaryAction compactAction dangerAction"
+                              disabled={
+                                !canManageOperators ||
+                                session.current ||
+                                session.revoked
+                              }
+                              onClick={() =>
+                                void onRevokeOperatorSession(session.id)
+                              }
+                              type="button"
+                            >
+                              <UserX size={14} />
+                              Revoke
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CrudPager>
+            </section>
+          </div>
+        )}
+
+        {activeSubpage === "Privilege unlock" && (
+          <div className="workspaceSection accessOverviewGrid">
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Privilege unlock</h2>
+                <span>
+                  Kept in the browser; API receives only request-bound
+                  assertions
+                </span>
+              </div>
+              <PrivilegeVaultBox
+                lastPayloadHash={privilegeMaterial ? "unlocked" : null}
+                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                onVaultAvailabilityChange={setVaultAvailable}
+                privilegeMaterial={privilegeMaterial}
+              />
+            </section>
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>TOTP</h2>
+                <span>
+                  {totpError ??
+                    (operator?.totp_enabled ? "enabled" : "optional hardening")}
+                </span>
+              </div>
+              <div className="sideForm standaloneForm">
+                <label>
+                  <span>Current password</span>
+                  <input
+                    aria-label="TOTP password"
+                    onChange={(event) => setTotpPassword(event.target.value)}
+                    type="password"
+                    value={totpPassword}
+                  />
+                </label>
+                <label>
+                  <span>Authenticator code</span>
+                  <input
+                    aria-label="TOTP code"
+                    onChange={(event) => setTotpCode(event.target.value)}
+                    value={totpCode}
+                  />
+                </label>
+                {totpSetup && (
+                  <div className="inlineSecret">
+                    <strong>{totpSetup.secret_base32}</strong>
+                    <small>{totpSetup.otpauth_uri}</small>
+                  </div>
+                )}
+                <div className="actionRow">
+                  <button
+                    className="secondaryAction"
+                    disabled={totpPending || !totpPassword}
+                    onClick={() => void setupTotp()}
+                    type="button"
+                  >
+                    <ShieldCheck size={17} />
+                    Setup TOTP
+                  </button>
+                  <button
+                    className="secondaryAction"
+                    disabled={totpPending || !totpPassword || !totpCode}
+                    onClick={() => void confirmTotp()}
+                    type="button"
+                  >
+                    <Save size={17} />
+                    Confirm
+                  </button>
+                  <button
+                    className="secondaryAction dangerAction"
+                    disabled={totpPending || !totpPassword || !totpCode}
+                    onClick={() => void disableTotp()}
+                    type="button"
+                  >
+                    <Trash2 size={17} />
+                    Disable
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeSubpage === "VPS clients" && (
+          <div className="workspaceSection">
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Gateway agent identities</h2>
+                <span>Registered public keys and revocation state</span>
+              </div>
+              <CrudPager
+                fields={[
+                  {
+                    label: "Client",
+                    value: (item) => `${item.display_name} ${item.client_id}`,
+                  },
+                  { label: "Status", value: (item) => item.status },
+                  {
+                    label: "Key",
+                    value: (item) => item.current_public_key_sha256_hex ?? "",
+                  },
+                  {
+                    label: "Revoked",
+                    value: (item) => item.current_key_revoked,
+                  },
+                ]}
+                itemLabel="identities"
+                items={lifecycleClients}
+                pageSize={10}
+                storageKey="vpsman.access.agentIdentities"
+                title="Gateway agent identities"
+              >
+                {(pagedClients) => (
+                  <table className="dataTable compactTable">
+                    <thead>
+                      <tr>
+                        <th>VPS</th>
+                        <th>Status</th>
+                        <th>Current key</th>
+                        <th>Latest revocation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedClients.map((client) => (
+                        <tr key={client.client_id}>
+                          <td title={client.client_id}>
+                            {formatVpsName(
+                              client.display_name,
+                              client.client_id,
+                              vpsNameDisplayMode,
+                            )}
+                          </td>
+                          <td>
+                            <span
+                              className={`statusPill ${statusClass(client.status)}`}
+                            >
+                              {client.current_key_revoked
+                                ? "blocked"
+                                : client.status}
+                            </span>
+                          </td>
+                          <td>
+                            {client.current_public_key_sha256_hex
+                              ? shortHash(client.current_public_key_sha256_hex)
+                              : "no key"}
+                          </td>
+                          <td>
+                            {client.latest_revoked_at
+                              ? `${formatTime(client.latest_revoked_at)} ${client.latest_revocation_reason ?? ""}`
+                              : "none"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CrudPager>
+            </section>
+
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Client key revocations</h2>
+                <span>{clientKeyRevocations.length} retained records</span>
+              </div>
+              <CrudPager
+                fields={[
+                  { label: "Client", value: (item) => item.client_id },
+                  { label: "Key", value: (item) => item.public_key_sha256_hex },
+                  { label: "Reason", value: (item) => item.reason ?? "" },
+                ]}
+                itemLabel="revocations"
+                items={clientKeyRevocations}
+                pageSize={8}
+                storageKey="vpsman.access.revocations"
+                title="Client key revocations"
+              >
+                {(pagedRevocations) => (
+                  <table className="dataTable compactTable">
+                    <thead>
+                      <tr>
+                        <th>VPS</th>
+                        <th>Key hash</th>
+                        <th>Reason</th>
+                        <th>Created</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedRevocations.map((revocation) => (
+                        <tr key={revocation.id}>
+                          <td title={revocation.client_id}>
+                            {lifecycleClientLabel(revocation.client_id)}
+                          </td>
+                          <td>{shortHash(revocation.public_key_sha256_hex)}</td>
+                          <td>{revocation.reason ?? "operator request"}</td>
+                          <td>{formatTime(revocation.created_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CrudPager>
+            </section>
+          </div>
+        )}
+
+        {activeSubpage === "Gateway" && (
+          <div className="workspaceSection">
+            <section className="controlPanel">
+              <div className="sectionHeader compact">
+                <h2>Gateway sessions</h2>
+                <span>
+                  {activeGatewaySessions} active / {gatewaySessions.length}{" "}
+                  recent
+                </span>
+              </div>
+              <CrudPager
+                fields={[
+                  { label: "Client", value: (item) => item.client_id },
+                  { label: "Gateway", value: (item) => item.gateway_id },
+                  { label: "Status", value: (item) => item.status },
+                ]}
+                itemLabel="gateway sessions"
+                items={gatewaySessions}
+                pageSize={12}
+                storageKey="vpsman.access.gatewaySessions"
+                title="Gateway sessions"
+              >
+                {(pagedSessions) => (
+                  <table className="dataTable compactTable">
+                    <thead>
+                      <tr>
+                        <th>VPS</th>
+                        <th>Gateway</th>
+                        <th>Status</th>
+                        <th>Last seen</th>
+                        <th>Noise key</th>
+                        <th>End reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedSessions.map((session) => (
+                        <tr key={session.id}>
+                          <td title={session.client_id}>
+                            {lifecycleClientLabel(session.client_id)}
+                          </td>
+                          <td>{session.gateway_id}</td>
+                          <td>
+                            <span
+                              className={`statusPill ${statusClass(session.status)}`}
+                            >
+                              {session.status}
+                            </span>
+                          </td>
+                          <td>{formatTime(session.last_seen_at)}</td>
+                          <td>
+                            {session.noise_public_key_hex
+                              ? shortHash(session.noise_public_key_hex)
+                              : "n/a"}
+                          </td>
+                          <td>
+                            {session.end_reason ??
+                              (session.ended_at ? "ended" : "active")}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CrudPager>
+            </section>
+          </div>
+        )}
+      </section>
+
+      <aside className="fleetPanel accessInspector">
+        <div className="accessConfigHeading">
+          <strong>
+            {activeSubpage === "VPS clients"
+              ? "Direct identity actions"
+              : "Access actions"}
+          </strong>
+          <span>
+            {canManageOperators ? "Admin controls" : "Admin role required"}
+          </span>
+        </div>
+
+        <div
+          className="sectionHeader compact"
+          hidden={activeSubpage !== "Operators"}
+        >
           <h2>Create operator</h2>
-          <span>{operatorActionError ?? (canManageOperators ? "Admin role" : "Admin role required")}</span>
+          <span>{operatorActionError ?? "Role and scope assignment"}</span>
         </div>
-        <form className="sideForm" hidden={activeSubpage !== "Operators"} onSubmit={(event) => void createOperator(event)}>
+        <form
+          className="sideForm"
+          hidden={activeSubpage !== "Operators"}
+          onSubmit={(event) => void createOperator(event)}
+        >
           <label>
             <span>Username</span>
             <input
-              aria-label="Operator username"
+              aria-label="New operator username"
               disabled={!canManageOperators || operatorActionPending}
               onChange={(event) => setNewOperatorUsername(event.target.value)}
-              placeholder="ops-shift-lead"
               value={newOperatorUsername}
             />
           </label>
           <label>
-            <span>Role</span>
-            <select
-              aria-label="Operator role"
-              disabled={!canManageOperators || operatorActionPending}
-              onChange={(event) => setNewOperatorRole(event.target.value)}
-              value={newOperatorRole}
-            >
-              <option value="operator">operator</option>
-              <option value="viewer">viewer</option>
-              <option value="admin">admin</option>
-            </select>
-          </label>
-          <label>
-            <span>Temporary password</span>
+            <span>Password</span>
             <input
-              aria-label="Operator password"
-              autoComplete="new-password"
+              aria-label="New operator password"
               disabled={!canManageOperators || operatorActionPending}
+              minLength={12}
               onChange={(event) => setNewOperatorPassword(event.target.value)}
-              placeholder="minimum 12 characters"
               type="password"
               value={newOperatorPassword}
             />
           </label>
           <label>
+            <span>Role</span>
+            <select
+              aria-label="New operator role"
+              disabled={!canManageOperators || operatorActionPending}
+              onChange={(event) => setNewOperatorRole(event.target.value)}
+              value={newOperatorRole}
+            >
+              <option value="operator">Operator</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <label>
             <span>Scopes</span>
             <input
-              aria-label="Operator scopes"
+              aria-label="New operator scopes"
               disabled={!canManageOperators || operatorActionPending}
               onChange={(event) => setNewOperatorScopes(event.target.value)}
-              placeholder="blank uses role defaults"
+              placeholder="inventory:write, jobs:run"
               value={newOperatorScopes}
             />
           </label>
-          <button className="secondaryAction" disabled={!canCreateOperator} type="submit">
+          <button
+            className="secondaryAction"
+            disabled={!canCreateOperator}
+            type="submit"
+          >
             <UserPlus size={17} />
             Create operator
           </button>
         </form>
 
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
-          <h2>TOTP</h2>
-          <span>{totpError ?? (operator?.totp_enabled ? "Enabled" : "Optional")}</span>
+        <div
+          className="sectionHeader compact"
+          hidden={activeSubpage !== "VPS clients"}
+        >
+          <h2>Import identity</h2>
+          <span>
+            {identityError ?? "Gateway-issued client ID and public key"}
+          </span>
         </div>
-        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
+        <form
+          className="sideForm"
+          hidden={activeSubpage !== "VPS clients"}
+          onSubmit={requestIdentityImport}
+        >
           <label>
-            <span>Current password</span>
+            <span>Client ID</span>
             <input
-              aria-label="TOTP password"
-              autoComplete="current-password"
-              onChange={(event) => setTotpPassword(event.target.value)}
-              placeholder="operator password"
-              type="password"
-              value={totpPassword}
+              aria-label="Agent identity client ID"
+              disabled={!canManageOperators || identityPending}
+              onChange={(event) => setIdentityClientId(event.target.value)}
+              placeholder="vps-edge-nrt-04"
+              value={identityClientId}
             />
           </label>
-          <label>
-            <span>Authenticator code</span>
-            <input
-              aria-label="TOTP code"
-              autoComplete="one-time-code"
-              inputMode="numeric"
-              maxLength={6}
-              onChange={(event) => setTotpCode(event.target.value)}
-              placeholder="6-digit code"
-              value={totpCode}
-            />
-          </label>
-          {totpSetup && (
-            <div className="inlineSecret">
-              <strong>{totpSetup.secret_base32}</strong>
-              <small>{totpSetup.otpauth_uri}</small>
-            </div>
-          )}
-          <button
-            className="secondaryAction"
-            disabled={totpPending || !totpPassword || operator?.totp_enabled}
-            onClick={() => void setupTotp()}
-            type="button"
-          >
-            <ShieldCheck size={17} />
-            Setup TOTP
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={totpPending || !totpPassword || !totpCode || operator?.totp_enabled}
-            onClick={() => void confirmTotp()}
-            type="button"
-          >
-            <LockKeyhole size={17} />
-            Confirm TOTP
-          </button>
-          <button
-            className="secondaryAction dangerAction"
-            disabled={totpPending || !totpPassword || !totpCode || !operator?.totp_enabled}
-            onClick={() => void disableTotp()}
-            type="button"
-          >
-            <Trash2 size={17} />
-            Disable TOTP
-          </button>
-        </div>
-
-        <div className="accessConfigHeading" hidden={activeSubpage !== "VPS clients"}>
-          <strong>VPS client configuration</strong>
-          <span>Enrollment, rebuild tokens, default tags, and key revocation</span>
-        </div>
-        <ConfirmationPrompt
-          confirmLabel={pendingConfirmation === "key-revoke" ? "Revoke key" : "Create rebuild token"}
-          detail={
-            pendingConfirmation === "key-revoke"
-              ? "Confirm revoking the current VPS key for the selected client."
-              : "Confirm issuing a rebuild re-enrollment token for the existing VPS identity."
-          }
-          items={
-            pendingConfirmation === "key-revoke"
-              ? [
-                  { label: "VPS", value: lifecycleClientLabel(revokeClientId) },
-                  { label: "Reason", value: revokeReason.trim() || "none" },
-                ]
-              : [
-                  { label: "VPS", value: lifecycleClientLabel(tokenClientId) },
-                  { label: "TTL", value: `${Number.parseInt(tokenTtlSecs, 10)}s` },
-                ]
-          }
-          onCancel={() => setPendingConfirmation(null)}
-          onConfirm={() => void confirmAccessAction()}
-          open={activeSubpage === "VPS clients" && pendingConfirmation !== null}
-          pending={tokenPending || revokePending}
-          title={pendingConfirmation === "key-revoke" ? "Revoke VPS key" : "Create rebuild token"}
-          tone="danger"
-        />
-        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
-          <h2>Enrollment runtime config</h2>
-          <span>{settingsError ?? (enrollmentSettings ? "Agent connection defaults" : "Loading runtime settings")}</span>
-        </div>
-        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void saveEnrollmentSettings(event)}>
-          <div className="formNote">
-            <strong>Claim API URL</strong>
-            <span>{enrollmentClaimApiUrl} is used by the install command only; agents store gateway endpoints and discovery settings.</span>
-          </div>
           <label className="wideField">
-            <span>Gateway endpoints</span>
+            <span>Noise public key hex</span>
             <textarea
-              aria-label="Enrollment gateway endpoints"
-              className="enrollmentEndpointEditor"
-              disabled={!canManageOperators || settingsPending}
-              onChange={(event) => setSettingsEndpoints(event.target.value)}
-              placeholder={"primary=gw.example.com:9443=10\nprimary-ipv4=203.0.113.10:9443=10\nprimary-ipv6=[2001:db8::10]:9443=20"}
-              value={settingsEndpoints}
-            />
-          </label>
-          <div className="formNote">
-            <strong>Address resolution</strong>
-            <span>Domain endpoints are resolved with IPv4 tried first, then IPv6. Explicit IPv4/IPv6 fallback can be represented as separate endpoint lines. Agents sleep {settingsRetrySecs || "60"} seconds after a failed endpoint pass.</span>
-          </div>
-          <label>
-            <span>Discovery URL</span>
-            <input
-              aria-label="Enrollment discovery URL"
-              disabled={!canManageOperators || settingsPending}
-              onChange={(event) => setSettingsDiscoveryUrl(event.target.value)}
-              placeholder="https://panel.example.com/.well-known/vpsman/endpoints.json"
-              value={settingsDiscoveryUrl}
-            />
-          </label>
-          <label>
-            <span>Gateway Noise public key</span>
-            <input
-              aria-label="Enrollment gateway Noise public key"
-              disabled={!canManageOperators || settingsPending}
-              onChange={(event) => setSettingsGatewayKey(event.target.value)}
+              aria-label="Agent identity public key hex"
+              disabled={!canManageOperators || identityPending}
+              onChange={(event) => setIdentityPublicKeyHex(event.target.value)}
               placeholder="64 hex characters"
-              value={settingsGatewayKey}
+              rows={3}
+              value={identityPublicKeyHex}
             />
           </label>
           <label>
-            <span>Retry seconds</span>
+            <span>Display name</span>
             <input
-              aria-label="Enrollment gateway retry seconds"
-              disabled={!canManageOperators || settingsPending}
-              inputMode="numeric"
-              onChange={(event) => setSettingsRetrySecs(event.target.value)}
-              placeholder="60"
-              value={settingsRetrySecs}
-            />
-          </label>
-          <label>
-            <span>Connect timeout seconds</span>
-            <input
-              aria-label="Enrollment gateway connect timeout seconds"
-              disabled={!canManageOperators || settingsPending}
-              inputMode="numeric"
-              onChange={(event) => setSettingsConnectTimeoutSecs(event.target.value)}
-              placeholder="10"
-              value={settingsConnectTimeoutSecs}
-            />
-          </label>
-          <label>
-            <span>Telemetry light seconds</span>
-            <input
-              aria-label="Enrollment telemetry light seconds"
-              disabled={!canManageOperators || settingsPending}
-              inputMode="numeric"
-              onChange={(event) => setSettingsTelemetryLightSecs(event.target.value)}
-              placeholder="15"
-              value={settingsTelemetryLightSecs}
-            />
-          </label>
-          <label>
-            <span>Telemetry full seconds</span>
-            <input
-              aria-label="Enrollment telemetry full seconds"
-              disabled={!canManageOperators || settingsPending}
-              inputMode="numeric"
-              onChange={(event) => setSettingsTelemetryFullSecs(event.target.value)}
-              placeholder="60"
-              value={settingsTelemetryFullSecs}
-            />
-          </label>
-          <label className="wideField">
-            <span>Trusted discovery signing keys</span>
-            <textarea
-              aria-label="Enrollment trusted discovery signing keys"
-              disabled={!canManageOperators || settingsPending}
-              onChange={(event) => setSettingsTrustedKeys(event.target.value)}
-              placeholder="one 64-hex Ed25519 public key per line"
-              value={settingsTrustedKeys}
-            />
-          </label>
-          <div className="formNote">
-            <strong>Server signing public key</strong>
-            <span>{enrollmentSettings?.server_ed25519_public_key_hex ?? "not configured"}</span>
-          </div>
-          <label className="inlineCheck">
-            <input
-              checked={settingsUpdateEnabled}
-              disabled={!canManageOperators || settingsPending}
-              onChange={(event) => setSettingsUpdateEnabled(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Default auto-check updates</span>
-          </label>
-          <label>
-            <span>Default version URL</span>
-            <input
-              aria-label="Enrollment default update version URL"
-              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
-              onChange={(event) => setSettingsUpdateVersionUrl(event.target.value)}
-              placeholder="https://updates.example.com/version.json"
-              value={settingsUpdateVersionUrl}
-            />
-          </label>
-          <label>
-            <span>Default update interval seconds</span>
-            <input
-              aria-label="Enrollment default update interval seconds"
-              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
-              inputMode="numeric"
-              onChange={(event) => setSettingsUpdateIntervalSecs(event.target.value)}
-              placeholder="86400"
-              value={settingsUpdateIntervalSecs}
-            />
-          </label>
-          <label>
-            <span>Default update jitter seconds</span>
-            <input
-              aria-label="Enrollment default update jitter seconds"
-              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
-              inputMode="numeric"
-              onChange={(event) => setSettingsUpdateJitterSecs(event.target.value)}
-              placeholder="86400"
-              value={settingsUpdateJitterSecs}
-            />
-          </label>
-          <label className="inlineCheck">
-            <input
-              checked={settingsUpdateActivate}
-              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled}
-              onChange={(event) => setSettingsUpdateActivate(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Default activate update</span>
-          </label>
-          <label className="inlineCheck">
-            <input
-              checked={settingsUpdateRestartAgent}
-              disabled={!canManageOperators || settingsPending || !settingsUpdateEnabled || !settingsUpdateActivate}
-              onChange={(event) => setSettingsUpdateRestartAgent(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Default restart agent</span>
-          </label>
-          <button className="secondaryAction" disabled={!canSaveEnrollmentSettings} type="submit">
-            <Save size={17} />
-            Save enrollment config
-          </button>
-          <button className="secondaryAction" disabled={settingsPending || loading} onClick={() => void onRefresh()} type="button">
-            <RefreshCw size={17} />
-            Reload config
-          </button>
-        </form>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
-          <h2>Create token</h2>
-          <span>{tokenError ?? (canManageOperators ? "Provision or rebuild" : "Admin role required")}</span>
-        </div>
-        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void createEnrollmentToken(event)}>
-          <label>
-            <span>Token purpose</span>
-            <select
-              aria-label="Enrollment token purpose"
-              disabled={!canManageOperators || tokenPending}
-              onChange={(event) => {
-                const nextPurpose = event.target.value as EnrollmentTokenPurpose;
-                setTokenPurpose(nextPurpose);
-                if (nextPurpose === "provision") {
-                  setTokenClientId("");
-                }
-              }}
-              value={tokenPurpose}
-            >
-              <option value="provision">Provision token</option>
-              <option value="rebuild_reenrollment">Rebuild token</option>
-            </select>
-          </label>
-          {tokenPurpose === "rebuild_reenrollment" ? (
-            <label>
-              <span>Existing VPS ID</span>
-              <input
-                aria-label="Enrollment token existing VPS ID"
-                disabled={!canManageOperators || tokenPending}
-                onChange={(event) => setTokenClientId(event.target.value)}
-                placeholder="VPS ID from details"
-                value={tokenClientId}
-              />
-            </label>
-          ) : (
-            <div className="formNote">
-              <strong>VPS identity</strong>
-              <span>System ID is assigned server-side; set the display name below.</span>
-            </div>
-          )}
-          <label>
-            <span>Token TTL seconds</span>
-            <input
-              aria-label="Enrollment token ttl"
-              disabled={!canManageOperators || tokenPending}
-              inputMode="numeric"
-              onChange={(event) => setTokenTtlSecs(event.target.value)}
-              placeholder="1800"
-              value={tokenTtlSecs}
-            />
-          </label>
-          <label>
-            <span>Default tags</span>
-            <input
-              aria-label="Enrollment default tags"
-              disabled={!canManageOperators || tokenPending}
-              onChange={(event) => setTokenTags(event.target.value)}
-              placeholder="country:JP,role:edge"
-              value={tokenTags}
-            />
-          </label>
-          <label>
-            <span>Initial display name</span>
-            <input
-              aria-label="Enrollment default display name"
-              disabled={!canManageOperators || tokenPending}
-              onChange={(event) => setTokenDisplayName(event.target.value)}
+              aria-label="Agent identity display name"
+              disabled={!canManageOperators || identityPending}
+              onChange={(event) => setIdentityDisplayName(event.target.value)}
               placeholder="edge-nrt-04"
-              value={tokenDisplayName}
+              value={identityDisplayName}
+            />
+          </label>
+          <label>
+            <span>Tags</span>
+            <input
+              aria-label="Agent identity tags"
+              disabled={!canManageOperators || identityPending}
+              onChange={(event) => setIdentityTags(event.target.value)}
+              placeholder="country:JP, role:edge"
+              value={identityTags}
             />
           </label>
           <label className="inlineCheck">
             <input
-              checked={tokenUnmanagedUpdateEnabled}
-              disabled={!canManageOperators || tokenPending}
-              onChange={(event) => setTokenUnmanagedUpdateEnabled(event.target.checked)}
+              checked={identityReplaceExistingKey}
+              disabled={!canManageOperators || identityPending}
+              onChange={(event) =>
+                setIdentityReplaceExistingKey(event.target.checked)
+              }
               type="checkbox"
             />
-            <span>Auto-check updates</span>
+            <span>Replace existing current key</span>
           </label>
-          <label>
-            <span>Version metadata URL</span>
-            <input
-              aria-label="Enrollment unmanaged update version URL"
-              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-              onChange={(event) => setTokenUnmanagedUpdateVersionUrl(event.target.value)}
-              placeholder="https://updates.example/version.json"
-              value={tokenUnmanagedUpdateVersionUrl}
-            />
-          </label>
-          <label>
-            <span>Update interval seconds</span>
-            <input
-              aria-label="Enrollment unmanaged update interval"
-              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-              inputMode="numeric"
-              onChange={(event) => setTokenUnmanagedUpdateIntervalSecs(event.target.value)}
-              placeholder="86400"
-              value={tokenUnmanagedUpdateIntervalSecs}
-            />
-          </label>
-          <label>
-            <span>Update jitter seconds</span>
-            <input
-              aria-label="Enrollment unmanaged update jitter"
-              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-              inputMode="numeric"
-              onChange={(event) => setTokenUnmanagedUpdateJitterSecs(event.target.value)}
-              placeholder="300"
-              value={tokenUnmanagedUpdateJitterSecs}
-            />
-          </label>
-          <label className="inlineCheck">
-            <input
-              checked={tokenUnmanagedUpdateActivate}
-              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled}
-              onChange={(event) => setTokenUnmanagedUpdateActivate(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Activate update</span>
-          </label>
-          <label className="inlineCheck">
-            <input
-              checked={tokenUnmanagedUpdateRestartAgent}
-              disabled={!canManageOperators || tokenPending || !tokenUnmanagedUpdateEnabled || !tokenUnmanagedUpdateActivate}
-              onChange={(event) => setTokenUnmanagedUpdateRestartAgent(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Restart agent</span>
-          </label>
-          <div className="enrollmentInstallCommand">
-            <div className="enrollmentInstallHeading">
-              <strong>Root install command</strong>
-              {enrollmentInstallRender.command && (
-                <button aria-label="Copy enrollment install command" onClick={() => void copyEnrollmentInstallCommand()} type="button">
-                  <Copy size={15} />
-                  {installCommandCopied ? "Copied" : "Copy"}
-                </button>
-              )}
-            </div>
-            {enrollmentInstallRender.command ? (
-              <code>{enrollmentInstallRender.command}</code>
-            ) : (
-              <small>{enrollmentInstallRender.error}</small>
-            )}
-            {createdToken && (
-              <>
-                <small>{enrollmentPurposeLabel(createdToken.purpose)} / {createdToken.token_prefix}</small>
-                <small>Name {enrollmentTokenDisplayName(createdToken)}</small>
-              </>
-            )}
-          </div>
-          {pendingConfirmation !== "rebuild-token" && (
-            <button className="secondaryAction" disabled={!canCreateEnrollmentToken} type="submit">
-              {tokenPurpose === "rebuild_reenrollment" ? <RotateCcw size={17} /> : <UserPlus size={17} />}
-              {tokenPurpose === "rebuild_reenrollment" ? "Rebuild token" : "Create token"}
-            </button>
-          )}
-          {createdToken && (
-            <div className="inlineSecret enrollmentSecret">
-              <strong>{createdToken.token}</strong>
+          <button
+            className="secondaryAction"
+            disabled={!canUpsertIdentity}
+            type="submit"
+          >
+            <Fingerprint size={17} />
+            Import gateway identity
+          </button>
+          {createdIdentity && (
+            <div className="formNote">
+              <strong>{createdIdentity.display_name}</strong>
+              <span>
+                {createdIdentity.client_id} /{" "}
+                {shortHash(createdIdentity.current_public_key_sha256_hex)}
+              </span>
             </div>
           )}
         </form>
 
-        <div className="sectionHeader compact" hidden={activeSubpage !== "VPS clients"}>
+        <div
+          className="sectionHeader compact"
+          hidden={activeSubpage !== "VPS clients"}
+        >
           <h2>Revoke key</h2>
-          <span>{revokeError ?? (canManageOperators ? "Current VPS key" : "Admin role required")}</span>
+          <span>{revokeError ?? "Block the current gateway key"}</span>
         </div>
-        <form className="sideForm" hidden={activeSubpage !== "VPS clients"} onSubmit={(event) => void revokeClientKey(event)}>
+        <form
+          className="sideForm"
+          hidden={activeSubpage !== "VPS clients"}
+          onSubmit={requestClientKeyRevoke}
+        >
           <label>
             <span>VPS ID</span>
             <input
@@ -1347,177 +1103,156 @@ export function AccessPanel({
               value={revokeReason}
             />
           </label>
-          {pendingConfirmation !== "key-revoke" && (
-            <button className="secondaryAction dangerAction" disabled={!canRevokeClientKey} type="submit">
-              <Ban size={17} />
-              Revoke current key
-            </button>
-          )}
+          <button
+            className="secondaryAction dangerAction"
+            disabled={!canRevokeClientKey}
+            type="submit"
+          >
+            <Ban size={17} />
+            Revoke current key
+          </button>
         </form>
 
-        <div className="accessConfigHeading" hidden={activeSubpage !== "Operators"}>
-          <strong>Local panel state</strong>
-          <span>Browser session and privilege vault controls</span>
-        </div>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Operators"}>
-          <h2>Session controls</h2>
-          <span>Local browser state only</span>
-        </div>
-        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
-          <button className="secondaryAction" onClick={onClearSession} type="button">
-            <KeyRound size={17} />
-            Clear bearer session
-          </button>
-          <button className="secondaryAction dangerAction" disabled={!vaultAvailable} onClick={clearVault} type="button">
-            <Trash2 size={17} />
-            Clear privilege vault
-          </button>
-        </div>
-        <div className="timeline" hidden={activeSubpage !== "Operators"}>
-          <ShieldCheck size={18} />
-          <div>
-            <strong>Deny by default</strong>
-            <span>Non-telemetry actions still require local privilege unlock assertions.</span>
-          </div>
-        </div>
-        <div className="timeline" hidden={activeSubpage !== "Operators"}>
-          <LockKeyhole size={18} />
-          <div>
-            <strong>Secret handling</strong>
-            <span>Plaintext super password is not sent to the control-plane API.</span>
-          </div>
-        </div>
-
-        <div className="accessConfigHeading" hidden={activeSubpage !== "Gateway"}>
-          <strong>Gateway lifecycle</strong>
-          <span>Noise-over-TCP VPS session inventory</span>
-        </div>
-        <div className="sectionHeader compact" hidden={activeSubpage !== "Gateway"}>
-          <h2>Gateway records</h2>
-          <span>{gatewaySessions.length} retained sessions</span>
-        </div>
-        <div className="sideForm" hidden={activeSubpage !== "Gateway"}>
-          <button className="secondaryAction" disabled={loading} onClick={() => void onRefresh()} type="button">
-            <RefreshCw size={17} />
-            Refresh sessions
-          </button>
+        <div
+          className="accessConfigHeading"
+          hidden={activeSubpage !== "Gateway"}
+        >
+          <strong>Gateway model</strong>
+          <span>Agents connect only to gateways</span>
         </div>
         <div className="timeline" hidden={activeSubpage !== "Gateway"}>
           <Wifi size={18} />
           <div>
-            <strong>Agent connectivity</strong>
-            <span>Current and recently closed gateway routes are retained as lifecycle records.</span>
+            <strong>Endpoint priority controls routing</strong>
+            <span>
+              Use DNS and endpoint priorities in agent config; no panel-side
+              endpoint lookup is used by agents.
+            </span>
           </div>
         </div>
-        <div className="timeline" hidden={activeSubpage !== "Gateway"}>
-          <Fingerprint size={18} />
+
+        <div
+          className="accessConfigHeading"
+          hidden={activeSubpage !== "Operators"}
+        >
+          <strong>Local panel state</strong>
+          <span>Browser session and privilege vault controls</span>
+        </div>
+        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
+          <button
+            className="secondaryAction"
+            onClick={onClearSession}
+            type="button"
+          >
+            <KeyRound size={17} />
+            Clear bearer session
+          </button>
+          <button
+            className="secondaryAction dangerAction"
+            disabled={!vaultAvailable}
+            onClick={clearVault}
+            type="button"
+          >
+            <Trash2 size={17} />
+            Clear privilege vault
+          </button>
+        </div>
+
+        <div
+          className="timeline"
+          hidden={
+            activeSubpage === "Operators" ||
+            activeSubpage === "VPS clients" ||
+            activeSubpage === "Gateway"
+          }
+        >
+          <LockKeyhole size={18} />
           <div>
-            <strong>VPS identity</strong>
-            <span>Gateway tables show display names; system IDs stay available from VPS details.</span>
+            <strong>Deny by default</strong>
+            <span>
+              Mutating work still requires explicit confirmation and privilege
+              material when the server marks it privileged.
+            </span>
           </div>
         </div>
       </aside>
-    </section>
+
+      <ConfirmationPrompt
+        confirmLabel="Import identity"
+        detail="This registers a gateway-issued client public key for inventory and key lifecycle management. It does not create a token and does not give the agent a panel endpoint."
+        items={[
+          { label: "Client", value: identityClientId.trim() },
+          {
+            label: "Public key",
+            value: shortHash(identityPublicKeyHex.trim()),
+          },
+          {
+            label: "Replace key",
+            value: identityReplaceExistingKey ? "yes" : "no",
+          },
+        ]}
+        onCancel={() => setPendingConfirmation(null)}
+        onConfirm={() => void confirmIdentityImport()}
+        open={pendingConfirmation === "agent-identity"}
+        pending={identityPending}
+        title="Confirm direct gateway identity import"
+      />
+      <ConfirmationPrompt
+        confirmLabel="Revoke key"
+        detail="The current stored public key is revoked, the VPS is hidden as revoked, and active gateway sessions are ended. Revoked or deleted identities cannot be reused through direct import."
+        items={[
+          { label: "VPS", value: revokeClientId.trim() },
+          { label: "Reason", value: revokeReason.trim() || "operator request" },
+        ]}
+        onCancel={() => setPendingConfirmation(null)}
+        onConfirm={() => void confirmClientKeyRevoke()}
+        open={pendingConfirmation === "key-revoke"}
+        pending={revokePending}
+        title="Confirm current key revocation"
+        tone="danger"
+      />
+    </div>
   );
 }
 
-function formatEnrollmentEndpoints(endpoints: EnrollmentServerEndpoint[]): string {
-  return endpoints.map((endpoint) => `${endpoint.label}=${endpoint.tcp_addr}=${endpoint.priority}`).join("\n");
+function SummaryCard({
+  detail,
+  label,
+  value,
+}: {
+  detail: string;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="summaryCard">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
 }
 
-function parseEnrollmentEndpoints(input: string): EnrollmentServerEndpoint[] {
-  const lines = input
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) {
-    throw new Error("At least one gateway endpoint is required");
-  }
-  if (lines.length > 16) {
-    throw new Error("Gateway endpoints are limited to 16 entries");
-  }
-  return lines.map((line) => {
-    const parts = line.split("=");
-    if (parts.length !== 3) {
-      throw new Error("Gateway endpoints must use label=host:port=priority");
-    }
-    const [label, tcpAddr, priorityText] = parts.map((part) => part.trim());
-    if (!/^[A-Za-z0-9._:-]{1,64}$/.test(label)) {
-      throw new Error(`Endpoint label is invalid: ${label || "(blank)"}`);
-    }
-    validateEndpointAddress(tcpAddr);
-    const priority = parseRequiredInteger(priorityText, "Endpoint priority");
-    if (priority < 0 || priority > 65535) {
-      throw new Error("Endpoint priority must be between 0 and 65535");
-    }
-    return { label, tcp_addr: tcpAddr, priority };
-  });
+function MetricRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metricRow">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
 }
 
-function validateEndpointAddress(value: string) {
-  if (!value || value.length > 256 || /\s/.test(value)) {
-    throw new Error("Endpoint address must be a host:port without spaces");
-  }
-  let portText = "";
-  if (value.startsWith("[")) {
-    const end = value.indexOf("]");
-    if (end <= 1 || value[end + 1] !== ":") {
-      throw new Error("IPv6 endpoints must use [address]:port");
-    }
-    portText = value.slice(end + 2);
-  } else {
-    const separator = value.lastIndexOf(":");
-    if (separator <= 0 || separator === value.length - 1 || value.slice(0, separator).includes(":")) {
-      throw new Error("Endpoint address must be domain:port, IPv4:port, or [IPv6]:port");
-    }
-    portText = value.slice(separator + 1);
-  }
-  const port = parseRequiredInteger(portText, "Endpoint port");
-  if (port < 1 || port > 65535) {
-    throw new Error("Endpoint port must be between 1 and 65535");
-  }
+function parseListInput(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
-function parseMultilineList(input: string): string[] {
-  return input
-    .split(/[\n,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function parseRequiredInteger(input: string, label: string): number {
-  const value = Number.parseInt(input.trim(), 10);
-  if (!Number.isSafeInteger(value) || String(value) !== input.trim()) {
-    throw new Error(`${label} must be a whole number`);
-  }
-  return value;
-}
-
-function integerInRange(input: string, min: number, max: number): boolean {
-  const value = Number.parseInt(input.trim(), 10);
-  return Number.isSafeInteger(value) && String(value) === input.trim() && value >= min && value <= max;
-}
-
-function parseScopeInput(input: string): string[] {
-  return input
-    .split(",")
-    .map((scope) => scope.trim())
-    .filter(Boolean);
-}
-
-function enrollmentPurposeLabel(purpose: EnrollmentTokenPurpose): string {
-  return purpose === "rebuild_reenrollment" ? "rebuild re-enrollment" : "provision";
-}
-
-function enrollmentTokenDefaultsLabel(record: EnrollmentTokenView): string {
-  const updateLabel = record.unmanaged_update_enabled
-    ? `updates ${Math.round(record.unmanaged_update_interval_secs / 3600)}h`
-    : "updates off";
-  return [record.default_display_name, ...record.default_tags, updateLabel]
-    .filter((value): value is string => Boolean(value))
-    .join(", ");
-}
-
-function enrollmentTokenDisplayName(record: EnrollmentTokenView | CreateEnrollmentTokenResponse): string {
-  return record.default_display_name?.trim() || (record.purpose === "rebuild_reenrollment" ? "Existing VPS" : "Pending VPS");
+function isFixedHex32(value: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(value.trim());
 }

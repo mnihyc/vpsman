@@ -12,7 +12,7 @@ use vpsman_common::{AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, Job
 use super::*;
 use crate::{
     gateway_client::GatewayDispatchClient, repository_ingest::upsert_memory_agent,
-    routes_schedules::apply_schedule_now, state::EnrollmentSettings,
+    routes_schedules::apply_schedule_now,
 };
 
 fn schedule_test_operator() -> AuthContext {
@@ -56,7 +56,6 @@ fn schedule_test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[41_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

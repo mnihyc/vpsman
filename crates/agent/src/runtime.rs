@@ -24,7 +24,6 @@ use crate::{
     config_update::{
         apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
     },
-    discovery::{endpoint_candidates, refresh_discovery_endpoints},
     executor::{authorize_job, execute_job_command_with_config_and_output_sink},
     network_apply::{
         execute_network_apply_command, execute_network_ospf_cost_update_command,
@@ -52,14 +51,13 @@ pub(crate) async fn run_agent(
         tcp_addr,
         priority: 0,
     });
-    let mut discovered_endpoints = Vec::new();
     let mut recent_commands = RecentCommandCache::default();
 
     loop {
         let endpoints = override_endpoint
             .as_ref()
             .map(|endpoint| vec![endpoint.clone()])
-            .unwrap_or_else(|| endpoint_candidates(&config, &discovered_endpoints));
+            .unwrap_or_else(|| endpoint_candidates(&config));
         if endpoints.is_empty() {
             anyhow::bail!("agent has no TCP endpoint configured");
         }
@@ -78,20 +76,21 @@ pub(crate) async fn run_agent(
             }
         }
 
-        if override_endpoint.is_none() && config.discovery_url.is_some() {
-            match refresh_discovery_endpoints(&config).await {
-                Ok(endpoints) => {
-                    info!(
-                        endpoint_count = endpoints.len(),
-                        "refreshed discovery endpoint candidates"
-                    );
-                    discovered_endpoints = endpoints;
-                }
-                Err(error) => warn!(%error, "gateway endpoint discovery failed"),
-            }
-        }
         time::sleep(Duration::from_secs(config.auth.gateway_retry_secs.max(1))).await;
     }
+}
+
+
+fn endpoint_candidates(config: &AgentConfig) -> Vec<ServerEndpoint> {
+    let mut endpoints = config.tcp_endpoints.clone();
+    endpoints.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.tcp_addr.cmp(&right.tcp_addr))
+    });
+    endpoints.dedup_by(|left, right| left.tcp_addr == right.tcp_addr);
+    endpoints
 }
 
 async fn connect_and_stream(

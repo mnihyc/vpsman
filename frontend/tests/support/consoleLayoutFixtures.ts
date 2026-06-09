@@ -30,24 +30,76 @@ const summary = {
 const dashboardOverview = {
   available_filters: {
     countries: [
-      { count: 2, kind: "country", label: "country:US", query: "country:US", value: "US" },
-      { count: 1, kind: "country", label: "country:DE", query: "country:DE", value: "DE" },
+      {
+        count: 2,
+        kind: "country",
+        label: "country:US",
+        query: "country:US",
+        value: "US",
+      },
+      {
+        count: 1,
+        kind: "country",
+        label: "country:DE",
+        query: "country:DE",
+        value: "DE",
+      },
     ],
     group_by_options: [
-      { description: "Provider, country, and custom tags together", label: "Labels", value: "labels" },
-      { description: "Non-provider and non-country tags", label: "Custom tags", value: "tags" },
-      { description: "country:* tag distribution", label: "Countries", value: "countries" },
-      { description: "provider:* tag distribution", label: "Providers", value: "providers" },
-      { description: "One group per VPS in the selected scope", label: "VPS clients", value: "clients" },
-      { description: "Online, offline, and stale client states", label: "Status", value: "status" },
-      { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
+      {
+        description: "Provider, country, and custom tags together",
+        label: "Labels",
+        value: "labels",
+      },
+      {
+        description: "Non-provider and non-country tags",
+        label: "Custom tags",
+        value: "tags",
+      },
+      {
+        description: "country:* tag distribution",
+        label: "Countries",
+        value: "countries",
+      },
+      {
+        description: "provider:* tag distribution",
+        label: "Providers",
+        value: "providers",
+      },
+      {
+        description: "One group per VPS in the selected scope",
+        label: "VPS clients",
+        value: "clients",
+      },
+      {
+        description: "Online, offline, and stale client states",
+        label: "Status",
+        value: "status",
+      },
+      {
+        description: "Time buckets across the selected range",
+        label: "Date buckets",
+        value: "date",
+      },
     ],
     providers: [
-      { count: 1, kind: "provider", label: "provider:alpha", query: "provider:alpha", value: "alpha" },
+      {
+        count: 1,
+        kind: "provider",
+        label: "provider:alpha",
+        query: "provider:alpha",
+        value: "alpha",
+      },
     ],
     tags: [
       { count: 1, kind: "tag", label: "bgp", query: "tag:bgp", value: "bgp" },
-      { count: 1, kind: "tag", label: "bird2", query: "tag:bird2", value: "bird2" },
+      {
+        count: 1,
+        kind: "tag",
+        label: "bird2",
+        query: "tag:bird2",
+        value: "bird2",
+      },
     ],
     windows: [
       { label: "15 minutes", seconds: 900, value: "15m" },
@@ -232,9 +284,21 @@ const dashboardOverview = {
         interfaces: ["eth0", "tun0"],
         label: "core-fra-02",
         points: [
-          { bucket_start: "2026-06-05T20:15:00Z", rx_bytes: 110_000_000, tx_bytes: 190_000_000 },
-          { bucket_start: "2026-06-05T20:25:00Z", rx_bytes: 180_000_000, tx_bytes: 310_000_000 },
-          { bucket_start: "2026-06-05T20:35:00Z", rx_bytes: 258_000_000, tx_bytes: 524_000_000 },
+          {
+            bucket_start: "2026-06-05T20:15:00Z",
+            rx_bytes: 110_000_000,
+            tx_bytes: 190_000_000,
+          },
+          {
+            bucket_start: "2026-06-05T20:25:00Z",
+            rx_bytes: 180_000_000,
+            tx_bytes: 310_000_000,
+          },
+          {
+            bucket_start: "2026-06-05T20:35:00Z",
+            rx_bytes: 258_000_000,
+            tx_bytes: 524_000_000,
+          },
         ],
         rx_bytes: 548_000_000,
         tx_bytes: 1_024_000_000,
@@ -250,9 +314,21 @@ const dashboardOverview = {
         interfaces: ["eth0"],
         label: "edge-sfo-01",
         points: [
-          { bucket_start: "2026-06-05T20:15:00Z", rx_bytes: 50_000_000, tx_bytes: 90_000_000 },
-          { bucket_start: "2026-06-05T20:25:00Z", rx_bytes: 80_000_000, tx_bytes: 100_000_000 },
-          { bucket_start: "2026-06-05T20:35:00Z", rx_bytes: 90_000_000, tx_bytes: 200_000_000 },
+          {
+            bucket_start: "2026-06-05T20:15:00Z",
+            rx_bytes: 50_000_000,
+            tx_bytes: 90_000_000,
+          },
+          {
+            bucket_start: "2026-06-05T20:25:00Z",
+            rx_bytes: 80_000_000,
+            tx_bytes: 100_000_000,
+          },
+          {
+            bucket_start: "2026-06-05T20:35:00Z",
+            rx_bytes: 90_000_000,
+            tx_bytes: 200_000_000,
+          },
         ],
         rx_bytes: 220_000_000,
         tx_bytes: 390_000_000,
@@ -449,9 +525,8 @@ const operatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  enrollment_install_command_template:
-    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
   language: "en",
+  show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
   vps_name_display_mode: "name_id_suffix",
@@ -782,10 +857,13 @@ const hotConfigRuleTemplates = [
     built_in: true,
     category: "Data sources",
     created_at: "2026-06-02T10:00:00Z",
-    description: "Selects the runtime traffic accounting source for selected VPSs.",
+    description:
+      "Selects the runtime traffic accounting source for selected VPSs.",
     docs_metadata: {
-      examples: ["runtime_traffic_accounting_source = \"vnstat\""],
-      notes: ["Generates a partial hot-config patch only for the traffic accounting source."],
+      examples: ['runtime_traffic_accounting_source = "vnstat"'],
+      notes: [
+        "Generates a partial hot-config patch only for the traffic accounting source.",
+      ],
     },
     domain: "runtime_traffic_accounting_source",
     field_schema: {
@@ -805,56 +883,6 @@ const hotConfigRuleTemplates = [
   },
 ];
 
-const enrollmentTokens = [
-  {
-    assigned_client_id: null,
-    allowed_client_id: null,
-    created_at: "2026-05-31T10:00:00Z",
-    created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-    default_tags: ["edge"],
-    expected_old_public_key_sha256_hex: null,
-    expires_at: "2026-05-31T10:30:00Z",
-    id: "abababab-cdcd-4efe-8aaa-bbbbbbbbbbbb",
-    preserve_existing_assignments: true,
-    purpose: "provision",
-    requires_existing_client: false,
-    token_prefix: "vpsm12345678",
-    unmanaged_update_activate: true,
-    unmanaged_update_enabled: true,
-    unmanaged_update_interval_secs: 86400,
-    unmanaged_update_jitter_secs: 86400,
-    unmanaged_update_restart_agent: true,
-    unmanaged_update_version_url: "https://updates.example.com/vpsman/stable/version.json",
-    used_at: null,
-    used_by_client_id: null,
-  },
-];
-
-const enrollmentSettings = {
-  discovery_trusted_server_ed25519_public_keys_hex: ["a".repeat(64)],
-  discovery_url: "https://panel.ops.example.com/.well-known/vpsman/endpoints.json",
-  gateway_connect_timeout_secs: 10,
-  gateway_retry_secs: 60,
-  gateway_server_public_key_hex: "b".repeat(64),
-  server_ed25519_public_key_hex: "c".repeat(64),
-  tcp_endpoints: [
-    { label: "primary", priority: 10, tcp_addr: "gw.ops.example.com:9443" },
-    { label: "primary-v4", priority: 20, tcp_addr: "203.0.113.10:9443" },
-    { label: "primary-v6", priority: 30, tcp_addr: "[2001:db8::10]:9443" },
-  ],
-  telemetry_full_secs: 60,
-  telemetry_light_secs: 15,
-  update: {
-    trusted_artifact_signing_key_hex: null,
-    unmanaged_activate: true,
-    unmanaged_enabled: true,
-    unmanaged_interval_secs: 86400,
-    unmanaged_jitter_secs: 86400,
-    unmanaged_restart_agent: true,
-    unmanaged_version_url: "https://updates.example.com/vpsman/stable/version.json",
-  },
-};
-
 const clientKeyRevocations = [
   {
     client_id: "agent-nyc-03",
@@ -867,7 +895,6 @@ const clientKeyRevocations = [
 ];
 
 const keyLifecycleReport = {
-  active_rebuild_reenrollment_token_count: 0,
   clients: agents.map((agent, index) => ({
     client_id: agent.id,
     current_key_revoked: agent.id === "agent-nyc-03",
@@ -880,10 +907,7 @@ const keyLifecycleReport = {
     status: agent.status,
   })),
   current_key_revoked_count: 1,
-  discovery_trusted_server_key_count: 1,
-  enrolled_client_count: agents.length,
-  gateway_server_public_key_configured: true,
-  rebuild_reenrollment_token_count: 0,
+  direct_identity_client_count: agents.length,
   revocation_count: clientKeyRevocations.length,
   server_ed25519_public_key_configured: true,
 };
@@ -1613,8 +1637,6 @@ export async function installConsoleApiMock(page: Page) {
       hotConfigRuleTemplatesFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
-      enrollmentSettingsFixture,
-      enrollmentTokensFixture,
       keyLifecycleReportFixture,
       fleetAlertNotificationChannelsFixture,
       fleetAlertNotificationsFixture,
@@ -1641,9 +1663,9 @@ export async function installConsoleApiMock(page: Page) {
     }) => {
       const originalFetch = window.fetch.bind(window);
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
-      let currentEnrollmentSettings = JSON.parse(JSON.stringify(enrollmentSettingsFixture));
       const deletedAgentIds = new Set<string>();
-      const visibleAgents = () => agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
+      const visibleAgents = () =>
+        agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
@@ -1653,8 +1675,7 @@ export async function installConsoleApiMock(page: Page) {
         dataSourcePresetAssignments: [] as unknown[],
         dataSourcePresets: [] as unknown[],
         hotConfigRuleTemplates: [] as unknown[],
-        enrollmentSettings: [] as unknown[],
-        enrollmentTokens: [] as unknown[],
+        agentIdentities: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
         fleetAlertNotificationDispatches: [] as unknown[],
         fleetAlertNotificationProcesses: [] as unknown[],
@@ -1692,7 +1713,9 @@ export async function installConsoleApiMock(page: Page) {
           status: string;
         }>
       >();
-      const commandTypeForOperation = (operation: Record<string, unknown> | undefined): string | null => {
+      const commandTypeForOperation = (
+        operation: Record<string, unknown> | undefined,
+      ): string | null => {
         if (!operation || typeof operation.type !== "string") {
           return null;
         }
@@ -1704,7 +1727,12 @@ export async function installConsoleApiMock(page: Page) {
       const normalizeScheduleRecord = (schedule: Record<string, unknown>) => ({
         catch_up_limit: schedule.catch_up_limit ?? 1,
         catch_up_policy: schedule.catch_up_policy ?? "run_once",
-        command_type: schedule.command_type ?? commandTypeForOperation(schedule.operation as Record<string, unknown> | undefined) ?? "shell_argv",
+        command_type:
+          schedule.command_type ??
+          commandTypeForOperation(
+            schedule.operation as Record<string, unknown> | undefined,
+          ) ??
+          "shell_argv",
         created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
         cron_expr: schedule.cron_expr ?? "0 * * * *",
         deferred_until: schedule.deferred_until ?? null,
@@ -1732,14 +1760,18 @@ export async function installConsoleApiMock(page: Page) {
         retry_delay_secs: schedule.retry_delay_secs ?? 300,
         selector_expression: schedule.selector_expression ?? "id:*",
         timezone: schedule.timezone ?? "UTC",
-        updated_at: schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
+        updated_at:
+          schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
       });
       const currentSchedules = (
         schedulesFixture as Array<Record<string, unknown>>
       ).map((schedule) => normalizeScheduleRecord(schedule));
       const findSchedule = (encodedScheduleId: string) => {
         const scheduleId = decodeURIComponent(encodedScheduleId);
-        return currentSchedules.find((schedule) => schedule.id === scheduleId) ?? null;
+        return (
+          currentSchedules.find((schedule) => schedule.id === scheduleId) ??
+          null
+        );
       };
       const jsonResponse = (body: unknown, status = 200) =>
         Promise.resolve(
@@ -1781,12 +1813,22 @@ export async function installConsoleApiMock(page: Page) {
         }
         return btoa(binary);
       };
-      const valueMatches = (value: string, pattern: string, contains: boolean) => {
+      const valueMatches = (
+        value: string,
+        pattern: string,
+        contains: boolean,
+      ) => {
         const normalizedValue = value.toLocaleLowerCase();
         const normalizedPattern = pattern.toLocaleLowerCase();
-        if (normalizedPattern.includes("*") || normalizedPattern.includes("?")) {
+        if (
+          normalizedPattern.includes("*") ||
+          normalizedPattern.includes("?")
+        ) {
           const regex = new RegExp(
-            `^${normalizedPattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`,
+            `^${normalizedPattern
+              .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+              .replace(/\*/g, ".*")
+              .replace(/\?/g, ".")}$`,
           );
           return regex.test(normalizedValue);
         }
@@ -1794,12 +1836,16 @@ export async function installConsoleApiMock(page: Page) {
           ? normalizedValue.includes(normalizedPattern)
           : normalizedValue === normalizedPattern;
       };
-      type SelectorToken = { kind: "and" | "left" | "or" | "right" } | { kind: "term"; raw: string };
+      type SelectorToken =
+        | { kind: "and" | "left" | "or" | "right" }
+        | { kind: "term"; raw: string };
       type SelectorExpr =
         | { type: "term"; raw: string }
         | { type: "and"; left: SelectorExpr; right: SelectorExpr }
         | { type: "or"; left: SelectorExpr; right: SelectorExpr };
-      const tokenizeSelectorExpression = (expression: string): SelectorToken[] => {
+      const tokenizeSelectorExpression = (
+        expression: string,
+      ): SelectorToken[] => {
         const tokens: SelectorToken[] = [];
         let index = 0;
         while (index < expression.length) {
@@ -1822,7 +1868,10 @@ export async function installConsoleApiMock(page: Page) {
             continue;
           }
           const start = index;
-          while (index < expression.length && !/[\s()&|]/.test(expression[index])) {
+          while (
+            index < expression.length &&
+            !/[\s()&|]/.test(expression[index])
+          ) {
             index += 1;
           }
           const raw = expression.slice(start, index);
@@ -1835,7 +1884,9 @@ export async function installConsoleApiMock(page: Page) {
         }
         return tokens;
       };
-      const parseSelectorExpression = (expression: string): SelectorExpr | null => {
+      const parseSelectorExpression = (
+        expression: string,
+      ): SelectorExpr | null => {
         const tokens = tokenizeSelectorExpression(expression);
         if (tokens.length === 0) {
           return null;
@@ -1888,7 +1939,10 @@ export async function installConsoleApiMock(page: Page) {
         }
         return parsed;
       };
-      const termMatchesAgent = (agent: (typeof agentsFixture)[number], term: string) => {
+      const termMatchesAgent = (
+        agent: (typeof agentsFixture)[number],
+        term: string,
+      ) => {
         const separator = term.indexOf(":");
         if (separator > 0) {
           const namespace = term.slice(0, separator).toLocaleLowerCase();
@@ -1906,31 +1960,50 @@ export async function installConsoleApiMock(page: Page) {
             return agent.tags.some((tag) => valueMatches(tag, value, false));
           }
           if (namespace === "provider") {
-            return agent.tags.some((tag) => valueMatches(tag, `provider:${value}`, false));
+            return agent.tags.some((tag) =>
+              valueMatches(tag, `provider:${value}`, false),
+            );
           }
           if (namespace === "country" || namespace === "region") {
-            return agent.tags.some((tag) => valueMatches(tag, `country:${value}`, false));
+            return agent.tags.some((tag) =>
+              valueMatches(tag, `country:${value}`, false),
+            );
           }
           if (namespace === "status") {
             return valueMatches(agent.status, value, false);
           }
           return false;
         }
-        return valueMatches(agent.id, term, true) || valueMatches(agent.display_name, term, true);
+        return (
+          valueMatches(agent.id, term, true) ||
+          valueMatches(agent.display_name, term, true)
+        );
       };
-      const evaluateSelectorExpression = (agent: (typeof agentsFixture)[number], expression: SelectorExpr | null): boolean => {
+      const evaluateSelectorExpression = (
+        agent: (typeof agentsFixture)[number],
+        expression: SelectorExpr | null,
+      ): boolean => {
         if (!expression) {
           return true;
         }
         if (expression.type === "and") {
-          return evaluateSelectorExpression(agent, expression.left) && evaluateSelectorExpression(agent, expression.right);
+          return (
+            evaluateSelectorExpression(agent, expression.left) &&
+            evaluateSelectorExpression(agent, expression.right)
+          );
         }
         if (expression.type === "or") {
-          return evaluateSelectorExpression(agent, expression.left) || evaluateSelectorExpression(agent, expression.right);
+          return (
+            evaluateSelectorExpression(agent, expression.left) ||
+            evaluateSelectorExpression(agent, expression.right)
+          );
         }
         return termMatchesAgent(agent, expression.raw);
       };
-      const expressionMatchesAgent = (agent: (typeof agentsFixture)[number], expression: string) =>
+      const expressionMatchesAgent = (
+        agent: (typeof agentsFixture)[number],
+        expression: string,
+      ) =>
         evaluateSelectorExpression(agent, parseSelectorExpression(expression));
       const resolveBulkTargets = (body: unknown) => {
         const request = body as { selector_expression?: string } | null;
@@ -1947,35 +2020,49 @@ export async function installConsoleApiMock(page: Page) {
         if (createdTargets) {
           return createdTargets.map((target) => ({ ...target, job_id: jobId }));
         }
-        const job =
-          (jobsFixture as Array<{ id: string; status: string; target_count: number; completed_at: string | null }>).find(
-            (candidate) => candidate.id === jobId,
-          ) ?? {
-            completed_at: "2026-05-31T10:09:00Z",
-            id: jobId,
-            status: "completed",
-            target_count: 1,
-          };
-        const outputs = ((jobOutputsFixture as Record<string, Array<{
-          client_id: string;
-          exit_code?: number | null;
-          stream: string;
-        }>>)[jobId] ?? []);
+        const job = (
+          jobsFixture as Array<{
+            id: string;
+            status: string;
+            target_count: number;
+            completed_at: string | null;
+          }>
+        ).find((candidate) => candidate.id === jobId) ?? {
+          completed_at: "2026-05-31T10:09:00Z",
+          id: jobId,
+          status: "completed",
+          target_count: 1,
+        };
+        const outputs =
+          (
+            jobOutputsFixture as Record<
+              string,
+              Array<{
+                client_id: string;
+                exit_code?: number | null;
+                stream: string;
+              }>
+            >
+          )[jobId] ?? [];
         const outputClientIds = Array.from(
           new Set(outputs.map((output) => output.client_id)),
         );
         const fallbackClientIds = visibleAgents()
           .slice(0, Math.max(1, job.target_count))
           .map((agent) => agent.id);
-        const clientIds = outputClientIds.length > 0 ? outputClientIds : fallbackClientIds;
+        const clientIds =
+          outputClientIds.length > 0 ? outputClientIds : fallbackClientIds;
         return clientIds.map((clientId) => {
           const statusOutput = outputs.find(
-            (output) => output.client_id === clientId && output.stream === "status",
+            (output) =>
+              output.client_id === clientId && output.stream === "status",
           );
           return {
             client_id: clientId,
             completed_at: job.completed_at,
-            exit_code: statusOutput?.exit_code ?? (job.status === "completed" ? 0 : null),
+            exit_code:
+              statusOutput?.exit_code ??
+              (job.status === "completed" ? 0 : null),
             job_id: jobId,
             started_at: "2026-05-31T10:08:55Z",
             status: job.status,
@@ -1985,11 +2072,17 @@ export async function installConsoleApiMock(page: Page) {
       const outputComparisonFor = async (jobId: string, mode: string) => {
         const comparisonMode = mode === "text" ? "text" : "binary";
         const targets = jobTargetsFor(jobId);
-        const outputs = ((jobOutputsFixture as Record<string, Array<{
-          client_id: string;
-          data_base64?: string;
-          stream: string;
-        }>>)[jobId] ?? []);
+        const outputs =
+          (
+            jobOutputsFixture as Record<
+              string,
+              Array<{
+                client_id: string;
+                data_base64?: string;
+                stream: string;
+              }>
+            >
+          )[jobId] ?? [];
         const rows = [] as Array<{
           byte_count: number;
           client_id: string;
@@ -2039,18 +2132,24 @@ export async function installConsoleApiMock(page: Page) {
           grouped.set(groupKey, groupRows);
         }
         const ordered = Array.from(grouped.values()).sort(
-          (left, right) => right.length - left.length || left[0].client_id.localeCompare(right[0].client_id),
+          (left, right) =>
+            right.length - left.length ||
+            left[0].client_id.localeCompare(right[0].client_id),
         );
         const largest = ordered[0]?.length ?? 0;
         const groups = ordered.map((groupRows, index) => {
           const groupId = `g${index + 1}`;
           for (const row of groupRows) {
             row.group_id = groupId;
-            row.matches_largest_group = largest > 0 && groupRows.length === largest;
+            row.matches_largest_group =
+              largest > 0 && groupRows.length === largest;
             rows.push(row);
           }
           return {
-            byte_count: groupRows.reduce((total, row) => total + row.byte_count, 0),
+            byte_count: groupRows.reduce(
+              (total, row) => total + row.byte_count,
+              0,
+            ),
             client_ids: groupRows.map((row) => row.client_id),
             exit_code: groupRows[0].exit_code,
             group_id: groupId,
@@ -2059,7 +2158,10 @@ export async function installConsoleApiMock(page: Page) {
             preview: groupRows[0].preview,
             representative_client_id: groupRows[0].client_id,
             status: groupRows[0].status,
-            stream_count: groupRows.reduce((total, row) => total + row.stream_count, 0),
+            stream_count: groupRows.reduce(
+              (total, row) => total + row.stream_count,
+              0,
+            ),
             target_count: groupRows.length,
           };
         });
@@ -2085,7 +2187,9 @@ export async function installConsoleApiMock(page: Page) {
           const params = new URL(url, window.location.href).searchParams;
           const requestedWindow = params.get("window") ?? "24h";
           const requestedGroupBy = params.get("group_by") ?? "labels";
-          const requestedResourceMetric = params.get("resource_metric") ?? dashboardOverviewFixture.resource_curve.metric;
+          const requestedResourceMetric =
+            params.get("resource_metric") ??
+            dashboardOverviewFixture.resource_curve.metric;
           const scopeKind = params.get("scope_kind") ?? "all";
           const scopeValue = params.get("scope_value");
           const startAt = params.get("start_at");
@@ -2114,7 +2218,11 @@ export async function installConsoleApiMock(page: Page) {
             time_range: {
               ...dashboardOverviewFixture.time_range,
               end_at: endAt ?? dashboardOverviewFixture.time_range.end_at,
-              mode: startAt ? "custom" : requestedWindow === "all" ? "all" : "window",
+              mode: startAt
+                ? "custom"
+                : requestedWindow === "all"
+                  ? "all"
+                  : "window",
               start_at: startAt ?? dashboardOverviewFixture.time_range.start_at,
               window: startAt ? null : requestedWindow,
             },
@@ -2125,7 +2233,8 @@ export async function installConsoleApiMock(page: Page) {
           const currentAgents = visibleAgents();
           return jsonResponse({
             ...summaryFixture,
-            online: currentAgents.filter((agent) => agent.status === "online").length,
+            online: currentAgents.filter((agent) => agent.status === "online")
+              .length,
             total: currentAgents.length,
           });
         }
@@ -2221,7 +2330,9 @@ export async function installConsoleApiMock(page: Page) {
             ),
           );
         }
-        const deleteAgentMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/delete$/);
+        const deleteAgentMatch = pathname.match(
+          /^\/api\/v1\/agents\/([^/]+)\/delete$/,
+        );
         if (deleteAgentMatch && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.agentDeletes.push(body);
@@ -2295,20 +2406,6 @@ export async function installConsoleApiMock(page: Page) {
               revoked_at: null,
             },
           ]);
-        if (pathname === "/api/v1/enrollment-tokens" && method === "GET")
-          return jsonResponse(enrollmentTokensFixture);
-        if (pathname === "/api/v1/enrollment-settings" && method === "GET")
-          return jsonResponse(currentEnrollmentSettings);
-        if (pathname === "/api/v1/enrollment-settings" && method === "PUT") {
-          const body = await readJsonBody(input, init);
-          requests.enrollmentSettings.push(body);
-          currentEnrollmentSettings = {
-            ...(body as Record<string, unknown>),
-            server_ed25519_public_key_hex:
-              currentEnrollmentSettings.server_ed25519_public_key_hex,
-          };
-          return jsonResponse(currentEnrollmentSettings);
-        }
         if (pathname === "/api/v1/client-key-revocations" && method === "GET")
           return jsonResponse(clientKeyRevocationsFixture);
         if (pathname === "/api/v1/key-lifecycle/report" && method === "GET")
@@ -2329,36 +2426,21 @@ export async function installConsoleApiMock(page: Page) {
             revoked_by: "99999999-aaaa-4bbb-8ccc-000000000001",
           });
         }
-        if (pathname === "/api/v1/enrollment-tokens" && method === "POST") {
-          const body = await readJsonBody(input, init);
-          requests.enrollmentTokens.push(body);
-          const purpose = (body as { purpose?: string }).purpose ?? "provision";
-          const assignedClientId =
-            purpose === "rebuild_reenrollment"
-              ? ((body as { allowed_client_id?: string | null })
-                  .allowed_client_id ?? "agent-sfo-01")
-              : "11111111-2222-4333-8444-555555555555";
+        if (pathname === "/api/v1/agent-identities" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            client_id?: string;
+            client_public_key_hex?: string;
+            display_name?: string | null;
+            tags?: string[];
+          };
+          requests.agentIdentities.push(body);
           return jsonResponse({
-            ...(body as Record<string, unknown>),
-            assigned_client_id: assignedClientId,
-            allowed_client_id: assignedClientId,
-            created_at: "2026-05-31T10:05:00Z",
-            created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-            expected_old_public_key_sha256_hex:
-              purpose === "rebuild_reenrollment" ? "f".repeat(64) : null,
-            expires_at: "2026-05-31T10:35:00Z",
-            id: "bcbcbcbc-dede-4faf-8bbb-cccccccccccc",
-            requires_existing_client: purpose === "rebuild_reenrollment",
-            token:
-              purpose === "rebuild_reenrollment"
-                ? "vpsm_rebuild_token_secret"
-                : "vpsm_provision_token_secret",
-            token_prefix:
-              purpose === "rebuild_reenrollment"
-                ? "vpsm_rebuild"
-                : "vpsm_provision",
-            used_at: null,
-            used_by_client_id: null,
+            client_id: body.client_id ?? "agent-new-direct-01",
+            current_public_key_sha256_hex: "e".repeat(64),
+            display_name:
+              body.display_name || body.client_id || "agent-new-direct-01",
+            status: "offline",
+            tags: body.tags ?? [],
           });
         }
         if (pathname === "/api/v1/telemetry/rollups" && method === "GET")
@@ -2422,10 +2504,16 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/data-source-status" && method === "GET") {
           return jsonResponse(dataSourceStatusFixture);
         }
-        if (pathname === "/api/v1/hot-config/rule-templates" && method === "GET") {
+        if (
+          pathname === "/api/v1/hot-config/rule-templates" &&
+          method === "GET"
+        ) {
           return jsonResponse(hotConfigRuleTemplatesFixture);
         }
-        if (pathname === "/api/v1/hot-config/rule-templates" && method === "POST") {
+        if (
+          pathname === "/api/v1/hot-config/rule-templates" &&
+          method === "POST"
+        ) {
           const body = await readJsonBody(input, init);
           requests.hotConfigRuleTemplates.push(body);
           const request = body as {
@@ -2458,10 +2546,12 @@ export async function installConsoleApiMock(page: Page) {
           pathname.endsWith("/render") &&
           method === "POST"
         ) {
-          const templateId = pathname.split("/").at(-2) ?? hotConfigRuleTemplatesFixture[0].id;
+          const templateId =
+            pathname.split("/").at(-2) ?? hotConfigRuleTemplatesFixture[0].id;
           const template =
-            hotConfigRuleTemplatesFixture.find((record: { id: string }) => record.id === templateId) ??
-            hotConfigRuleTemplatesFixture[0];
+            hotConfigRuleTemplatesFixture.find(
+              (record: { id: string }) => record.id === templateId,
+            ) ?? hotConfigRuleTemplatesFixture[0];
           return jsonResponse({
             affected_sections: [template.domain],
             docs_metadata: template.docs_metadata,
@@ -2473,10 +2563,13 @@ export async function installConsoleApiMock(page: Page) {
               },
             },
             template_id: template.id,
-            toml: "[data_sources]\nruntime_traffic_accounting_source = \"vnstat\"\n",
+            toml: '[data_sources]\nruntime_traffic_accounting_source = "vnstat"\n',
           });
         }
-        if (pathname.startsWith("/api/v1/hot-config/rule-templates/") && method === "DELETE") {
+        if (
+          pathname.startsWith("/api/v1/hot-config/rule-templates/") &&
+          method === "DELETE"
+        ) {
           return new Response(null, { status: 204 });
         }
         if (
@@ -2485,13 +2578,21 @@ export async function installConsoleApiMock(page: Page) {
         ) {
           const body = await readJsonBody(input, init);
           requests.dataSourcePresetAssignments.push(body);
-          const request = body as { preset_id?: string; selector_expression?: string };
+          const request = body as {
+            preset_id?: string;
+            selector_expression?: string;
+          };
           const preset =
             dataSourcePresetsFixture.find(
               (record: { id: string }) => record.id === request.preset_id,
             ) ?? dataSourcePresetsFixture[0];
           const targetCount = request.selector_expression
-            ? visibleAgents().filter((agent) => expressionMatchesAgent(agent, request.selector_expression ?? "")).length
+            ? visibleAgents().filter((agent) =>
+                expressionMatchesAgent(
+                  agent,
+                  request.selector_expression ?? "",
+                ),
+              ).length
             : 0;
           return jsonResponse({
             assignments: dataSourceAssignmentsFixture,
@@ -2769,16 +2870,15 @@ export async function installConsoleApiMock(page: Page) {
         );
         if (comparisonMatch && method === "GET") {
           const params = new URL(url, window.location.href).searchParams;
-          const mode = params.get("mode") ?? currentOperatorPreferences.bulk_output_compare_mode;
+          const mode =
+            params.get("mode") ??
+            currentOperatorPreferences.bulk_output_compare_mode;
           requests.jobOutputComparisons.push({
             job_id: comparisonMatch[1],
             mode,
           });
           return jsonResponse(
-            await outputComparisonFor(
-              comparisonMatch[1],
-              mode,
-            ),
+            await outputComparisonFor(comparisonMatch[1], mode),
           );
         }
         const outputMatch = pathname.match(
@@ -2808,7 +2908,9 @@ export async function installConsoleApiMock(page: Page) {
           return jsonResponse(backupsFixture);
         }
         if (pathname === "/api/v1/schedules" && method === "GET") {
-          return jsonResponse(currentSchedules.filter((schedule) => !schedule.deleted_at));
+          return jsonResponse(
+            currentSchedules.filter((schedule) => !schedule.deleted_at),
+          );
         }
         if (pathname === "/api/v1/schedules" && method === "POST") {
           const body = await readJsonBody(input, init);
@@ -2885,15 +2987,20 @@ export async function installConsoleApiMock(page: Page) {
           };
           Object.assign(schedule, {
             catch_up_limit: request.catch_up_limit ?? schedule.catch_up_limit,
-            catch_up_policy: request.catch_up_policy ?? schedule.catch_up_policy,
-            command_type: commandTypeForOperation(request.operation) ?? schedule.command_type,
+            catch_up_policy:
+              request.catch_up_policy ?? schedule.catch_up_policy,
+            command_type:
+              commandTypeForOperation(request.operation) ??
+              schedule.command_type,
             cron_expr: request.cron_expr ?? schedule.cron_expr,
             enabled: request.enabled ?? schedule.enabled,
             max_failures: request.max_failures ?? schedule.max_failures,
             name: request.name ?? schedule.name,
             operation: request.operation ?? schedule.operation,
-            retry_delay_secs: request.retry_delay_secs ?? schedule.retry_delay_secs,
-            selector_expression: request.selector_expression ?? schedule.selector_expression,
+            retry_delay_secs:
+              request.retry_delay_secs ?? schedule.retry_delay_secs,
+            selector_expression:
+              request.selector_expression ?? schedule.selector_expression,
             timezone: request.timezone ?? schedule.timezone,
             updated_at: "2026-06-02T10:05:00Z",
           });
@@ -2911,7 +3018,9 @@ export async function installConsoleApiMock(page: Page) {
           schedule.updated_at = "2026-06-02T10:08:00Z";
           return jsonResponse(schedule);
         }
-        const scheduleActionMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)\/(enable|disable|defer|apply-now)$/);
+        const scheduleActionMatch = pathname.match(
+          /^\/api\/v1\/schedules\/([^/]+)\/(enable|disable|defer|apply-now)$/,
+        );
         if (scheduleActionMatch && method === "POST") {
           const body = await readJsonBody(input, init);
           const [, encodedScheduleId, action] = scheduleActionMatch;
@@ -2931,12 +3040,16 @@ export async function installConsoleApiMock(page: Page) {
             return jsonResponse(schedule);
           }
           if (action === "defer") {
-            schedule.deferred_until = (body as { deferred_until?: string } | null)?.deferred_until ?? "2026-06-03T12:00:00Z";
+            schedule.deferred_until =
+              (body as { deferred_until?: string } | null)?.deferred_until ??
+              "2026-06-03T12:00:00Z";
             schedule.updated_at = "2026-06-02T10:07:00Z";
             return jsonResponse(schedule);
           }
           return jsonResponse({
-            accepted_targets: resolveBulkTargets({ selector_expression: schedule.selector_expression }).filter((agent) => agent.status !== "offline").length,
+            accepted_targets: resolveBulkTargets({
+              selector_expression: schedule.selector_expression,
+            }).filter((agent) => agent.status !== "offline").length,
             job_id: "abababab-2323-4545-8989-cdcdcdcdcdcd",
             schedule_id: schedule.id,
             status: "accepted",
@@ -3169,20 +3282,35 @@ export async function installConsoleApiMock(page: Page) {
           const body = await readJsonBody(input, init);
           requests.jobs.push(body);
           const targets = resolveBulkTargets(body);
-          const commandType = (body as { command?: string } | null)?.command ?? "job";
-          const acceptedTargets = targets.filter((agent) => agent.status !== "offline");
+          const commandType =
+            (body as { command?: string } | null)?.command ?? "job";
+          const acceptedTargets = targets.filter(
+            (agent) => agent.status !== "offline",
+          );
           const targetRecords = targets.map((agent) => ({
             client_id: agent.id,
-            completed_at: agent.status === "offline" ? null : "2026-05-31T10:09:00Z",
-            exit_code: agent.status === "stale" ? 2 : agent.status === "offline" ? null : 0,
+            completed_at:
+              agent.status === "offline" ? null : "2026-05-31T10:09:00Z",
+            exit_code:
+              agent.status === "stale"
+                ? 2
+                : agent.status === "offline"
+                  ? null
+                  : 0,
             message:
               agent.status === "stale"
                 ? `stale: agent rejected ${commandType} command_version 3`
                 : agent.status === "offline"
                   ? "agent offline"
                   : "completed",
-            started_at: agent.status === "offline" ? null : "2026-05-31T10:08:55Z",
-            status: agent.status === "stale" ? "failed" : agent.status === "offline" ? "dispatch_failed" : "completed",
+            started_at:
+              agent.status === "offline" ? null : "2026-05-31T10:08:55Z",
+            status:
+              agent.status === "stale"
+                ? "failed"
+                : agent.status === "offline"
+                  ? "dispatch_failed"
+                  : "completed",
           }));
           const jobId = "11111111-2222-4333-8444-555555555555";
           createdJobTargets.set(jobId, targetRecords);
@@ -3239,8 +3367,6 @@ export async function installConsoleApiMock(page: Page) {
       hotConfigRuleTemplatesFixture: hotConfigRuleTemplates,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
-      enrollmentSettingsFixture: enrollmentSettings,
-      enrollmentTokensFixture: enrollmentTokens,
       keyLifecycleReportFixture: keyLifecycleReport,
       fleetAlertNotificationChannelsFixture: fleetAlertNotificationChannels,
       fleetAlertNotificationsFixture: fleetAlertNotifications,

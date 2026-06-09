@@ -209,7 +209,7 @@ Unprivileged targets degrade by default for privileged restore paths. Use
 
 ## Run Rebuilt-VPS Migration
 
-After a rebuild and re-enrollment, prefer `migration-run` when you want one
+After a rebuild and direct identity rotation, prefer `migration-run` when you want one
 audited operation that creates the migration link and dispatches the selected
 restore plan:
 
@@ -244,7 +244,7 @@ cargo run -p vpsctl -- migration-link \
   --confirmed
 ```
 
-Use this with `reenrollment-token-create` from `02-enroll-agents.md` to keep
+Use this with `agent-identity-upsert --replace-existing-key` from `02-install-agents.md` to keep
 server-side state intact while replacing the VPS.
 
 ## Panel Workflow

@@ -1,117 +1,8 @@
 use super::*;
 use vpsman_common::{
-    verify_command_envelope, verify_discovery_document_signature, AgentHello, AgentNoiseMode,
-    GatewayAgentHelloIngest, JobCommand, PrivilegeReplayCache,
+    verify_command_envelope, AgentHello, GatewayAgentHelloIngest, JobCommand,
+    PrivilegeReplayCache,
 };
-
-#[test]
-fn discovery_document_uses_configured_gateway_endpoints() {
-    let signing_key = SigningKey::from_bytes(&[15_u8; 32]);
-    let settings = EnrollmentSettings {
-        tcp_endpoints: vec![
-            vpsman_common::ServerEndpoint {
-                label: "primary".to_string(),
-                tcp_addr: "198.51.100.10:9443".to_string(),
-                priority: 10,
-            },
-            vpsman_common::ServerEndpoint {
-                label: "backup".to_string(),
-                tcp_addr: "203.0.113.20:9443".to_string(),
-                priority: 20,
-            },
-        ],
-        discovery_url: Some("https://panel.example/.well-known/vpsman/endpoints.json".to_string()),
-        ..EnrollmentSettings::default()
-    };
-
-    let document =
-        routes_discovery::build_discovery_document(&settings, 1_700_000_000, Some(&signing_key));
-
-    assert_eq!(document.version, 1);
-    assert_eq!(document.issued_unix, 1_700_000_000);
-    assert_eq!(document.expires_unix, 1_700_000_060);
-    assert_eq!(document.endpoints, settings.tcp_endpoints);
-    assert!(verify_discovery_document_signature(
-        &signing_key.verifying_key(),
-        &document
-    ));
-}
-
-#[tokio::test]
-async fn enrollment_runtime_settings_are_persisted_with_live_identity() {
-    let repo = Repository::Memory(MemoryState::default());
-    repo.upsert_enrollment_settings(
-        &EnrollmentSettings {
-            tcp_endpoints: vec![
-                vpsman_common::ServerEndpoint {
-                    label: "primary".to_string(),
-                    tcp_addr: "gw.ops.example.com:9443".to_string(),
-                    priority: 10,
-                },
-                vpsman_common::ServerEndpoint {
-                    label: "primary-v6".to_string(),
-                    tcp_addr: "[2001:db8::10]:9443".to_string(),
-                    priority: 20,
-                },
-            ],
-            discovery_url: Some(
-                "https://panel.ops.example.com/.well-known/vpsman/endpoints.json".to_string(),
-            ),
-            gateway_server_public_key_hex: Some("22".repeat(32)),
-            server_ed25519_public_key_hex: Some("ff".repeat(32)),
-            discovery_trusted_server_ed25519_public_keys_hex: vec!["33".repeat(32)],
-            gateway_retry_secs: 60,
-            gateway_connect_timeout_secs: 10,
-            default_country_tag: Some("country:DE".to_string()),
-            ..EnrollmentSettings::default()
-        },
-        &test_operator(),
-    )
-    .await
-    .unwrap();
-
-    let (events, _) = tokio::sync::broadcast::channel(16);
-    let state = AppState {
-        repo,
-        events,
-        internal_token: Some("internal-token-at-least-32-characters".to_string()),
-        gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
-        enrollment: EnrollmentSettings {
-            server_ed25519_public_key_hex: Some("11".repeat(32)),
-            default_country_tag: Some("country:US".to_string()),
-            ..EnrollmentSettings::default()
-        },
-        backup_object_store: None,
-        update_object_store: None,
-        update_artifact_public_base_url: None,
-        update_release_policy: UpdateReleasePolicy::default(),
-        fleet_alert_policy: FleetAlertPolicy::default(),
-        job_output_artifact_min_bytes: 1,
-        require_registered_agent_updates: false,
-    };
-
-    let effective = state.enrollment_settings().await.unwrap();
-    assert_eq!(effective.tcp_endpoints.len(), 2);
-    assert_eq!(
-        effective.tcp_endpoints[0].tcp_addr,
-        "gw.ops.example.com:9443"
-    );
-    assert_eq!(effective.gateway_retry_secs, 60);
-    assert_eq!(effective.gateway_connect_timeout_secs, 10);
-    assert_eq!(
-        effective.gateway_server_public_key_hex,
-        Some("22".repeat(32))
-    );
-    assert_eq!(
-        effective.server_ed25519_public_key_hex,
-        Some("11".repeat(32))
-    );
-    assert_eq!(
-        effective.default_country_tag,
-        Some("country:US".to_string())
-    );
-}
 
 #[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
@@ -312,24 +203,14 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
         .await
         .is_err());
     assert!(repo
-        .create_enrollment_token(
-            &CreateEnrollmentTokenRequest {
-                ttl_secs: Some(600),
-                purpose: Some(
-                    crate::repository_enrollment::ENROLLMENT_PURPOSE_REBUILD_REENROLLMENT
-                        .to_string(),
-                ),
-                allowed_client_id: Some("client-delete".to_string()),
-                confirmed_reenrollment: true,
-                preserve_existing_assignments: Some(true),
-                default_tags: Vec::new(),
-                default_display_name: None,
-                unmanaged_update_enabled: None,
-                unmanaged_update_version_url: None,
-                unmanaged_update_interval_secs: None,
-                unmanaged_update_jitter_secs: None,
-                unmanaged_update_activate: None,
-                unmanaged_update_restart_agent: None,
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: "client-delete".to_string(),
+                client_public_key_hex: "55".repeat(32),
+                display_name: Some("retired edge".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
             },
             &test_operator(),
         )
@@ -362,213 +243,31 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
 }
 
 #[tokio::test]
-async fn enrollment_token_claim_records_client_key_and_consumes_token() {
+async fn gateway_identity_validation_uses_direct_client_public_key() {
     let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let created = repo
-        .create_enrollment_token(
-            &CreateEnrollmentTokenRequest {
-                ttl_secs: Some(600),
-                purpose: None,
-                allowed_client_id: None,
-                confirmed_reenrollment: false,
-                preserve_existing_assignments: None,
-                default_tags: vec!["bgp".to_string(), "edge".to_string()],
-                default_display_name: None,
-                unmanaged_update_enabled: None,
-                unmanaged_update_version_url: None,
-                unmanaged_update_interval_secs: None,
-                unmanaged_update_jitter_secs: None,
-                unmanaged_update_activate: None,
-                unmanaged_update_restart_agent: None,
+    let operator = test_operator();
+    let identity = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: "direct-edge-01".to_string(),
+                client_public_key_hex: "55".repeat(32),
+                display_name: Some("Direct edge 01".to_string()),
+                tags: vec!["role:edge".to_string()],
+                replace_existing_key: false,
+                confirmed: true,
             },
             &operator,
         )
         .await
         .unwrap();
 
-    assert_eq!(created.token.len(), 64);
-    assert_eq!(created.token_prefix.len(), 12);
-    assert!(!created.token.contains("bgp"));
-    let assigned_client_id = created.assigned_client_id.clone().unwrap();
-    assert!(uuid::Uuid::parse_str(&assigned_client_id).is_ok());
-
-    let response = repo
-        .claim_enrollment(
-            &EnrollmentSettings::default(),
-            &ClaimEnrollmentRequest {
-                token: created.token.clone(),
-                client_public_key_hex: "11".repeat(32),
-            },
-        )
-        .await
-        .unwrap();
-    let EnrollmentClaimOutcome::Accepted(response) = response else {
-        panic!("expected accepted enrollment");
-    };
-    let agents = repo.list_agents().await.unwrap();
-    let listed_tokens = repo.list_enrollment_tokens().await.unwrap();
-
-    assert_eq!(response.client_id, assigned_client_id);
-    assert_eq!(response.noise_mode, AgentNoiseMode::EnrolledIk);
-    assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].id, response.client_id);
-    assert_eq!(agents[0].status, "offline");
-    assert_eq!(
-        agents[0].tags,
-        vec![
-            "bgp".to_string(),
-            "country:US".to_string(),
-            "edge".to_string(),
-        ]
-    );
-    assert_eq!(listed_tokens.len(), 1);
-    assert_eq!(listed_tokens[0].token_prefix, created.token_prefix);
-    assert_eq!(
-        listed_tokens[0].used_by_client_id.as_deref(),
-        Some(response.client_id.as_str())
-    );
-    assert!(listed_tokens[0].used_at.is_some());
-}
-
-#[tokio::test]
-async fn enrollment_token_rejects_reuse_and_never_lists_plaintext_token() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let created = repo
-        .create_enrollment_token(
-            &CreateEnrollmentTokenRequest {
-                ttl_secs: Some(600),
-                purpose: None,
-                allowed_client_id: None,
-                confirmed_reenrollment: false,
-                preserve_existing_assignments: None,
-                default_tags: Vec::new(),
-                default_display_name: None,
-                unmanaged_update_enabled: None,
-                unmanaged_update_version_url: None,
-                unmanaged_update_interval_secs: None,
-                unmanaged_update_jitter_secs: None,
-                unmanaged_update_activate: None,
-                unmanaged_update_restart_agent: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-    let request = ClaimEnrollmentRequest {
-        token: created.token.clone(),
-        client_public_key_hex: "22".repeat(32),
-    };
-
-    let settings = EnrollmentSettings {
-        discovery_trusted_server_ed25519_public_keys_hex: vec!["33".repeat(32), "44".repeat(32)],
-        ..EnrollmentSettings::default()
-    };
-    let accepted = repo.claim_enrollment(&settings, &request).await.unwrap();
-    let EnrollmentClaimOutcome::Accepted(accepted) = accepted else {
-        panic!("expected accepted enrollment");
-    };
-    assert_eq!(
-        accepted.discovery_trusted_server_ed25519_public_keys_hex,
-        vec!["33".repeat(32), "44".repeat(32)]
-    );
-    assert!(matches!(
-        repo.claim_enrollment(&EnrollmentSettings::default(), &request)
-            .await
-            .unwrap(),
-        EnrollmentClaimOutcome::UsedToken
-    ));
-    assert!(matches!(
-        repo.claim_enrollment(
-            &EnrollmentSettings::default(),
-            &ClaimEnrollmentRequest {
-                token: "wrong".to_string(),
-                ..request
-            },
-        )
-        .await
-        .unwrap(),
-        EnrollmentClaimOutcome::InvalidToken
-    ));
-    let tokens_json = serde_json::to_string(&repo.list_enrollment_tokens().await.unwrap()).unwrap();
-
-    assert!(!tokens_json.contains(&created.token));
-    assert!(tokens_json.contains(&created.token_prefix));
-}
-
-#[tokio::test]
-async fn gateway_identity_validation_uses_enrolled_client_public_key() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "memory-dev".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-        },
-        session_id: Uuid::nil(),
-    };
-    let created = repo
-        .create_enrollment_token(
-            &CreateEnrollmentTokenRequest {
-                ttl_secs: Some(600),
-                purpose: None,
-                allowed_client_id: None,
-                confirmed_reenrollment: false,
-                preserve_existing_assignments: None,
-                default_tags: Vec::new(),
-                default_display_name: None,
-                unmanaged_update_enabled: None,
-                unmanaged_update_version_url: None,
-                unmanaged_update_interval_secs: None,
-                unmanaged_update_jitter_secs: None,
-                unmanaged_update_activate: None,
-                unmanaged_update_restart_agent: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-    let client_id = created.assigned_client_id.clone().unwrap();
-    repo.claim_enrollment(
-        &EnrollmentSettings::default(),
-        &ClaimEnrollmentRequest {
-            token: created.token,
-            client_public_key_hex: "55".repeat(32),
-        },
-    )
-    .await
-    .unwrap();
-
+    assert_eq!(identity.client_id, "direct-edge-01");
     assert!(repo
-        .validate_agent_public_key(&client_id, &"55".repeat(32))
+        .validate_agent_public_key("direct-edge-01", &"55".repeat(32))
         .await
         .unwrap());
     assert!(!repo
-        .validate_agent_public_key(&client_id, &"66".repeat(32))
+        .validate_agent_public_key("direct-edge-01", &"66".repeat(32))
         .await
         .unwrap());
     assert!(!repo

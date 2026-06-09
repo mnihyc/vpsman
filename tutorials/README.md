@@ -9,10 +9,10 @@ the private gateway verifies.
 Use these in order for a new deployment:
 
 1. `00-operator-quickstart.md`: shortest path from local control plane to
-   enrolled VPS, fleet view, privileged command, backup, and update check.
+   registered VPS, fleet view, privileged command, backup, and update check.
 2. `01-local-control-plane.md`: run the API, gateway, worker, and panel locally.
-3. `02-enroll-agents.md`: create enrollment material, install root or
-   unprivileged agents, and re-enroll rebuilt VPSs.
+3. `02-install-agents.md`: create direct gateway identity material, install root or
+   unprivileged agents, and reinstall rebuilt VPSs.
 4. `03-fleet-organization.md`: organize 20+ VPSs with tags, bulk targeting,
    and alerts.
 5. `04-daily-operations.md`: run commands, inspect job/audit history, manage

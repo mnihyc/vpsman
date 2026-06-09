@@ -49,8 +49,6 @@ mod repository_command_templates;
 mod repository_data_source_hot_config;
 mod repository_data_source_presets;
 mod repository_data_source_status;
-mod repository_enrollment;
-mod repository_enrollment_settings;
 mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
@@ -81,9 +79,8 @@ mod routes_auth;
 mod routes_backups;
 mod routes_command_templates;
 mod routes_dashboard;
-mod routes_discovery;
-mod routes_enrollment;
 mod routes_file_transfers;
+mod routes_key_lifecycle;
 mod routes_history;
 mod routes_ingest;
 mod routes_inventory;
@@ -113,7 +110,7 @@ use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use repository_rollouts::DEFAULT_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS;
 use routes::build_router;
-use state::{AppState, EnrollmentSettings, UpdateReleasePolicy};
+use state::{AppState, UpdateReleasePolicy};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -140,9 +137,9 @@ use model_alert_states::*;
 #[cfg(test)]
 use repository::MemoryState;
 #[cfg(test)]
-use repository_enrollment::EnrollmentClaimOutcome;
-#[cfg(test)]
 use repository_ingest::upsert_memory_agent;
+#[cfg(test)]
+use repository_key_lifecycle::KeyLifecycleTrustReport;
 #[cfg(test)]
 use routes_schedules::validate_schedule_request;
 #[cfg(test)]
@@ -150,7 +147,6 @@ use security::{constant_time_eq, role_allows, validate_operator_role};
 use uuid::Uuid;
 #[cfg(test)]
 use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
-use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, ServerEndpoint};
 
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]
@@ -169,76 +165,6 @@ struct Args {
     gateway_control_url: Option<String>,
     #[arg(long, env = "VPSMAN_SERVER_SIGNING_KEY_HEX")]
     server_signing_key_hex: Option<String>,
-    #[arg(
-        long,
-        env = "VPSMAN_DISCOVERY_TRUSTED_SERVER_PUBLIC_KEYS_HEX",
-        value_delimiter = ','
-    )]
-    discovery_trusted_server_public_keys_hex: Vec<String>,
-    #[arg(long, env = "VPSMAN_PUBLIC_GATEWAY_ENDPOINTS", value_delimiter = ',')]
-    public_gateway_endpoints: Vec<String>,
-    #[arg(long, env = "VPSMAN_DISCOVERY_URL")]
-    discovery_url: Option<String>,
-    #[arg(long, env = "VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX")]
-    gateway_server_public_key_hex: Option<String>,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_TELEMETRY_LIGHT_SECS",
-        default_value_t = 15
-    )]
-    enrollment_telemetry_light_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_GATEWAY_RETRY_SECS",
-        default_value_t = 60
-    )]
-    enrollment_gateway_retry_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_GATEWAY_CONNECT_TIMEOUT_SECS",
-        default_value_t = 10
-    )]
-    enrollment_gateway_connect_timeout_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_TELEMETRY_FULL_SECS",
-        default_value_t = 60
-    )]
-    enrollment_telemetry_full_secs: u64,
-    #[arg(long, env = "VPSMAN_ENROLLMENT_DEFAULT_COUNTRY", default_value = "US")]
-    enrollment_default_country: String,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_ENABLED",
-        default_value_t = true
-    )]
-    enrollment_unmanaged_update_enabled: bool,
-    #[arg(long, env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_VERSION_URL")]
-    enrollment_unmanaged_update_version_url: Option<String>,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_INTERVAL_SECS",
-        default_value_t = 86_400
-    )]
-    enrollment_unmanaged_update_interval_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_JITTER_SECS",
-        default_value_t = 86_400
-    )]
-    enrollment_unmanaged_update_jitter_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_ACTIVATE",
-        default_value_t = true
-    )]
-    enrollment_unmanaged_update_activate: bool,
-    #[arg(
-        long,
-        env = "VPSMAN_ENROLLMENT_UNMANAGED_UPDATE_RESTART_AGENT",
-        default_value_t = true
-    )]
-    enrollment_unmanaged_update_restart_agent: bool,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
@@ -385,40 +311,6 @@ async fn main() -> Result<()> {
             "DANGEROUS INTERNAL TEST MODE: VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; privilege-gated job dispatch remains disabled"
         );
     }
-    let server_ed25519_public_key_hex = server_signing_key
-        .as_deref()
-        .map(|key| hex::encode(key.verifying_key().to_bytes()));
-    let discovery_trusted_server_ed25519_public_keys_hex =
-        parse_public_key_ring(&args.discovery_trusted_server_public_keys_hex)?;
-    let enrollment = EnrollmentSettings {
-        tcp_endpoints: parse_public_gateway_endpoints(&args.public_gateway_endpoints)?,
-        discovery_url: args.discovery_url.clone().filter(|value| !value.is_empty()),
-        noise_mode: AgentNoiseMode::EnrolledIk,
-        gateway_server_public_key_hex: args
-            .gateway_server_public_key_hex
-            .clone()
-            .filter(|value| !value.is_empty()),
-        server_ed25519_public_key_hex,
-        discovery_trusted_server_ed25519_public_keys_hex,
-        gateway_retry_secs: args.enrollment_gateway_retry_secs.clamp(1, 3_600),
-        gateway_connect_timeout_secs: args.enrollment_gateway_connect_timeout_secs.clamp(1, 300),
-        telemetry_light_secs: args.enrollment_telemetry_light_secs.max(5),
-        telemetry_full_secs: args.enrollment_telemetry_full_secs.max(5),
-        default_country_tag: default_country_tag(args.enrollment_default_country.as_str())?,
-        update: AgentUpdateConfig {
-            trusted_artifact_signing_key_hex: None,
-            unmanaged_enabled: args.enrollment_unmanaged_update_enabled,
-            unmanaged_version_url: args
-                .enrollment_unmanaged_update_version_url
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(vpsman_common::default_agent_unmanaged_update_version_url),
-            unmanaged_interval_secs: args.enrollment_unmanaged_update_interval_secs,
-            unmanaged_jitter_secs: args.enrollment_unmanaged_update_jitter_secs,
-            unmanaged_activate: args.enrollment_unmanaged_update_activate,
-            unmanaged_restart_agent: args.enrollment_unmanaged_update_restart_agent,
-        },
-    };
     let backup_object_store = build_backup_object_store(&args)?;
     if let Some(store) = &backup_object_store {
         info!(kind = store.kind(), "backup object store enabled");
@@ -459,7 +351,6 @@ async fn main() -> Result<()> {
         internal_token: Some(internal_token),
         gateway,
         server_signing_key,
-        enrollment,
         backup_object_store,
         update_object_store,
         update_artifact_public_base_url,
@@ -566,61 +457,6 @@ fn spawn_agent_update_rollout_reconciler(
     });
 }
 
-fn parse_public_gateway_endpoints(values: &[String]) -> Result<Vec<ServerEndpoint>> {
-    let values = values
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return Ok(EnrollmentSettings::default().tcp_endpoints);
-    }
-    values
-        .iter()
-        .map(|value| {
-            let parts = value.split('=').collect::<Vec<_>>();
-            anyhow::ensure!(
-                parts.len() == 3,
-                "gateway endpoint must use label=tcp_addr=priority"
-            );
-            let priority = parts[2]
-                .parse::<u16>()
-                .with_context(|| format!("invalid endpoint priority in {value}"))?;
-            anyhow::ensure!(!parts[0].trim().is_empty(), "endpoint label is empty");
-            anyhow::ensure!(!parts[1].trim().is_empty(), "endpoint tcp_addr is empty");
-            Ok(ServerEndpoint {
-                label: parts[0].trim().to_string(),
-                tcp_addr: parts[1].trim().to_string(),
-                priority,
-            })
-        })
-        .collect()
-}
-
-fn parse_public_key_ring(values: &[String]) -> Result<Vec<String>> {
-    let mut keys = values
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    keys.sort();
-    keys.dedup();
-    anyhow::ensure!(
-        keys.len() <= 8,
-        "at most 8 discovery trusted server public keys can be configured"
-    );
-    for key in &keys {
-        let decoded =
-            hex::decode(key).context("invalid discovery trusted server public key hex")?;
-        anyhow::ensure!(
-            decoded.len() == 32,
-            "discovery trusted server public key must be 32 bytes"
-        );
-    }
-    Ok(keys)
-}
-
 fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
     if let Some(store) = args
         .backup_object_store_dir
@@ -686,23 +522,6 @@ fn parse_public_update_artifact_base_url(value: Option<&str>) -> Result<Option<S
         "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL contains a NUL byte"
     );
     Ok(Some(value.trim_end_matches('/').to_string()))
-}
-
-fn default_country_tag(value: &str) -> Result<Option<String>> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        value.len() <= 32
-            && value
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric()
-                    || character == '-'
-                    || character == '_'),
-        "VPSMAN_ENROLLMENT_DEFAULT_COUNTRY must be a short country code/tag fragment"
-    );
-    Ok(Some(format!("country:{}", value.to_ascii_uppercase())))
 }
 
 fn build_s3_object_store(

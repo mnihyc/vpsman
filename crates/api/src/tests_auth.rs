@@ -92,8 +92,6 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
 
     let preferences = OperatorPreferences {
         language: "en".to_string(),
-        enrollment_install_command_template: "env TOKEN={TOKEN} URL={API_URL} bash ./enroll.sh"
-            .to_string(),
         sidebar_subpanel_default: "all".to_string(),
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
@@ -107,10 +105,6 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
     assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
     assert_eq!(updated.preferences.bulk_output_compare_mode, "binary");
-    assert_eq!(
-        updated.preferences.enrollment_install_command_template,
-        "env TOKEN={TOKEN} URL={API_URL} bash ./enroll.sh"
-    );
 
     let context = repo
         .authenticate_access_token(&auth.access_token)
@@ -129,11 +123,6 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     );
     assert_eq!(
         context
-            .operator
-            .preferences
-            .enrollment_install_command_template,
-        "env TOKEN={TOKEN} URL={API_URL} bash ./enroll.sh"
-    );
 }
 
 #[tokio::test]
@@ -175,28 +164,6 @@ async fn operator_preferences_route_rejects_invalid_values() {
             },
             "invalid_bulk_output_compare_mode",
         ),
-        (
-            OperatorPreferences {
-                enrollment_install_command_template: "env TOKEN={TOKEN_RAW} bash".to_string(),
-                ..OperatorPreferences::default()
-            },
-            "unknown_enrollment_install_command_variable",
-        ),
-        (
-            OperatorPreferences {
-                enrollment_install_command_template: "env TOKEN={TOKEN bash".to_string(),
-                ..OperatorPreferences::default()
-            },
-            "invalid_enrollment_install_command_template",
-        ),
-        (
-            OperatorPreferences {
-                enrollment_install_command_template: "env URL={API_URL} bash ./enroll.sh"
-                    .to_string(),
-                ..OperatorPreferences::default()
-            },
-            "missing_enrollment_install_command_token_variable",
-        ),
     ];
 
     for (preferences, expected_code) in cases {
@@ -236,7 +203,6 @@ async fn operator_preferences_route_persists_valid_payload() {
         HeaderMap::new(),
         axum::Json(OperatorPreferences {
             language: "en".to_string(),
-            enrollment_install_command_template: "env TOKEN={TOKEN} URL={API_URL} bash".to_string(),
             sidebar_subpanel_default: "all".to_string(),
             timezone: Some(" America/Los_Angeles ".to_string()),
             vps_name_display_mode: "name".to_string(),
@@ -252,17 +218,12 @@ async fn operator_preferences_route_persists_valid_payload() {
         Some("America/Los_Angeles")
     );
     assert_eq!(response.0.preferences.sidebar_subpanel_default, "all");
-    assert_eq!(
-        response.0.preferences.enrollment_install_command_template,
-        "env TOKEN={TOKEN} URL={API_URL} bash"
-    );
 }
 
 #[test]
 fn stored_operator_preferences_drop_invalid_timezone() {
     let preferences = repository_auth::parse_operator_preferences(serde_json::json!({
         "language": "en",
-        "enrollment_install_command_template": " env TOKEN={TOKEN} bash ",
         "sidebar_subpanel_default": "all",
         "timezone": "Mars/Base",
         "vps_name_display_mode": "name"
@@ -270,10 +231,6 @@ fn stored_operator_preferences_drop_invalid_timezone() {
 
     assert_eq!(preferences.vps_name_display_mode, "name");
     assert_eq!(preferences.sidebar_subpanel_default, "all");
-    assert_eq!(
-        preferences.enrollment_install_command_template,
-        "env TOKEN={TOKEN} bash"
-    );
     assert_eq!(preferences.timezone, None);
 }
 
@@ -393,7 +350,6 @@ fn internal_gateway_token_requires_matching_bearer() {
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -457,7 +413,6 @@ fn internal_gateway_token_is_mandatory_even_for_memory_dev() {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -486,7 +441,6 @@ fn memory_test_state() -> AppState {
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

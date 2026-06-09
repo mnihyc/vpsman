@@ -700,7 +700,6 @@ export type OperatorPreferences = {
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
   bulk_output_compare_mode: JobOutputCompareMode;
-  enrollment_install_command_template: string;
 };
 
 export type OperatorSessionRecord = {

@@ -1,0 +1,191 @@
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    Json,
+};
+
+use crate::{
+    error::ApiError,
+    model::{
+        AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest,
+        HistoryQuery, KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
+    },
+    repository_key_lifecycle::KeyLifecycleTrustReport,
+    state::AppState,
+    util::limit_or_default,
+};
+
+pub(crate) async fn upsert_agent_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpsertAgentIdentityRequest>,
+) -> Result<(StatusCode, Json<AgentIdentityView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_agent_identity_request(&request)?;
+    let view = state.repo.upsert_agent_identity(&request, &operator).await?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id: view.client_id.clone(),
+        gateway_id: "identity".to_string(),
+    });
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+pub(crate) async fn list_client_key_revocations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Vec<ClientKeyRevocationView>>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(
+        state
+            .repo
+            .list_client_key_revocations(limit_or_default(query.limit))
+            .await?,
+    ))
+}
+
+pub(crate) async fn revoke_current_client_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+    Json(request): Json<CreateClientKeyRevocationRequest>,
+) -> Result<(StatusCode, Json<ClientKeyRevocationView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_client_id(&client_id)?;
+    validate_client_key_revocation(&request)?;
+    if state
+        .repo
+        .client_public_key_sha256_hex(&client_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("client_public_key_not_found"));
+    }
+    let record = state
+        .repo
+        .revoke_current_client_key(&client_id, &request, &operator)
+        .await?;
+    state.publish(WsEvent::AgentUpdated {
+        client_id,
+        gateway_id: "key_lifecycle".to_string(),
+    });
+    Ok((StatusCode::CREATED, Json(record)))
+}
+
+pub(crate) async fn key_lifecycle_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<KeyLifecycleReportView>, ApiError> {
+    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(
+        state
+            .repo
+            .key_lifecycle_report(KeyLifecycleTrustReport {
+                server_ed25519_public_key_configured: state.server_signing_key.is_some(),
+            })
+            .await?,
+    ))
+}
+
+fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "agent_identity_confirmation_required",
+        ));
+    }
+    validate_client_id(&request.client_id)?;
+    validate_fixed_hex32(&request.client_public_key_hex, "client_public_key_hex")?;
+    if let Some(display_name) = request.display_name.as_deref() {
+        validate_optional_display_name(display_name)?;
+    }
+    validate_tags(&request.tags)?;
+    Ok(())
+}
+
+fn validate_client_key_revocation(
+    request: &CreateClientKeyRevocationRequest,
+) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "client_key_revocation_confirmation_required",
+        ));
+    }
+    if request
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.trim().len() > 1024)
+    {
+        return Err(ApiError::bad_request(
+            "client_key_revocation_reason_too_long",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
+    if client_id.trim().is_empty() || client_id.len() > 120 {
+        return Err(ApiError::bad_request("client_id_invalid"));
+    }
+    if !client_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(ApiError::bad_request("client_id_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_tags(tags: &[String]) -> Result<(), ApiError> {
+    if tags.len() > 32 {
+        return Err(ApiError::bad_request("too_many_tags"));
+    }
+    for tag in normalize_tags(tags) {
+        if tag.len() > 64 {
+            return Err(ApiError::bad_request("tag_too_long"));
+        }
+        if tag.starts_with("id:") || tag.starts_with("name:") {
+            return Err(ApiError::bad_request("reserved_inner_tag_selector"));
+        }
+        if !tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err(ApiError::bad_request("tag_invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized = tags
+        .iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn validate_optional_display_name(value: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 160
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(ApiError::bad_request("display_name_invalid"));
+    }
+    Ok(())
+}
+
+fn validate_fixed_hex32(value: &str, _field: &'static str) -> Result<(), ApiError> {
+    if value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("client_public_key_invalid"))
+    }
+}

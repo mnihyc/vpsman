@@ -11,7 +11,7 @@ use crate::{
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
     routes_jobs::create_job,
-    state::{AppState, EnrollmentSettings},
+    state::AppState,
 };
 use ed25519_dalek::SigningKey;
 use vpsman_common::{
@@ -229,7 +229,6 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[19_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

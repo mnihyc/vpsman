@@ -333,23 +333,29 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await openConsoleSubpage(page, "Access", "VPS keys");
   const inspector = page.locator(".accessInspector");
   await expect(
-    page.getByRole("heading", { name: "Enrollment tokens" }),
+    page.getByRole("heading", { name: "Gateway agent identities" }),
   ).toBeVisible();
-  await inspector.getByLabel("Enrollment token ttl").fill("1800");
   await inspector
-    .getByLabel("Enrollment default tags")
-    .fill("provider:acmecloud,country:SG,payments,edge,env:prod");
+    .getByLabel("Agent identity client ID")
+    .fill("agent-sin-payments-25");
   await inspector
-    .getByLabel("Enrollment default display name")
+    .getByLabel("Agent identity public key hex")
+    .fill("b".repeat(64));
+  await inspector
+    .getByLabel("Agent identity display name")
     .fill("sin-payments-edge-25");
-  await activate(inspector.getByRole("button", { name: "Create token" }));
-  await expect(inspector.getByText("Root install command")).toBeVisible();
-  await expect(
-    inspector.locator(".enrollmentInstallCommand code"),
-  ).toContainText("VPSMAN_ENROLLMENT_TOKEN='vpsm_provision_token_secret'");
-  await expect(
-    inspector.getByRole("button", { name: "Copy enrollment install command" }),
-  ).toBeVisible();
+  await inspector
+    .getByLabel("Agent identity tags")
+    .fill("provider:acmecloud,country:SG,payments,edge,env:prod");
+  await activate(
+    inspector.getByRole("button", { name: "Import gateway identity" }),
+  );
+  await activate(
+    page
+      .getByLabel("Confirm direct gateway identity import")
+      .getByRole("button", { name: "Import identity" }),
+  );
+  await expect(inspector.getByText("sin-payments-edge-25")).toBeVisible();
 
   const layout = await collectLayoutSignals(page, ".commandComposer");
   expect(layout.horizontalOverflowPx).toBeLessThanOrEqual(1);

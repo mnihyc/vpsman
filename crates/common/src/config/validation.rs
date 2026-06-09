@@ -15,7 +15,6 @@ pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     validate_identifier(&config.client_id, "client_id", 128)?;
     validate_display_name(&config.display_name)?;
     validate_endpoints(&config.tcp_endpoints)?;
-    validate_discovery_url(config.discovery_url.as_deref())?;
     validate_noise_config(&config.noise)?;
     validate_auth_config(&config.auth)?;
     validate_backup_config(&config.backup)?;
@@ -109,50 +108,6 @@ fn validate_endpoints(endpoints: &[ServerEndpoint]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_discovery_url(value: Option<&str>) -> Result<(), String> {
-    if let Some(value) = value {
-        if value.len() > 2048 || value.as_bytes().contains(&0) {
-            return Err("discovery_url_invalid".to_string());
-        }
-        if value.starts_with("https://") {
-            return Ok(());
-        }
-        if value
-            .strip_prefix("http://")
-            .is_some_and(is_local_http_discovery_authority)
-        {
-            return Ok(());
-        }
-        if value.starts_with("http://") {
-            return Err("discovery_url_http_must_be_localhost".to_string());
-        }
-        if !value.starts_with("https://") {
-            return Err("discovery_url_must_be_https".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn is_local_http_discovery_authority(rest: &str) -> bool {
-    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.is_empty() || authority.contains('@') {
-        return false;
-    }
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        let Some((host, _suffix)) = rest.split_once(']') else {
-            return false;
-        };
-        host
-    } else {
-        match authority.rsplit_once(':') {
-            Some((host, _port)) if !host.contains(':') => host,
-            _ => authority,
-        }
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
 fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
     match config.mode {
         AgentNoiseMode::DevXx => {
@@ -183,11 +138,6 @@ fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
     validate_optional_hex32(
         config.server_ed25519_public_key_hex.as_deref(),
         "server_ed25519_public_key_hex",
-    )?;
-    validate_hex32_ring(
-        &config.discovery_trusted_server_ed25519_public_keys_hex,
-        "discovery_trusted_server_ed25519_public_keys_hex",
-        8,
     )?;
     if !(1..=3600).contains(&config.command_timeout_secs) {
         return Err("command_timeout_secs_out_of_range".to_string());
@@ -236,7 +186,7 @@ fn validate_update_version_url(value: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(rest) = value.strip_prefix("http://") {
-        if is_local_http_discovery_authority(rest) {
+        if is_local_http_authority(rest) {
             return Ok(());
         }
         return Err("update_unmanaged_version_url_http_must_be_localhost".to_string());
@@ -248,6 +198,22 @@ fn validate_update_version_url(value: &str) -> Result<(), String> {
         return Err("update_unmanaged_version_url_file_must_be_absolute".to_string());
     }
     Err("update_unmanaged_version_url_must_be_https".to_string())
+}
+
+fn is_local_http_authority(rest: &str) -> bool {
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host.starts_with("localhost:")
+        || host.starts_with("127.0.0.1:")
+    {
+        return true;
+    }
+    if host == "[::1]" || host.starts_with("[::1]:") {
+        return true;
+    }
+    false
 }
 
 fn validate_execution_config(config: &AgentExecutionConfig) -> Result<(), String> {

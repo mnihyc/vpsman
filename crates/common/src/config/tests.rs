@@ -17,29 +17,6 @@ fn validates_default_agent_config_shape() {
 }
 
 #[test]
-fn rejects_invalid_hot_config_shape() {
-    let config = AgentConfig {
-        discovery_url: Some("http://example.test/config".to_string()),
-        ..AgentConfig::default()
-    };
-
-    assert_eq!(
-        validate_agent_config_shape(&config).unwrap_err(),
-        "discovery_url_http_must_be_localhost"
-    );
-}
-
-#[test]
-fn accepts_local_development_http_discovery_url() {
-    let config = AgentConfig {
-        discovery_url: Some("http://127.0.0.1:8080/endpoints.json".to_string()),
-        ..AgentConfig::default()
-    };
-
-    validate_agent_config_shape(&config).unwrap();
-}
-
-#[test]
 fn validates_backup_recipient_and_limits() {
     let config = AgentConfig {
         backup: AgentBackupConfig {
@@ -630,7 +607,6 @@ fn rejects_hot_config_identity_and_secret_changes() {
     let current = AgentConfig {
         auth: super::AgentAuthConfig {
             server_ed25519_public_key_hex: Some("11".repeat(32)),
-            discovery_trusted_server_ed25519_public_keys_hex: vec!["12".repeat(32)],
             command_timeout_secs: 30,
             ..Default::default()
         },
@@ -664,53 +640,5 @@ fn rejects_hot_config_identity_and_secret_changes() {
     assert_eq!(
         validate_hot_config_update(&current, &updated).unwrap_err(),
         "hot_config_cannot_change_update_signing_key"
-    );
-
-    let mut updated = current.clone();
-    updated
-        .auth
-        .discovery_trusted_server_ed25519_public_keys_hex = vec!["66".repeat(32)];
-    validate_hot_config_update(&current, &updated).unwrap();
-}
-
-#[test]
-fn validates_discovery_trust_key_ring_shape() {
-    let valid = AgentConfig {
-        auth: super::AgentAuthConfig {
-            discovery_trusted_server_ed25519_public_keys_hex: vec![
-                "11".repeat(32),
-                "22".repeat(32),
-            ],
-            ..Default::default()
-        },
-        ..AgentConfig::default()
-    };
-    validate_agent_config_shape(&valid).unwrap();
-
-    let duplicate = AgentConfig {
-        auth: super::AgentAuthConfig {
-            discovery_trusted_server_ed25519_public_keys_hex: vec![
-                "11".repeat(32),
-                "11".repeat(32),
-            ],
-            ..Default::default()
-        },
-        ..AgentConfig::default()
-    };
-    assert_eq!(
-        validate_agent_config_shape(&duplicate).unwrap_err(),
-        "discovery_trusted_server_ed25519_public_keys_hex_duplicate"
-    );
-
-    let too_many = AgentConfig {
-        auth: super::AgentAuthConfig {
-            discovery_trusted_server_ed25519_public_keys_hex: vec!["11".repeat(32); 9],
-            ..Default::default()
-        },
-        ..AgentConfig::default()
-    };
-    assert_eq!(
-        validate_agent_config_shape(&too_many).unwrap_err(),
-        "discovery_trusted_server_ed25519_public_keys_hex_too_many"
     );
 }

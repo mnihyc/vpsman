@@ -20,7 +20,7 @@ use crate::{
         upload_file_transfer_source_artifact,
     },
     routes_job_history::download_file_download_bundle,
-    state::{AppState, EnrollmentSettings},
+    state::AppState,
 };
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash, CommandOutput,
@@ -307,7 +307,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: Some(store),
         update_object_store: None,
         update_artifact_public_base_url: None,

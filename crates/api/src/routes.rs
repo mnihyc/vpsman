@@ -29,11 +29,9 @@ use crate::{
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
     routes_dashboard::dashboard_overview,
-    routes_discovery::discovery_endpoints,
-    routes_enrollment::{
-        claim_enrollment, create_enrollment_token, get_enrollment_runtime_settings,
-        key_lifecycle_report, list_client_key_revocations, list_enrollment_tokens,
-        revoke_current_client_key, update_enrollment_runtime_settings,
+    routes_key_lifecycle::{
+        key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
+        upsert_agent_identity,
     },
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
@@ -103,11 +101,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/build-info", get(build_info))
-        .route(
-            "/.well-known/vpsman/endpoints.json",
-            get(discovery_endpoints),
-        )
-        .route("/api/v1/discovery/endpoints", get(discovery_endpoints))
         .route("/api/v1/auth/bootstrap", post(bootstrap_operator))
         .route("/api/v1/auth/login", post(login_operator))
         .route("/api/v1/auth/refresh", post(refresh_operator_session))
@@ -125,15 +118,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/operator-sessions/{session_id}",
             delete(revoke_operator_session),
         )
-        .route(
-            "/api/v1/enrollment-tokens",
-            get(list_enrollment_tokens).post(create_enrollment_token),
-        )
-        .route(
-            "/api/v1/enrollment-settings",
-            get(get_enrollment_runtime_settings).put(update_enrollment_runtime_settings),
-        )
-        .route("/api/v1/enrollments/claim", post(claim_enrollment))
+        .route("/api/v1/agent-identities", post(upsert_agent_identity))
         .route(
             "/api/v1/client-key-revocations",
             get(list_client_key_revocations),

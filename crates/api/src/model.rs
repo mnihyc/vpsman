@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentNoiseMode, AgentUpdateConfig, BandwidthTier, JobCommand,
-    PrivilegeAssertion, RuntimeTunnelControl, RuntimeTunnelTopologyIntent, ServerEndpoint,
+    AgentCapabilitySnapshot, BandwidthTier, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
+    RuntimeTunnelTopologyIntent,
     TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
@@ -378,54 +378,26 @@ pub(crate) struct TunnelPlanView {
     pub(crate) updated_at: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct EnrollmentTokenRecord {
-    pub(crate) id: Uuid,
-    pub(crate) token_hash: String,
-    pub(crate) token_prefix: String,
-    pub(crate) purpose: String,
-    pub(crate) allowed_client_id: Option<String>,
-    pub(crate) requires_existing_client: bool,
-    pub(crate) preserve_existing_assignments: bool,
-    pub(crate) expected_old_public_key_sha256_hex: Option<String>,
-    pub(crate) created_by: Option<Uuid>,
-    pub(crate) created_at_unix: u64,
-    pub(crate) expires_unix: u64,
-    pub(crate) used_at_unix: Option<u64>,
-    pub(crate) used_by_client_id: Option<String>,
-    pub(crate) default_tags: Vec<String>,
-    pub(crate) default_display_name: Option<String>,
-    pub(crate) unmanaged_update_enabled: bool,
-    pub(crate) unmanaged_update_version_url: String,
-    pub(crate) unmanaged_update_interval_secs: i64,
-    pub(crate) unmanaged_update_jitter_secs: i64,
-    pub(crate) unmanaged_update_activate: bool,
-    pub(crate) unmanaged_update_restart_agent: bool,
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentIdentityView {
+    pub(crate) client_id: String,
+    pub(crate) display_name: String,
+    pub(crate) status: String,
+    pub(crate) current_public_key_sha256_hex: String,
+    pub(crate) tags: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct EnrollmentTokenView {
-    pub(crate) id: Uuid,
-    pub(crate) token_prefix: String,
-    pub(crate) purpose: String,
-    pub(crate) assigned_client_id: Option<String>,
-    pub(crate) allowed_client_id: Option<String>,
-    pub(crate) requires_existing_client: bool,
-    pub(crate) preserve_existing_assignments: bool,
-    pub(crate) expected_old_public_key_sha256_hex: Option<String>,
-    pub(crate) created_by: Option<Uuid>,
-    pub(crate) created_at: String,
-    pub(crate) expires_at: String,
-    pub(crate) used_at: Option<String>,
-    pub(crate) used_by_client_id: Option<String>,
-    pub(crate) default_tags: Vec<String>,
-    pub(crate) default_display_name: Option<String>,
-    pub(crate) unmanaged_update_enabled: bool,
-    pub(crate) unmanaged_update_version_url: String,
-    pub(crate) unmanaged_update_interval_secs: i64,
-    pub(crate) unmanaged_update_jitter_secs: i64,
-    pub(crate) unmanaged_update_activate: bool,
-    pub(crate) unmanaged_update_restart_agent: bool,
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpsertAgentIdentityRequest {
+    pub(crate) client_id: String,
+    pub(crate) client_public_key_hex: String,
+    pub(crate) display_name: Option<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) replace_existing_key: bool,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -452,13 +424,9 @@ pub(crate) struct KeyLifecycleClientView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct KeyLifecycleReportView {
     pub(crate) server_ed25519_public_key_configured: bool,
-    pub(crate) discovery_trusted_server_key_count: usize,
-    pub(crate) gateway_server_public_key_configured: bool,
-    pub(crate) enrolled_client_count: usize,
+    pub(crate) direct_identity_client_count: usize,
     pub(crate) current_key_revoked_count: usize,
     pub(crate) revocation_count: usize,
-    pub(crate) rebuild_reenrollment_token_count: usize,
-    pub(crate) active_rebuild_reenrollment_token_count: usize,
     pub(crate) clients: Vec<KeyLifecycleClientView>,
 }
 
@@ -467,105 +435,6 @@ pub(crate) struct CreateClientKeyRevocationRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateEnrollmentTokenRequest {
-    pub(crate) ttl_secs: Option<u64>,
-    pub(crate) purpose: Option<String>,
-    pub(crate) allowed_client_id: Option<String>,
-    #[serde(default)]
-    pub(crate) confirmed_reenrollment: bool,
-    pub(crate) preserve_existing_assignments: Option<bool>,
-    #[serde(default)]
-    pub(crate) default_tags: Vec<String>,
-    #[serde(default)]
-    pub(crate) default_display_name: Option<String>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_enabled: Option<bool>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_version_url: Option<String>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_interval_secs: Option<i64>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_jitter_secs: Option<i64>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_activate: Option<bool>,
-    #[serde(default)]
-    pub(crate) unmanaged_update_restart_agent: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CreateEnrollmentTokenResponse {
-    pub(crate) id: Uuid,
-    pub(crate) token: String,
-    pub(crate) token_prefix: String,
-    pub(crate) purpose: String,
-    pub(crate) assigned_client_id: Option<String>,
-    pub(crate) allowed_client_id: Option<String>,
-    pub(crate) requires_existing_client: bool,
-    pub(crate) preserve_existing_assignments: bool,
-    pub(crate) expected_old_public_key_sha256_hex: Option<String>,
-    pub(crate) expires_at: String,
-    pub(crate) default_tags: Vec<String>,
-    pub(crate) default_display_name: Option<String>,
-    pub(crate) unmanaged_update_enabled: bool,
-    pub(crate) unmanaged_update_version_url: String,
-    pub(crate) unmanaged_update_interval_secs: i64,
-    pub(crate) unmanaged_update_jitter_secs: i64,
-    pub(crate) unmanaged_update_activate: bool,
-    pub(crate) unmanaged_update_restart_agent: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ClaimEnrollmentRequest {
-    pub(crate) token: String,
-    pub(crate) client_public_key_hex: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct ClaimEnrollmentResponse {
-    pub(crate) client_id: String,
-    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
-    pub(crate) discovery_url: Option<String>,
-    pub(crate) noise_mode: AgentNoiseMode,
-    pub(crate) gateway_server_public_key_hex: Option<String>,
-    pub(crate) server_ed25519_public_key_hex: Option<String>,
-    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
-    pub(crate) gateway_retry_secs: u64,
-    pub(crate) gateway_connect_timeout_secs: u64,
-    pub(crate) telemetry_light_secs: u64,
-    pub(crate) telemetry_full_secs: u64,
-    pub(crate) update: AgentUpdateConfig,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct EnrollmentRuntimeSettingsView {
-    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
-    pub(crate) discovery_url: Option<String>,
-    pub(crate) gateway_server_public_key_hex: Option<String>,
-    pub(crate) server_ed25519_public_key_hex: Option<String>,
-    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
-    pub(crate) gateway_retry_secs: u64,
-    pub(crate) gateway_connect_timeout_secs: u64,
-    pub(crate) telemetry_light_secs: u64,
-    pub(crate) telemetry_full_secs: u64,
-    pub(crate) update: AgentUpdateConfig,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct UpdateEnrollmentRuntimeSettingsRequest {
-    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
-    pub(crate) discovery_url: Option<String>,
-    pub(crate) gateway_server_public_key_hex: Option<String>,
-    #[serde(default)]
-    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
-    pub(crate) gateway_retry_secs: u64,
-    pub(crate) gateway_connect_timeout_secs: u64,
-    pub(crate) telemetry_light_secs: u64,
-    pub(crate) telemetry_full_secs: u64,
-    #[serde(default)]
-    pub(crate) update: AgentUpdateConfig,
 }
 
 #[derive(Debug, Deserialize)]

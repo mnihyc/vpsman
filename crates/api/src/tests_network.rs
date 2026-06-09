@@ -20,7 +20,6 @@ use crate::{
         validate_job_command,
     },
     routes_jobs::create_job,
-    state::EnrollmentSettings,
 };
 
 #[tokio::test]
@@ -893,7 +892,6 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

@@ -402,9 +402,9 @@ async function verifyDesktopSubpages(page: Page) {
     ["Backups", "Migration", "Migration links"],
     ["Audit", "Events", "Audit log"],
     ["Audit", "Retention", "History retention"],
-    ["Access", "Overview", "Operator session"],
+    ["Access", "Overview", "Access control"],
     ["Access", "Operators", "Operators"],
-    ["Access", "VPS keys", "Enrollment tokens"],
+    ["Access", "VPS keys", "Gateway agent identities"],
     ["Access", "Gateway", "Gateway sessions"],
     ["Access", "Privilege unlock", "Privilege unlock"],
   ] as const;

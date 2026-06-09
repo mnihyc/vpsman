@@ -4,7 +4,6 @@ import type {
   OperatorPreferences,
   WsEvent,
 } from "./types";
-import { DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE } from "./enrollmentInstallCommand";
 
 export function parseWsEvent(value: unknown): WsEvent | null {
   if (typeof value !== "string") {
@@ -105,8 +104,6 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  enrollment_install_command_template:
-    DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
   language: "en",
   show_country_flags: true,
   sidebar_subpanel_default: "active",

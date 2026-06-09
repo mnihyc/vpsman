@@ -1275,7 +1275,6 @@ fn data_source_test_state(
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store,
         update_object_store,
         update_artifact_public_base_url: None,

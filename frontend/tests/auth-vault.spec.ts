@@ -7,9 +7,8 @@ const preferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  enrollment_install_command_template:
-    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/enroll-agent.sh | env VPSMAN_INSTALL_MODE={INSTALL_MODE} VPSMAN_ENROLLMENT_API_URL={API_URL} VPSMAN_ENROLLMENT_TOKEN={TOKEN} bash",
   language: "en",
+  show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
   vps_name_display_mode: "name_id_suffix",
@@ -19,18 +18,26 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
-test("stores bearer session only inside encrypted WebCrypto vault", async ({ page }) => {
+test("stores bearer session only inside encrypted WebCrypto vault", async ({
+  page,
+}) => {
   await installAuthVaultApiMock(page);
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Operator access" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operator access" }),
+  ).toBeVisible();
   await page.getByLabel("Username").fill("vault-admin");
   await page.getByLabel("Password").fill("vault-password-123");
   await page.getByLabel("Session vault key").fill("vault-key-123456");
   await activate(page.getByRole("button", { name: "Submit login" }));
 
-  await page.waitForFunction(() => window.localStorage.getItem("vpsman.authVault") !== null);
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await page.waitForFunction(
+    () => window.localStorage.getItem("vpsman.authVault") !== null,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
 
   const storage = await readSessionStorage(page);
   expect(storage.access).toBeNull();
@@ -42,10 +49,14 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({ pag
   expect(storage.authVault).not.toContain("vault-key-123456");
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Operator access" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operator access" }),
+  ).toBeVisible();
   await page.getByLabel("Stored session key").fill("vault-key-123456");
   await activate(page.getByRole("button", { name: "Unlock session" }));
-  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
 });
 
 async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
@@ -71,17 +82,32 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
   });
   await page.route("**/api/v1/fleet/summary", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({
       contentType: "application/json",
-      json: { online: 1, offline: 0, stale: 0, running_jobs: 0, total: 1, warnings: 0 },
+      json: {
+        online: 1,
+        offline: 0,
+        stale: 0,
+        running_jobs: 0,
+        total: 1,
+        warnings: 0,
+      },
     });
   });
   await page.route("**/api/v1/dashboard/overview**", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({
@@ -89,11 +115,20 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
       json: {
         available_filters: {
           countries: [],
-          group_by_options: [{ description: "All labels", label: "Labels", value: "labels" }],
+          group_by_options: [
+            { description: "All labels", label: "Labels", value: "labels" },
+          ],
           providers: [],
           windows: [{ label: "24 hours", seconds: 86400, value: "24h" }],
         },
-        drilldowns: [{ label: "Open fleet instances", query: null, subpage: "instances", view: "Fleet" }],
+        drilldowns: [
+          {
+            label: "Open fleet instances",
+            query: null,
+            subpage: "instances",
+            view: "Fleet",
+          },
+        ],
         generated_at: "2026-06-05T20:44:58Z",
         group_by: "labels",
         label_clusters: [],
@@ -117,8 +152,21 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
           memory_used_ratio: null,
           sampled_clients: 0,
         },
-        scope: { kind: "all", label: "All VPS", matched_clients: 1, query: null, value: null },
-        summary: { online: 1, offline: 0, stale: 0, running_jobs: 0, total: 1, warnings: 0 },
+        scope: {
+          kind: "all",
+          label: "All VPS",
+          matched_clients: 1,
+          query: null,
+          value: null,
+        },
+        summary: {
+          online: 1,
+          offline: 0,
+          stale: 0,
+          running_jobs: 0,
+          total: 1,
+          warnings: 0,
+        },
         time_range: {
           end_at: "2026-06-05T20:44:58Z",
           end_unix: 1780692298,
@@ -133,7 +181,11 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
   });
   await page.route("**/api/v1/agents", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({
@@ -158,21 +210,33 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
   });
   await page.route("**/api/v1/telemetry/rollups**", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({ contentType: "application/json", json: [] });
   });
   await page.route("**/api/v1/telemetry/network-rates**", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({ contentType: "application/json", json: [] });
   });
   await page.route("**/api/v1/telemetry/tunnels**", async (route) => {
     if (!isAuthorized(route.request())) {
-      await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
       return;
     }
     await route.fulfill({ contentType: "application/json", json: [] });
@@ -208,7 +272,11 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
   ]) {
     await page.route(`**/api/v1/${path}**`, async (route) => {
       if (!isAuthorized(route.request())) {
-        await route.fulfill({ contentType: "application/json", json: { error: "missing_bearer_token" }, status: 401 });
+        await route.fulfill({
+          contentType: "application/json",
+          json: { error: "missing_bearer_token" },
+          status: 401,
+        });
         return;
       }
       await route.fulfill({

@@ -5,29 +5,21 @@ use serde::{Deserialize, Serialize};
 use crate::{RuntimeTunnelCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerEndpoint {
     pub label: String,
     pub tcp_addr: String,
     pub priority: u16,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DiscoveryDocument {
-    pub version: u32,
-    pub issued_unix: u64,
-    pub expires_unix: u64,
-    pub endpoints: Vec<ServerEndpoint>,
-    pub signature: Vec<u8>,
-}
-
 pub const MAX_AGENT_HOT_CONFIG_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub client_id: String,
     pub display_name: String,
     pub tcp_endpoints: Vec<ServerEndpoint>,
-    pub discovery_url: Option<String>,
     #[serde(default)]
     pub noise: AgentNoiseConfig,
     #[serde(default)]
@@ -48,6 +40,7 @@ pub struct AgentConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentNoiseConfig {
     pub mode: AgentNoiseMode,
     pub client_private_key_hex: Option<String>,
@@ -55,10 +48,9 @@ pub struct AgentNoiseConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
     pub server_ed25519_public_key_hex: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
     pub command_timeout_secs: u64,
     #[serde(default = "default_agent_gateway_retry_secs")]
     pub gateway_retry_secs: u64,
@@ -468,7 +460,6 @@ impl Default for AgentAuthConfig {
     fn default() -> Self {
         Self {
             server_ed25519_public_key_hex: None,
-            discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
             command_timeout_secs: 30,
             gateway_retry_secs: default_agent_gateway_retry_secs(),
             gateway_connect_timeout_secs: default_agent_gateway_connect_timeout_secs(),
@@ -503,7 +494,6 @@ impl Default for AgentConfig {
                 tcp_addr: "127.0.0.1:9443".to_string(),
                 priority: 10,
             }],
-            discovery_url: None,
             noise: AgentNoiseConfig::default(),
             auth: AgentAuthConfig::default(),
             backup: AgentBackupConfig::default(),

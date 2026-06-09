@@ -12,7 +12,7 @@ use vpsman_common::{
     TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
-use crate::{gateway_client::GatewayDispatchClient, state::EnrollmentSettings};
+use crate::{gateway_client::GatewayDispatchClient};
 
 #[tokio::test]
 async fn records_network_observation_summaries_from_status_outputs() {
@@ -684,7 +684,6 @@ fn test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

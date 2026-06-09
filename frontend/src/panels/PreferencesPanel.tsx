@@ -11,7 +11,6 @@ import {
   LayoutPanelTop,
   Languages,
   ListChecks,
-  KeyRound,
   RotateCcw,
   Save,
   ServerCog,
@@ -20,11 +19,6 @@ import {
 } from "lucide-react";
 import { clearLocalStorageSelections } from "../localStorageSelections";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
-import {
-  DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
-  ENROLLMENT_INSTALL_TEMPLATE_VARIABLES,
-  validateEnrollmentInstallCommandTemplate,
-} from "../enrollmentInstallCommand";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type { OperatorPreferences, OperatorView } from "../types";
 
@@ -83,9 +77,6 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
       validateDashboardLimits(
         draft.dashboard_resource_top_limit,
         draft.dashboard_network_top_limit,
-      ) ??
-      validateEnrollmentInstallCommandTemplate(
-        draft.enrollment_install_command_template,
       );
     if (validationError) {
       setLocalError(validationError);
@@ -95,9 +86,6 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
       await updatePreferences({
         ...draft,
         dashboard_curve_exclusions: dashboardCurveExclusions,
-        enrollment_install_command_template:
-          draft.enrollment_install_command_template.trim() ||
-          DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
         timezone,
       });
     } catch {
@@ -295,48 +283,6 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
             {localSelectionMessage && (
               <p className="preferencesNotice">{localSelectionMessage}</p>
             )}
-          </PreferenceGroup>
-
-          <PreferenceGroup
-            description="Rendered after token creation. Unknown or unresolved {VARIABLE} entries are not shown as commands."
-            icon={<KeyRound size={18} />}
-            title="Enrollment install command"
-          >
-            <label>
-              <span>Template</span>
-              <textarea
-                aria-label="Enrollment install command template"
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    enrollment_install_command_template: event.target.value,
-                  }))
-                }
-                rows={4}
-                value={draft.enrollment_install_command_template}
-              />
-            </label>
-            <div className="preferenceHint">
-              <strong>
-                {ENROLLMENT_INSTALL_TEMPLATE_VARIABLES.map(
-                  (variable) => `{${variable}}`,
-                ).join(" ")}
-              </strong>
-              <button
-                className="secondaryAction compactAction"
-                onClick={() =>
-                  setDraft((current) => ({
-                    ...current,
-                    enrollment_install_command_template:
-                      DEFAULT_ENROLLMENT_INSTALL_COMMAND_TEMPLATE,
-                  }))
-                }
-                type="button"
-              >
-                <RotateCcw size={15} />
-                <span>Default</span>
-              </button>
-            </div>
           </PreferenceGroup>
 
           <PreferenceGroup

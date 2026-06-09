@@ -4,7 +4,6 @@ mod build_info;
 mod child_process;
 mod cli;
 mod config_update;
-mod discovery;
 mod executor;
 #[cfg(test)]
 mod executor_tests;

@@ -52,26 +52,23 @@ locally to build request-bound privilege assertions. The API forwards those
 assertions to the private gateway for verification and never receives the
 plaintext super password.
 
-## 3. Enroll One VPS
+## 3. Install One VPS
 
-Create an enrollment token:
-
-```sh
-cargo run -p vpsctl -- enrollment-token-create \
-  --default-display-name edge-01 \
-  --default-tags edge \
-  --ttl-secs 3600
-```
-
-Install the agent on the VPS using the one-line installer from
-`02-enroll-agents.md` or the Access panel. After it connects, copy the assigned
-client ID from `agents`:
+Register a direct gateway agent identity:
 
 ```sh
-cargo run -p vpsctl -- agents
-cargo run -p vpsctl -- gateway-sessions
-export EDGE_CLIENT_ID=<assigned_client_id>
+cargo run -p vpsctl -- noise-keygen
+cargo run -p vpsctl -- agent-identity-upsert \
+  --client-id edge-01 \
+  --client-public-key-hex <agent_noise_public_key_hex> \
+  --display-name edge-01 \
+  --tags country:US,role:edge \
+  --confirmed
 ```
+
+Install the agent with `deploy/install-agent.sh` or follow
+`02-install-agents.md`. After it connects, use the assigned display name in Fleet
+and target expressions.
 
 ## 4. Organize And Inspect
 
@@ -167,5 +164,5 @@ Use this loop while managing 20+ VPSs:
 2. Resolve exact targets with `bulk-resolve`.
 3. Dispatch through panel, CLI, or VTY with confirmation and local privilege unlock.
 4. Observe `jobs`, `job-targets`, `job-outputs`, and alerts.
-5. Recover with rollback commands, re-enrollment tokens, or data-source preset
+5. Recover with rollback commands, direct identity key rotation, or data-source preset
    changes instead of manual per-host edits.

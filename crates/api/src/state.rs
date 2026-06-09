@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::http::HeaderMap;
 use ed25519_dalek::SigningKey;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -24,47 +23,6 @@ use crate::{
         bearer_token, constant_time_eq, default_operator_scopes, operator_has_scope, role_allows,
     },
 };
-use vpsman_common::{AgentNoiseMode, AgentUpdateConfig, ServerEndpoint};
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct EnrollmentSettings {
-    pub(crate) tcp_endpoints: Vec<ServerEndpoint>,
-    pub(crate) discovery_url: Option<String>,
-    pub(crate) noise_mode: AgentNoiseMode,
-    pub(crate) gateway_server_public_key_hex: Option<String>,
-    pub(crate) server_ed25519_public_key_hex: Option<String>,
-    pub(crate) discovery_trusted_server_ed25519_public_keys_hex: Vec<String>,
-    pub(crate) gateway_retry_secs: u64,
-    pub(crate) gateway_connect_timeout_secs: u64,
-    pub(crate) telemetry_light_secs: u64,
-    pub(crate) telemetry_full_secs: u64,
-    pub(crate) default_country_tag: Option<String>,
-    pub(crate) update: AgentUpdateConfig,
-}
-
-impl Default for EnrollmentSettings {
-    fn default() -> Self {
-        Self {
-            tcp_endpoints: vec![ServerEndpoint {
-                label: "local".to_string(),
-                tcp_addr: "127.0.0.1:9443".to_string(),
-                priority: 10,
-            }],
-            discovery_url: None,
-            noise_mode: AgentNoiseMode::EnrolledIk,
-            gateway_server_public_key_hex: None,
-            server_ed25519_public_key_hex: None,
-            discovery_trusted_server_ed25519_public_keys_hex: Vec::new(),
-            gateway_retry_secs: vpsman_common::default_agent_gateway_retry_secs(),
-            gateway_connect_timeout_secs: vpsman_common::default_agent_gateway_connect_timeout_secs(
-            ),
-            telemetry_light_secs: 15,
-            telemetry_full_secs: 60,
-            default_country_tag: Some("country:US".to_string()),
-            update: AgentUpdateConfig::default(),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -73,7 +31,6 @@ pub(crate) struct AppState {
     pub(crate) internal_token: Option<String>,
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) server_signing_key: Option<Arc<SigningKey>>,
-    pub(crate) enrollment: EnrollmentSettings,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
     pub(crate) update_object_store: Option<BackupObjectStore>,
     pub(crate) update_artifact_public_base_url: Option<String>,
@@ -184,15 +141,6 @@ impl AppState {
     pub(crate) fn public_update_artifact_url(&self, path: &str) -> Option<String> {
         let base = self.update_artifact_public_base_url.as_deref()?;
         Some(format!("{}{}", base.trim_end_matches('/'), path))
-    }
-
-    pub(crate) async fn enrollment_settings(&self) -> Result<EnrollmentSettings> {
-        let mut settings = self.repo.load_enrollment_settings(&self.enrollment).await?;
-        settings.noise_mode = self.enrollment.noise_mode;
-        settings.server_ed25519_public_key_hex =
-            self.enrollment.server_ed25519_public_key_hex.clone();
-        settings.default_country_tag = self.enrollment.default_country_tag.clone();
-        Ok(settings)
     }
 
     pub(crate) async fn list_data_source_status(

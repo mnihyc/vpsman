@@ -42,7 +42,7 @@ use crate::{
         validate_create_backup_request,
     },
     routes_jobs::create_job,
-    state::{AppState, EnrollmentSettings},
+    state::AppState,
     unix_now,
 };
 
@@ -1326,7 +1326,6 @@ fn test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

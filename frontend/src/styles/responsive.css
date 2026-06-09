@@ -120,7 +120,10 @@
   }
 
   .auditHistoryGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(120px, 0.7fr);
+    grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(
+        120px,
+        0.7fr
+      );
   }
 
   .targetHistoryGrid {
@@ -129,7 +132,10 @@
 
   .comparisonGroupGrid,
   .comparisonTargetGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(120px, 0.7fr);
+    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(
+        120px,
+        0.7fr
+      );
   }
 
   .executionSummaryStats {
@@ -137,157 +143,10 @@
   }
 
   .gatewaySessionGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr);
-  }
-
-  .keyLifecycleGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr);
-  }
-
-  .rolloutGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 90px;
-  }
-
-  .releaseGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 90px;
-  }
-
-  .supervisorInventoryGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 80px;
-  }
-
-  .backupHistoryGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 90px;
-  }
-
-  .topologyEvidenceGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(130px, 0.8fr);
-  }
-
-  .targetImpactGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .topologyGraphEdgeRow {
-    grid-template-columns: minmax(170px, 1fr) minmax(120px, 0.6fr) minmax(130px, 0.8fr);
-  }
-
-  .managementGrid,
-  .accessGrid,
-  .preferenceGroup,
-  .formRow,
-  .historyRetentionGrid,
-  .handoffBulkBar,
-  .releaseRecordForm,
-  .rolloutPolicyForm,
-  .sourceArtifactControls,
-  .templateToolbar,
-  .privilegeFields,
-  .inlinePrivilege,
-  .supervisorOperation {
-    grid-template-columns: 1fr;
-  }
-
-  .supervisorOperation .wideField {
-    grid-column: auto;
-  }
-
-  .preferencesActions,
-  .preferenceHint,
-  .preferenceResetRow {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .preferenceResetRow {
-    grid-template-columns: 1fr;
-  }
-
-  .tagGrid {
-    grid-template-columns: minmax(170px, 1fr) 70px;
-  }
-
-  .dataSourcePresetGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 86px;
-  }
-
-  .dataSourceStatusGrid {
-    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) 96px;
-  }
-
-  .fleetAlertRow {
-    grid-template-columns: auto minmax(150px, 1fr) minmax(110px, 0.7fr) auto;
-  }
-
-  .fleetAlertRow > span:not(.status, .fleetAlertState) {
-    display: none;
-  }
-
-  .fleetAlertActions,
-  .fleetAlertReason {
-    grid-column: 2 / -1;
-    justify-self: start;
-  }
-
-  .fleetPolicyGrid {
-    grid-template-columns: repeat(3, minmax(120px, 1fr));
-  }
-
-  .fieldWide,
-  .fieldFull {
-    grid-column: 1 / -1;
-  }
-
-  .notificationGrid {
-    grid-template-columns: repeat(3, minmax(120px, 1fr));
-  }
-
-  .dataSourcePresetGrid span:nth-child(4),
-  .dataSourcePresetGrid span:nth-child(5),
-  .dataSourceStatusGrid span:nth-child(3),
-  .dataSourceStatusGrid span:nth-child(4),
-  .dataSourceStatusGrid span:nth-child(6) {
-    display: none;
-  }
-
-  .outputChunk {
-    grid-template-columns: 1fr;
-  }
-
-  .row span:nth-child(4),
-  .row span:nth-child(5) {
-    display: none;
-  }
-
-  .jobHistoryGrid span:nth-child(4),
-  .jobHistoryGrid span:nth-child(5),
-  .jobHistoryGrid span:nth-child(6),
-  .auditHistoryGrid span:nth-child(4),
-  .auditHistoryGrid span:nth-child(5),
-  .backupHistoryGrid span:nth-child(4),
-  .backupHistoryGrid span:nth-child(5),
-    .backupHistoryGrid span:nth-child(6),
-    .rolloutGrid span:nth-child(4),
-    .rolloutGrid span:nth-child(5),
-    .rolloutGrid span:nth-child(6),
-    .rolloutGrid span:nth-child(7),
-    .releaseGrid span:nth-child(4),
-    .releaseGrid span:nth-child(5),
-    .releaseGrid span:nth-child(6),
-    .releaseGrid span:nth-child(7),
-    .supervisorInventoryGrid span:nth-child(4),
-    .supervisorInventoryGrid span:nth-child(5),
-    .supervisorInventoryGrid span:nth-child(6),
-    .gatewaySessionGrid span:nth-child(4),
-    .targetHistoryGrid span:nth-child(4),
-    .targetHistoryGrid span:nth-child(5),
-    .topologyEvidenceGrid span:nth-child(4),
-    .topologyGraphEdgeRow span:nth-child(4),
-    .topologyGraphEdgeRow span:nth-child(5),
-    .topologyGraphEdgeRow span:nth-child(6),
-    .topologyGraphEdgeRow span:nth-child(7),
-  .topologyEvidenceGrid span:nth-child(5) {
-    display: none;
+    grid-template-columns: minmax(170px, 1fr) minmax(130px, 0.8fr) minmax(
+        130px,
+        0.8fr
+      );
   }
 }
 
@@ -486,196 +345,5 @@
 
   .gatewaySessionGrid {
     grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .keyLifecycleGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .operatorGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .operatorSessionGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .rolloutGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .releaseGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .supervisorInventoryGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .backupHistoryGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .topologyEvidenceGrid {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .targetImpactGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .topologyGraphCanvas {
-    min-height: 210px;
-  }
-
-  .topologyGraphControls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .compactSearch {
-    width: 100%;
-  }
-
-  .crudToolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .crudSearch {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .crudSearch input {
-    grid-column: 1 / -1;
-  }
-
-  .crudPageActions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .crudPageSize {
-    margin-right: auto;
-  }
-
-  .segmentedControl {
-    width: 100%;
-  }
-
-  .segmentedControl button {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .topologyNodeInspector {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .topologyNodeInspector .topologyTagList,
-  .topologyNodeInspector .topologyMetric:last-child {
-    display: none;
-  }
-
-  .topologyGraphEdgeRow {
-    grid-template-columns: minmax(0, 1fr) 104px;
-  }
-
-  .tagGrid,
-  .tagRegistryGrid,
-  .tagAssignmentGrid,
-  .configJobGrid,
-  .dataSourcePresetGrid,
-  .dataSourceStatusGrid {
-    grid-template-columns: minmax(0, 1fr) 76px;
-  }
-
-  .metricGrid,
-  .configRuleWorkspace,
-  .configApplyGrid,
-  .promotionWorkflow {
-    grid-template-columns: 1fr;
-  }
-
-  .tagCreateForm .formRow {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .dataSourcePresetGrid span:nth-child(2),
-  .tagRegistryGrid span:nth-child(2),
-  .tagAssignmentGrid span:nth-child(2),
-  .tagAssignmentGrid span:nth-child(3),
-  .configJobGrid span:nth-child(3),
-  .dataSourceStatusGrid span:nth-child(2) {
-    display: none;
-  }
-
-  .topologyEvidenceGrid span:nth-child(3) {
-    display: none;
-  }
-
-  .topologyGraphEdgeRow span:nth-child(3) {
-    display: none;
-  }
-
-  .row span:nth-child(3) {
-    display: none;
-  }
-
-  .jobHistoryGrid span:nth-child(3),
-    .auditHistoryGrid span:nth-child(3),
-    .backupHistoryGrid span:nth-child(3),
-    .gatewaySessionGrid span:nth-child(3),
-    .keyLifecycleGrid span:nth-child(3),
-    .keyLifecycleGrid span:nth-child(4),
-    .rolloutGrid span:nth-child(3),
-    .releaseGrid span:nth-child(3),
-    .supervisorInventoryGrid span:nth-child(3),
-    .targetHistoryGrid span:nth-child(3),
-    .comparisonGroupGrid span:nth-child(3),
-    .comparisonGroupGrid span:nth-child(4),
-    .comparisonTargetGrid span:nth-child(3),
-    .comparisonTargetGrid span:nth-child(4) {
-    display: none;
-  }
-
-  .jobStatusCell .compactAction {
-    width: 32px;
-    padding: 0;
-  }
-
-  .jobStatusCell .compactAction span {
-    display: none;
-  }
-
-  .rowActions .compactAction {
-    width: 32px;
-    padding: 0;
-  }
-
-  .rowActions .compactAction span {
-    display: none;
-  }
-
-  .rowActions .compactSelect {
-    max-width: 124px;
-    min-width: 96px;
-  }
-
-  .confirmationPrompt {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .confirmationPromptActions {
-    grid-column: 1 / -1;
-    justify-content: flex-end;
-  }
-
-  .confirmationPromptBody dl {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .executionFailureReason {
-    grid-template-columns: minmax(0, 1fr);
   }
 }

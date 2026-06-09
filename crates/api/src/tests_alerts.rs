@@ -673,7 +673,6 @@ fn alert_test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         server_signing_key: None,
-        enrollment: EnrollmentSettings::default(),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

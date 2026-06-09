@@ -1,16 +1,15 @@
 client_id = "lax-edge-01"
 # Local-only placeholder value for agent-side scripts; panel alias is owned by
-# server inventory and set through enrollment-token defaults or panel/CLI edits.
+# server inventory or explicit operator edits.
 display_name = "lax-edge-01"
-discovery_url = "https://panel.example.com/.well-known/vpsman/endpoints.json"
 telemetry_light_secs = 15
 telemetry_full_secs = 60
 tags = ["bgp", "edge"]
 
 [noise]
-# Use "dev_xx" only for local development. Production enrolled clients must use
-# "enrolled_ik" with locally generated client private key and pinned server
-# public key from enrollment.
+# Use "dev_xx" only for local development. Production agents use
+# "enrolled_ik" with locally provisioned client private keys and pinned gateway
+# public keys.
 mode = "enrolled_ik"
 client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
