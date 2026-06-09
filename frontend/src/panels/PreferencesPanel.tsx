@@ -16,6 +16,7 @@ import {
   ServerCog,
   TimerReset,
   Trash2,
+  Wifi,
 } from "lucide-react";
 import { clearLocalStorageSelections } from "../localStorageSelections";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
@@ -318,6 +319,43 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 endings and trailing whitespace for command output review.
               </span>
             </div>
+          </PreferenceGroup>
+
+          <PreferenceGroup
+            description="Used to compose the one-line agent install command after identity import. Endpoints are label=host:port=priority, one per line."
+            icon={<Wifi size={18} />}
+            title="Gateway install defaults"
+          >
+            <label>
+              <span>Server public key hex</span>
+              <input
+                aria-label="Gateway server public key hex"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    gateway_server_public_key_hex:
+                      event.target.value.trim() || null,
+                  }))
+                }
+                placeholder="64 hex characters"
+                value={draft.gateway_server_public_key_hex ?? ""}
+              />
+            </label>
+            <label className="wideField">
+              <span>Endpoints</span>
+              <textarea
+                aria-label="Gateway install endpoints"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    gateway_endpoints: event.target.value,
+                  }))
+                }
+                placeholder={"primary=gw.example.com:9443=10\nbackup=gw2.example.com:9443=20"}
+                rows={3}
+                value={draft.gateway_endpoints}
+              />
+            </label>
           </PreferenceGroup>
 
           <PreferenceGroup

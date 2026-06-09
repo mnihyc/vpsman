@@ -72,6 +72,10 @@ pub(crate) struct OperatorPreferences {
     pub(crate) dashboard_network_top_limit: u8,
     #[serde(default = "default_bulk_output_compare_mode")]
     pub(crate) bulk_output_compare_mode: String,
+    #[serde(default)]
+    pub(crate) gateway_server_public_key_hex: Option<String>,
+    #[serde(default)]
+    pub(crate) gateway_endpoints: String,
 }
 
 impl Default for OperatorPreferences {
@@ -86,6 +90,8 @@ impl Default for OperatorPreferences {
             dashboard_resource_top_limit: default_dashboard_top_limit(),
             dashboard_network_top_limit: default_dashboard_top_limit(),
             bulk_output_compare_mode: default_bulk_output_compare_mode(),
+            gateway_server_public_key_hex: None,
+            gateway_endpoints: String::new(),
         }
     }
 }
@@ -120,6 +126,11 @@ impl OperatorPreferences {
                 "binary",
                 &["binary", "text"],
             ),
+            gateway_server_public_key_hex: self
+                .gateway_server_public_key_hex
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty()),
+            gateway_endpoints: self.gateway_endpoints.trim().to_string(),
         }
     }
 }

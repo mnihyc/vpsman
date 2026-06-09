@@ -104,6 +104,8 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  gateway_endpoints: "",
+  gateway_server_public_key_hex: null,
   language: "en",
   show_country_flags: true,
   sidebar_subpanel_default: "active",

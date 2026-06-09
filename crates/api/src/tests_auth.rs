@@ -95,6 +95,8 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         sidebar_subpanel_default: "all".to_string(),
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
+        gateway_server_public_key_hex: Some("11".repeat(32)),
+        gateway_endpoints: "primary=gw.example.com:9443=10".to_string(),
         ..OperatorPreferences::default()
     };
     let updated = repo
@@ -105,6 +107,14 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
     assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
     assert_eq!(updated.preferences.bulk_output_compare_mode, "binary");
+    assert_eq!(
+        updated.preferences.gateway_server_public_key_hex.as_deref(),
+        Some("11".repeat(32).as_str())
+    );
+    assert_eq!(
+        updated.preferences.gateway_endpoints,
+        "primary=gw.example.com:9443=10"
+    );
 
     let context = repo
         .authenticate_access_token(&auth.access_token)
@@ -161,6 +171,27 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "invalid_bulk_output_compare_mode",
+        ),
+        (
+            OperatorPreferences {
+                gateway_server_public_key_hex: Some("gg".repeat(32)),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_server_public_key_hex",
+        ),
+        (
+            OperatorPreferences {
+                gateway_server_public_key_hex: Some("aa".repeat(31)),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_server_public_key_hex",
+        ),
+        (
+            OperatorPreferences {
+                gateway_endpoints: "bad-format".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_gateway_endpoints",
         ),
     ];
 

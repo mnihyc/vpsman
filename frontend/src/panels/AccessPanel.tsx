@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Ban,
+  Copy,
   Fingerprint,
   KeyRound,
   LockKeyhole,
@@ -16,6 +17,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
+import { generateNoiseKeypair } from "../noiseKeygen";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
@@ -157,6 +159,7 @@ export function AccessPanel({
     useState(false);
   const [identityPending, setIdentityPending] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
+  const [privateKeyHex, setPrivateKeyHex] = useState<string | null>(null);
   const [createdIdentity, setCreatedIdentity] =
     useState<AgentIdentityView | null>(null);
   const [revokeClientId, setRevokeClientId] = useState("");
@@ -302,6 +305,23 @@ export function AccessPanel({
       );
     } finally {
       setTotpPending(false);
+    }
+  }
+
+  async function handleGenerateKeypair() {
+    try {
+      const keypair = await generateNoiseKeypair();
+      setIdentityPublicKeyHex(keypair.publicKeyHex);
+      setPrivateKeyHex(keypair.privateKeyHex);
+      setIdentityError(null);
+    } catch {
+      setIdentityError("Key generation failed — browser may not support Web Crypto");
+    }
+  }
+
+  function handleCopyPrivateKey() {
+    if (privateKeyHex) {
+      navigator.clipboard.writeText(privateKeyHex).catch(() => {});
     }
   }
 
@@ -1019,7 +1039,41 @@ export function AccessPanel({
               rows={3}
               value={identityPublicKeyHex}
             />
+            <button
+              className="secondaryAction compact"
+              disabled={!canManageOperators || identityPending}
+              onClick={() => void handleGenerateKeypair()}
+              type="button"
+            >
+              <KeyRound size={15} />
+              Generate keypair
+            </button>
           </label>
+          {privateKeyHex && (
+            <div className="inlineSecret">
+              <strong>Private key</strong>
+              <div className="secretRow">
+                <input
+                  aria-label="Agent identity private key"
+                  className="monospace"
+                  readOnly
+                  value={privateKeyHex}
+                />
+                <button
+                  className="secondaryAction compact"
+                  onClick={handleCopyPrivateKey}
+                  type="button"
+                >
+                  <Copy size={15} />
+                  Copy
+                </button>
+              </div>
+              <small>
+                Store this key securely. It is not saved by the panel and cannot be
+                recovered.
+              </small>
+            </div>
+          )}
           <label>
             <span>Display name</span>
             <input
@@ -1067,6 +1121,13 @@ export function AccessPanel({
                 {shortHash(createdIdentity.current_public_key_sha256_hex)}
               </span>
             </div>
+          )}
+          {createdIdentity && privateKeyHex && (
+            <InstallCommand
+              clientId={createdIdentity.client_id}
+              privateKeyHex={privateKeyHex}
+              preferences={operator?.preferences ?? null}
+            />
           )}
         </form>
 
@@ -1254,4 +1315,67 @@ function parseListInput(value: string): string[] {
 
 function isFixedHex32(value: string): boolean {
   return /^[0-9a-fA-F]{64}$/.test(value.trim());
+}
+
+function InstallCommand({
+  clientId,
+  privateKeyHex,
+  preferences,
+}: {
+  clientId: string;
+  privateKeyHex: string;
+  preferences: {
+    gateway_server_public_key_hex: string | null;
+    gateway_endpoints: string;
+  } | null;
+}) {
+  const endpoints =
+    (preferences?.gateway_endpoints ?? "").trim();
+  const gatewayKey =
+    (preferences?.gateway_server_public_key_hex ?? "").trim();
+
+  if (!endpoints || !gatewayKey) {
+    return (
+      <div className="formNote mutedNote">
+        <span>
+          Gateway endpoints or public key not configured. Set them in{" "}
+          <strong>Preferences → Operator</strong> to generate an install command.
+        </span>
+      </div>
+    );
+  }
+
+  const command =
+    [
+      "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \\",
+      "  VPSMAN_INSTALL_MODE=root \\",
+      `  VPSMAN_AGENT_CLIENT_ID=${clientId} \\`,
+      `  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=${privateKeyHex} \\`,
+      `  VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=${gatewayKey} \\`,
+      `  VPSMAN_GATEWAY_ENDPOINTS='${endpoints}' \\`,
+      "  bash",
+    ].join("\n");
+
+  function handleCopy() {
+    navigator.clipboard.writeText(command).catch(() => {});
+  }
+
+  return (
+    <div className="installCommandBlock">
+      <div className="sectionHeader compact">
+        <strong>Install command</strong>
+        <button
+          className="secondaryAction compact"
+          onClick={handleCopy}
+          type="button"
+        >
+          <Copy size={15} />
+          Copy
+        </button>
+      </div>
+      <pre>
+        <code>{command}</code>
+      </pre>
+    </div>
+  );
 }

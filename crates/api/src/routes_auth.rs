@@ -197,7 +197,53 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     ) {
         return Err(ApiError::bad_request("invalid_bulk_output_compare_mode"));
     }
+    if let Some(key) = preferences.gateway_server_public_key_hex.as_deref() {
+        if key.len() != 64 || !key.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+            return Err(ApiError::bad_request(
+                "invalid_gateway_server_public_key_hex",
+            ));
+        }
+    }
+    if !preferences.gateway_endpoints.trim().is_empty()
+        && !validate_gateway_endpoints_format(preferences.gateway_endpoints.trim())
+    {
+        return Err(ApiError::bad_request("invalid_gateway_endpoints"));
+    }
     Ok(())
+}
+
+fn validate_gateway_endpoints_format(value: &str) -> bool {
+    value
+        .lines()
+        .all(|line| validate_gateway_endpoint_entry(line.trim()))
+}
+
+fn validate_gateway_endpoint_entry(entry: &str) -> bool {
+    if entry.is_empty() {
+        return true;
+    }
+    let parts: Vec<&str> = entry.splitn(3, '=').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let label = parts[0];
+    let addr = parts[1];
+    let priority = parts[2];
+    if label.is_empty()
+        || label.len() > 64
+        || !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return false;
+    }
+    if addr.is_empty() || addr.len() > 256 || addr.contains(char::is_control) {
+        return false;
+    }
+    if priority.parse::<u16>().is_err() {
+        return false;
+    }
+    true
 }
 
 pub(crate) async fn list_operators(

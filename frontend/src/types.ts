@@ -700,6 +700,8 @@ export type OperatorPreferences = {
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
   bulk_output_compare_mode: JobOutputCompareMode;
+  gateway_server_public_key_hex: string | null;
+  gateway_endpoints: string;
 };
 
 export type OperatorSessionRecord = {
