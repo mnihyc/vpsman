@@ -73,11 +73,7 @@ struct Args {
     rollout_worker_id: Option<String>,
     #[arg(long, env = "VPSMAN_WORKER_ROLLOUT_LEASE_SECS", default_value_t = 60)]
     rollout_lease_secs: i32,
-    #[arg(
-        long,
-        env = "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
-        default_value_t = 300
-    )]
+    #[arg(long, env = "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS", default_value_t = 300)]
     agent_offline_timeout_secs: i64,
     #[arg(
         long,

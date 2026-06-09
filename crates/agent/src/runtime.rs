@@ -80,7 +80,6 @@ pub(crate) async fn run_agent(
     }
 }
 
-
 fn endpoint_candidates(config: &AgentConfig) -> Vec<ServerEndpoint> {
     let mut endpoints = config.tcp_endpoints.clone();
     endpoints.sort_by(|left, right| {

@@ -4,20 +4,19 @@ use clap::{Parser, Subcommand};
 
 use crate::cli_access::{
     AgentIdentityUpsertCommand, AgentTagCommand, BootstrapCommand, BulkResolveCommand,
-    ClientKeyRevokeCommand,
-    DataSourceAssignmentListCommand, DataSourceHotConfigApplyCommand, DataSourceHotConfigCommand,
-    DataSourcePresetAssignCommand, DataSourcePresetCloneCommand, DataSourcePresetCreateCommand,
-    DataSourcePresetDiffCommand, DataSourcePresetListCommand, DataSourcePresetTestCommand,
-    DataSourcePresetUpdateCommand, DataSourceStatusCommand,
+    ClientKeyRevokeCommand, DataSourceAssignmentListCommand, DataSourceHotConfigApplyCommand,
+    DataSourceHotConfigCommand, DataSourcePresetAssignCommand, DataSourcePresetCloneCommand,
+    DataSourcePresetCreateCommand, DataSourcePresetDiffCommand, DataSourcePresetListCommand,
+    DataSourcePresetTestCommand, DataSourcePresetUpdateCommand, DataSourceStatusCommand,
     FleetAlertExportCommand, FleetAlertNotificationChannelUpsertCommand,
     FleetAlertNotificationChannelsCommand, FleetAlertNotificationDispatchCommand,
     FleetAlertNotificationProcessCommand, FleetAlertNotificationsCommand,
     FleetAlertPoliciesCommand, FleetAlertPolicyUpsertCommand, FleetAlertStateUpdateCommand,
     FleetAlertStatesCommand, FleetAlertsCommand, LimitCommand, LoginCommand, NameCommand,
-    OperatorCreateCommand, OperatorSessionRevokeCommand, OperatorSessionsCommand,
-    RefreshCommand, ScheduleCreateCommand, ScheduleDeferCommand,
-    ScheduleMutationCommand, ScheduleUpdateCommand, TelemetryNetworkRatesCommand,
-    TelemetryRollupsCommand, TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
+    OperatorCreateCommand, OperatorSessionRevokeCommand, OperatorSessionsCommand, RefreshCommand,
+    ScheduleCreateCommand, ScheduleDeferCommand, ScheduleMutationCommand, ScheduleUpdateCommand,
+    TelemetryNetworkRatesCommand, TelemetryRollupsCommand, TelemetryTunnelsCommand,
+    TotpConfirmCommand, TotpPasswordCommand,
 };
 use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,

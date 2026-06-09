@@ -7,8 +7,8 @@ use axum::{
 use crate::{
     error::ApiError,
     model::{
-        AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest,
-        HistoryQuery, KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
+        AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest, HistoryQuery,
+        KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
     },
     repository_key_lifecycle::KeyLifecycleTrustReport,
     state::AppState,
@@ -24,7 +24,10 @@ pub(crate) async fn upsert_agent_identity(
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_agent_identity_request(&request)?;
-    let view = state.repo.upsert_agent_identity(&request, &operator).await?;
+    let view = state
+        .repo
+        .upsert_agent_identity(&request, &operator)
+        .await?;
     state.publish(WsEvent::AgentUpdated {
         client_id: view.client_id.clone(),
         gateway_id: "identity".to_string(),
@@ -109,7 +112,9 @@ fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Resu
             ));
         }
         if !request.tags.is_empty() {
-            return Err(ApiError::bad_request("tags_not_allowed_during_key_rotation"));
+            return Err(ApiError::bad_request(
+                "tags_not_allowed_during_key_rotation",
+            ));
         }
     } else {
         if let Some(client_id) = request.client_id.as_deref() {

@@ -12,7 +12,7 @@ use vpsman_common::{
     TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
-use crate::{gateway_client::GatewayDispatchClient};
+use crate::gateway_client::GatewayDispatchClient;
 
 #[tokio::test]
 async fn records_network_observation_summaries_from_status_outputs() {

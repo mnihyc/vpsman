@@ -9,7 +9,7 @@ use vpsman_common::{
     RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelKind, TunnelPlanInput,
 };
 
-use crate::{gateway_client::GatewayDispatchClient};
+use crate::gateway_client::GatewayDispatchClient;
 
 #[tokio::test]
 async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {

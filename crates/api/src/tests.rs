@@ -1,7 +1,6 @@
 use super::*;
 use vpsman_common::{
-    verify_command_envelope, AgentHello, GatewayAgentHelloIngest, JobCommand,
-    PrivilegeReplayCache,
+    verify_command_envelope, AgentHello, GatewayAgentHelloIngest, JobCommand, PrivilegeReplayCache,
 };
 
 #[tokio::test]

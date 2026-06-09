@@ -9,9 +9,7 @@ use vpsman_common::{
     ProcessRestartPolicy, ProcessRunPolicy,
 };
 
-use crate::{
-    gateway_client::GatewayDispatchClient, routes_jobs::create_job,
-};
+use crate::{gateway_client::GatewayDispatchClient, routes_jobs::create_job};
 
 #[test]
 fn process_supervisor_job_commands_validate_operation_payloads() {

@@ -29,10 +29,6 @@ use crate::{
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
     routes_dashboard::dashboard_overview,
-    routes_key_lifecycle::{
-        key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
-        upsert_agent_identity,
-    },
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
         download_file_transfer_source_artifact, list_file_transfer_sessions,
@@ -66,6 +62,10 @@ use crate::{
         list_process_supervisor_inventory,
     },
     routes_jobs::{cancel_job, create_job},
+    routes_key_lifecycle::{
+        key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
+        upsert_agent_identity,
+    },
     routes_migrations::{create_migration_link, list_migration_links},
     routes_network::{
         create_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,

@@ -57,21 +57,12 @@ pub(crate) fn agent_identity_upsert(
     }
     println!(
         "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/agent-identities",
-            token,
-            &body,
-        )?
+        http_post_json(api_url, "/api/v1/agent-identities", token, &body,)?
     );
     Ok(())
 }
 
-pub(crate) fn client_key_revocations(
-    api_url: &str,
-    token: Option<&str>,
-    limit: u16,
-) -> Result<()> {
+pub(crate) fn client_key_revocations(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
     println!(
         "{}",
         http_get(

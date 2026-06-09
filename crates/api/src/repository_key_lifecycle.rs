@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{
-        AgentIdentityView, AgentView, AuthContext, AuditLogView, ClientKeyRevocationView,
+        AgentIdentityView, AgentView, AuditLogView, AuthContext, ClientKeyRevocationView,
         CreateClientKeyRevocationRequest, KeyLifecycleClientView, KeyLifecycleReportView,
         UpsertAgentIdentityRequest,
     },
@@ -53,18 +53,17 @@ impl Repository {
                 if memory.hidden_clients.read().await.contains(&client_id) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                if memory
-                    .agents
-                    .read()
-                    .await
-                    .iter()
-                    .any(|agent| {
-                        agent.id == client_id && matches!(agent.status.as_str(), "revoked" | "deleted")
-                    })
-                {
+                if memory.agents.read().await.iter().any(|agent| {
+                    agent.id == client_id && matches!(agent.status.as_str(), "revoked" | "deleted")
+                }) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                let existing = memory.client_public_keys.read().await.get(&client_id).cloned();
+                let existing = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(&client_id)
+                    .cloned();
                 if request.replace_existing_key {
                     if existing.as_ref().is_none_or(|key| key.is_empty()) {
                         anyhow::bail!("client_not_found_or_no_key");
@@ -204,7 +203,13 @@ impl Repository {
                         "#,
                     )
                     .bind(&client_id)
-                    .bind(request.display_name.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+                    .bind(
+                        request
+                            .display_name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty()),
+                    )
                     .bind(&public_key)
                     .execute(&mut *tx)
                     .await?;
@@ -516,7 +521,8 @@ impl Repository {
                             current_key_revoked: latest.is_some(),
                             current_public_key_sha256_hex,
                             latest_revoked_at: latest.map(|record| record.created_at.clone()),
-                            latest_revocation_reason: latest.and_then(|record| record.reason.clone()),
+                            latest_revocation_reason: latest
+                                .and_then(|record| record.reason.clone()),
                         }
                     })
                     .collect::<Vec<_>>();
@@ -594,7 +600,8 @@ impl Repository {
                             current_public_key_sha256_hex: fingerprint,
                             current_key_revoked: latest.is_some(),
                             latest_revoked_at: latest.map(|record| record.created_at.clone()),
-                            latest_revocation_reason: latest.and_then(|record| record.reason.clone()),
+                            latest_revocation_reason: latest
+                                .and_then(|record| record.reason.clone()),
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -621,15 +628,17 @@ impl Repository {
     ) -> Result<bool> {
         let public_key_sha256_hex = public_key_sha256_hex(public_key);
         match self {
-            Self::Memory(memory) => Ok(memory
-                .client_key_revocations
-                .read()
-                .await
-                .iter()
-                .any(|record| {
-                    record.client_id == client_id
-                        && record.public_key_sha256_hex == public_key_sha256_hex
-                })),
+            Self::Memory(memory) => {
+                Ok(memory
+                    .client_key_revocations
+                    .read()
+                    .await
+                    .iter()
+                    .any(|record| {
+                        record.client_id == client_id
+                            && record.public_key_sha256_hex == public_key_sha256_hex
+                    }))
+            }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"

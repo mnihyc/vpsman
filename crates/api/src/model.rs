@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
     AgentCapabilitySnapshot, BandwidthTier, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
-    RuntimeTunnelTopologyIntent,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    RuntimeTunnelTopologyIntent, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;

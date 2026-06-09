@@ -42,9 +42,9 @@ pub(crate) fn submit_vty_direct_command(
         "restore-plans" => Ok(Some(http_get(api_url, "/api/v1/restore-plans", token)?)),
         "migration-links" => Ok(Some(http_get(api_url, "/api/v1/migration-links", token)?)),
         "tunnel-plans" => Ok(Some(http_get(api_url, "/api/v1/tunnel-plans", token)?)),
-        command if command.starts_with("agent-identity-upsert ") => Ok(Some(
-            submit_agent_identity_upsert(api_url, token, command)?,
-        )),
+        command if command.starts_with("agent-identity-upsert ") => {
+            Ok(Some(submit_agent_identity_upsert(api_url, token, command)?))
+        }
         command if command.starts_with("client-key-revoke ") => {
             Ok(Some(submit_client_key_revoke(api_url, token, command)?))
         }
@@ -76,8 +76,11 @@ pub(crate) fn submit_vty_direct_command(
     }
 }
 
-
-fn submit_agent_identity_upsert(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+fn submit_agent_identity_upsert(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+) -> Result<String> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let client_id = required_flag(&parts, "--client-id")?;
     let client_public_key_hex = required_flag(&parts, "--client-public-key-hex")?;

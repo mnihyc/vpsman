@@ -13,9 +13,7 @@ use vpsman_common::{
     TelemetryEnvelope, TunnelEndpointSide, TunnelKind, MANAGED_BIRD2_FILE,
 };
 
-use crate::{
-    gateway_client::GatewayDispatchClient, model::PromoteTelemetryTunnelRequest,
-};
+use crate::{gateway_client::GatewayDispatchClient, model::PromoteTelemetryTunnelRequest};
 
 #[tokio::test]
 async fn promote_telemetry_tunnel_creates_external_observed_plan_and_audit() {
