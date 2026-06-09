@@ -97,14 +97,29 @@ fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Resu
             "agent_identity_confirmation_required",
         ));
     }
-    if let Some(client_id) = request.client_id.as_deref() {
-        validate_client_id(client_id)?;
-    }
     validate_fixed_hex32(&request.client_public_key_hex, "client_public_key_hex")?;
-    if let Some(display_name) = request.display_name.as_deref() {
-        validate_optional_display_name(display_name)?;
+    if request.replace_existing_key {
+        let Some(client_id) = request.client_id.as_deref() else {
+            return Err(ApiError::bad_request("client_id_required_for_key_rotation"));
+        };
+        validate_client_id(client_id)?;
+        if request.display_name.is_some() {
+            return Err(ApiError::bad_request(
+                "display_name_not_allowed_during_key_rotation",
+            ));
+        }
+        if !request.tags.is_empty() {
+            return Err(ApiError::bad_request("tags_not_allowed_during_key_rotation"));
+        }
+    } else {
+        if let Some(client_id) = request.client_id.as_deref() {
+            validate_client_id(client_id)?;
+        }
+        if let Some(display_name) = request.display_name.as_deref() {
+            validate_optional_display_name(display_name)?;
+        }
+        validate_tags(&request.tags)?;
     }
-    validate_tags(&request.tags)?;
     Ok(())
 }
 

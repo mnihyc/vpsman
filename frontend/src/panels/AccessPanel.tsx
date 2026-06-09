@@ -155,8 +155,9 @@ export function AccessPanel({
   const [identityPublicKeyHex, setIdentityPublicKeyHex] = useState("");
   const [identityDisplayName, setIdentityDisplayName] = useState("");
   const [identityTags, setIdentityTags] = useState("");
-  const [identityReplaceExistingKey, setIdentityReplaceExistingKey] =
-    useState(false);
+  const [identityMode, setIdentityMode] = useState<"register" | "rotate">(
+    "register",
+  );
   const [identityPending, setIdentityPending] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [privateKeyHex, setPrivateKeyHex] = useState<string | null>(null);
@@ -202,7 +203,8 @@ export function AccessPanel({
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
-    isFixedHex32(identityPublicKeyHex);
+    isFixedHex32(identityPublicKeyHex) &&
+    (identityMode === "register" || identityClientId.trim().length > 0);
   const canRevokeClientKey =
     canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
 
@@ -344,12 +346,13 @@ export function AccessPanel({
     setIdentityPending(true);
     setIdentityError(null);
     try {
+      const isRotate = identityMode === "rotate";
       const response = await onUpsertAgentIdentity({
         client_id: identityClientId.trim(),
         client_public_key_hex: identityPublicKeyHex.trim().toLowerCase(),
-        display_name: identityDisplayName.trim() || null,
-        tags: parseListInput(identityTags),
-        replace_existing_key: identityReplaceExistingKey,
+        display_name: isRotate ? null : (identityDisplayName.trim() || null),
+        tags: isRotate ? [] : parseListInput(identityTags),
+        replace_existing_key: isRotate,
         confirmed: true,
       });
       setCreatedIdentity(response);
@@ -357,7 +360,7 @@ export function AccessPanel({
       setIdentityPublicKeyHex("");
       setIdentityDisplayName("");
       setIdentityTags("");
-      setIdentityReplaceExistingKey(false);
+      setIdentityMode("register");
       setPendingConfirmation(null);
     } catch (actionError) {
       setIdentityError(
@@ -1014,6 +1017,25 @@ export function AccessPanel({
             {identityError ?? "Gateway-issued client ID and public key"}
           </span>
         </div>
+        <nav
+          className="accessSubnav"
+          hidden={activeSubpage !== "VPS keys"}
+        >
+          <button
+            className={identityMode === "register" ? "selected" : ""}
+            onClick={() => setIdentityMode("register")}
+            type="button"
+          >
+            New registration
+          </button>
+          <button
+            className={identityMode === "rotate" ? "selected" : ""}
+            onClick={() => setIdentityMode("rotate")}
+            type="button"
+          >
+            Key rotation
+          </button>
+        </nav>
         <form
           className="sideForm"
           hidden={activeSubpage !== "VPS keys"}
@@ -1025,7 +1047,11 @@ export function AccessPanel({
               aria-label="Agent identity client ID"
               disabled={!canManageOperators || identityPending}
               onChange={(event) => setIdentityClientId(event.target.value)}
-              placeholder="auto-generated if empty"
+              placeholder={
+                identityMode === "rotate"
+                  ? "existing VPS ID"
+                  : "auto-generated if empty"
+              }
               value={identityClientId}
             />
           </label>
@@ -1078,9 +1104,13 @@ export function AccessPanel({
             <span>Display name</span>
             <input
               aria-label="Agent identity display name"
-              disabled={!canManageOperators || identityPending}
+              disabled={
+                !canManageOperators || identityPending || identityMode === "rotate"
+              }
               onChange={(event) => setIdentityDisplayName(event.target.value)}
-              placeholder="edge-nrt-04"
+              placeholder={
+                identityMode === "rotate" ? "unchanged" : "edge-nrt-04"
+              }
               value={identityDisplayName}
             />
           </label>
@@ -1088,22 +1118,15 @@ export function AccessPanel({
             <span>Tags</span>
             <input
               aria-label="Agent identity tags"
-              disabled={!canManageOperators || identityPending}
+              disabled={
+                !canManageOperators || identityPending || identityMode === "rotate"
+              }
               onChange={(event) => setIdentityTags(event.target.value)}
-              placeholder="country:JP, role:edge"
+              placeholder={
+                identityMode === "rotate" ? "unchanged" : "country:JP, role:edge"
+              }
               value={identityTags}
             />
-          </label>
-          <label className="inlineCheck">
-            <input
-              checked={identityReplaceExistingKey}
-              disabled={!canManageOperators || identityPending}
-              onChange={(event) =>
-                setIdentityReplaceExistingKey(event.target.checked)
-              }
-              type="checkbox"
-            />
-            <span>Replace existing current key</span>
           </label>
           <button
             className="secondaryAction"
@@ -1111,7 +1134,9 @@ export function AccessPanel({
             type="submit"
           >
             <Fingerprint size={17} />
-            Import gateway identity
+            {identityMode === "rotate"
+              ? "Rotate key"
+              : "Import gateway identity"}
           </button>
           {createdIdentity && (
             <div className="formNote">
@@ -1247,8 +1272,8 @@ export function AccessPanel({
             value: shortHash(identityPublicKeyHex.trim()),
           },
           {
-            label: "Replace key",
-            value: identityReplaceExistingKey ? "yes" : "no",
+            label: "Mode",
+            value: identityMode === "rotate" ? "key rotation" : "new registration",
           },
         ]}
         onCancel={() => setPendingConfirmation(null)}

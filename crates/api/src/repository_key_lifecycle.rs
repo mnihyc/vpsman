@@ -64,10 +64,21 @@ impl Repository {
                 {
                     anyhow::bail!("agent_identity_deactivated");
                 }
-                if let Some(existing) = memory.client_public_keys.read().await.get(&client_id) {
-                    if !existing.is_empty() && existing != &public_key && !request.replace_existing_key
+                let existing = memory.client_public_keys.read().await.get(&client_id).cloned();
+                if request.replace_existing_key {
+                    if existing.as_ref().is_none_or(|key| key.is_empty()) {
+                        anyhow::bail!("client_not_found_or_no_key");
+                    }
+                } else {
+                    if existing.is_some()
+                        || memory
+                            .agents
+                            .read()
+                            .await
+                            .iter()
+                            .any(|agent| agent.id == client_id)
                     {
-                        anyhow::bail!("agent_identity_key_change_requires_replace");
+                        anyhow::bail!("client_id_already_registered");
                     }
                 }
                 memory
@@ -174,11 +185,12 @@ impl Repository {
                         anyhow::bail!("agent_identity_deactivated");
                     }
                     let existing_key: Vec<u8> = row.try_get("public_key")?;
-                    if !existing_key.is_empty()
-                        && existing_key != public_key
-                        && !request.replace_existing_key
-                    {
-                        anyhow::bail!("agent_identity_key_change_requires_replace");
+                    if request.replace_existing_key {
+                        if existing_key.is_empty() {
+                            anyhow::bail!("client_not_found_or_no_key");
+                        }
+                    } else {
+                        anyhow::bail!("client_id_already_registered");
                     }
                     sqlx::query(
                         r#"

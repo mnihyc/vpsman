@@ -743,6 +743,62 @@ test("imports direct gateway identities and revokes current keys from the access
   });
 });
 
+test("rotates an existing agent key through the access panel", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "key rotation is a desktop admin workflow",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "VPS keys");
+  const accessTabs = page.locator(".accessTabs");
+  await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
+
+  const accessSubnav = page.locator(".accessSubnav");
+  await activate(accessSubnav.getByRole("button", { name: "Key rotation" }));
+
+  const inspector = page.locator(".accessInspector");
+  await expect(inspector.getByRole("button", { name: "Rotate key" })).toBeVisible();
+
+  const displayNameInput = inspector.getByLabel("Agent identity display name");
+  const tagsInput = inspector.getByLabel("Agent identity tags");
+  await expect(displayNameInput).toBeDisabled();
+  await expect(tagsInput).toBeDisabled();
+
+  await inspector.getByLabel("Agent identity client ID").fill("agent-sfo-01");
+  await inspector
+    .getByLabel("Agent identity public key hex")
+    .fill("b".repeat(64));
+  await activate(inspector.getByRole("button", { name: "Rotate key" }));
+  await expect(
+    page.getByLabel("Confirm direct gateway identity import"),
+  ).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm direct gateway identity import")
+      .getByRole("button", { name: "Import identity" }),
+  );
+
+  const identityRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { agentIdentities: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.agentIdentities.at(-1);
+  });
+  expect(identityRequest).toMatchObject({
+    client_id: "agent-sfo-01",
+    client_public_key_hex: "b".repeat(64),
+    confirmed: true,
+    display_name: null,
+    replace_existing_key: true,
+    tags: [],
+  });
+});
+
 test("shows topology network evidence, speed metrics, and probe latency history", async ({
   page,
 }, testInfo) => {
