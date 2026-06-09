@@ -17,6 +17,7 @@ pub(crate) struct FleetSummary {
     pub(crate) total: usize,
     pub(crate) online: usize,
     pub(crate) offline: usize,
+    pub(crate) never: usize,
     pub(crate) stale: usize,
     pub(crate) warnings: usize,
     pub(crate) running_jobs: usize,

@@ -502,7 +502,7 @@ async fn build_dashboard_overview(
                 .count(),
             offline: scoped_agents
                 .iter()
-                .filter(|agent| agent.status == "offline")
+                .filter(|agent| agent.status == "offline" || agent.status == "never")
                 .count(),
             stale: stale_agents,
             warnings: stale_agents.max(alerts.len()),

@@ -2,6 +2,7 @@ export type FleetSummary = {
   total: number;
   online: number;
   offline: number;
+  never: number;
   stale: number;
   warnings: number;
   running_jobs: number;

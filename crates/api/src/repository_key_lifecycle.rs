@@ -123,7 +123,7 @@ impl Repository {
                         agents.push(AgentView {
                             id: client_id.to_string(),
                             display_name: display_name.clone(),
-                            status: "offline".to_string(),
+                            status: "never".to_string(),
                             tags: agent_tags.clone(),
                             registration_ip: None,
                             last_ip: None,
@@ -214,7 +214,7 @@ impl Repository {
                         INSERT INTO clients (
                             id, display_name, public_key, status, internal_build_number, capabilities
                         )
-                        VALUES ($1, $2, $3, 'offline', 1, '{}'::jsonb)
+                        VALUES ($1, $2, $3, 'never', 1, '{}'::jsonb)
                         "#,
                     )
                     .bind(&client_id)

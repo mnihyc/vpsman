@@ -29,6 +29,10 @@ impl Repository {
                         .iter()
                         .filter(|agent| agent.status == "offline" && !hidden.contains(&agent.id))
                         .count(),
+                    never: agents
+                        .iter()
+                        .filter(|agent| agent.status == "never" && !hidden.contains(&agent.id))
+                        .count(),
                     stale: agents
                         .iter()
                         .filter(|agent| agent.status == "stale" && !hidden.contains(&agent.id))
@@ -44,8 +48,9 @@ impl Repository {
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL) AS total,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'online') AS online,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'offline') AS offline,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'never') AS never,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'stale') AS stale,
-                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status <> 'online') AS warnings,
+                        (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status IN ('offline', 'never', 'stale')) AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running', 'dispatching')) AS running_jobs
                     "#,
                 )
@@ -55,6 +60,7 @@ impl Repository {
                     total: row.try_get::<i64, _>("total")? as usize,
                     online: row.try_get::<i64, _>("online")? as usize,
                     offline: row.try_get::<i64, _>("offline")? as usize,
+                    never: row.try_get::<i64, _>("never")? as usize,
                     stale: row.try_get::<i64, _>("stale")? as usize,
                     warnings: row.try_get::<i64, _>("warnings")? as usize,
                     running_jobs: row.try_get::<i64, _>("running_jobs")? as usize,

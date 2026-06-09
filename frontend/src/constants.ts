@@ -150,12 +150,13 @@ export function subpageDescription(view: ActiveView, subpage: string): string {
 }
 
 export const emptySummary: FleetSummary = {
-  total: 0,
-  online: 0,
+  never: 0,
   offline: 0,
-  stale: 0,
-  warnings: 0,
+  online: 0,
   running_jobs: 0,
+  stale: 0,
+  total: 0,
+  warnings: 0,
 };
 
 export const ACCESS_TOKEN_STORAGE_KEY = "vpsman.accessToken";

@@ -19,10 +19,11 @@ const statusOutput = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
 
 const summary = {
-  online: 2,
+  never: 0,
   offline: 1,
-  stale: 0,
+  online: 2,
   running_jobs: 3,
+  stale: 0,
   total: 3,
   warnings: 1,
 };

@@ -75,6 +75,12 @@ struct Args {
     rollout_lease_secs: i32,
     #[arg(
         long,
+        env = "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
+        default_value_t = 300
+    )]
+    agent_offline_timeout_secs: i64,
+    #[arg(
+        long,
         env = "VPSMAN_WORKER_NOTIFICATION_DELIVERY_LIMIT",
         default_value_t = 25
     )]
@@ -297,6 +303,7 @@ async fn main() -> Result<()> {
     }
 
     let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
+    let mut last_offline_check = tokio::time::Instant::now();
     let mut webhook_listener = match connect_webhook_listener(postgres_url).await {
         Ok(listener) => Some(listener),
         Err(error) => {
@@ -437,7 +444,33 @@ async fn main() -> Result<()> {
             }
             Err(error) => warn!(%error, "failed to process backup policy retention prune"),
         }
+        if last_offline_check.elapsed() >= Duration::from_secs(60) {
+            last_offline_check = tokio::time::Instant::now();
+            match detect_offline_agents(&pool, args.agent_offline_timeout_secs).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!(count, "detected offline agents");
+                    }
+                }
+                Err(error) => warn!(%error, "failed to detect offline agents"),
+            }
+        }
     }
+}
+
+async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE clients
+        SET status = 'offline'
+        WHERE status = 'online'
+          AND last_seen_at < now() - make_interval(secs => $1)
+        "#,
+    )
+    .bind(timeout_secs as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 async fn connect_postgres(postgres_url: &str, migrations_dir: &std::path::Path) -> Result<PgPool> {
