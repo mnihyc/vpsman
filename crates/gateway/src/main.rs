@@ -60,6 +60,12 @@ pub(crate) struct Args {
     privilege_verifier_key_hex: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_ID", default_value = "local-dev-gateway")]
     gateway_id: String,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_RECONNECT_GRACE_SECS",
+        default_value_t = 60
+    )]
+    reconnect_grace_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -86,7 +92,10 @@ async fn main() -> Result<()> {
     );
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     validate_gateway_runtime_mode(&args)?;
-    let state = GatewayState::default();
+    let state = GatewayState {
+        reconnect_grace_secs: args.reconnect_grace_secs,
+        ..GatewayState::default()
+    };
     let agent_args = args.clone();
     let agent_state = state.clone();
     let control_args = args.clone();
@@ -260,6 +269,11 @@ async fn handle_agent(
 
     if let Some(client_id) = client_id {
         unregister_session_if_current(&state, &client_id, session_id).await;
+        state
+            .disconnected_at
+            .write()
+            .await
+            .insert(client_id.clone(), std::time::Instant::now());
         let end_event = GatewaySessionLifecycleIngest {
             gateway_id: args.gateway_id.clone(),
             client_id,
@@ -335,6 +349,12 @@ async fn handle_agent_frame(
                     cancel_sender: context.cancel_tx.clone(),
                 },
             );
+            context
+                .state
+                .disconnected_at
+                .write()
+                .await
+                .remove(&hello.client_id);
             let session_event = GatewaySessionLifecycleIngest {
                 gateway_id: context.args.gateway_id.clone(),
                 client_id: hello.client_id.clone(),

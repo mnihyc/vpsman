@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use vpsman_common::{
@@ -6,10 +6,23 @@ use vpsman_common::{
     PrivilegeAssertionReplayCache,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
     pub(crate) privilege_assertions: Arc<Mutex<PrivilegeAssertionReplayCache>>,
+    pub(crate) disconnected_at: Arc<RwLock<HashMap<String, Instant>>>,
+    pub(crate) reconnect_grace_secs: u64,
+}
+
+impl Default for GatewayState {
+    fn default() -> Self {
+        Self {
+            sessions: Arc::default(),
+            privilege_assertions: Arc::default(),
+            disconnected_at: Arc::default(),
+            reconnect_grace_secs: 60,
+        }
+    }
 }
 
 #[derive(Clone)]

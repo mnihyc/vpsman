@@ -178,52 +178,90 @@ async fn dispatch_gateway_command(
     state: &GatewayState,
     dispatch: GatewayCommandDispatch,
 ) -> Result<GatewayCommandDispatchResult> {
-    let sender = state
-        .sessions
+    let grace_deadline = state
+        .disconnected_at
         .read()
         .await
         .get(&dispatch.client_id)
-        .map(|session| session.sender.clone())
-        .ok_or_else(|| anyhow!("agent_not_online:{}", dispatch.client_id))?;
-    let (response_tx, response_rx) = oneshot::channel();
-    sender
-        .send(GatewayCommand {
-            request: dispatch.request,
-            response: response_tx,
-        })
-        .await
-        .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
-    time::timeout(Duration::from_secs(120), response_rx)
-        .await
-        .context("gateway command timed out")?
-        .context("gateway command response dropped")
+        .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs));
+
+    loop {
+        if let Some(sender) = state
+            .sessions
+            .read()
+            .await
+            .get(&dispatch.client_id)
+            .map(|session| session.sender.clone())
+        {
+            let (response_tx, response_rx) = oneshot::channel();
+            sender
+                .send(GatewayCommand {
+                    request: dispatch.request.clone(),
+                    response: response_tx,
+                })
+                .await
+                .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
+            return time::timeout(Duration::from_secs(120), response_rx)
+                .await
+                .context("gateway command timed out")?
+                .context("gateway command response dropped");
+        }
+        match grace_deadline {
+            Some(deadline) if std::time::Instant::now() < deadline => {
+                time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            _ => {
+                return Err(anyhow!("agent_not_online:{}", dispatch.client_id));
+            }
+        }
+    }
 }
 
 async fn cancel_gateway_command(
     state: &GatewayState,
     cancel: GatewayCommandCancel,
 ) -> Result<GatewayCommandCancelResult> {
-    let sender = state
-        .sessions
+    let grace_deadline = state
+        .disconnected_at
         .read()
         .await
         .get(&cancel.client_id)
-        .map(|session| session.cancel_sender.clone())
-        .ok_or_else(|| anyhow!("agent_not_online:{}", cancel.client_id))?;
-    let (response_tx, response_rx) = oneshot::channel();
-    sender
-        .send(GatewayCancelMessage {
-            client_id: cancel.client_id.clone(),
-            job_id: cancel.job_id,
-            reason: cancel.reason,
-            response: response_tx,
-        })
-        .await
-        .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
-    time::timeout(Duration::from_secs(10), response_rx)
-        .await
-        .context("gateway command cancel timed out")?
-        .context("gateway command cancel response dropped")
+        .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs));
+
+    loop {
+        if let Some(sender) = state
+            .sessions
+            .read()
+            .await
+            .get(&cancel.client_id)
+            .map(|session| session.cancel_sender.clone())
+        {
+            let (response_tx, response_rx) = oneshot::channel();
+            sender
+                .send(GatewayCancelMessage {
+                    client_id: cancel.client_id.clone(),
+                    job_id: cancel.job_id,
+                    reason: cancel.reason.clone(),
+                    response: response_tx,
+                })
+                .await
+                .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
+            return time::timeout(Duration::from_secs(10), response_rx)
+                .await
+                .context("gateway command cancel timed out")?
+                .context("gateway command cancel response dropped");
+        }
+        match grace_deadline {
+            Some(deadline) if std::time::Instant::now() < deadline => {
+                time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            _ => {
+                return Err(anyhow!("agent_not_online:{}", cancel.client_id));
+            }
+        }
+    }
 }
 
 async fn write_gateway_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {
