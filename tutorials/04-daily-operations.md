@@ -235,7 +235,7 @@ control group.
 Limit-bearing starts on unprivileged agents default to degraded status. Use
 `--force-unprivileged` only when a best-effort attempt is intentional.
 
-## Schedules And Cancellation
+## Schedules And Job Observation
 
 Create a schedule. Privilege is verified when the schedule intent is created
 or changed; due execution is handled by the trusted worker after the schedule
@@ -270,8 +270,12 @@ cargo run -p vpsctl -- jobs --limit 20
 In the browser, use the Schedules page and its Schedule runs subpage for the
 same review flow.
 
-Cancel active or pending work:
+Dispatched jobs are treated as already handed to the target. Observe them with
+job polling commands and run an explicit compensating operation when a completed
+result needs recovery:
 
 ```sh
-cargo run -p vpsctl -- job-cancel --job-id <job_uuid> --reason "operator requested" --confirmed
+cargo run -p vpsctl -- job-follow --job-id <job_uuid>
+cargo run -p vpsctl -- job-targets --job-id <job_uuid>
+cargo run -p vpsctl -- job-outputs --job-id <job_uuid>
 ```

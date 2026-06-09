@@ -797,8 +797,6 @@ pub(crate) struct CreateJobRequest {
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
     #[serde(default)]
-    pub(crate) canary_count: Option<i32>,
-    #[serde(default)]
     pub(crate) force_unprivileged: bool,
     pub(crate) privileged: bool,
     #[serde(default)]

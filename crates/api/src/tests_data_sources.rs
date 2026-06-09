@@ -1036,46 +1036,6 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 note: None,
                 created_at: "102".to_string(),
             });
-        memory
-            .agent_update_rollouts
-            .write()
-            .await
-            .push(AgentUpdateRolloutView {
-                id: Uuid::new_v4(),
-                job_id: Uuid::new_v4(),
-                actor_id: None,
-                status: "heartbeat_timeout".to_string(),
-                artifact_sha256_hex: "8".repeat(64),
-                artifact_signature_provided: true,
-                artifact_signing_key_sha256_hex: Some("9".repeat(64)),
-                target_count: 1,
-                completed_count: 0,
-                failed_count: 1,
-                pending_count: 0,
-                activation_policy: "manual_staging_only".to_string(),
-                canary_count: 1,
-                rollout_policy_id: None,
-                rollout_policy_name: None,
-                heartbeat_timeout_secs: Some(900),
-                automation_paused: false,
-                automation_pause_reason: None,
-                automation_health_gate: "heartbeat_verified".to_string(),
-                automation_lease_owner: None,
-                automation_lease_expires_at: None,
-                automation_status: "rollback_recommended".to_string(),
-                automation_next_action: Some("rollback".to_string()),
-                automation_blocker: Some("heartbeat timed out".to_string()),
-                automation_targets: vec!["edge-a".to_string()],
-                automation_updated_at: Some("120".to_string()),
-                targets: vec![AgentUpdateRolloutTargetView {
-                    client_id: "edge-a".to_string(),
-                    status: "heartbeat_timeout".to_string(),
-                    exit_code: None,
-                    updated_at: "120".to_string(),
-                }],
-                created_at: "100".to_string(),
-                updated_at: "120".to_string(),
-            });
     }
     let tunnel_input = TunnelPlanInput {
         name: "edge-a-b".to_string(),
@@ -1178,14 +1138,10 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
     let update = status_row(&no_store_rows, "update_artifact_source");
     assert_eq!(update.status, "selected_no_artifacts");
     assert_eq!(update.evidence["release_count"], 0);
-    assert_eq!(update.evidence["rollout_count"], 1);
-    assert_eq!(update.evidence["failed_rollout_count"], 1);
     let update_restart = status_row(&no_store_rows, "update_restart_policy");
     assert_eq!(update_restart.status, "ready_on_demand");
-    assert_eq!(update_restart.evidence["rollout_count"], 1);
     let update_heartbeat = status_row(&no_store_rows, "update_rollback_heartbeat_source");
-    assert_eq!(update_heartbeat.status, "attention");
-    assert_eq!(update_heartbeat.evidence["failed_rollout_count"], 1);
+    assert_eq!(update_heartbeat.status, "ready_on_demand");
     let traffic = status_row(&no_store_rows, "runtime_traffic_accounting_source");
     assert_eq!(traffic.evidence["traffic_limit_plan_count"], 1);
     assert_eq!(traffic.evidence["traffic_limit_apply_plan_count"], 1);

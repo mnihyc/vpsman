@@ -1,5 +1,7 @@
 # vpsman
 
+> This project is highly personalized and managed by AI agents.
+
 `vpsman` is a Rust-based VPS panel with extended special functions: lightweight
 headless agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator
 tool, and a Vite-built web panel.
@@ -14,7 +16,7 @@ ignored and are not part of the public tree.
 - `crates/agent`: low-overhead Linux client agent.
 - `crates/gateway`: raw TCP gateway for long-lived agent sessions.
 - `crates/api`: HTTP/WebSocket control-plane API.
-- `crates/worker`: background scheduler and rollout worker.
+- `crates/worker`: background scheduler and automation worker.
 - `crates/vpsctl`: scriptable CLI and interactive VTY shell.
 - `crates/common`: shared protocol, auth, config, and telemetry types.
 - `frontend`: React + TypeScript panel source.

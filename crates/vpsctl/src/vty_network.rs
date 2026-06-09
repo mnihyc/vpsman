@@ -496,7 +496,6 @@ fn submit_vty_network_job(
         &privilege_context.salt_hex,
         ttl_secs,
         timeout_secs,
-        None,
         force_unprivileged,
         true,
     )?;

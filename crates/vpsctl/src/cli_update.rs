@@ -59,37 +59,3 @@ pub(crate) struct AgentUpdateReleaseLatestArgs {
     #[arg(long, default_value = "stable")]
     pub(crate) channel: String,
 }
-
-#[derive(Debug, Args)]
-pub(crate) struct AgentUpdateRolloutPoliciesArgs {
-    #[arg(long, default_value_t = 25)]
-    pub(crate) limit: u16,
-    #[arg(long)]
-    pub(crate) enabled: Option<bool>,
-    #[arg(long)]
-    pub(crate) channel: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AgentUpdateRolloutPolicyCreateArgs {
-    #[arg(long)]
-    pub(crate) name: String,
-    #[arg(long)]
-    pub(crate) scope_kind: String,
-    #[arg(long)]
-    pub(crate) scope_value: Option<String>,
-    #[arg(long)]
-    pub(crate) channel: Option<String>,
-    #[arg(long)]
-    pub(crate) canary_count: Option<i32>,
-    #[arg(long)]
-    pub(crate) health_gate: Option<String>,
-    #[arg(long, default_value_t = 0)]
-    pub(crate) priority: i32,
-    #[arg(long, default_value_t = true)]
-    pub(crate) enabled: bool,
-    #[arg(long)]
-    pub(crate) notes: Option<String>,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
-}

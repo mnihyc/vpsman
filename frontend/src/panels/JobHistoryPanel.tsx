@@ -6,25 +6,15 @@ import {
 } from "../components/ConsoleDataGrid";
 import { CrudPager } from "../components/CrudPager";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import {
-  buildPrivilegeForJobOperation,
-  type PrivilegeMaterial,
-} from "../privilege";
-import { selectorExpressionForClientIds } from "../searchExpression";
+import { type PrivilegeMaterial } from "../privilege";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentView,
   AgentUpdateReleaseRecord,
-  AgentUpdateRolloutControlRequest,
-  AgentUpdateRolloutPolicyRecord,
-  AgentUpdateRolloutRecord,
   BulkResolveResponse,
-  CancelJobRequest,
-  CancelJobResponse,
   CommandTemplateRecord,
   CreateJobRequest,
   CreateJobResponse,
-  CreateAgentUpdateRolloutPolicyRequest,
   CreateAgentUpdateReleaseRequest,
   JobHistoryRecord,
   JobOutputCompareMode,
@@ -63,58 +53,11 @@ import {
   type TerminalComposerAction,
 } from "./JobDispatchPanel";
 import { AgentUpdateReleasesPanel } from "./jobs/AgentUpdateReleasesPanel";
-import { AgentUpdateRolloutsPanel } from "./jobs/AgentUpdateRolloutsPanel";
 import { FileBrowserPanel } from "./jobs/FileBrowserPanel";
 import { FileTransferSessionsPanel } from "./jobs/FileTransferSessionsPanel";
 import { MultiFileActionsPanel } from "./jobs/MultiFileActionsPanel";
 import { ProcessSupervisorInventoryPanel } from "./jobs/ProcessSupervisorInventoryPanel";
 import { TerminalSessionsPanel } from "./jobs/TerminalSessionsPanel";
-
-function selectRolloutClients(
-  rollout: AgentUpdateRolloutRecord,
-  eligibleStatuses: string[],
-  batchSize?: number,
-): string[] {
-  const statusByClient = new Map(
-    rollout.targets.map((target) => [target.client_id, target.status]),
-  );
-  const recommended = rollout.automation_targets.filter((clientId) =>
-    eligibleStatuses.includes(statusByClient.get(clientId) ?? ""),
-  );
-  const candidates =
-    recommended.length > 0
-      ? recommended
-      : rollout.targets
-          .filter((target) => eligibleStatuses.includes(target.status))
-          .map((target) => target.client_id);
-  const unique = Array.from(new Set(candidates)).sort();
-  if (batchSize !== undefined) {
-    unique.splice(Math.max(1, Math.trunc(batchSize)));
-  }
-  return unique;
-}
-
-function selectRolloutDelegationClients(
-  rollout: AgentUpdateRolloutRecord,
-): string[] {
-  const rolloutClients = new Set(
-    rollout.targets.map((target) => target.client_id),
-  );
-  const recommended = rollout.automation_targets.filter((clientId) =>
-    rolloutClients.has(clientId),
-  );
-  const candidates =
-    recommended.length > 0 ? recommended : Array.from(rolloutClients);
-  return Array.from(new Set(candidates)).sort();
-}
-
-function selectRolloutActivationDelegationClients(
-  rollout: AgentUpdateRolloutRecord,
-): string[] {
-  return Array.from(
-    new Set(rollout.targets.map((target) => target.client_id)),
-  ).sort();
-}
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
@@ -128,8 +71,6 @@ export function JobHistoryPanel({
   activeSubpage,
   agents,
   agentUpdateReleases,
-  agentUpdateRolloutPolicies,
-  agentUpdateRollouts,
   error,
   fileTransfers,
   fileTransferSources,
@@ -138,9 +79,7 @@ export function JobHistoryPanel({
   lastJobOutputEvent,
   lastTerminalOutputEvent,
   loading,
-  onCancelJob,
   onCreateAgentUpdateRelease,
-  onCreateAgentUpdateRolloutPolicy,
   onCreateFileTransferHandoff,
   onUploadAgentUpdateArtifact,
   onCreateJob,
@@ -158,7 +97,6 @@ export function JobHistoryPanel({
   onSaveFileTransferHandoff,
   onSelectSubpage,
   onSelectedJobDetailsOpened,
-  onUpdateAgentUpdateRolloutControl,
   onUploadFileTransferSource,
   onUpsertCommandTemplate,
   pendingSelectedJobId,
@@ -170,8 +108,6 @@ export function JobHistoryPanel({
   activeSubpage: string;
   agents: AgentView[];
   agentUpdateReleases: AgentUpdateReleaseRecord[];
-  agentUpdateRolloutPolicies: AgentUpdateRolloutPolicyRecord[];
-  agentUpdateRollouts: AgentUpdateRolloutRecord[];
   error: string | null;
   fileTransfers: FileTransferSessionRecord[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
@@ -180,16 +116,9 @@ export function JobHistoryPanel({
   lastJobOutputEvent: WsJobOutputEvent | null;
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
-  onCancelJob: (
-    jobId: string,
-    request: CancelJobRequest,
-  ) => Promise<CancelJobResponse>;
   onCreateAgentUpdateRelease: (
     request: CreateAgentUpdateReleaseRequest,
   ) => Promise<AgentUpdateReleaseRecord>;
-  onCreateAgentUpdateRolloutPolicy: (
-    request: CreateAgentUpdateRolloutPolicyRequest,
-  ) => Promise<AgentUpdateRolloutPolicyRecord>;
   onCreateFileTransferHandoff: (
     clientId: string,
     sessionId: string,
@@ -223,10 +152,6 @@ export function JobHistoryPanel({
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
   onSelectedJobDetailsOpened?: (jobId: string) => void;
-  onUpdateAgentUpdateRolloutControl: (
-    rolloutId: string,
-    request: AgentUpdateRolloutControlRequest,
-  ) => Promise<AgentUpdateRolloutRecord>;
   onSaveFileTransferHandoff: (
     downloadPath: string,
     request: {
@@ -267,16 +192,6 @@ export function JobHistoryPanel({
   const [targetsLoading, setTargetsLoading] = useState(false);
   const [outputsLoading, setOutputsLoading] = useState(false);
   const [comparisonLoading, setComparisonLoading] = useState(false);
-  const [lastPrivilegeActionHash, setLastPrivilegeActionHash] = useState<string | null>(null);
-  const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
-  const [rolloutRestartAgent, setRolloutRestartAgent] = useState(false);
-  const [rolloutForceUnprivileged, setRolloutForceUnprivileged] =
-    useState(false);
-  const [rolloutActionError, setRolloutActionError] = useState<string | null>(
-    null,
-  );
-  const [rolloutActionPending, setRolloutActionPending] = useState(false);
-  const [rolloutActionId, setRolloutActionId] = useState<string | null>(null);
   const [terminalComposerAction, setTerminalComposerAction] =
     useState<TerminalComposerAction | null>(null);
   const [multiFileInitialPath, setMultiFileInitialPath] = useState("/");
@@ -293,11 +208,6 @@ export function JobHistoryPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "history";
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const [cancelPending, setCancelPending] = useState(false);
-  const [cancelPendingJobId, setCancelPendingJobId] = useState<string | null>(
-    null,
-  );
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [artifactPendingKey, setArtifactPendingKey] = useState<string | null>(
     null,
@@ -412,26 +322,6 @@ export function JobHistoryPanel({
             >
               {displayToken(job.status)}
             </span>
-            {isCancelableJob(job) && (
-              <button
-                aria-label={
-                  isActiveCancelableJob(job)
-                    ? "Cancel active job"
-                    : "Cancel pending job"
-                }
-                className="secondaryAction compactAction dangerAction"
-                disabled={cancelPending}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void cancelPendingJob(job);
-                }}
-                type="button"
-              >
-                <span>
-                  {cancelPendingJobId === job.id ? "Canceling" : "Cancel"}
-                </span>
-              </button>
-            )}
           </span>
         ),
       },
@@ -491,11 +381,7 @@ export function JobHistoryPanel({
         cell: (job) => formatTime(job.created_at),
       },
     ],
-    [
-      cancelPending,
-      cancelPendingJobId,
-      openTargets,
-    ],
+    [openTargets],
   );
 
   async function compareSelectedJobOutputs(
@@ -532,20 +418,6 @@ export function JobHistoryPanel({
     }
   }, [lastJobOutputEvent, openTargets, selectedJobId]);
 
-  async function cancelPendingJob(job: JobHistoryRecord) {
-    setCancelPendingJobId(job.id);
-    await runPanelAction(setCancelPending, setCancelError, async () => {
-      await onCancelJob(job.id, {
-        confirmed: true,
-        reason: `Canceled from panel while status was ${job.status}`,
-      });
-      if (selectedJobId === job.id) {
-        await openTargets(job.id);
-      }
-    });
-    setCancelPendingJobId(null);
-  }
-
   async function downloadOutputArtifact(output: JobOutputRecord) {
     if (!selectedJobId) {
       return;
@@ -572,143 +444,6 @@ export function JobHistoryPanel({
       },
     );
     setArtifactPendingKey(null);
-  }
-
-  async function activateRolloutBatch(rollout: AgentUpdateRolloutRecord) {
-    setRolloutActionId(rollout.id);
-    await runPanelAction(
-      setRolloutActionPending,
-      setRolloutActionError,
-      async () => {
-        if (!privilegeMaterial) {
-          throw new Error("Privilege unlock is locked");
-        }
-        const batchSize = Math.max(
-          1,
-          Math.trunc(rolloutBatchSize || rollout.canary_count || 1),
-        );
-        const clientIds = selectRolloutClients(
-          rollout,
-          ["completed"],
-          batchSize,
-        );
-        if (clientIds.length === 0) {
-          throw new Error("No staged targets are eligible for activation");
-        }
-        const operation = rolloutRestartAgent
-          ? ({
-              type: "agent_update_activate",
-              staged_sha256_hex: rollout.artifact_sha256_hex,
-              restart_agent: true,
-            } as const)
-          : ({
-              type: "agent_update_activate",
-              staged_sha256_hex: rollout.artifact_sha256_hex,
-            } as const);
-        const clientSelector = selectorExpressionForClientIds(clientIds);
-        const built = await buildPrivilegeForJobOperation({
-          clientIds,
-          commandType: "agent_update_activate",
-          forceUnprivileged: rolloutForceUnprivileged,
-          operation,
-          privilegeMaterial,
-          selectorExpression: clientSelector,
-          timeoutSecs: 60,
-        });
-        setLastPrivilegeActionHash(built.payloadHashHex);
-        await onCreateJob({
-          selector_expression: clientSelector,
-          destructive: false,
-          confirmed: true,
-          command: "agent_update_activate",
-          argv: [],
-          operation,
-          timeout_secs: 60,
-          canary_count: null,
-          force_unprivileged: rolloutForceUnprivileged,
-          privileged: true,
-          idempotency_key: `panel:rollout-activate:${rollout.id}:${built.payloadHashHex.slice(0, 16)}`,
-          reconnect_policy: {
-            duplicate_delivery: "ignore_completed",
-            resume_outputs: true,
-            cancel_on_disconnect: false,
-          },
-          privilege_assertion: built.privilegeAssertion,
-        });
-      },
-    );
-    setRolloutActionId(null);
-  }
-
-  async function rollbackRolloutTargets(rollout: AgentUpdateRolloutRecord) {
-    setRolloutActionId(rollout.id);
-    await runPanelAction(
-      setRolloutActionPending,
-      setRolloutActionError,
-      async () => {
-        if (!privilegeMaterial) {
-          throw new Error("Privilege unlock is locked");
-        }
-        const clientIds = selectRolloutClients(rollout, [
-          "activation_pending_restart",
-          "activation_failed",
-          "heartbeat_timeout",
-          "heartbeat_verified",
-        ]);
-        if (clientIds.length === 0) {
-          throw new Error(
-            "No activation-pending, activation-failed, heartbeat-timeout, or heartbeat-verified targets are eligible for rollback",
-          );
-        }
-        const operation = { type: "agent_update_rollback" } as const;
-        const clientSelector = selectorExpressionForClientIds(clientIds);
-        const built = await buildPrivilegeForJobOperation({
-          clientIds,
-          commandType: "agent_update_rollback",
-          forceUnprivileged: rolloutForceUnprivileged,
-          operation,
-          privilegeMaterial,
-          selectorExpression: clientSelector,
-          timeoutSecs: 60,
-        });
-        setLastPrivilegeActionHash(built.payloadHashHex);
-        await onCreateJob({
-          selector_expression: clientSelector,
-          destructive: false,
-          confirmed: true,
-          command: "agent_update_rollback",
-          argv: [],
-          operation,
-          timeout_secs: 60,
-          canary_count: null,
-          force_unprivileged: rolloutForceUnprivileged,
-          privileged: true,
-          idempotency_key: `panel:rollout-rollback:${rollout.id}:${built.payloadHashHex.slice(0, 16)}`,
-          reconnect_policy: {
-            duplicate_delivery: "ignore_completed",
-            resume_outputs: true,
-            cancel_on_disconnect: false,
-          },
-          privilege_assertion: built.privilegeAssertion,
-        });
-      },
-    );
-    setRolloutActionId(null);
-  }
-
-  async function controlRollout(
-    rollout: AgentUpdateRolloutRecord,
-    request: AgentUpdateRolloutControlRequest,
-  ) {
-    setRolloutActionId(rollout.id);
-    await runPanelAction(
-      setRolloutActionPending,
-      setRolloutActionError,
-      async () => {
-        await onUpdateAgentUpdateRolloutControl(rollout.id, request);
-      },
-    );
-    setRolloutActionId(null);
   }
 
   function prepareTerminalSessionAction(
@@ -784,30 +519,6 @@ export function JobHistoryPanel({
             onUploadAgentUpdateArtifact={onUploadAgentUpdateArtifact}
             releases={agentUpdateReleases}
           />
-          <AgentUpdateRolloutsPanel
-            actionError={rolloutActionError}
-            actionId={rolloutActionId}
-            actionPending={rolloutActionPending}
-            batchSize={rolloutBatchSize}
-            loading={loading}
-            onActivateBatch={(rollout) => void activateRolloutBatch(rollout)}
-            onBatchSizeChange={setRolloutBatchSize}
-            onControlRollout={(rollout, request) =>
-              void controlRollout(rollout, request)
-            }
-            onCreatePolicy={onCreateAgentUpdateRolloutPolicy}
-            onForceUnprivilegedChange={setRolloutForceUnprivileged}
-            onRefresh={onRefresh}
-            onRestartAgentChange={setRolloutRestartAgent}
-            onRollbackTargets={(rollout) =>
-              void rollbackRolloutTargets(rollout)
-            }
-            privilegeMaterial={privilegeMaterial}
-            restartAgent={rolloutRestartAgent}
-            forceUnprivileged={rolloutForceUnprivileged}
-            policies={agentUpdateRolloutPolicies}
-            rollouts={agentUpdateRollouts}
-          />
         </div>
       )}
       {jobSubpage === "processes" && (
@@ -870,7 +581,6 @@ export function JobHistoryPanel({
                 <h2>Job history</h2>
                 <span>
                   {error ??
-                    cancelError ??
                     (loading
                       ? "Refreshing command records"
                       : "Latest privileged requests")}
@@ -896,15 +606,6 @@ export function JobHistoryPanel({
                   label: "Copy job IDs",
                   onSelect: (rows) =>
                     void copyText(rows.map((job) => job.id).join("\n")),
-                },
-                {
-                  label: "Cancel selected",
-                  tone: "danger",
-                  disabled: (rows) => !rows.some(isCancelableJob),
-                  onSelect: (rows) =>
-                    rows
-                      .filter(isCancelableJob)
-                      .forEach((job) => void cancelPendingJob(job)),
                 },
               ]}
               columns={jobColumns}
@@ -1305,7 +1006,7 @@ export function JobHistoryPanel({
             <div className="sectionHeader compact">
               <div>
                 <h2>Schedule runs</h2>
-                <span>{cancelError ?? `${scheduleRunJobs.length} worker-created due runs`}</span>
+                <span>{`${scheduleRunJobs.length} worker-created due runs`}</span>
               </div>
               <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
                 Refresh
@@ -1333,16 +1034,6 @@ export function JobHistoryPanel({
                       <button className="secondaryAction compactAction" onClick={() => void openTargets(job.id)} type="button">
                         Open
                       </button>
-                      {isActiveCancelableJob(job) && (
-                        <button
-                          className="secondaryAction dangerAction compactAction"
-                          disabled={cancelPending || cancelPendingJobId === job.id}
-                          onClick={() => void cancelPendingJob(job)}
-                          type="button"
-                        >
-                          Cancel
-                        </button>
-                      )}
                     </span>
                   </div>
                 ))}
@@ -1361,19 +1052,11 @@ export function JobHistoryPanel({
   );
 }
 
-function isActiveCancelableJob(job: JobHistoryRecord): boolean {
-  return job.status === "dispatching" || job.status === "cancel_requested";
-}
-
 async function copyText(value: string) {
   if (!value.trim()) {
     return;
   }
   await navigator.clipboard?.writeText(value);
-}
-
-function isCancelableJob(job: JobHistoryRecord): boolean {
-  return isActiveCancelableJob(job);
 }
 
 function outputCompareBasisLabel(value: string): string {

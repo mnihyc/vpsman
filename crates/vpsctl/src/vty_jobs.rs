@@ -181,7 +181,6 @@ pub(crate) fn vty_submit_operation_with_force(
         &privilege_context.salt_hex,
         300,
         timeout_secs,
-        None,
         force_unprivileged,
         true,
     )?;

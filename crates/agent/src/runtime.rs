@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle, time};
+use tokio::{net::TcpStream, sync::mpsc, time};
 use tracing::{debug, info, warn};
 #[cfg(test)]
 use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
@@ -15,8 +15,8 @@ use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
     AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode, CommandOutput, Frame, JobAck,
-    JobCancelRequest, JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
-    PrivilegeReplayCache, ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream, PrivilegeReplayCache,
+    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
@@ -136,7 +136,7 @@ async fn connect_and_stream(
     let mut replay_cache = PrivilegeReplayCache::default();
     let (command_event_tx, mut command_event_rx) = mpsc::channel::<CommandExecutionEvent>(32);
     let (terminal_stream_tx, mut terminal_stream_rx) = mpsc::channel::<TerminalStreamOutput>(64);
-    let mut active_command = None::<ActiveCommand>;
+    let mut active_commands = HashMap::<uuid::Uuid, ActiveCommand>::new();
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
     let mut ticker = time::interval(Duration::from_secs(
         server_hello.telemetry_light_secs.max(5),
@@ -167,7 +167,7 @@ async fn connect_and_stream(
                                 stream: &mut stream,
                                 seq: &mut seq,
                                 replay_cache: &mut replay_cache,
-                                active_command: &mut active_command,
+                                active_commands: &mut active_commands,
                                 recent_commands,
                                 command_event_tx: &command_event_tx,
                                 terminal_stream_tx: &terminal_stream_tx,
@@ -179,15 +179,6 @@ async fn connect_and_stream(
                             unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                         }
                     }
-                    MessageKind::CommandCancel => {
-                        handle_command_cancel_frame(
-                            &mut stream,
-                            frame,
-                            &mut seq,
-                            &mut active_command,
-                        )
-                        .await?;
-                    }
                     MessageKind::Keepalive => {
                         debug!("gateway keepalive");
                     }
@@ -196,14 +187,14 @@ async fn connect_and_stream(
                     }
                 }
             }
-            event = command_event_rx.recv(), if active_command.is_some() => {
+            event = command_event_rx.recv(), if !active_commands.is_empty() => {
                 if let Some(event) = event {
                     match event {
                         CommandExecutionEvent::Output(output) => {
                             send_active_command_output(
                                 &mut stream,
                                 &mut seq,
-                                active_command.as_ref(),
+                                &active_commands,
                                 output,
                             )
                             .await?;
@@ -212,7 +203,7 @@ async fn connect_and_stream(
                             finish_active_command(
                                 &mut stream,
                                 &mut seq,
-                                &mut active_command,
+                                &mut active_commands,
                                 recent_commands,
                                 result,
                             )
@@ -234,7 +225,7 @@ async fn connect_and_stream(
                     seq += 1;
                 }
             }
-            _ = &mut unmanaged_update_sleep, if active_command.is_none() && unmanaged_update_schedule.enabled(config) => {
+            _ = &mut unmanaged_update_sleep, if active_commands.is_empty() && unmanaged_update_schedule.enabled(config) => {
                 if unmanaged_update_schedule.due(config) {
                     unmanaged_update_schedule.mark_attempt(config);
                     unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
@@ -402,10 +393,8 @@ fn agent_capabilities() -> AgentCapabilitySnapshot {
 }
 
 struct ActiveCommand {
-    job_id: uuid::Uuid,
     payload_hash: String,
     stream_id: u32,
-    task: JoinHandle<()>,
 }
 
 struct CommandExecutionResult {
@@ -425,7 +414,7 @@ struct CommandFrameContext<'a> {
     stream: &'a mut NoiseFrameStream<TcpStream>,
     seq: &'a mut u64,
     replay_cache: &'a mut PrivilegeReplayCache,
-    active_command: &'a mut Option<ActiveCommand>,
+    active_commands: &'a mut HashMap<uuid::Uuid, ActiveCommand>,
     recent_commands: &'a mut RecentCommandCache,
     command_event_tx: &'a mpsc::Sender<CommandExecutionEvent>,
     terminal_stream_tx: &'a mpsc::Sender<TerminalStreamOutput>,
@@ -526,7 +515,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         stream,
         seq,
         replay_cache,
-        active_command,
+        active_commands,
         recent_commands,
         command_event_tx,
         terminal_stream_tx,
@@ -556,15 +545,11 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         .await?;
         return Ok(false);
     }
-    if let Some(active) = active_command.as_ref() {
-        let message = if active.job_id == request.job_id {
-            if active.payload_hash == request_payload_hash {
-                "duplicate job already active"
-            } else {
-                "duplicate job id is active with different payload"
-            }
+    if let Some(active) = active_commands.get(&request.job_id) {
+        let message = if active.payload_hash == request_payload_hash {
+            "duplicate job already active"
         } else {
-            "agent is busy with another command"
+            "duplicate job id is active with different payload"
         };
         let ack = JobAck {
             job_id: request.job_id,
@@ -683,7 +668,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let task_config_path = config_path.to_path_buf();
     let event_tx = command_event_tx.clone();
     let terminal_stream_tx = terminal_stream_tx.clone();
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         let (output_tx, mut output_rx) = mpsc::channel::<CommandOutput>(16);
         let output_event_tx = event_tx.clone();
         let output_forwarder = tokio::spawn(async move {
@@ -715,12 +700,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             }))
             .await;
     });
-    *active_command = Some(ActiveCommand {
+    active_commands.insert(
         job_id,
-        payload_hash: request_payload_hash,
-        stream_id,
-        task,
-    });
+        ActiveCommand {
+            payload_hash: request_payload_hash,
+            stream_id,
+        },
+    );
     Ok(false)
 }
 
@@ -1040,15 +1026,12 @@ async fn send_command_result_outputs(
 async fn send_active_command_output(
     stream: &mut NoiseFrameStream<TcpStream>,
     seq: &mut u64,
-    active_command: Option<&ActiveCommand>,
+    active_commands: &HashMap<uuid::Uuid, ActiveCommand>,
     output: CommandOutput,
 ) -> Result<()> {
-    let Some(active) = active_command else {
+    let Some(active) = active_commands.get(&output.job_id) else {
         return Ok(());
     };
-    if active.job_id != output.job_id {
-        return Ok(());
-    }
     send_json_frame(
         stream,
         MessageKind::CommandOutput,
@@ -1064,56 +1047,15 @@ async fn send_active_command_output(
 async fn finish_active_command(
     stream: &mut NoiseFrameStream<TcpStream>,
     seq: &mut u64,
-    active_command: &mut Option<ActiveCommand>,
+    active_commands: &mut HashMap<uuid::Uuid, ActiveCommand>,
     recent_commands: &mut RecentCommandCache,
     result: CommandExecutionResult,
 ) -> Result<()> {
-    let Some(active) = active_command.take() else {
+    let Some(active) = active_commands.remove(&result.job_id) else {
         return Ok(());
     };
-    if active.job_id != result.job_id {
-        *active_command = Some(active);
-        return Ok(());
-    }
     recent_commands.remember(result.job_id, active.payload_hash);
     send_command_result_outputs(stream, result.stream_id, seq, result.job_id, result.result).await
-}
-
-async fn handle_command_cancel_frame(
-    stream: &mut NoiseFrameStream<TcpStream>,
-    frame: Frame,
-    seq: &mut u64,
-    active_command: &mut Option<ActiveCommand>,
-) -> Result<()> {
-    let request: JobCancelRequest = decode_json(&frame.decoded_payload()?)?;
-    let Some(active) = active_command.take() else {
-        return Ok(());
-    };
-    if active.job_id != request.job_id {
-        *active_command = Some(active);
-        return Ok(());
-    }
-    active.task.abort();
-    let output = CommandOutput {
-        job_id: request.job_id,
-        stream: OutputStream::Status,
-        data: serde_json::to_vec(&serde_json::json!({
-            "type": "command_canceled",
-            "reason": request.reason,
-        }))?,
-        exit_code: Some(130),
-        done: true,
-    };
-    send_json_frame(
-        stream,
-        MessageKind::CommandOutput,
-        active.stream_id,
-        *seq,
-        &output,
-    )
-    .await?;
-    *seq += 1;
-    Ok(())
 }
 
 #[cfg(test)]

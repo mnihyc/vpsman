@@ -3,13 +3,7 @@ import { apiGet, apiGetBlob, apiPost, apiPostBinary, buildListPath, isApiUnautho
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentUpdateReleaseRecord,
-  AgentUpdateRolloutControlRequest,
-  AgentUpdateRolloutPolicyRecord,
-  AgentUpdateRolloutRecord,
-  CancelJobRequest,
-  CancelJobResponse,
   CommandTemplateRecord,
-  CreateAgentUpdateRolloutPolicyRequest,
   CreateAgentUpdateReleaseRequest,
   CreateHostedAgentUpdateReleaseRequest,
   CreateJobRequest,
@@ -39,8 +33,6 @@ export function useJobsData(
   onAuditChanged: () => Promise<void>,
 ) {
   const [jobs, setJobs] = useState<JobHistoryRecord[]>([]);
-  const [agentUpdateRollouts, setAgentUpdateRollouts] = useState<AgentUpdateRolloutRecord[]>([]);
-  const [agentUpdateRolloutPolicies, setAgentUpdateRolloutPolicies] = useState<AgentUpdateRolloutPolicyRecord[]>([]);
   const [agentUpdateReleases, setAgentUpdateReleases] = useState<AgentUpdateReleaseRecord[]>([]);
   const [processSupervisorInventory, setProcessSupervisorInventory] = useState<ProcessSupervisorInventoryRecord[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSessionRecord[]>([]);
@@ -56,8 +48,6 @@ export function useJobsData(
     try {
       const [
         jobsResult,
-        rolloutsResult,
-        rolloutPoliciesResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -66,8 +56,6 @@ export function useJobsData(
         commandTemplatesResult,
       ] = await Promise.allSettled([
         apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
-        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=200", apiToken),
-        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=200", apiToken),
         apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
         apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
         apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
@@ -77,8 +65,6 @@ export function useJobsData(
       ]);
       const settledResults = [
         jobsResult,
-        rolloutsResult,
-        rolloutPoliciesResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -92,8 +78,6 @@ export function useJobsData(
       if (unauthorized) {
         onUnauthorized();
         setJobs([]);
-        setAgentUpdateRollouts([]);
-        setAgentUpdateRolloutPolicies([]);
         setAgentUpdateReleases([]);
         setProcessSupervisorInventory([]);
         setFileTransfers([]);
@@ -104,10 +88,6 @@ export function useJobsData(
         return;
       }
       if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
-      if (rolloutsResult.status === "fulfilled") setAgentUpdateRollouts(rolloutsResult.value);
-      if (rolloutPoliciesResult.status === "fulfilled") {
-        setAgentUpdateRolloutPolicies(rolloutPoliciesResult.value);
-      }
       if (releasesResult.status === "fulfilled") setAgentUpdateReleases(releasesResult.value);
       if (processSupervisorInventoryResult.status === "fulfilled") {
         setProcessSupervisorInventory(processSupervisorInventoryResult.value);
@@ -125,25 +105,16 @@ export function useJobsData(
     }
   }, [apiToken, onUnauthorized]);
 
-  const loadAgentUpdateRollouts = useCallback(async () => {
+  const loadAgentUpdateReleases = useCallback(async () => {
     try {
-      const [nextRollouts, nextRolloutPolicies, nextReleases] = await Promise.all([
-        apiGet<AgentUpdateRolloutRecord[]>("/api/v1/agent-update-rollouts?limit=200", apiToken),
-        apiGet<AgentUpdateRolloutPolicyRecord[]>("/api/v1/agent-update-rollout-policies?limit=200", apiToken),
-        apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
-      ]);
-      setAgentUpdateRollouts(nextRollouts);
-      setAgentUpdateRolloutPolicies(nextRolloutPolicies);
-      setAgentUpdateReleases(nextReleases);
+      setAgentUpdateReleases(await apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken));
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
-        setAgentUpdateRollouts([]);
-        setAgentUpdateRolloutPolicies([]);
         setAgentUpdateReleases([]);
         return;
       }
-      setJobsError(error instanceof Error ? error.message : "Agent update rollouts unavailable");
+      setJobsError(error instanceof Error ? error.message : "Agent update releases unavailable");
     }
   }, [apiToken, onUnauthorized]);
 
@@ -398,30 +369,30 @@ export function useJobsData(
   const createJob = useCallback(
     async (request: CreateJobRequest) => {
       const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, request);
-      void Promise.allSettled([loadJobs(), loadAgentUpdateRollouts(), onFleetChanged(), onAuditChanged()]);
+      void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
       return response;
     },
-    [apiToken, loadAgentUpdateRollouts, loadJobs, onAuditChanged, onFleetChanged],
+    [apiToken, loadJobs, onAuditChanged, onFleetChanged],
   );
 
   const createAgentUpdateRelease = useCallback(
     async (request: CreateAgentUpdateReleaseRequest) => {
       const response = await apiPost<AgentUpdateReleaseRecord>("/api/v1/agent-update-releases", apiToken, request);
-      await loadAgentUpdateRollouts();
+      await loadAgentUpdateReleases();
       void onAuditChanged();
       return response;
     },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
+    [apiToken, loadAgentUpdateReleases, onAuditChanged],
   );
 
   const uploadAgentUpdateArtifact = useCallback(
     async (request: UploadAgentUpdateArtifactRequest) => {
       const response = await apiPost<AgentUpdateReleaseRecord>("/api/v1/agent-update-releases/upload", apiToken, request);
-      await loadAgentUpdateRollouts();
+      await loadAgentUpdateReleases();
       void onAuditChanged();
       return response;
     },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
+    [apiToken, loadAgentUpdateReleases, onAuditChanged],
   );
 
   const streamAgentUpdateArtifact = useCallback(
@@ -449,67 +420,24 @@ export function useJobsData(
         apiToken,
         request,
       );
-      await loadAgentUpdateRollouts();
+      await loadAgentUpdateReleases();
       void onAuditChanged();
       return response;
     },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
+    [apiToken, loadAgentUpdateReleases, onAuditChanged],
   );
 
-  const updateAgentUpdateRolloutControl = useCallback(
-    async (rolloutId: string, request: AgentUpdateRolloutControlRequest) => {
-      const response = await apiPost<AgentUpdateRolloutRecord>(
-        `/api/v1/agent-update-rollouts/${encodeURIComponent(rolloutId)}/control`,
-        apiToken,
-        request,
-      );
-      await loadAgentUpdateRollouts();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
-  );
 
-  const createAgentUpdateRolloutPolicy = useCallback(
-    async (request: CreateAgentUpdateRolloutPolicyRequest) => {
-      const response = await apiPost<AgentUpdateRolloutPolicyRecord>(
-        "/api/v1/agent-update-rollout-policies",
-        apiToken,
-        request,
-      );
-      await loadAgentUpdateRollouts();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateRollouts, onAuditChanged],
-  );
 
-  const cancelJob = useCallback(
-    async (jobId: string, request: CancelJobRequest) => {
-      const response = await apiPost<CancelJobResponse>(
-        `/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,
-        apiToken,
-        request,
-      );
-      void Promise.allSettled([loadJobs(), onAuditChanged()]);
-      return response;
-    },
-    [apiToken, loadJobs, onAuditChanged],
-  );
 
   return {
-    cancelJob,
     createAgentUpdateRelease,
-    createAgentUpdateRolloutPolicy,
-    updateAgentUpdateRolloutControl,
     uploadAgentUpdateArtifact,
     streamAgentUpdateArtifact,
     createHostedAgentUpdateRelease,
     createJob,
     commandTemplates,
     agentUpdateReleases,
-    agentUpdateRolloutPolicies,
-    agentUpdateRollouts,
     fileTransfers,
     fileTransferSources,
     jobs,
@@ -529,9 +457,9 @@ export function useJobsData(
     loadJobOutputComparison,
     loadJobTargets,
     loadJobs,
+    loadAgentUpdateReleases,
     loadTerminalReplay,
     loadTerminalSessions,
-    loadAgentUpdateRollouts,
     upsertCommandTemplate,
   };
 }

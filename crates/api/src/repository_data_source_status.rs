@@ -410,11 +410,11 @@ fn update_rollback_heartbeat_status(
     (
         "ready_on_demand".to_string(),
         format!(
-            "rollback heartbeat source {source_kind} is selected; rollout workers classify heartbeat and activation failures"
+            "rollback heartbeat source {source_kind} is selected; agent-update jobs report heartbeat and activation evidence"
         ),
         json!({
             "continuous_status": false,
-            "workflow": "agent_update_rollout",
+            "workflow": "agent_update_jobs",
             "command_types": ["agent_update", "agent_update_activate", "agent_update_rollback"],
             "privilege_gated": true,
             "source_kind": source_kind,

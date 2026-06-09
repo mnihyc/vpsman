@@ -104,46 +104,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
             started_at: Some("105".to_string()),
             completed_at: Some("110".to_string()),
         });
-        memory
-            .agent_update_rollouts
-            .write()
-            .await
-            .push(AgentUpdateRolloutView {
-                id: Uuid::new_v4(),
-                job_id: Uuid::new_v4(),
-                actor_id: None,
-                status: "heartbeat_timeout".to_string(),
-                artifact_sha256_hex: "bb".repeat(32),
-                artifact_signature_provided: true,
-                artifact_signing_key_sha256_hex: Some("cc".repeat(32)),
-                target_count: 1,
-                completed_count: 0,
-                failed_count: 1,
-                pending_count: 0,
-                activation_policy: "manual_staging_only".to_string(),
-                canary_count: 1,
-                rollout_policy_id: None,
-                rollout_policy_name: None,
-                heartbeat_timeout_secs: Some(900),
-                automation_paused: false,
-                automation_pause_reason: None,
-                automation_health_gate: "heartbeat_verified".to_string(),
-                automation_lease_owner: None,
-                automation_lease_expires_at: None,
-                automation_status: "rollback_recommended".to_string(),
-                automation_next_action: Some("rollback".to_string()),
-                automation_blocker: Some("heartbeat timed out".to_string()),
-                automation_targets: vec!["edge-a".to_string()],
-                automation_updated_at: Some("120".to_string()),
-                targets: vec![AgentUpdateRolloutTargetView {
-                    client_id: "edge-a".to_string(),
-                    status: "heartbeat_timeout".to_string(),
-                    exit_code: None,
-                    updated_at: "120".to_string(),
-                }],
-                created_at: "100".to_string(),
-                updated_at: "120".to_string(),
-            });
     }
 
     let state = alert_test_state(repo);
@@ -161,7 +121,6 @@ async fn fleet_alerts_derive_actionable_current_status() {
     assert_alert_category(&alerts, "agent_status");
     assert_alert_category(&alerts, "network");
     assert_alert_category(&alerts, "backup");
-    assert_alert_category(&alerts, "agent_update");
     assert_alert_category(&alerts, "unprivileged_blocked");
     assert_alert_category(&alerts, "source_readiness");
     assert!(alerts

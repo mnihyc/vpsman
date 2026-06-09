@@ -64,11 +64,9 @@ if [[ "${VPSMAN_RELEASE_SKIP_TESTS:-0}" == "1" ]]; then
   skip_step cargo-test-agent-network-apply "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-agent-network-runtime "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-agent-network-status "VPSMAN_RELEASE_SKIP_TESTS=1"
-  skip_step cargo-test-api-rollouts "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-api-update-releases "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-api-history-retention "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-vpsctl-update-releases "VPSMAN_RELEASE_SKIP_TESTS=1"
-  skip_step cargo-test-worker-rollout-automation "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-worker-leases "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-worker-schedules "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-worker-alert-notifications "VPSMAN_RELEASE_SKIP_TESTS=1"
@@ -85,11 +83,9 @@ else
   run_step cargo-test-agent-network-apply cargo test -p vpsman-agent network_apply
   run_step cargo-test-agent-network-runtime cargo test -p vpsman-agent network_runtime
   run_step cargo-test-agent-network-status cargo test -p vpsman-agent network_status
-  run_step cargo-test-api-rollouts cargo test -p vpsman-api tests_rollout
   run_step cargo-test-api-update-releases cargo test -p vpsman-api tests_update_releases
   run_step cargo-test-api-history-retention cargo test -p vpsman-api history_retention
   run_step cargo-test-vpsctl-update-releases cargo test -p vpsctl update_release
-  run_step cargo-test-worker-rollout-automation cargo test -p vpsman-worker rollout_automation
   run_step cargo-test-worker-leases cargo test -p vpsman-worker worker_leases
   run_step cargo-test-worker-schedules cargo test -p vpsman-worker schedule
   run_step cargo-test-worker-alert-notifications cargo test -p vpsman-worker alert_notifications

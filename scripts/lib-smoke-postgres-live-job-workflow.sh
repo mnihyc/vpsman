@@ -189,48 +189,6 @@ large_output_job_id="$(jq -r '.job_id' <<<"$large_output_json")"
 jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$large_output_json" >/dev/null
 assert_large_output_artifact
 
-active_cancel_output="$SMOKE_TMPDIR/active-cancel-job.json"
-VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" job-shell \
-    --script "sleep 30" \
-    --clients "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 60 \
-    --confirmed >"$active_cancel_output" &
-active_cancel_pid="$!"
-active_cancel_job_id=""
-deadline=$((SECONDS + 15))
-until [[ -n "$active_cancel_job_id" ]]; do
-  if (( SECONDS >= deadline )); then
-    smoke_dump_logs "active cancel job was not recorded as dispatching" \
-      "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
-    exit 1
-  fi
-  active_cancel_job_id="$(api_get "/api/v1/jobs?limit=20" | jq -r '
-    map(select(.command_type == "shell_script" and .status == "dispatching"))
-    | first
-    | .id // empty
-  ')"
-  sleep 0.2
-done
-sleep 1
-active_cancel_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" job-cancel \
-    --job-id "$active_cancel_job_id" \
-    --reason active-in-flight-smoke \
-    --confirmed)"
-jq -e --arg job_id "$active_cancel_job_id" '
-  .job_id == $job_id
-  and .status == "cancel_requested"
-  and .cancel_requested_targets == 1
-' <<<"$active_cancel_json" >/dev/null
-wait "$active_cancel_pid"
-jq -e --arg job_id "$active_cancel_job_id" '
-  .job_id == $job_id and .accepted_targets == 1 and .status == "canceled"
-' "$active_cancel_output" >/dev/null
-assert_active_cancel_job_output
-
 timeout_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" job-create \
@@ -543,7 +501,6 @@ assert_shell_script_job_output 0
 assert_job_follow_output
 assert_live_streaming_job_output
 assert_large_output_artifact
-assert_active_cancel_job_output
 assert_timed_out_shell_job
 assert_file_pull_output
 assert_terminal_session_workflow
@@ -572,7 +529,6 @@ jq -n \
   --arg shell_script_job_id "$shell_script_job_id" \
   --arg live_stream_job_id "$live_stream_job_id" \
   --arg large_output_job_id "$large_output_job_id" \
-  --arg active_cancel_job_id "$active_cancel_job_id" \
   --arg timeout_job_id "$timeout_job_id" \
   --arg file_pull_job_id "$file_pull_job_id" \
   --arg terminal_session_id "$terminal_session_id" \
@@ -606,7 +562,6 @@ jq -n \
     shell_script_job_id: $shell_script_job_id,
     live_stream_job_id: $live_stream_job_id,
     large_output_job_id: $large_output_job_id,
-    active_cancel_job_id: $active_cancel_job_id,
     timeout_job_id: $timeout_job_id,
     file_pull_job_id: $file_pull_job_id,
     terminal_session_id: $terminal_session_id,
@@ -630,5 +585,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "active_in_flight_job_cancel", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
   }'

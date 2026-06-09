@@ -528,7 +528,6 @@ pub(crate) fn submit_transfer_step(
         ctx.salt_hex,
         ctx.privilege_ttl_secs,
         ctx.timeout_secs,
-        None,
         false,
         true,
     )?;
@@ -910,7 +909,16 @@ pub(crate) fn push_event(events: &mut String, event: serde_json::Value) -> Resul
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "failed" | "partial_failed" | "timed_out" | "canceled" | "rejected"
+        "completed"
+            | "partially_completed"
+            | "failed"
+            | "timed_out"
+            | "dispatch_failed"
+            | "degraded_unprivileged"
+            | "accepted"
+            | "rejected_authorization_required"
+            | "schedule_no_targets"
+            | "rejected_by_agent"
     )
 }
 

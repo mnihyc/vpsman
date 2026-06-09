@@ -591,11 +591,11 @@ mod tests {
     #[test]
     fn parses_vty_latest_release_command() {
         let (name, channel) = parse_vty_latest_release_command(
-            "agent-update-release-latest --name vpsman-agent --channel canary",
+            "agent-update-release-latest --name vpsman-agent --channel beta",
         )
         .unwrap();
         assert_eq!(name, "vpsman-agent");
-        assert_eq!(channel, "canary");
+        assert_eq!(channel, "beta");
     }
 
     #[test]

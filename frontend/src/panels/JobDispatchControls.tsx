@@ -36,13 +36,9 @@ export function JobTargetSelector({
 }
 
 export function DispatchOptions({
-  canaryCount,
-  setCanaryCount,
   setTimeoutSecs,
   timeoutSecs,
 }: {
-  canaryCount: number;
-  setCanaryCount: (value: number) => void;
   setTimeoutSecs: (value: number) => void;
   timeoutSecs: number;
 }) {
@@ -57,17 +53,6 @@ export function DispatchOptions({
           onChange={(event) => setTimeoutSecs(Number(event.target.value))}
           type="number"
           value={timeoutSecs}
-        />
-      </label>
-      <label>
-        <span>Canary</span>
-        <input
-          aria-label="Canary count"
-          max={10000}
-          min={0}
-          onChange={(event) => setCanaryCount(Number(event.target.value))}
-          type="number"
-          value={canaryCount}
         />
       </label>
     </div>

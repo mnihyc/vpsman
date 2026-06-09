@@ -11,6 +11,24 @@ use vpsman_common::{
 
 use crate::{gateway_client::GatewayDispatchClient, routes_jobs::create_job};
 
+async fn wait_for_job_status(
+    repo: &crate::repository::Repository,
+    job_id: uuid::Uuid,
+    expected: &str,
+) {
+    for _ in 0..50 {
+        let jobs = repo.list_jobs(100).await.unwrap();
+        if jobs
+            .iter()
+            .any(|job| job.id == job_id && job.status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("job {job_id} did not reach status {expected}");
+}
+
 #[test]
 fn process_supervisor_job_commands_validate_operation_payloads() {
     let request = CreateJobRequest {
@@ -28,7 +46,6 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
             limits: ProcessResourceLimits::default(),
         }),
         timeout_secs: Some(5),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -85,7 +102,6 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
             },
         }),
         timeout_secs: Some(5),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -116,7 +132,6 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
             },
         }),
         timeout_secs: Some(5),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -146,7 +161,6 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
             limits: ProcessResourceLimits::default(),
         }),
         timeout_secs: Some(5),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -214,7 +228,6 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         argv: Vec::new(),
         operation: Some(operation),
         timeout_secs: Some(30),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -231,6 +244,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
     )
     .await
     .unwrap();
+    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
     let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
@@ -238,7 +252,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "degraded_unprivileged");
+    assert_eq!(response.status, "dispatching");
     assert_eq!(targets[0].status, "degraded_unprivileged");
     assert_eq!(
         status_output["reason"],

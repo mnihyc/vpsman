@@ -27,7 +27,6 @@ export type JobPrivilegeIntentInput = {
   operationPayloadHash: string;
   resolvedTargets: string[];
   timeoutSecs: number;
-  canaryCount?: number | null;
   forceUnprivileged: boolean;
   privileged: boolean;
 };
@@ -111,7 +110,6 @@ export function parseCommandArgv(input: string): string[] {
 
 export async function buildPrivilegeForJobOperation({
   clientIds,
-  canaryCount = null,
   commandType,
   forceUnprivileged = false,
   operation,
@@ -122,7 +120,6 @@ export async function buildPrivilegeForJobOperation({
   ttlSecs = 300,
 }: {
   clientIds: string[];
-  canaryCount?: number | null;
   commandType: string;
   forceUnprivileged?: boolean;
   operation: JobOperation;
@@ -138,7 +135,6 @@ export async function buildPrivilegeForJobOperation({
 
   const payloadHashHex = await operationPayloadHashHex(operation);
   return buildPrivilegeForJobPayloadHash({
-    canaryCount,
     clientIds,
     commandType,
     forceUnprivileged,
@@ -152,7 +148,6 @@ export async function buildPrivilegeForJobOperation({
 }
 
 export async function buildPrivilegeForJobPayloadHash({
-  canaryCount = null,
   clientIds,
   commandType,
   forceUnprivileged = false,
@@ -163,7 +158,6 @@ export async function buildPrivilegeForJobPayloadHash({
   timeoutSecs,
   ttlSecs = 300,
 }: {
-  canaryCount?: number | null;
   clientIds: string[];
   commandType: string;
   forceUnprivileged?: boolean;
@@ -179,7 +173,6 @@ export async function buildPrivilegeForJobPayloadHash({
   }
   const normalizedPayloadHashHex = normalizeSha256Hex(payloadHashHex);
   const intent = canonicalJobPrivilegeIntent({
-    canaryCount,
     commandType,
     forceUnprivileged,
     operationPayloadHash: normalizedPayloadHashHex,
@@ -258,7 +251,6 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
       ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
       ["resolved_targets", [...input.resolvedTargets].sort()],
       ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
-      ["canary_count", input.canaryCount ?? null],
       ["force_unprivileged", input.forceUnprivileged],
       ["privileged", input.privileged],
     ]),

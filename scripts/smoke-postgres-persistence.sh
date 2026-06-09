@@ -789,39 +789,6 @@ api_get "/api/v1/jobs/$degraded_process_job_id/outputs" | jq -e '
   (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
 ' >/dev/null
 
-cancel_job_id="$(cat /proc/sys/kernel/random/uuid)"
-operator_id="$(jq -r '.operator.id' <<<"$auth_json")"
-cancel_payload_hash="$(printf 'aa%.0s' {1..32})"
-docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c "
-INSERT INTO jobs (
-  id, actor_id, command_type, privileged, status, target_count, payload_hash, operation
-) VALUES (
-  '$cancel_job_id',
-  '$operator_id',
-  'shell_argv',
-  true,
-  'dispatching',
-  1,
-  '$cancel_payload_hash',
-  '{\"type\":\"shell\",\"argv\":[\"/usr/bin/sleep\",\"60\"],\"pty\":false}'::jsonb
-);
-INSERT INTO job_targets (job_id, client_id, status)
-VALUES ('$cancel_job_id', 'pg-agent-a', 'queued');
-" >/dev/null
-cancel_json="$(vpsctl_json job-cancel \
-  --job-id "$cancel_job_id" \
-  --reason postgres-smoke-cancel \
-  --confirmed)"
-jq -e --arg job_id "$cancel_job_id" '
-  .job_id == $job_id and .canceled == false and .status == "cancel_requested" and .cancel_requested_targets == 0
-' <<<"$cancel_json" >/dev/null
-api_get "/api/v1/jobs/$cancel_job_id" | jq -e --arg job_id "$cancel_job_id" '
-  .id == $job_id and .status == "cancel_requested" and .completed_at == null
-' >/dev/null
-api_get "/api/v1/jobs/$cancel_job_id/targets" | jq -e '
-  length == 1 and .[0].client_id == "pg-agent-a" and .[0].status == "queued" and .[0].completed_at == null
-' >/dev/null
-
 rejected_job_json="$(api_post_expect_status "/api/v1/jobs" '{
   "selector_expression": "id:pg-agent-a || tag:edge",
   "command": "uptime",
@@ -848,8 +815,7 @@ command_template_request="$(jq -n '{
     confirmed: true,
     reconnect_policy: {
       duplicate_delivery: "ignore_completed",
-      resume_outputs: true,
-      cancel_on_disconnect: false
+      resume_outputs: true
     }
   },
   confirmed: true
@@ -872,8 +838,7 @@ idempotent_reject_payload="$(jq -n '{
   idempotency_key: "pg-smoke-rejected-1",
   reconnect_policy: {
     duplicate_delivery: "ignore_completed",
-    resume_outputs: true,
-    cancel_on_disconnect: false
+    resume_outputs: true
   }
 }')"
 idempotent_reject_first="$(api_post_expect_status "/api/v1/jobs" "$idempotent_reject_payload" "403")"
@@ -895,7 +860,6 @@ jq -e '
   any(.[]; .action == "backup.artifact_metadata_recorded") and
   any(.[]; .action == "backup_policy.retention_pruned") and
   any(.[]; .action == "restore.planned_metadata_only") and
-  any(.[]; .action == "job.cancel_requested") and
   any(.[]; .action == "command_template.upserted")
 ' <<<"$audit_json" >/dev/null || {
   jq -r '.[].action' <<<"$audit_json" | sort | uniq -c >&2
@@ -1009,7 +973,6 @@ jq -e '
   any(.[]; .action == "backup.requested_metadata_only") and
   any(.[]; .action == "backup.artifact_metadata_recorded") and
   any(.[]; .action == "restore.planned_metadata_only") and
-  any(.[]; .action == "job.cancel_requested") and
   any(.[]; .action == "command_template.upserted")
 ' <<<"$audit_json" >/dev/null || {
   jq -r '.[].action' <<<"$audit_json" | sort | uniq -c >&2
@@ -1021,5 +984,5 @@ jq -n \
   '{
     postgres_persistence_smoke: "ok",
     api_url: $api_url,
-    checks: ["auth_session", "agents", "postgres_reenrollment_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "job_cancel_request", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
+    checks: ["auth_session", "agents", "postgres_reenrollment_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
   }'

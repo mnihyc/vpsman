@@ -6,9 +6,8 @@ use tokio::{
     net::TcpStream,
 };
 use vpsman_common::{
-    GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
-    GatewayCommandDispatchResult, GatewayPrivilegeVerification, GatewayPrivilegeVerificationResult,
-    JobRequest, PrivilegeAssertion,
+    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationResult, JobRequest, PrivilegeAssertion,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -84,29 +83,6 @@ impl GatewayDispatchClient {
             &GatewayCommandDispatch {
                 client_id: client_id.to_string(),
                 request,
-            },
-            self.internal_token.as_deref(),
-        )
-        .await
-    }
-
-    pub(crate) async fn cancel(
-        &self,
-        client_id: &str,
-        job_id: uuid::Uuid,
-        reason: Option<&str>,
-    ) -> Result<GatewayCommandCancelResult> {
-        let control_url = self
-            .control_url
-            .as_deref()
-            .context("gateway control URL is not configured")?;
-        post_gateway_control(
-            control_url,
-            "/internal/v1/gateway/command-cancel",
-            &GatewayCommandCancel {
-                client_id: client_id.to_string(),
-                job_id,
-                reason: reason.map(str::to_string),
             },
             self.internal_token.as_deref(),
         )

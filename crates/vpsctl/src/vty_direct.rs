@@ -57,9 +57,6 @@ pub(crate) fn submit_vty_direct_command(
         command if command.starts_with("operator-session-revoke ") => Ok(Some(
             submit_operator_session_revoke(api_url, token, command)?,
         )),
-        command if command.starts_with("job-cancel ") => {
-            Ok(Some(submit_job_cancel(api_url, token, command)?))
-        }
         command if command.starts_with("history-retention-upsert ") => Ok(Some(
             submit_history_retention_upsert(api_url, token, command)?,
         )),
@@ -193,27 +190,6 @@ fn submit_operator_session_revoke(
         api_url,
         &format!("/api/v1/operator-sessions/{}", parts[1]),
         token,
-    )
-}
-
-fn submit_job_cancel(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
-    let parts = command.split_whitespace().collect::<Vec<_>>();
-    if parts.len() < 3 || parts[2] != "--confirmed" {
-        return Ok("usage: job-cancel <job_uuid> --confirmed [reason words...]".to_string());
-    }
-    let reason = if parts.len() > 3 {
-        Some(parts[3..].join(" "))
-    } else {
-        None
-    };
-    http_post_json(
-        api_url,
-        &format!("/api/v1/jobs/{}/cancel", parts[1]),
-        token,
-        &serde_json::json!({
-            "confirmed": true,
-            "reason": reason,
-        }),
     )
 }
 

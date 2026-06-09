@@ -439,7 +439,6 @@ pub(crate) fn backup_run(
         &salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        None,
         false,
         true,
     )?;
@@ -501,7 +500,6 @@ pub(crate) fn backup_request(
         &salt_hex,
         privilege_ttl_secs,
         30,
-        None,
         false,
         true,
     )?;
@@ -619,7 +617,6 @@ pub(crate) fn restore_plan(
         &salt_hex,
         privilege_ttl_secs,
         30,
-        None,
         false,
         true,
     )?;
@@ -735,7 +732,6 @@ pub(crate) fn restore_run_with_credentials(
         salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        None,
         force_unprivileged,
         true,
     )?;
@@ -789,7 +785,6 @@ pub(crate) fn restore_rollback(
         &salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        None,
         force_unprivileged,
         true,
     )?;

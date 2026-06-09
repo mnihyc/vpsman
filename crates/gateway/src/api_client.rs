@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    time::{sleep, Duration},
 };
 use tracing::warn;
 
@@ -26,8 +27,22 @@ impl GatewayControlClient {
         let Some(api_url) = &self.api_url else {
             return;
         };
-        if let Err(error) = post_json(api_url, path, value, self.internal_token.as_deref()).await {
-            warn!(%error, path, "failed to forward gateway event to API");
+
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match post_json(api_url, path, value, self.internal_token.as_deref()).await {
+                Ok(_) => return,
+                Err(error) => {
+                    warn!(%error, path, attempt, "failed to forward gateway event to API");
+                    last_error = Some(error);
+                    if attempt < 3 {
+                        sleep(Duration::from_millis(100 * attempt as u64)).await;
+                    }
+                }
+            }
+        }
+        if let Some(error) = last_error {
+            warn!(%error, path, "dropped gateway event after retrying API forwarding");
         }
     }
 

@@ -759,7 +759,6 @@ pub(crate) fn submit_vty_backup_request(
         salt_hex,
         300,
         30,
-        None,
         false,
         true,
     )?;
@@ -867,7 +866,6 @@ pub(crate) fn submit_vty_restore_plan(
         salt_hex,
         300,
         30,
-        None,
         false,
         true,
     )?;

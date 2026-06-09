@@ -61,7 +61,7 @@ use crate::{
         list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
-    routes_jobs::{cancel_job, create_job},
+    routes_jobs::create_job,
     routes_key_lifecycle::{
         key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
         upsert_agent_identity,
@@ -73,10 +73,6 @@ use crate::{
         promote_tunnel_plan_to_adapter,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
-    routes_rollout_policies::{
-        create_agent_update_rollout_policy, list_agent_update_rollout_policies,
-    },
-    routes_rollouts::{list_agent_update_rollouts, update_agent_update_rollout_control},
     routes_schedules::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
         enable_schedule, list_schedules, update_schedule,
@@ -249,18 +245,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(list_command_templates).post(upsert_command_template),
         )
         .route(
-            "/api/v1/agent-update-rollouts",
-            get(list_agent_update_rollouts),
-        )
-        .route(
-            "/api/v1/agent-update-rollout-policies",
-            get(list_agent_update_rollout_policies).post(create_agent_update_rollout_policy),
-        )
-        .route(
-            "/api/v1/agent-update-rollouts/{rollout_id}/control",
-            post(update_agent_update_rollout_control),
-        )
-        .route(
             "/api/v1/agent-update-releases",
             get(list_agent_update_releases).post(create_agent_update_release),
         )
@@ -287,7 +271,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(download_agent_update_artifact),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
-        .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route("/api/v1/jobs/{job_id}/outputs", get(list_job_outputs))
         .route(

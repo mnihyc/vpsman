@@ -19,22 +19,6 @@ use crate::util::percent_encode_path_segment;
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-struct AgentUpdateRolloutRecord {
-    id: String,
-    artifact_sha256_hex: String,
-    canary_count: i32,
-    #[serde(default)]
-    automation_targets: Vec<String>,
-    targets: Vec<AgentUpdateRolloutTargetRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentUpdateRolloutTargetRecord {
-    client_id: String,
-    status: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct StreamedAgentUpdateArtifactRecord {
     artifact_sha256_hex: String,
     size_bytes: i64,
@@ -108,7 +92,6 @@ pub(crate) fn agent_update(
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
     timeout_secs: u64,
-    canary_count: Option<u16>,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -141,7 +124,6 @@ pub(crate) fn agent_update(
         &salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        canary_count.map(i32::from),
         force_unprivileged,
         true,
     )?;
@@ -161,7 +143,6 @@ pub(crate) fn agent_update(
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
-                "canary_count": canary_count,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -182,7 +163,6 @@ pub(crate) fn agent_update_check(
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
     timeout_secs: u64,
-    canary_count: Option<u16>,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -217,7 +197,6 @@ pub(crate) fn agent_update_check(
         &salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        canary_count.map(i32::from),
         force_unprivileged,
         true,
     )?;
@@ -237,7 +216,6 @@ pub(crate) fn agent_update_check(
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
                 "timeout_secs": timeout_secs,
-                "canary_count": canary_count,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -571,391 +549,6 @@ pub(crate) fn agent_update_release_latest(
     Ok(())
 }
 
-pub(crate) fn agent_update_rollouts(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
-    println!(
-        "{}",
-        http_get(
-            api_url,
-            &format!(
-                "/api/v1/agent-update-rollouts?limit={}",
-                limit.clamp(1, 200)
-            ),
-            token,
-        )?
-    );
-    Ok(())
-}
-
-pub(crate) fn agent_update_rollout_policies(
-    api_url: &str,
-    token: Option<&str>,
-    limit: u16,
-    enabled: Option<bool>,
-    channel: Option<String>,
-) -> Result<()> {
-    let mut path = format!(
-        "/api/v1/agent-update-rollout-policies?limit={}",
-        limit.clamp(1, 200)
-    );
-    if let Some(enabled) = enabled {
-        path.push_str(&format!("&enabled={enabled}"));
-    }
-    if let Some(channel) = channel
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        path.push_str("&channel=");
-        path.push_str(&percent_encode_path_segment(channel));
-    }
-    println!("{}", http_get(api_url, &path, token)?);
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_policy_create(
-    api_url: &str,
-    token: Option<&str>,
-    name: String,
-    scope_kind: String,
-    scope_value: Option<String>,
-    channel: Option<String>,
-    canary_count: Option<i32>,
-    health_gate: Option<String>,
-    priority: i32,
-    enabled: bool,
-    notes: Option<String>,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-policy-create requires --confirmed because it changes reusable rollout defaults"
-    );
-    validate_rollout_policy_scope(&scope_kind, scope_value.as_deref())?;
-    if let Some(canary_count) = canary_count {
-        anyhow::ensure!(
-            (0..=10_000).contains(&canary_count),
-            "--canary-count must be between 0 and 10000"
-        );
-    }
-    if let Some(health_gate) = health_gate.as_deref() {
-        validate_rollout_health_gate(health_gate)?;
-    }
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/agent-update-rollout-policies",
-            token,
-            &serde_json::json!({
-                "name": name,
-                "scope_kind": scope_kind,
-                "scope_value": scope_value,
-                "channel": channel,
-                "canary_count": canary_count,
-                "automation_health_gate": health_gate,
-                "priority": priority,
-                "enabled": enabled,
-                "notes": notes,
-                "confirmed": confirmed,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_control(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: String,
-    pause: bool,
-    resume: bool,
-    pause_reason: Option<String>,
-    automation_health_gate: Option<String>,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-control requires --confirmed because it changes rollout automation policy"
-    );
-    anyhow::ensure!(
-        !(pause && resume),
-        "agent-update-rollout-control cannot use --pause and --resume together"
-    );
-    let paused = if pause {
-        Some(true)
-    } else if resume {
-        Some(false)
-    } else {
-        None
-    };
-    if paused.is_none() && automation_health_gate.is_none() {
-        anyhow::bail!("agent-update-rollout-control requires --pause, --resume, or --health-gate");
-    }
-    if let Some(health_gate) = automation_health_gate.as_deref() {
-        validate_rollout_health_gate(health_gate)?;
-    }
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!(
-                "/api/v1/agent-update-rollouts/{}/control",
-                percent_encode_path_segment(&rollout_id)
-            ),
-            token,
-            &serde_json::json!({
-                "confirmed": confirmed,
-                "paused": paused,
-                "pause_reason": pause_reason,
-                "automation_health_gate": automation_health_gate,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-fn load_rollout(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: &str,
-) -> Result<AgentUpdateRolloutRecord> {
-    let body = http_get(api_url, "/api/v1/agent-update-rollouts?limit=200", token)?;
-    let rollouts: Vec<AgentUpdateRolloutRecord> =
-        serde_json::from_str(&body).context("failed to parse agent update rollout list")?;
-    rollouts
-        .into_iter()
-        .find(|rollout| rollout.id == rollout_id)
-        .with_context(|| {
-            format!("agent update rollout {rollout_id} was not found in latest 200 records")
-        })
-}
-
-fn select_rollout_targets(
-    rollout: &AgentUpdateRolloutRecord,
-    explicit_clients: &[String],
-    batch_size: Option<u16>,
-    eligible_statuses: &[&str],
-    empty_message: &'static str,
-) -> Result<Vec<String>> {
-    let mut candidates = rollout
-        .automation_targets
-        .iter()
-        .filter(|client_id| {
-            rollout.targets.iter().any(|target| {
-                target.client_id == **client_id
-                    && eligible_statuses.contains(&target.status.as_str())
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        candidates = rollout
-            .targets
-            .iter()
-            .filter(|target| eligible_statuses.contains(&target.status.as_str()))
-            .map(|target| target.client_id.clone())
-            .collect();
-    }
-    if !explicit_clients.is_empty() {
-        candidates.retain(|client_id| explicit_clients.iter().any(|wanted| wanted == client_id));
-    }
-    candidates.sort();
-    candidates.dedup();
-    let limit = batch_size.map(|value| usize::from(value.max(1)));
-    if let Some(limit) = limit {
-        candidates.truncate(limit);
-    }
-    anyhow::ensure!(!candidates.is_empty(), empty_message);
-    Ok(candidates)
-}
-
-fn rollout_canary_batch_size(canary_count: i32) -> Option<u16> {
-    (canary_count > 0).then_some(canary_count as u16)
-}
-
-fn validate_rollout_health_gate(value: &str) -> Result<()> {
-    anyhow::ensure!(
-        matches!(
-            value,
-            "heartbeat_verified" | "manual_after_canary" | "manual_only"
-        ),
-        "--health-gate must be heartbeat_verified, manual_after_canary, or manual_only"
-    );
-    Ok(())
-}
-
-fn validate_rollout_policy_scope(scope_kind: &str, scope_value: Option<&str>) -> Result<()> {
-    let scope_kind = scope_kind.trim();
-    anyhow::ensure!(
-        matches!(scope_kind, "global" | "tag" | "provider"),
-        "--scope-kind must be global, tag, or provider"
-    );
-    if scope_kind == "global" {
-        anyhow::ensure!(
-            scope_value.map(str::trim).unwrap_or("").is_empty(),
-            "--scope-value is not allowed for global rollout policies"
-        );
-    } else {
-        anyhow::ensure!(
-            !scope_value.map(str::trim).unwrap_or("").is_empty(),
-            "--scope-value is required unless --scope-kind global"
-        );
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn submit_rollout_operation(
-    api_url: &str,
-    token: Option<&str>,
-    command_label: &str,
-    operation: JobCommand,
-    clients: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    force_unprivileged: bool,
-    confirmed: bool,
-) -> Result<()> {
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let selector_expression = selector_expression_from_targets(&clients, &[]);
-    let privilege = build_privilege_for_job_command(
-        &clients,
-        &operation,
-        command_label,
-        &selector_expression,
-        &password,
-        &salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        None,
-        force_unprivileged,
-        true,
-    )?;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/jobs",
-            token,
-            &serde_json::json!({
-                "command": command_label,
-                "argv": [],
-                "operation": operation,
-                "selector_expression": selector_expression,
-                "privileged": true,
-                "destructive": false,
-                "confirmed": confirmed,
-                "force_unprivileged": force_unprivileged,
-                "timeout_secs": timeout_secs,
-                "privilege_assertion": privilege.privilege_assertion,
-            }),
-        )?
-    );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_activate(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: String,
-    batch_size: Option<u16>,
-    clients: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    restart_agent: bool,
-    force_unprivileged: bool,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-activate requires --confirmed because it promotes staged binaries"
-    );
-    let rollout = load_rollout(api_url, token, &rollout_id)?;
-    let selected_clients = select_rollout_targets(
-        &rollout,
-        &clients,
-        batch_size.or(rollout_canary_batch_size(rollout.canary_count)),
-        &["completed"],
-        "no staged rollout targets are eligible for activation",
-    )?;
-    submit_rollout_operation(
-        api_url,
-        token,
-        "agent_update_activate",
-        JobCommand::AgentUpdateActivate {
-            staged_sha256_hex: rollout.artifact_sha256_hex,
-            restart_agent,
-        },
-        selected_clients,
-        password_env,
-        super_salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
-        confirmed,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn agent_update_rollout_rollback(
-    api_url: &str,
-    token: Option<&str>,
-    rollout_id: String,
-    rollback_sha256_hex: Option<String>,
-    clients: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    force_unprivileged: bool,
-    confirmed: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-rollout-rollback requires --confirmed because it restores rollback binaries"
-    );
-    let rollout = load_rollout(api_url, token, &rollout_id)?;
-    let selected_clients = select_rollout_targets(
-        &rollout,
-        &clients,
-        None,
-        &[
-            "activation_pending_restart",
-            "activation_failed",
-            "heartbeat_timeout",
-            "heartbeat_verified",
-        ],
-        "no activation-pending, activation-failed, heartbeat-timeout, or heartbeat-verified rollout targets are eligible for rollback",
-    )?;
-    let rollback_sha256_hex = rollback_sha256_hex
-        .as_deref()
-        .map(|value| validate_sha256_arg(value, "--rollback-sha256-hex"))
-        .transpose()?;
-    submit_rollout_operation(
-        api_url,
-        token,
-        "agent_update_rollback",
-        JobCommand::AgentUpdateRollback {
-            rollback_sha256_hex,
-        },
-        selected_clients,
-        password_env,
-        super_salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
-        confirmed,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_activate(
     api_url: &str,
@@ -1225,9 +818,7 @@ fn decode_fixed_hex(value: &str, byte_len: usize, label: &str) -> Result<[u8; 32
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_update_rollout_control, agent_update_rollout_policy_create,
-        build_update_artifact_upload_payload, build_update_signature_json, select_rollout_targets,
-        validate_update_input, AgentUpdateRolloutRecord, AgentUpdateRolloutTargetRecord,
+        build_update_artifact_upload_payload, build_update_signature_json, validate_update_input,
     };
     use ed25519_dalek::SigningKey;
     use vpsman_common::sign_update_artifact_hash;
@@ -1312,137 +903,5 @@ mod tests {
             .as_str()
             .is_some());
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn rollout_target_selection_prefers_worker_recommendations() {
-        let rollout = AgentUpdateRolloutRecord {
-            id: "rollout-a".to_string(),
-            artifact_sha256_hex: "ab".repeat(32),
-            canary_count: 1,
-            automation_targets: vec!["client-b".to_string()],
-            targets: vec![
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-a".to_string(),
-                    status: "completed".to_string(),
-                },
-                AgentUpdateRolloutTargetRecord {
-                    client_id: "client-b".to_string(),
-                    status: "completed".to_string(),
-                },
-            ],
-        };
-
-        let selected = select_rollout_targets(
-            &rollout,
-            &[],
-            Some(10),
-            &["completed"],
-            "no eligible targets",
-        )
-        .unwrap();
-
-        assert_eq!(selected, vec!["client-b"]);
-    }
-
-    #[test]
-    fn rollout_control_validation_fails_before_http_for_bad_requests() {
-        assert!(agent_update_rollout_control(
-            "http://127.0.0.1:1",
-            None,
-            "rollout-a".to_string(),
-            true,
-            true,
-            None,
-            None,
-            true,
-        )
-        .is_err());
-        assert!(agent_update_rollout_control(
-            "http://127.0.0.1:1",
-            None,
-            "rollout-a".to_string(),
-            false,
-            false,
-            None,
-            Some("invalid_gate".to_string()),
-            true,
-        )
-        .is_err());
-        assert!(agent_update_rollout_control(
-            "http://127.0.0.1:1",
-            None,
-            "rollout-a".to_string(),
-            true,
-            false,
-            None,
-            Some("manual_only".to_string()),
-            false,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn rollout_policy_create_validation_fails_before_http_for_bad_requests() {
-        assert!(agent_update_rollout_policy_create(
-            "http://127.0.0.1:1",
-            None,
-            "stable".to_string(),
-            "global".to_string(),
-            Some("unexpected".to_string()),
-            Some("stable".to_string()),
-            Some(1),
-            Some("heartbeat_verified".to_string()),
-            0,
-            true,
-            None,
-            true,
-        )
-        .is_err());
-        assert!(agent_update_rollout_policy_create(
-            "http://127.0.0.1:1",
-            None,
-            "stable".to_string(),
-            "provider".to_string(),
-            Some("hetzner".to_string()),
-            Some("stable".to_string()),
-            Some(10001),
-            Some("heartbeat_verified".to_string()),
-            0,
-            true,
-            None,
-            true,
-        )
-        .is_err());
-        assert!(agent_update_rollout_policy_create(
-            "http://127.0.0.1:1",
-            None,
-            "stable".to_string(),
-            "provider".to_string(),
-            Some("hetzner".to_string()),
-            Some("stable".to_string()),
-            Some(1),
-            Some("bad_gate".to_string()),
-            0,
-            true,
-            None,
-            true,
-        )
-        .is_err());
-        assert!(agent_update_rollout_policy_create(
-            "http://127.0.0.1:1",
-            None,
-            "stable".to_string(),
-            "provider".to_string(),
-            Some("hetzner".to_string()),
-            Some("stable".to_string()),
-            Some(1),
-            Some("heartbeat_verified".to_string()),
-            0,
-            true,
-            None,
-            false,
-        )
-        .is_err());
     }
 }

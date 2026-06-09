@@ -59,7 +59,6 @@ mod vty_terminal;
 mod vty_terminal_sessions;
 mod vty_tunnel_plan;
 mod vty_update_releases;
-mod vty_update_rollouts;
 
 use anyhow::Result;
 use clap::Parser;

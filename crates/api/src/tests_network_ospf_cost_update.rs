@@ -103,7 +103,6 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
             bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,

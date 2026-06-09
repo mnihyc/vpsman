@@ -21,7 +21,6 @@ pub(crate) fn build_privilege_for_job_command(
     salt_hex: &str,
     ttl_secs: u64,
     timeout_secs: u64,
-    canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
 ) -> Result<BuiltJobPrivilege> {
@@ -35,7 +34,6 @@ pub(crate) fn build_privilege_for_job_command(
         salt_hex,
         ttl_secs,
         timeout_secs,
-        canary_count,
         force_unprivileged,
         privileged,
     )
@@ -51,7 +49,6 @@ pub(crate) fn build_privilege_for_payload_hash(
     salt_hex: &str,
     ttl_secs: u64,
     timeout_secs: u64,
-    canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
 ) -> Result<BuiltJobPrivilege> {
@@ -66,7 +63,6 @@ pub(crate) fn build_privilege_for_payload_hash(
         operation_payload_hash: &payload_hash_hex,
         resolved_targets: client_ids,
         timeout_secs,
-        canary_count,
         force_unprivileged,
         privileged,
     })?;
@@ -173,7 +169,6 @@ struct JobPrivilegeIntent<'a> {
     operation_payload_hash: &'a str,
     resolved_targets: Vec<&'a str>,
     timeout_secs: u64,
-    canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
 }
@@ -215,7 +210,6 @@ struct JobPrivilegeIntentInput<'a> {
     operation_payload_hash: &'a str,
     resolved_targets: &'a [String],
     timeout_secs: u64,
-    canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
 }
@@ -235,7 +229,6 @@ fn canonical_job_privilege_intent(input: JobPrivilegeIntentInput<'_>) -> Result<
         operation_payload_hash: input.operation_payload_hash,
         resolved_targets,
         timeout_secs: input.timeout_secs.clamp(1, 3600),
-        canary_count: input.canary_count,
         force_unprivileged: input.force_unprivileged,
         privileged: input.privileged,
     })?)
@@ -370,7 +363,6 @@ mod tests {
             "01020304",
             600,
             30,
-            None,
             false,
             true,
         )
@@ -389,7 +381,6 @@ mod tests {
             operation_payload_hash: &payload_hash_hex,
             resolved_targets: &clients,
             timeout_secs: 30,
-            canary_count: None,
             force_unprivileged: false,
             privileged: true,
         })

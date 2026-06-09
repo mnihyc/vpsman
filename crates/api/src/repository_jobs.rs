@@ -7,20 +7,15 @@ use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::model::*;
-use crate::model_rollout_policies::ResolvedAgentUpdateRolloutPolicy;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
-use crate::repository_rollouts::{
-    insert_postgres_agent_update_rollout, record_memory_agent_update_rollout,
-    rollout_status_for_job_status, rollout_target_summary,
-};
 use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
 use crate::{unix_now, TargetDispatchOutcome};
 
 fn agent_update_activation_failure_status(status: &str) -> bool {
     matches!(
         status,
-        "failed" | "dispatch_failed" | "rejected_by_agent" | "timed_out" | "canceled"
+        "failed" | "dispatch_failed" | "rejected_by_agent" | "timed_out"
     )
 }
 
@@ -624,7 +619,7 @@ impl Repository {
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
                     created_at: created_at.clone(),
-                    completed_at: None,
+                    completed_at: Some(created_at.clone()),
                 });
                 if let Some(key) = request.idempotency_key.as_deref() {
                     memory
@@ -668,9 +663,9 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, idempotency_key,
-                        reconnect_policy
+                        reconnect_policy, completed_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{"duplicate_delivery":"ignore_completed","resume_outputs":true,"cancel_on_disconnect":false}'::jsonb))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb), now())
                     "#,
                 )
                 .bind(job_id)
@@ -680,7 +675,7 @@ impl Repository {
                 .bind("rejected_authorization_required")
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
-                .bind(operation.as_ref().map(sqlx::types::Json))
+                .bind(operation.clone().map(sqlx::types::Json))
                 .bind(request.idempotency_key.as_deref())
                 .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
@@ -735,7 +730,6 @@ impl Repository {
         Ok(job_id)
     }
 
-    #[cfg(test)]
     pub(crate) async fn record_dispatching_job(
         &self,
         request: &CreateJobRequest,
@@ -743,30 +737,11 @@ impl Repository {
         operator: &AuthContext,
         resolved_targets: &[String],
     ) -> Result<Uuid> {
-        self.record_dispatching_job_with_rollout_policy(
+        self.record_dispatching_job_with_source(
             request,
             command_hash,
             operator,
             resolved_targets,
-            &ResolvedAgentUpdateRolloutPolicy::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn record_dispatching_job_with_rollout_policy(
-        &self,
-        request: &CreateJobRequest,
-        command_hash: &str,
-        operator: &AuthContext,
-        resolved_targets: &[String],
-        rollout_policy: &ResolvedAgentUpdateRolloutPolicy,
-    ) -> Result<Uuid> {
-        self.record_dispatching_job_with_rollout_policy_and_source(
-            request,
-            command_hash,
-            operator,
-            resolved_targets,
-            rollout_policy,
             None,
         )
         .await
@@ -780,24 +755,22 @@ impl Repository {
         resolved_targets: &[String],
         source_schedule_id: Uuid,
     ) -> Result<Uuid> {
-        self.record_dispatching_job_with_rollout_policy_and_source(
+        self.record_dispatching_job_with_source(
             request,
             command_hash,
             operator,
             resolved_targets,
-            &ResolvedAgentUpdateRolloutPolicy::default(),
             Some(source_schedule_id),
         )
         .await
     }
 
-    async fn record_dispatching_job_with_rollout_policy_and_source(
+    async fn record_dispatching_job_with_source(
         &self,
         request: &CreateJobRequest,
         command_hash: &str,
         operator: &AuthContext,
         resolved_targets: &[String],
-        rollout_policy: &ResolvedAgentUpdateRolloutPolicy,
         source_schedule_id: Option<Uuid>,
     ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
@@ -809,11 +782,8 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
-            "canary_count": request.canary_count,
             "idempotency_key": request.idempotency_key,
             "reconnect_policy": request.reconnect_policy,
-            "rollout_policy_id": rollout_policy.policy_id,
-            "rollout_policy_name": &rollout_policy.policy_name,
             "source_schedule_id": source_schedule_id,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
@@ -876,32 +846,6 @@ impl Repository {
                     metadata,
                     created_at: created_at.clone(),
                 });
-                if let JobCommand::UpdateAgent {
-                    sha256_hex,
-                    artifact_signature_hex,
-                    artifact_signing_key_hex,
-                    ..
-                } = &operation
-                {
-                    record_memory_agent_update_rollout(
-                        memory,
-                        job_id,
-                        operator,
-                        command_hash,
-                        resolved_targets,
-                        sha256_hex,
-                        artifact_signature_hex.is_some(),
-                        artifact_signing_key_hex.as_deref(),
-                        request
-                            .canary_count
-                            .or(rollout_policy.canary_count)
-                            .unwrap_or(0)
-                            .clamp(0, resolved_targets.len() as i32),
-                        rollout_policy,
-                        &created_at,
-                    )
-                    .await;
-                }
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -912,7 +856,7 @@ impl Repository {
                         target_count, payload_hash, operation, source_schedule_id, idempotency_key,
                         reconnect_policy
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true,"cancel_on_disconnect":false}'::jsonb))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb))
                     "#,
                 )
                 .bind(job_id)
@@ -922,7 +866,7 @@ impl Repository {
                 .bind("dispatching")
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
-                .bind(sqlx::types::Json(&operation))
+                .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
                 .bind(request.idempotency_key.as_deref())
                 .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
@@ -959,31 +903,6 @@ impl Repository {
                 .bind(metadata)
                 .execute(&mut *tx)
                 .await?;
-                if let JobCommand::UpdateAgent {
-                    sha256_hex,
-                    artifact_signature_hex,
-                    artifact_signing_key_hex,
-                    ..
-                } = &operation
-                {
-                    insert_postgres_agent_update_rollout(
-                        &mut tx,
-                        job_id,
-                        operator,
-                        command_hash,
-                        resolved_targets,
-                        sha256_hex,
-                        artifact_signature_hex.is_some(),
-                        artifact_signing_key_hex.as_deref(),
-                        request
-                            .canary_count
-                            .or(rollout_policy.canary_count)
-                            .unwrap_or(0)
-                            .clamp(0, resolved_targets.len() as i32),
-                        rollout_policy,
-                    )
-                    .await?;
-                }
                 tx.commit().await?;
             }
         }
@@ -1000,6 +919,49 @@ impl Repository {
         })
         .await?;
         Ok(job_id)
+    }
+
+    pub(crate) async fn mark_job_targets_dispatching(
+        &self,
+        job_id: Uuid,
+        client_ids: &[String],
+    ) -> Result<()> {
+        if client_ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let started_at = unix_now().to_string();
+                let mut targets = memory.job_targets.write().await;
+                for target in targets.iter_mut().filter(|target| {
+                    target.job_id == job_id
+                        && client_ids
+                            .iter()
+                            .any(|client_id| client_id == &target.client_id)
+                        && target.completed_at.is_none()
+                }) {
+                    target.status = "dispatching".to_string();
+                    target.started_at.get_or_insert_with(|| started_at.clone());
+                }
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'dispatching',
+                        started_at = COALESCE(started_at, now())
+                    WHERE job_id = $1
+                      AND client_id = ANY($2)
+                      AND completed_at IS NULL
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_ids.to_vec())
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn update_job_target_result(
@@ -1025,29 +987,6 @@ impl Repository {
                         .started_at
                         .get_or_insert_with(|| completed_at.clone());
                     target.completed_at = Some(completed_at.clone());
-                }
-                if let Some(rollout) = memory
-                    .agent_update_rollouts
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|rollout| rollout.job_id == job_id)
-                {
-                    if let Some(target) = rollout
-                        .targets
-                        .iter_mut()
-                        .find(|target| target.client_id == client_id)
-                    {
-                        target.status = outcome.status.clone();
-                        target.exit_code = outcome.exit_code;
-                        target.updated_at = completed_at.clone();
-                    }
-                    let (completed_count, failed_count, pending_count) =
-                        rollout_target_summary(&rollout.targets);
-                    rollout.completed_count = completed_count;
-                    rollout.failed_count = failed_count;
-                    rollout.pending_count = pending_count;
-                    rollout.updated_at = completed_at.clone();
                 }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
@@ -1131,34 +1070,6 @@ impl Repository {
                 .bind(&outcome.status)
                 .bind(&outcome.message)
                 .bind(outcome.exit_code)
-                .execute(pool)
-                .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE agent_update_rollout_targets target
-                    SET status = $3,
-                        exit_code = $4,
-                        updated_at = now()
-                    FROM agent_update_rollouts rollout
-                    WHERE target.rollout_id = rollout.id
-                      AND rollout.job_id = $1
-                      AND target.client_id = $2
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .bind(&outcome.status)
-                .bind(outcome.exit_code)
-                .execute(pool)
-                .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE agent_update_rollouts
-                    SET updated_at = now()
-                    WHERE job_id = $1
-                    "#,
-                )
-                .bind(job_id)
                 .execute(pool)
                 .await?;
                 sqlx::query(
@@ -1266,16 +1177,6 @@ impl Repository {
                     job.status = status.to_string();
                     job.completed_at = Some(completed_at);
                 }
-                if let Some(rollout) = memory
-                    .agent_update_rollouts
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|rollout| rollout.job_id == job_id)
-                {
-                    rollout.status = rollout_status_for_job_status(status).to_string();
-                    rollout.updated_at = unix_now().to_string();
-                }
                 if status == "completed" {
                     memory.job_operations.read().await.get(&job_id).cloned()
                 } else {
@@ -1292,18 +1193,6 @@ impl Repository {
                 )
                 .bind(job_id)
                 .bind(status)
-                .execute(pool)
-                .await?;
-                sqlx::query(
-                    r#"
-                    UPDATE agent_update_rollouts
-                    SET status = $2,
-                        updated_at = now()
-                    WHERE job_id = $1
-                    "#,
-                )
-                .bind(job_id)
-                .bind(rollout_status_for_job_status(status))
                 .execute(pool)
                 .await?;
                 if status == "completed" {

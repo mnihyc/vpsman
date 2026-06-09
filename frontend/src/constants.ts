@@ -84,15 +84,15 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "status", label: "Status", description: "Active data-source selections and health" },
   ],
   Jobs: [
-    { id: "history", label: "History", description: "Command requests, targets, output, and cancellation" },
+    { id: "history", label: "History", description: "Command requests, targets, outputs, and history" },
     { id: "dispatch", label: "Dispatch", description: "Compose privileged commands and terminal actions" },
     { id: "files", label: "Files", description: "Browse, edit, upload, download, and manage one VPS filesystem" },
     { id: "multi_files", label: "Multi files", description: "Bulk file actions by selector expression and policy" },
-    { id: "updates", label: "Updates", description: "Agent releases, rollout policies, and rollout state" },
+    { id: "updates", label: "Updates", description: "Agent releases and update jobs" },
     { id: "transfers", label: "Transfer history", description: "Source artifacts, handoffs, and resumable transfer sessions" },
     { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
     { id: "processes", label: "Processes", description: "Process supervisor inventory" },
-    { id: "approvals", label: "Schedule runs", description: "Due schedule jobs and rollout actions" },
+    { id: "approvals", label: "Schedule runs", description: "Due schedule jobs and queued actions" },
   ],
   Schedules: [
     { id: "registry", label: "Schedule registry", description: "Server-side schedules and due-run records" },

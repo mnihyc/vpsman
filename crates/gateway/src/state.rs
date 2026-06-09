@@ -2,8 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use vpsman_common::{
-    CommandOutput, GatewayCommandCancelResult, GatewayCommandDispatchResult, JobAck, JobRequest,
-    PrivilegeAssertionReplayCache,
+    CommandOutput, GatewayCommandDispatchResult, JobAck, JobRequest, PrivilegeAssertionReplayCache,
 };
 
 #[derive(Clone)]
@@ -29,19 +28,11 @@ impl Default for GatewayState {
 pub(crate) struct GatewaySession {
     pub(crate) session_id: uuid::Uuid,
     pub(crate) sender: mpsc::Sender<GatewayCommand>,
-    pub(crate) cancel_sender: mpsc::Sender<GatewayCommandCancel>,
 }
 
 pub(crate) struct GatewayCommand {
     pub(crate) request: JobRequest,
     pub(crate) response: oneshot::Sender<GatewayCommandDispatchResult>,
-}
-
-pub(crate) struct GatewayCommandCancel {
-    pub(crate) client_id: String,
-    pub(crate) job_id: uuid::Uuid,
-    pub(crate) reason: Option<String>,
-    pub(crate) response: oneshot::Sender<GatewayCommandCancelResult>,
 }
 
 pub(crate) struct PendingCommand {

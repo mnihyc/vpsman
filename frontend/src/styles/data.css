@@ -802,15 +802,6 @@
     ) minmax(110px, 0.4fr);
 }
 
-.rolloutGrid {
-  grid-template-columns:
-    minmax(170px, 1fr) minmax(150px, 0.8fr) minmax(110px, 0.6fr) minmax(
-      150px,
-      0.8fr
-    )
-    minmax(120px, 0.7fr) minmax(160px, 0.8fr) minmax(250px, 1.1fr);
-}
-
 .releaseGrid {
   grid-template-columns:
     minmax(170px, 1fr) minmax(150px, 0.7fr) minmax(120px, 0.6fr) minmax(
@@ -1429,11 +1420,6 @@
   grid-template-columns: minmax(140px, 200px);
   gap: 12px;
   padding: 18px;
-}
-
-.rolloutControls {
-  grid-template-columns: repeat(3, minmax(120px, 190px));
-  padding-top: 0;
 }
 
 .approvalControls label {

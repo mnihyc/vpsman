@@ -257,7 +257,6 @@ async fn backup_job_dispatch_requires_confirmation() {
             recipient_public_key_hex: None,
         }),
         timeout_secs: Some(30),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -307,7 +306,6 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         argv: Vec::new(),
         operation: Some(operation.clone()),
         timeout_secs: Some(30),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -318,13 +316,14 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
     let (status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(request))
         .await
         .unwrap();
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "dispatching");
     let dispatch = gateway_task.await.unwrap();
+    wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
 
-    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.status, "completed");
     assert_eq!(dispatch.client_id, "client-a");
     assert_eq!(
         encode_json(&dispatch.request.command).unwrap(),
@@ -401,7 +400,6 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         argv: Vec::new(),
         operation: Some(operation.clone()),
         timeout_secs: Some(30),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -412,10 +410,11 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let (_status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(job_request))
         .await
         .unwrap();
+    assert_eq!(response.status, "dispatching");
     let _dispatch = gateway_task.await.unwrap();
+    wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
 
-    assert_eq!(response.status, "completed");
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].id, manual_backup.id);
     assert_eq!(backups[0].note.as_deref(), Some("operator-requested"));
@@ -1352,7 +1351,7 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
     }
 }
 
-async fn seed_backup_agent(repo: &Repository) {
+async fn seed_backup_agent(repo: &crate::repository::Repository) {
     if let Repository::Memory(memory) = repo {
         upsert_memory_agent(
             &memory.agents,
@@ -1371,7 +1370,7 @@ async fn seed_backup_agent(repo: &Repository) {
 }
 
 async fn create_test_backup_request(
-    repo: &Repository,
+    repo: &crate::repository::Repository,
     state: AppState,
 ) -> crate::model::BackupRequestView {
     let request = CreateBackupRequest {
@@ -1391,7 +1390,7 @@ async fn create_test_backup_request(
 }
 
 async fn seed_policy_backup_artifact(
-    repo: &Repository,
+    repo: &crate::repository::Repository,
     store: &BackupObjectStore,
     schedule_id: Uuid,
     label: &str,
@@ -1480,6 +1479,24 @@ async fn seed_policy_backup_artifact(
         }
     }
     object_key
+}
+
+async fn wait_for_job_status(
+    repo: &crate::repository::Repository,
+    job_id: uuid::Uuid,
+    expected: &str,
+) {
+    for _ in 0..50 {
+        let jobs = repo.list_jobs(100).await.unwrap();
+        if jobs
+            .iter()
+            .any(|job| job.id == job_id && job.status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("job {job_id} did not reach status {expected}");
 }
 
 fn backup_test_operator() -> AuthContext {

@@ -345,10 +345,6 @@ export function App() {
                 agents={visibleAgents}
                 error={dashboard.jobsError}
                 agentUpdateReleases={dashboard.agentUpdateReleases}
-                agentUpdateRolloutPolicies={
-                  dashboard.agentUpdateRolloutPolicies
-                }
-                agentUpdateRollouts={dashboard.agentUpdateRollouts}
                 jobs={dashboard.jobs}
                 commandTemplates={dashboard.commandTemplates}
                 fileTransfers={dashboard.fileTransfers}
@@ -356,18 +352,11 @@ export function App() {
                 lastJobOutputEvent={dashboard.lastJobOutputEvent}
                 lastTerminalOutputEvent={dashboard.lastTerminalOutputEvent}
                 loading={dashboard.jobsLoading}
-                onCancelJob={dashboard.cancelJob}
                 onCreateFileTransferHandoff={
                   dashboard.createFileTransferHandoff
                 }
                 onCreateJob={dashboard.createJob}
                 onCreateAgentUpdateRelease={dashboard.createAgentUpdateRelease}
-                onCreateAgentUpdateRolloutPolicy={
-                  dashboard.createAgentUpdateRolloutPolicy
-                }
-                onUpdateAgentUpdateRolloutControl={
-                  dashboard.updateAgentUpdateRolloutControl
-                }
                 onUploadAgentUpdateArtifact={
                   dashboard.uploadAgentUpdateArtifact
                 }

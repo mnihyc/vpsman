@@ -195,7 +195,6 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
         &privilege_context.salt_hex,
         request.privilege_ttl_secs,
         request.timeout_secs,
-        None,
         request.force_unprivileged,
         true,
     )?;

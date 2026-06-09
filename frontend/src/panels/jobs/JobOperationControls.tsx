@@ -158,7 +158,6 @@ export function JobOperationEditor({
   setUpdateActivationSha256Hex,
   setUpdateRestartAgent,
   setUpdateRollbackSha256Hex,
-  setUpdateCanaryCount,
   setUpdateSha256Hex,
   supervisorAction,
   supervisorArgv,
@@ -176,7 +175,6 @@ export function JobOperationEditor({
   updateActivationSha256Hex,
   updateRestartAgent,
   updateRollbackSha256Hex,
-  updateCanaryCount,
   updateSha256Hex,
 }: {
   backupIncludeConfig: boolean;
@@ -264,7 +262,6 @@ export function JobOperationEditor({
   setUpdateActivationSha256Hex: (value: string) => void;
   setUpdateRestartAgent: (value: boolean) => void;
   setUpdateRollbackSha256Hex: (value: string) => void;
-  setUpdateCanaryCount: (value: number) => void;
   setUpdateSha256Hex: (value: string) => void;
   supervisorAction: SupervisorAction;
   supervisorArgv: string;
@@ -282,7 +279,6 @@ export function JobOperationEditor({
   updateActivationSha256Hex: string;
   updateRestartAgent: boolean;
   updateRollbackSha256Hex: string;
-  updateCanaryCount: number;
   updateSha256Hex: string;
 }) {
   if (mode === "shell") {
@@ -745,17 +741,6 @@ export function JobOperationEditor({
             value={updateArtifactSigningKeyHex}
           />
         </label>
-        <label>
-          <span>Canary</span>
-          <input
-            aria-label="Agent update canary count"
-            max={10000}
-            min={0}
-            onChange={(event) => setUpdateCanaryCount(Number(event.target.value))}
-            type="number"
-            value={updateCanaryCount}
-          />
-        </label>
       </div>
     );
   }
@@ -793,17 +778,6 @@ export function JobOperationEditor({
             type="checkbox"
           />
           <span>Restart agent</span>
-        </label>
-        <label>
-          <span>Canary</span>
-          <input
-            aria-label="Agent update check canary count"
-            max={10000}
-            min={0}
-            onChange={(event) => setUpdateCanaryCount(Number(event.target.value))}
-            type="number"
-            value={updateCanaryCount}
-          />
         </label>
       </div>
     );

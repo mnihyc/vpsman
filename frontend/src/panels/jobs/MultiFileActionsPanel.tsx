@@ -245,15 +245,13 @@ export function MultiFileActionsPanel({
         argv: [],
         operation: confirmation.operation,
         timeout_secs: BULK_JOB_TIMEOUT_SECS,
-        canary_count: null,
-        force_unprivileged: false,
+            force_unprivileged: false,
         privileged: true,
         idempotency_key: null,
         reconnect_policy: {
           duplicate_delivery: "ignore_completed",
           resume_outputs: true,
-          cancel_on_disconnect: false,
-        },
+          },
         privilege_assertion: built.privilegeAssertion,
       });
       let outputs: JobOutputRecord[] = [];

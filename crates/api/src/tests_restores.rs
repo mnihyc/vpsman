@@ -22,6 +22,24 @@ use crate::{
     state::AppState,
 };
 
+async fn wait_for_job_status(
+    repo: &crate::repository::Repository,
+    job_id: uuid::Uuid,
+    expected: &str,
+) {
+    for _ in 0..50 {
+        let jobs = repo.list_jobs(100).await.unwrap();
+        if jobs
+            .iter()
+            .any(|job| job.id == job_id && job.status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("job {job_id} did not reach status {expected}");
+}
+
 #[test]
 fn restore_job_validation_requires_safe_inline_archive() {
     let source_backup_request_id = Uuid::new_v4();
@@ -278,7 +296,6 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         argv: Vec::new(),
         operation: Some(operation),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -293,6 +310,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
     )
     .await
     .unwrap();
+    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
     let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
@@ -300,7 +318,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "degraded_unprivileged");
+    assert_eq!(response.status, "dispatching");
     assert_eq!(targets[0].status, "degraded_unprivileged");
     assert_eq!(
         status_output["reason"],
@@ -330,7 +348,7 @@ async fn seeded_restore_repo() -> Repository {
     repo
 }
 
-async fn create_source_backup(repo: &Repository) -> Uuid {
+async fn create_source_backup(repo: &crate::repository::Repository) -> Uuid {
     let request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],

@@ -82,7 +82,6 @@ pub(crate) fn submit_privileged_operation(
         &salt_hex,
         request.privilege_ttl_secs,
         request.timeout_secs,
-        None,
         request.force_unprivileged,
         true,
     )?;

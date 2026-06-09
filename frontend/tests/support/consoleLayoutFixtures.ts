@@ -1190,64 +1190,6 @@ const schedules = [
   },
 ];
 
-const agentUpdateRollouts = [
-  {
-    activation_policy: "manual_staging_only",
-    actor_id: null,
-    artifact_sha256_hex: "d".repeat(64),
-    artifact_signature_provided: true,
-    artifact_signing_key_sha256_hex: "e".repeat(64),
-    canary_count: 0,
-    completed_count: 1,
-    created_at: "2026-05-31T10:09:55Z",
-    failed_count: 0,
-    heartbeat_timeout_secs: null,
-    automation_paused: false,
-    automation_pause_reason: null,
-    automation_health_gate: "heartbeat_verified",
-    automation_lease_owner: null,
-    automation_lease_expires_at: null,
-    automation_status: "ready_activate_canary",
-    automation_next_action: "operator_activate_batch",
-    automation_blocker:
-      "privileged rollout dispatch requires a saved gateway-approved rollout action; use direct panel or CLI activation/rollback",
-    automation_targets: ["agent-sfo-01"],
-    automation_updated_at: "2026-05-31T10:10:01Z",
-    id: "12121212-3434-4567-8abc-defdefdefdef",
-    job_id: "66666666-aaaa-4bbb-8ccc-dddddddddddd",
-    pending_count: 0,
-    status: "staged",
-    target_count: 1,
-    targets: [
-      {
-        client_id: "agent-sfo-01",
-        exit_code: 0,
-        status: "completed",
-        updated_at: "2026-05-31T10:10:00Z",
-      },
-    ],
-    updated_at: "2026-05-31T10:10:00Z",
-  },
-];
-
-const agentUpdateRolloutPolicies = [
-  {
-    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    automation_health_gate: "heartbeat_verified",
-    canary_count: 1,
-    channel: "stable",
-    created_at: "2026-05-31T10:08:00Z",
-    enabled: true,
-    id: "34343434-5656-4789-8abc-defdefdefdef",
-    name: "stable-default",
-    notes: "fixture policy preset for smoke coverage",
-    priority: 0,
-    scope_kind: "global",
-    scope_value: null,
-    updated_at: "2026-05-31T10:08:00Z",
-  },
-];
-
 const agentUpdateReleases = [
   {
     actor_id: null,
@@ -1628,8 +1570,6 @@ export async function installConsoleApiMock(page: Page) {
   await page.addInitScript(
     ({
       agentsFixture,
-      agentUpdateRolloutPoliciesFixture,
-      agentUpdateRolloutsFixture,
       agentUpdateReleasesFixture,
       artifactsFixture,
       backupsFixture,
@@ -1673,7 +1613,6 @@ export async function installConsoleApiMock(page: Page) {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
         agentDeletes: [] as unknown[],
-        agentUpdateRolloutPolicies: [] as unknown[],
         bulkResolve: [] as unknown[],
         dataSourcePresetAssignments: [] as unknown[],
         dataSourcePresets: [] as unknown[],
@@ -2638,48 +2577,6 @@ export async function installConsoleApiMock(page: Page) {
             updated_at: "2026-06-02T10:04:00Z",
           });
         }
-        if (pathname === "/api/v1/agent-update-rollouts" && method === "GET") {
-          return jsonResponse(agentUpdateRolloutsFixture);
-        }
-        if (
-          pathname === "/api/v1/agent-update-rollout-policies" &&
-          method === "GET"
-        ) {
-          return jsonResponse(agentUpdateRolloutPoliciesFixture);
-        }
-        if (
-          pathname === "/api/v1/agent-update-rollout-policies" &&
-          method === "POST"
-        ) {
-          const body = await readJsonBody(input, init);
-          requests.agentUpdateRolloutPolicies.push(body);
-          const request = body as {
-            automation_health_gate?: string | null;
-            canary_count?: number | null;
-            channel?: string | null;
-            enabled?: boolean;
-            name?: string;
-            notes?: string | null;
-            priority?: number;
-            scope_kind?: string;
-            scope_value?: string | null;
-          };
-          return jsonResponse({
-            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-            automation_health_gate: request.automation_health_gate ?? null,
-            canary_count: request.canary_count ?? null,
-            channel: request.channel ?? null,
-            created_at: "2026-06-02T10:04:00Z",
-            enabled: request.enabled ?? true,
-            id: "45454545-5656-4789-8abc-defdefdefdef",
-            name: request.name ?? "policy",
-            notes: request.notes ?? null,
-            priority: request.priority ?? 0,
-            scope_kind: request.scope_kind ?? "global",
-            scope_value: request.scope_value ?? null,
-            updated_at: "2026-06-02T10:04:00Z",
-          });
-        }
         if (pathname === "/api/v1/agent-update-releases" && method === "GET") {
           return jsonResponse(agentUpdateReleasesFixture);
         }
@@ -3358,8 +3255,6 @@ export async function installConsoleApiMock(page: Page) {
     },
     {
       agentsFixture: agents,
-      agentUpdateRolloutPoliciesFixture: agentUpdateRolloutPolicies,
-      agentUpdateRolloutsFixture: agentUpdateRollouts,
       agentUpdateReleasesFixture: agentUpdateReleases,
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,

@@ -77,7 +77,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await page.getByLabel("Schedule defer until").fill("2026-06-04T09:30");
   await page
     .getByLabel("Schedule defer reason")
-    .fill("Customer maintenance freeze for APAC packet-filter rollout");
+    .fill("Customer maintenance freeze for APAC packet-filter update");
   await activate(
     page
       .locator(".inlineOpsForm")
@@ -86,7 +86,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await expect(page.getByText("Confirm schedule defer")).toBeVisible();
   await expect(
     page.getByText(
-      "Customer maintenance freeze for APAC packet-filter rollout",
+      "Customer maintenance freeze for APAC packet-filter update",
     ),
   ).toBeVisible();
   await activate(
@@ -265,7 +265,6 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(impact.getByText(/more/)).toBeVisible();
 
   await composer.getByLabel("Timeout seconds").fill("120");
-  await composer.getByLabel("Canary count").fill("4");
   await activate(composer.getByRole("button", { name: "Dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);

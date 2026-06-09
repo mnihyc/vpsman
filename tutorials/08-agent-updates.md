@@ -84,7 +84,7 @@ non-stream JSON/base64 upload only for small compatibility workflows.
 Production deployments can restrict release policy:
 
 ```sh
-export VPSMAN_AGENT_UPDATE_ALLOWED_CHANNELS=stable,canary
+export VPSMAN_AGENT_UPDATE_ALLOWED_CHANNELS=stable,beta
 export VPSMAN_AGENT_UPDATE_TRUSTED_SIGNING_KEYS_HEX=<64_hex_public_key>
 ```
 
@@ -95,31 +95,11 @@ cargo run -p vpsctl -- agent-update-releases --limit 10
 cargo run -p vpsctl -- agent-update-release-latest --name vpsman-agent --channel stable
 ```
 
-## Configure Rollout Policy Presets
+## Dispatch A Direct Update Job
 
-Create reusable canary and automation-gate defaults by hierarchy:
-
-```sh
-cargo run -p vpsctl -- agent-update-rollout-policy-create \
-  --name hetzner-stable \
-  --scope-kind provider \
-  --scope-value hetzner \
-  --channel stable \
-  --canary-count 2 \
-  --health-gate manual_after_canary \
-  --priority 10 \
-  --confirmed
-
-cargo run -p vpsctl -- agent-update-rollout-policies --limit 10
-```
-
-The same command updates an existing policy with the same name. Scope can be
-`global`, `tag`, `pool`, or `provider`. Channel-specific policies apply when
-the staged artifact matches a registered release on that channel. Explicit
-`agent-update --canary-count` overrides the preset, and rollout rows show the
-applied policy id/name.
-
-## Stage An Update
+Agent update jobs follow the same model as other privileged jobs: resolve the
+targets, dispatch to every resolved VPS, then poll job/target/output endpoints
+for progress and results. There is no staged server-side promotion queue.
 
 ```sh
 cargo run -p vpsctl -- agent-update \
@@ -128,58 +108,26 @@ cargo run -p vpsctl -- agent-update \
   --artifact-signature-hex <128_hex_signature> \
   --artifact-signing-key-hex <64_hex_public_key> \
   --tags edge \
-  --canary-count 2 \
   --confirmed
 ```
 
 The agent downloads over HTTPS, verifies SHA-256, verifies the signature when a
-trusted key is pinned, stages the binary, and creates rollback material.
+trusted key is pinned, stages the binary, and creates local rollback material.
+Use normal job inspection commands to review progress:
+
+```sh
+cargo run -p vpsctl -- jobs --limit 20
+cargo run -p vpsctl -- job-targets --job-id <job_uuid>
+cargo run -p vpsctl -- job-outputs --job-id <job_uuid>
+cargo run -p vpsctl -- job-follow --job-id <job_uuid>
+```
 
 ## Activate Or Roll Back
 
-Operator-driven rollout batch:
+Activation and rollback are explicit privileged jobs. Dispatch them to the
+operator-reviewed targets just like any other mutating job.
 
-```sh
-cargo run -p vpsctl -- agent-update-rollouts --limit 10
-cargo run -p vpsctl -- agent-update-rollout-control \
-  --rollout-id <rollout_uuid> \
-  --health-gate manual_after_canary \
-  --confirmed
-cargo run -p vpsctl -- agent-update-rollout-activate \
-  --rollout-id <rollout_uuid> \
-  --batch-size 2 \
-  --restart-agent \
-  --confirmed
-```
-
-Pause a rollout during maintenance, then resume normal assisted
-recommendations:
-
-```sh
-cargo run -p vpsctl -- agent-update-rollout-control \
-  --rollout-id <rollout_uuid> \
-  --pause \
-  --pause-reason maintenance \
-  --confirmed
-cargo run -p vpsctl -- agent-update-rollout-control \
-  --rollout-id <rollout_uuid> \
-  --resume \
-  --health-gate heartbeat_verified \
-  --confirmed
-```
-
-Rollout control is metadata-only. It does not send the super password or allow
-the server to dispatch privileged activation without a request-bound privilege
-assertion verified by the private gateway. Use `manual_after_canary` to stop
-after the first verified canary, and `manual_only` when every promotion should
-be explicitly selected by an operator.
-
-The worker records rollout recommendations and timeout evidence, but
-activation and rollback are still explicit operator actions. Run
-`agent-update-rollout-activate` for the next reviewed batch and
-`agent-update-rollout-rollback` when a target should be recovered.
-
-Direct activation:
+Activate a staged binary:
 
 ```sh
 cargo run -p vpsctl -- agent-update-activate \
@@ -189,25 +137,26 @@ cargo run -p vpsctl -- agent-update-activate \
   --confirmed
 ```
 
-Roll back:
+Roll back to the local rollback binary:
 
 ```sh
-cargo run -p vpsctl -- agent-update-rollout-rollback --rollout-id <rollout_uuid> --confirmed
-cargo run -p vpsctl -- agent-update-rollback --rollback-sha256-hex <64_hex_rollback_sha256> --tags edge --confirmed
+cargo run -p vpsctl -- agent-update-rollback \
+  --rollback-sha256-hex <64_hex_rollback_sha256> \
+  --tags edge \
+  --confirmed
 ```
 
 Unprivileged targets report degraded mutation capability by default. Use
 `--force-unprivileged` only for a deliberate best-effort attempt.
 
-## Verify Rollout State
+## Verify Update State
 
 ```sh
-cargo run -p vpsctl -- agent-update-rollouts --limit 10
+cargo run -p vpsctl -- jobs --limit 20
 cargo run -p vpsctl -- audit --limit 50
 ```
 
-The API records activation-pending, activation-failed, heartbeat-verified,
-heartbeat-timeout, and rollback evidence. Rollout records also show pause
-state, health gate, and worker lease evidence without storing artifact URLs,
+The API records activation-pending, activation-failed, heartbeat-verified, and
+rollback evidence in job outputs and audit rows without storing artifact URLs,
 detached signatures, public signing keys, plaintext super password, or trust
-anchors.
+anchors in operator-facing lifecycle metadata.

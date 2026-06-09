@@ -14,18 +14,15 @@ use tokio::{
 use tracing::{debug, info, warn};
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, AgentHello, Frame, GatewayAgentHelloIngest,
-    GatewayCommandCancelResult, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
-    GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobAck, JobCancelRequest, MessageKind,
-    NoiseFrameStream, ServerHello, TelemetryEnvelope,
+    GatewayCommandOutputIngest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
+    GatewayTerminalOutputIngest, JobAck, MessageKind, NoiseFrameStream, ServerHello,
+    TelemetryEnvelope,
 };
 
 use crate::{
     api_client::GatewayControlClient,
     control::run_control_listener,
-    state::{
-        finish_pending_command, GatewayCommand, GatewayCommandCancel, GatewaySession, GatewayState,
-        PendingCommand,
-    },
+    state::{finish_pending_command, GatewayCommand, GatewaySession, GatewayState, PendingCommand},
 };
 
 #[derive(Clone, Debug, Parser)]
@@ -193,7 +190,6 @@ async fn handle_agent(
     let session_id = uuid::Uuid::new_v4();
     let mut client_id = None::<String>;
     let (command_tx, mut command_rx) = mpsc::channel::<GatewayCommand>(8);
-    let (cancel_tx, mut cancel_rx) = mpsc::channel::<GatewayCommandCancel>(8);
     let mut outbound_seq = 2_u64;
     let mut pending_command = None::<PendingCommand>;
 
@@ -212,7 +208,6 @@ async fn handle_agent(
                     remote_ip: &remote_ip,
                     session_id,
                     command_tx: &command_tx,
-                    cancel_tx: &cancel_tx,
                 };
                 if let Err(error) =
                     handle_agent_frame(&mut stream, context, &mut client_id, &mut pending_command, frame).await
@@ -248,21 +243,6 @@ async fn handle_agent(
                     next_output_seq: 0,
                     response: command.response,
                 });
-            }
-            cancel = cancel_rx.recv(), if client_id.is_some() => {
-                let Some(cancel) = cancel else {
-                    continue;
-                };
-                let result = forward_cancel_to_agent(
-                    &mut stream,
-                    &mut outbound_seq,
-                    pending_command.as_ref(),
-                    cancel,
-                )
-                .await;
-                if let Err(error) = result {
-                    break Err(error);
-                }
             }
         }
     };
@@ -311,7 +291,6 @@ struct AgentFrameContext<'a> {
     remote_ip: &'a str,
     session_id: uuid::Uuid,
     command_tx: &'a mpsc::Sender<GatewayCommand>,
-    cancel_tx: &'a mpsc::Sender<GatewayCommandCancel>,
 }
 
 async fn handle_agent_frame(
@@ -346,7 +325,6 @@ async fn handle_agent_frame(
                 GatewaySession {
                     session_id: context.session_id,
                     sender: context.command_tx.clone(),
-                    cancel_sender: context.cancel_tx.clone(),
                 },
             );
             context
@@ -459,40 +437,6 @@ async fn handle_agent_frame(
     Ok(())
 }
 
-async fn forward_cancel_to_agent(
-    stream: &mut NoiseFrameStream<TcpStream>,
-    outbound_seq: &mut u64,
-    pending_command: Option<&PendingCommand>,
-    cancel: GatewayCommandCancel,
-) -> Result<()> {
-    let canceled = pending_command.is_some_and(|pending| pending.job_id == cancel.job_id);
-    let message = if canceled {
-        let request = JobCancelRequest {
-            job_id: cancel.job_id,
-            reason: cancel.reason.clone(),
-        };
-        write_json_frame(
-            stream,
-            MessageKind::CommandCancel,
-            1,
-            *outbound_seq,
-            &request,
-        )
-        .await?;
-        *outbound_seq += 1;
-        "cancel forwarded to agent".to_string()
-    } else {
-        "job is not active on this gateway session".to_string()
-    };
-    let _ = cancel.response.send(GatewayCommandCancelResult {
-        client_id: cancel.client_id,
-        job_id: cancel.job_id,
-        canceled,
-        message,
-    });
-    Ok(())
-}
-
 fn session_end_reason(error: &anyhow::Error) -> String {
     let mut reason = error.to_string();
     reason.truncate(512);
@@ -579,15 +523,11 @@ mod tests {
         let newer_session_id = uuid::Uuid::new_v4();
         let (older_tx, _older_rx) = mpsc::channel(1);
         let (newer_tx, _newer_rx) = mpsc::channel(1);
-        let (older_cancel_tx, _older_cancel_rx) = mpsc::channel(1);
-        let (newer_cancel_tx, _newer_cancel_rx) = mpsc::channel(1);
-
         state.sessions.write().await.insert(
             "client-a".to_string(),
             GatewaySession {
                 session_id: older_session_id,
                 sender: older_tx,
-                cancel_sender: older_cancel_tx,
             },
         );
         state.sessions.write().await.insert(
@@ -595,7 +535,6 @@ mod tests {
             GatewaySession {
                 session_id: newer_session_id,
                 sender: newer_tx,
-                cancel_sender: newer_cancel_tx,
             },
         );
 

@@ -656,7 +656,6 @@ fn submit_network_job(
         salt_hex,
         ttl_secs,
         timeout_secs,
-        None,
         force_unprivileged,
         true,
     )?;

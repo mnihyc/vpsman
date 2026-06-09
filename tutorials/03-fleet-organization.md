@@ -10,7 +10,7 @@ cargo run -p vpsctl -- tag-create --name provider:provider-a
 cargo run -p vpsctl -- tag-create --name region:sfo
 cargo run -p vpsctl -- tag-create --name edge
 cargo run -p vpsctl -- tag-create --name bgp
-cargo run -p vpsctl -- tag-create --name canary
+cargo run -p vpsctl -- tag-create --name lab
 ```
 
 Assign agents:
@@ -30,7 +30,7 @@ Bulk operations should resolve the exact target set before dispatch:
 cargo run -p vpsctl -- bulk-resolve --tags edge
 cargo run -p vpsctl -- bulk-resolve --tags provider:provider-a,region:sfo
 cargo run -p vpsctl -- bulk-resolve --tags id:edge-01
-cargo run -p vpsctl -- bulk-resolve --clients edge-01 --tags canary
+cargo run -p vpsctl -- bulk-resolve --clients edge-01 --tags lab
 ```
 
 Use `id:<client_id>` or explicit client ids for destructive one-off work, and
@@ -186,7 +186,7 @@ exact targets, then dispatch.
 
 ## Operator Rules
 
-- Treat tags as operational intent: `edge`, `bgp`, `canary`, `backup-critical`.
+- Treat tags as operational intent: `edge`, `bgp`, `lab`, `backup-critical`.
 - Treat namespaced tags as infrastructure ownership: `provider:provider-a`,
   `country:US`, `region:sfo`, `pool:legacy`, or reseller/account labels.
 - Do not dispatch destructive work from a fuzzy mental target set. Resolve and

@@ -416,7 +416,7 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                   }))
                 }
                 placeholder={
-                  "provider:test\ncountry:lab\nname:canary\nid:agent-dev-"
+                  "provider:test\ncountry:lab\nname:lab\nid:agent-dev-"
                 }
                 rows={5}
                 value={draft.dashboard_curve_exclusions.join("\n")}

@@ -57,7 +57,7 @@ CREATE TABLE jobs (
     operation JSONB,
     source_schedule_id UUID REFERENCES schedules(id),
     idempotency_key TEXT,
-    reconnect_policy JSONB NOT NULL DEFAULT '{"duplicate_delivery":"ignore_completed","resume_outputs":true,"cancel_on_disconnect":false}'::jsonb,
+    reconnect_policy JSONB NOT NULL DEFAULT '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ
 );

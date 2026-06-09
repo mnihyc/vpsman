@@ -13,7 +13,6 @@ pub(crate) struct JobPrivilegeIntent<'a> {
     operation_payload_hash: &'a str,
     resolved_targets: Vec<&'a str>,
     timeout_secs: u64,
-    canary_count: Option<i32>,
     force_unprivileged: bool,
     privileged: bool,
 }
@@ -28,7 +27,6 @@ impl<'a> JobPrivilegeIntent<'a> {
             operation_payload_hash: input.operation_payload_hash,
             resolved_targets: sorted_refs(input.resolved_targets),
             timeout_secs: input.timeout_secs.clamp(1, 3600),
-            canary_count: input.canary_count,
             force_unprivileged: input.force_unprivileged,
             privileged: input.privileged,
         }
@@ -41,7 +39,6 @@ pub(crate) struct JobPrivilegeIntentInput<'a> {
     pub(crate) operation_payload_hash: &'a str,
     pub(crate) resolved_targets: &'a [String],
     pub(crate) timeout_secs: u64,
-    pub(crate) canary_count: Option<i32>,
     pub(crate) force_unprivileged: bool,
     pub(crate) privileged: bool,
 }

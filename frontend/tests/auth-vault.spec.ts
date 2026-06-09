@@ -252,7 +252,6 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
     "operator-sessions",
     "gateway-sessions",
     "jobs",
-    "agent-update-rollouts",
     "agent-update-releases",
     "process-supervisor/inventory",
     "tags",

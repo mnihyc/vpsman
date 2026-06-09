@@ -25,30 +25,6 @@ pub(crate) fn jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn job_cancel(
-    api_url: &str,
-    token: Option<&str>,
-    job_id: String,
-    reason: Option<String>,
-    confirmed: bool,
-) -> Result<()> {
-    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
-    anyhow::ensure!(confirmed, "job-cancel requires --confirmed");
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!("/api/v1/jobs/{job_id}/cancel"),
-            token,
-            &serde_json::json!({
-                "confirmed": confirmed,
-                "reason": reason,
-            }),
-        )?
-    );
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn job_create(
     api_url: &str,
@@ -103,7 +79,6 @@ pub(crate) fn job_create(
                 &salt_hex,
                 privilege_ttl_secs,
                 timeout_secs,
-                None,
                 force_unprivileged,
                 true,
             )?
@@ -368,7 +343,16 @@ fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "completed" | "failed" | "partial_failed" | "timed_out" | "canceled" | "rejected"
+        "completed"
+            | "partially_completed"
+            | "failed"
+            | "timed_out"
+            | "dispatch_failed"
+            | "degraded_unprivileged"
+            | "accepted"
+            | "rejected_authorization_required"
+            | "schedule_no_targets"
+            | "rejected_by_agent"
     )
 }
 
@@ -628,15 +612,19 @@ mod tests {
     fn classifies_terminal_follow_statuses() {
         for status in [
             "completed",
+            "partially_completed",
             "failed",
-            "partial_failed",
             "timed_out",
-            "canceled",
-            "rejected",
+            "dispatch_failed",
+            "degraded_unprivileged",
+            "accepted",
+            "rejected_authorization_required",
+            "schedule_no_targets",
+            "rejected_by_agent",
         ] {
             assert!(is_terminal_job_status(status));
         }
-        for status in ["dispatching", "running", "cancel_requested"] {
+        for status in ["dispatching", "running"] {
             assert!(!is_terminal_job_status(status));
         }
     }

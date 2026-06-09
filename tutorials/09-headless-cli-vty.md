@@ -110,13 +110,11 @@ backup-policy-upsert nightly-edge --path /etc/hostname --include-config tag:back
 backup-policy-prune --dry-run
 restore-plans
 migration-run <restore_plan_uuid> --confirmed
-agent-update-rollouts
+agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
 agent-update-artifact-upload --name vpsman-agent --version 0.1.1 --artifact-file ./target/vpsman-agent --signing-seed-hex <seed> --rollback-artifact-file ./target/vpsman-agent.previous --stream --confirmed
-agent-update-rollout-control --rollout-id <uuid> --pause --pause-reason maintenance --confirmed
-agent-update-rollout-control --rollout-id <uuid> --resume --health-gate heartbeat_verified --confirmed
-agent-update-rollout-activate --rollout-id <uuid> --batch-size 2 --restart-agent --confirmed
-agent-update-rollout-rollback --rollout-id <uuid> --confirmed
+agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
+agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
 
 ## Headless Operating Pattern
@@ -126,16 +124,15 @@ agent-update-rollout-rollback --rollout-id <uuid> --confirmed
    `name:<display_name>` selectors, explicit `tag:<name>`, or bare tag names.
 3. Dispatch: privilege-gated command with confirmation for destructive work.
 4. Observe: `jobs`, `job-targets`, `job-outputs`, `job-follow`.
-5. Recover: `job-cancel`, `restore-rollback`, `agent-update-rollback`, or
-   `tunnel-rollback` as appropriate.
+5. Recover: inspect job outputs, then run an explicit compensating operation such as
+   `restore-rollback`, `agent-update-rollback`, or `tunnel-rollback` as appropriate.
 
-For rollout control, use `agent-update-rollout-control` in normal VTY mode
-because it updates server-side metadata only. Activation and rollback need
-privilege unlock through `enable` or explicit CLI unlock environment. The
-worker records recommendations and heartbeat timeout evidence; operators still
-submit the activation or rollback command that the private gateway verifies.
-Use `--force-unprivileged` only for a known normal-user agent where the
-operator deliberately wants a best-effort activation or rollback attempt.
+Agent update staging, activation, and rollback use the same direct job model as
+other privileged commands. Activation and rollback need privilege unlock through
+`enable` or explicit CLI unlock environment, and operators observe progress
+through `jobs`, `job-targets`, `job-outputs`, and `job-follow`. Use
+`--force-unprivileged` only for a known normal-user agent where the operator
+deliberately wants a best-effort activation or rollback attempt.
 
 Headless notification delivery has two paths. Use
 `fleet-alert-notification-process` for an immediate reviewed run from CLI/VTY,

@@ -163,7 +163,6 @@ pub(crate) fn submit_vty_tunnel_probe(
         &privilege_context.salt_hex,
         request.privilege_ttl_secs,
         request.timeout_secs,
-        None,
         false,
         true,
     )?;

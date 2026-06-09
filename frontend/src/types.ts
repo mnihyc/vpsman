@@ -1087,81 +1087,6 @@ export type ProcessSupervisorInventoryRecord = {
   observed_at: string;
 };
 
-export type AgentUpdateRolloutTargetRecord = {
-  client_id: string;
-  status: string;
-  exit_code: number | null;
-  updated_at: string;
-};
-
-export type AgentUpdateRolloutRecord = {
-  id: string;
-  job_id: string;
-  actor_id: string | null;
-  status: string;
-  artifact_sha256_hex: string;
-  artifact_signature_provided: boolean;
-  artifact_signing_key_sha256_hex: string | null;
-  target_count: number;
-  completed_count: number;
-  failed_count: number;
-  pending_count: number;
-  activation_policy: string;
-  canary_count: number;
-  rollout_policy_id: string | null;
-  rollout_policy_name: string | null;
-  heartbeat_timeout_secs: number | null;
-  automation_paused: boolean;
-  automation_pause_reason: string | null;
-  automation_health_gate: string;
-  automation_lease_owner: string | null;
-  automation_lease_expires_at: string | null;
-  automation_status: string;
-  automation_next_action: string | null;
-  automation_blocker: string | null;
-  automation_targets: string[];
-  automation_updated_at: string | null;
-  targets: AgentUpdateRolloutTargetRecord[];
-  created_at: string;
-  updated_at: string;
-};
-
-export type AgentUpdateRolloutPolicyRecord = {
-  id: string;
-  name: string;
-  scope_kind: "global" | "tag" | "provider" | string;
-  scope_value: string | null;
-  channel: string | null;
-  canary_count: number | null;
-  automation_health_gate: string | null;
-  priority: number;
-  enabled: boolean;
-  notes: string | null;
-  actor_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type CreateAgentUpdateRolloutPolicyRequest = {
-  name: string;
-  scope_kind: "global" | "tag" | "provider";
-  scope_value?: string | null;
-  channel?: string | null;
-  canary_count?: number | null;
-  automation_health_gate?: string | null;
-  priority?: number;
-  enabled?: boolean;
-  notes?: string | null;
-  confirmed: boolean;
-};
-
-export type AgentUpdateRolloutControlRequest = {
-  confirmed: boolean;
-  paused?: boolean;
-  pause_reason?: string | null;
-  automation_health_gate?: string | null;
-};
-
 export type AgentUpdateReleaseRecord = {
   id: string;
   actor_id: string | null;
@@ -1672,7 +1597,6 @@ export type CreateJobRequest = {
   operation?: JobOperation;
   timeout_secs: number;
   command_version?: number;
-  canary_count?: number | null;
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
@@ -1684,19 +1608,6 @@ export type CreateJobResponse = {
   job_id: string;
   accepted_targets: number;
   status: string;
-};
-
-export type CancelJobRequest = {
-  confirmed: boolean;
-  reason?: string | null;
-};
-
-export type CancelJobResponse = {
-  job_id: string;
-  canceled: boolean;
-  status: string;
-  canceled_targets: number;
-  cancel_requested_targets: number;
 };
 
 export type CreateScheduleRequest = {

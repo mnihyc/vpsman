@@ -105,7 +105,7 @@ Clone a shared preset before changing production assignments:
 ```sh
 cargo run -p vpsctl -- data-source-preset-clone \
   --source-preset-id <preset_uuid> \
-  --name traffic-vnstat-json-canary
+  --name traffic-vnstat-json-lab
 ```
 
 Test the candidate definition and compare it:
@@ -119,7 +119,7 @@ cargo run -p vpsctl -- data-source-preset-diff \
   --definition-json '{"source":"vnstat"}'
 ```
 
-Update the shared preset only after the canary is clean:
+Update the shared preset only after the lab candidate is clean:
 
 ```sh
 cargo run -p vpsctl -- data-source-preset-update \

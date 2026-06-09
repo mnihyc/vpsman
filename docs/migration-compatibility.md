@@ -34,7 +34,7 @@ Operational rollback model:
 | `0003_telemetry_alerts_history.sql` | Initial telemetry, rollup, alert policy/state/notification, and history-retention schema. Telemetry aggregates can be recomputed after snapshot restore. |
 | `0004_backups_restores.sql` | Initial backup artifact, backup request, restore plan, migration link, and backup-policy schema. Rollback requires snapshot restore plus object-store cleanup if artifacts were written. |
 | `0005_network_tunnels.sql` | Initial tunnel, tunnel-plan, and network-observation schema. Rollback requires restoring the matching initial-release snapshot. |
-| `0006_agent_updates.sql` | Initial signed release, rollout, rollout policy, target, and rollout automation schema. Rollback requires snapshot restore before running older update-management code. |
+| `0006_agent_updates.sql` | Initial signed release schema. Rollback requires snapshot restore before running older update-management code. |
 | `0007_data_sources_file_transfer.sql` | Initial data-source preset, client assignment, and file-transfer source-artifact schema, including built-in presets. Rollback by snapshot restore; do not delete built-in preset rows manually. |
 
 Future schema changes must start at `0008_...` and remain role-scoped when

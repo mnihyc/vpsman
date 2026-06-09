@@ -147,8 +147,7 @@ binary path, or one accounting source is not enough.
   - Current state: local filesystem object store with reserved S3 extension;
     data-source status reports selected backup/update presets, server
     object-store kind/configuration, backup artifact counts, backup request
-    counts, restore/migration linkage, update release counts, rollout counts,
-    failed rollout counts, and rollout automation readiness.
+    counts, restore/migration linkage, update release counts and job execution evidence.
   - Required model: typed object-store adapters, direct/resumable artifact
     handoff, artifact hosting adapters, restore path mapping presets, update
     restart adapters, and heartbeat source selection.

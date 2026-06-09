@@ -66,7 +66,7 @@ fn schedule_test_state(repo: Repository) -> AppState {
     }
 }
 
-async fn seed_unprivileged_agent(repo: &Repository, client_id: &str) {
+async fn seed_unprivileged_agent(repo: &crate::repository::Repository, client_id: &str) {
     let Repository::Memory(memory) = repo else {
         unreachable!();
     };
@@ -244,7 +244,8 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "degraded_unprivileged");
+    assert_eq!(response.status, "dispatching");
+    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     assert_eq!(
         repo.schedule_by_id(schedule.id).await.unwrap().next_run_at,
         next_run_before
@@ -272,6 +273,24 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
             .and_then(serde_json::Value::as_str),
         Some(schedule_id.as_str())
     );
+}
+
+async fn wait_for_job_status(
+    repo: &crate::repository::Repository,
+    job_id: uuid::Uuid,
+    expected: &str,
+) {
+    for _ in 0..50 {
+        let jobs = repo.list_jobs(100).await.unwrap();
+        if jobs
+            .iter()
+            .any(|job| job.id == job_id && job.status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("job {job_id} did not reach status {expected}");
 }
 
 #[test]

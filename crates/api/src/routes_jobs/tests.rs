@@ -35,34 +35,6 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
 }
 
 #[test]
-fn gateway_canceled_output_maps_to_canceled_target_status() {
-    let job_id = Uuid::new_v4();
-    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
-        client_id: "client-a".to_string(),
-        job_id,
-        command_version: 1,
-        accepted: true,
-        message: "accepted".to_string(),
-        outputs: vec![CommandOutput {
-            job_id,
-            stream: OutputStream::Status,
-            data: serde_json::to_vec(&serde_json::json!({
-                "type": "command_canceled",
-                "reason": "operator request",
-            }))
-            .unwrap(),
-            exit_code: Some(130),
-            done: true,
-        }],
-    });
-
-    assert_eq!(outcome.status, "canceled");
-    assert_eq!(outcome.exit_code, Some(130));
-    assert!(outcome.accepted);
-    assert_eq!(aggregate_job_status(&[outcome.status], 1), "canceled");
-}
-
-#[test]
 fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
     let job_id = Uuid::new_v4();
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {

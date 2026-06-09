@@ -492,7 +492,6 @@ async function submitTransferStep(
     command,
     operation,
     timeout_secs: timeoutSecs,
-    canary_count: null,
     force_unprivileged: false,
     privileged: true,
     privilege_assertion: built.privilegeAssertion,
@@ -665,7 +664,18 @@ function normalizeTransferAbsolutePath(path: string, label: string): string {
 }
 
 function isTerminalJobStatus(status: string): boolean {
-  return ["completed", "failed", "partial_failed", "timed_out", "canceled", "rejected"].includes(status);
+  return [
+    "completed",
+    "partially_completed",
+    "failed",
+    "timed_out",
+    "dispatch_failed",
+    "degraded_unprivileged",
+    "accepted",
+    "rejected_authorization_required",
+    "schedule_no_targets",
+    "rejected_by_agent",
+  ].includes(status);
 }
 
 function randomHex(byteLength: number): string {

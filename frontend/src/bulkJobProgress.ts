@@ -191,13 +191,14 @@ export function targetRecordSucceeded(status: string | undefined): boolean {
 
 export function targetRecordFailed(status: string | undefined): boolean {
   return [
-    "canceled",
+    "accepted",
     "degraded_unprivileged",
     "dispatch_failed",
     "failed",
-    "partial_failed",
     "rejected",
+    "rejected_authorization_required",
     "rejected_by_agent",
+    "schedule_no_targets",
     "timed_out",
   ].includes((status ?? "").toLowerCase());
 }

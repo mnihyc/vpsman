@@ -15,14 +15,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_jobs::jobs(api_url, token, limit)?;
             Ok(None)
         }
-        Command::JobCancel {
-            job_id,
-            reason,
-            confirmed,
-        } => {
-            commands_jobs::job_cancel(api_url, token, job_id, reason, confirmed)?;
-            Ok(None)
-        }
         Command::JobCreate {
             command,
             argv,
@@ -518,7 +510,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             super_salt_hex,
             privilege_ttl_secs,
             timeout_secs,
-            canary_count,
             confirmed,
             force_unprivileged,
         } => {
@@ -535,7 +526,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 super_salt_hex,
                 privilege_ttl_secs,
                 timeout_secs,
-                canary_count,
                 confirmed,
                 force_unprivileged,
             )?;
@@ -551,7 +541,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             super_salt_hex,
             privilege_ttl_secs,
             timeout_secs,
-            canary_count,
             confirmed,
             force_unprivileged,
         } => {
@@ -567,7 +556,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 super_salt_hex,
                 privilege_ttl_secs,
                 timeout_secs,
-                canary_count,
                 confirmed,
                 force_unprivileged,
             )?;
@@ -682,91 +670,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_config::agent_update_releases(api_url, token, limit)?;
             Ok(None)
         }
-        Command::AgentUpdateRollouts { limit } => {
-            commands_config::agent_update_rollouts(api_url, token, limit)?;
-            Ok(None)
-        }
-        Command::AgentUpdateRolloutPolicies(command) => {
-            commands_config::agent_update_rollout_policies(
-                api_url,
-                token,
-                command.limit,
-                command.enabled,
-                command.channel,
-            )?;
-            Ok(None)
-        }
-        Command::AgentUpdateRolloutPolicyCreate(command) => {
-            commands_config::agent_update_rollout_policy_create(
-                api_url,
-                token,
-                command.name,
-                command.scope_kind,
-                command.scope_value,
-                command.channel,
-                command.canary_count,
-                command.health_gate,
-                command.priority,
-                command.enabled,
-                command.notes,
-                command.confirmed,
-            )?;
-            Ok(None)
-        }
-        Command::AgentUpdateRolloutActivate {
-            rollout_id,
-            batch_size,
-            clients,
-            password_env,
-            super_salt_hex,
-            privilege_ttl_secs,
-            timeout_secs,
-            restart_agent,
-            force_unprivileged,
-            confirmed,
-        } => {
-            commands_config::agent_update_rollout_activate(
-                api_url,
-                token,
-                rollout_id,
-                batch_size,
-                clients,
-                password_env,
-                super_salt_hex,
-                privilege_ttl_secs,
-                timeout_secs,
-                restart_agent,
-                force_unprivileged,
-                confirmed,
-            )?;
-            Ok(None)
-        }
-        Command::AgentUpdateRolloutRollback {
-            rollout_id,
-            rollback_sha256_hex,
-            clients,
-            password_env,
-            super_salt_hex,
-            privilege_ttl_secs,
-            timeout_secs,
-            force_unprivileged,
-            confirmed,
-        } => {
-            commands_config::agent_update_rollout_rollback(
-                api_url,
-                token,
-                rollout_id,
-                rollback_sha256_hex,
-                clients,
-                password_env,
-                super_salt_hex,
-                privilege_ttl_secs,
-                timeout_secs,
-                force_unprivileged,
-                confirmed,
-            )?;
-            Ok(None)
-        }
         Command::UserSessions {
             clients,
             tags,
@@ -785,26 +688,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 super_salt_hex,
                 privilege_ttl_secs,
                 timeout_secs,
-                confirmed,
-            )?;
-            Ok(None)
-        }
-        Command::AgentUpdateRolloutControl {
-            rollout_id,
-            pause,
-            resume,
-            pause_reason,
-            health_gate,
-            confirmed,
-        } => {
-            commands_config::agent_update_rollout_control(
-                api_url,
-                token,
-                rollout_id,
-                pause,
-                resume,
-                pause_reason,
-                health_gate,
                 confirmed,
             )?;
             Ok(None)

@@ -264,8 +264,7 @@ export function DataSourcePresetPanel({
       });
       const response = await onCreateJob({
         argv: [],
-        canary_count: null,
-        selector_expression: selectorExpression,
+            selector_expression: selectorExpression,
         command: "data_source_config_patch",
         confirmed: true,
         destructive: false,
@@ -912,9 +911,6 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
     typeof evidence.migration_source_count === "number" ? evidence.migration_source_count : null;
   const migrationTargetCount =
     typeof evidence.migration_target_count === "number" ? evidence.migration_target_count : null;
-  const rolloutCount = typeof evidence.rollout_count === "number" ? evidence.rollout_count : null;
-  const activeRolloutCount = typeof evidence.active_rollout_count === "number" ? evidence.active_rollout_count : null;
-  const failedRolloutCount = typeof evidence.failed_rollout_count === "number" ? evidence.failed_rollout_count : null;
   const probeSampleCount = typeof evidence.probe_sample_count === "number" ? evidence.probe_sample_count : null;
   const speedSampleCount = typeof evidence.speed_sample_count === "number" ? evidence.speed_sample_count : null;
   const routingRecommendationCount =
@@ -1000,15 +996,6 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
   }
   if (migrationTargetCount !== null && migrationTargetCount > 0) {
     parts.push(`${migrationTargetCount} target migrations`);
-  }
-  if (rolloutCount !== null && rolloutCount > 0) {
-    parts.push(`${rolloutCount} rollouts`);
-  }
-  if (activeRolloutCount !== null && activeRolloutCount > 0) {
-    parts.push(`${activeRolloutCount} active rollout`);
-  }
-  if (failedRolloutCount !== null && failedRolloutCount > 0) {
-    parts.push(`${failedRolloutCount} failed rollout`);
   }
   if (probeSampleCount !== null && probeSampleCount > 0) {
     parts.push(`${probeSampleCount} probe samples`);

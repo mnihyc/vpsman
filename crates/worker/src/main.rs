@@ -11,7 +11,7 @@ use sqlx::{
     types::Json as SqlJson,
     PgPool, Row,
 };
-use tokio::time;
+use tokio::{task::JoinSet, time};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use vpsman_common::{
@@ -24,7 +24,6 @@ use vpsman_common::{
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
-mod rollout_automation;
 mod webhook_rules;
 mod worker_leases;
 
@@ -35,7 +34,6 @@ use backup_policy_retention::{
     process_backup_policy_retention_prune, BackupPolicyRetentionPruneConfig,
     BackupPolicyRetentionPruneRun,
 };
-use rollout_automation::process_rollout_automation;
 use webhook_rules::{
     ensure_event_partitions, insert_webhook_event_in_tx, process_webhook_rules,
     WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
@@ -57,22 +55,6 @@ struct Args {
     worker_id: Option<String>,
     #[arg(long, env = "VPSMAN_WORKER_LEASE_SECS", default_value_t = 60)]
     worker_lease_secs: i32,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_ROLLOUT_HEARTBEAT_TIMEOUT_SECS",
-        default_value_t = 900
-    )]
-    rollout_heartbeat_timeout_secs: i32,
-    #[arg(
-        long,
-        env = "VPSMAN_WORKER_ROLLOUT_RECONCILE_LIMIT",
-        default_value_t = 50
-    )]
-    rollout_reconcile_limit: i64,
-    #[arg(long, env = "VPSMAN_WORKER_ROLLOUT_WORKER_ID")]
-    rollout_worker_id: Option<String>,
-    #[arg(long, env = "VPSMAN_WORKER_ROLLOUT_LEASE_SECS", default_value_t = 60)]
-    rollout_lease_secs: i32,
     #[arg(long, env = "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS", default_value_t = 300)]
     agent_offline_timeout_secs: i64,
     #[arg(
@@ -205,12 +187,7 @@ async fn main() -> Result<()> {
     let worker_id = args
         .worker_id
         .clone()
-        .or_else(|| args.rollout_worker_id.clone())
         .unwrap_or_else(|| format!("vpsman-worker-{}", std::process::id()));
-    let rollout_worker_id = args
-        .rollout_worker_id
-        .clone()
-        .unwrap_or_else(|| worker_id.clone());
     let alert_notification_config = AlertNotificationWorkerConfig::new(
         args.notification_delivery_limit,
         args.notification_retention_days,
@@ -262,14 +239,6 @@ async fn main() -> Result<()> {
             args.worker_lease_secs,
         )
         .await?;
-        let rollout_automation = process_rollout_automation(
-            &pool,
-            args.rollout_reconcile_limit,
-            args.rollout_heartbeat_timeout_secs,
-            &rollout_worker_id,
-            args.rollout_lease_secs,
-        )
-        .await?;
         let backup_policy_prune = process_backup_policy_retention_prune_if_leader(
             &pool,
             backup_policy_prune_config.clone(),
@@ -288,8 +257,6 @@ async fn main() -> Result<()> {
             webhook_rule_delivered = webhook_rules.delivered,
             webhook_rule_failed = webhook_rules.failed,
             webhook_rule_pruned = webhook_rules.pruned,
-            expired_rollout_heartbeats = rollout_automation.expired_heartbeats,
-            reconciled_rollouts = rollout_automation.reconciled_rollouts,
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
@@ -399,26 +366,6 @@ async fn main() -> Result<()> {
                 }
             }
             Err(error) => warn!(%error, "failed to process webhook rules"),
-        }
-        match process_rollout_automation(
-            &pool,
-            args.rollout_reconcile_limit,
-            args.rollout_heartbeat_timeout_secs,
-            &rollout_worker_id,
-            args.rollout_lease_secs,
-        )
-        .await
-        {
-            Ok(run) => {
-                if run.expired_heartbeats > 0 || run.reconciled_rollouts > 0 {
-                    info!(
-                        expired_heartbeats = run.expired_heartbeats,
-                        reconciled_rollouts = run.reconciled_rollouts,
-                        "processed rollout automation"
-                    );
-                }
-            }
-            Err(error) => warn!(%error, "failed to process rollout automation"),
         }
         match process_backup_policy_retention_prune_if_leader(
             &pool,
@@ -972,30 +919,54 @@ async fn dispatch_scheduled_run(
         .signing_key
         .as_ref()
         .context("worker schedule signing key is not configured")?;
+    let command_version = job_command_protocol_version(&dispatch.operation);
+    let max_in_flight = dispatch.targets.len().clamp(1, 8);
     let mut outcomes = Vec::new();
-    for client_id in &dispatch.targets {
-        let envelope = signed_schedule_envelope(client_id, &dispatch.command_hash, signing_key);
-        let request = JobRequest {
-            job_id: dispatch.job_id,
-            command_version: job_command_protocol_version(&dispatch.operation),
-            command: dispatch.operation.clone(),
-            envelope,
-            timeout_secs: config.timeout_secs,
+    let mut jobs = JoinSet::new();
+    let mut targets = dispatch.targets.iter();
+
+    loop {
+        while jobs.len() < max_in_flight {
+            let Some(client_id) = targets.next().cloned() else {
+                break;
+            };
+            let envelope =
+                signed_schedule_envelope(&client_id, &dispatch.command_hash, signing_key);
+            let request = JobRequest {
+                job_id: dispatch.job_id,
+                command_version,
+                command: dispatch.operation.clone(),
+                envelope,
+                timeout_secs: config.timeout_secs,
+            };
+            let config = config.clone();
+            jobs.spawn(async move {
+                let result = dispatch_schedule_command(&config, &client_id, request).await;
+                match result {
+                    Ok(result) => scheduled_outcome_from_gateway(result),
+                    Err(error) => ScheduledTargetOutcome {
+                        client_id,
+                        status: "dispatch_failed".to_string(),
+                        exit_code: None,
+                        command_version: None,
+                        accepted: false,
+                        message: error.to_string(),
+                        outputs: Vec::new(),
+                    },
+                }
+            });
+        }
+        let Some(result) = jobs.join_next().await else {
+            break;
         };
-        let result = dispatch_schedule_command(config, client_id, request).await;
-        outcomes.push(match result {
-            Ok(result) => scheduled_outcome_from_gateway(result),
-            Err(error) => ScheduledTargetOutcome {
-                client_id: client_id.clone(),
-                status: "dispatch_failed".to_string(),
-                exit_code: None,
-                command_version: None,
-                accepted: false,
-                message: error.to_string(),
-                outputs: Vec::new(),
-            },
-        });
+        match result {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(error) => {
+                warn!(%error, job_id = %dispatch.job_id, "scheduled dispatch worker task failed")
+            }
+        }
     }
+
     record_scheduled_dispatch_outcomes(pool, &dispatch, outcomes).await
 }
 
@@ -1073,8 +1044,6 @@ fn scheduled_outcome_from_gateway(result: GatewayCommandDispatchResult) -> Sched
     let exit_code = final_output.and_then(|output| output.exit_code);
     let status = if final_output.is_some_and(output_indicates_timeout) {
         "timed_out"
-    } else if final_output.is_some_and(output_indicates_canceled) {
-        "canceled"
     } else {
         match exit_code {
             Some(0) => "completed",
@@ -1240,7 +1209,7 @@ async fn record_scheduled_dispatch_outcomes(
                 exit_code = $5,
                 started_at = COALESCE(started_at, now()),
                 completed_at = CASE
-                    WHEN $3 IN ('completed', 'failed', 'timed_out', 'canceled', 'rejected_by_agent', 'dispatch_failed') THEN now()
+                    WHEN $3 IN ('completed', 'failed', 'timed_out', 'rejected_by_agent', 'dispatch_failed') THEN now()
                     ELSE completed_at
                 END
             WHERE job_id = $1 AND client_id = $2
@@ -1509,21 +1478,6 @@ fn status_value_message(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn output_indicates_canceled(output: &CommandOutput) -> bool {
-    if output.stream != OutputStream::Status {
-        return false;
-    }
-    serde_json::from_slice::<serde_json::Value>(&output.data)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|kind| kind == "command_canceled")
-}
-
 fn output_indicates_timeout(output: &CommandOutput) -> bool {
     if output.stream != OutputStream::Status {
         return false;
@@ -1552,27 +1506,21 @@ fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'st
     }
     if target_statuses
         .iter()
-        .any(|status| status.as_str() == "accepted")
-    {
-        return "accepted";
-    }
-    if target_statuses
-        .iter()
         .any(|status| status.as_str() == "timed_out")
     {
         return "timed_out";
     }
     if target_statuses
         .iter()
-        .any(|status| status.as_str() == "canceled")
-    {
-        return "canceled";
-    }
-    if target_statuses
-        .iter()
         .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
     {
         return "failed";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "accepted")
+    {
+        return "accepted";
     }
     "dispatch_failed"
 }

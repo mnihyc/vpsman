@@ -6,9 +6,8 @@ use vpsman_common::payload_hash;
 
 use crate::{
     model::{
-        AgentUpdateRolloutView, AgentView, BackupRequestView, DataSourceStatusView,
-        FleetAlertQuery, FleetAlertView, JobHistoryView, JobTargetView, TelemetryRollupView,
-        TelemetryTunnelView,
+        AgentView, BackupRequestView, DataSourceStatusView, FleetAlertQuery, FleetAlertView,
+        JobHistoryView, JobTargetView, TelemetryRollupView, TelemetryTunnelView,
     },
     model_alert_policies::FleetAlertPolicyOverrideView,
     model_alert_states::FleetAlertStateView,
@@ -266,9 +265,6 @@ impl AppState {
 
         let backup_requests = self.repo.list_backup_requests(200).await?;
         append_backup_request_alerts(&mut alerts, &backup_requests);
-
-        let rollouts = self.repo.list_agent_update_rollouts(200).await?;
-        append_update_rollout_alerts(&mut alerts, &rollouts);
 
         let jobs = self.repo.list_jobs(200).await?;
         append_job_alerts(&mut alerts, &self.repo, &jobs, &agents_by_id).await?;
@@ -553,6 +549,43 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Data
     }
 }
 
+async fn append_job_alerts(
+    alerts: &mut Vec<FleetAlertView>,
+    repo: &crate::repository::Repository,
+    jobs: &[JobHistoryView],
+    agents_by_id: &HashMap<&str, &AgentView>,
+) -> Result<()> {
+    for job in jobs {
+        if failed_status(&job.status) {
+            let severity = if job.status == "partially_completed" {
+                "warning"
+            } else {
+                "critical"
+            };
+            let category =
+                if job.command_type.contains("backup") || job.command_type.contains("restore") {
+                    "backup"
+                } else if job.command_type.contains("agent_update") {
+                    "agent_update"
+                } else {
+                    "job"
+                };
+            push_job_alert(
+                alerts,
+                severity,
+                job,
+                category,
+                "Job requires operator attention",
+                format!("{} job {}", job.command_type, job.status),
+                json!({"command_type": &job.command_type, "target_count": job.target_count}),
+            );
+        }
+        let targets = repo.list_job_targets(job.id).await?;
+        append_unprivileged_target_alerts(alerts, job, &targets, agents_by_id);
+    }
+    Ok(())
+}
+
 fn append_backup_request_alerts(alerts: &mut Vec<FleetAlertView>, backups: &[BackupRequestView]) {
     for backup in backups {
         if backup.status.contains("failed") || backup.status.contains("rejected") {
@@ -577,84 +610,6 @@ fn append_backup_request_alerts(alerts: &mut Vec<FleetAlertView>, backups: &[Bac
             );
         }
     }
-}
-
-fn append_update_rollout_alerts(
-    alerts: &mut Vec<FleetAlertView>,
-    rollouts: &[AgentUpdateRolloutView],
-) {
-    for rollout in rollouts {
-        let severity = if rollout.status.contains("timeout") || rollout.status.contains("failed") {
-            "critical"
-        } else if rollout.automation_blocker.is_some() || rollout.failed_count > 0 {
-            "warning"
-        } else {
-            continue;
-        };
-        push_alert(
-            alerts,
-            AlertInput {
-                severity,
-                category: "agent_update",
-                target_kind: "agent_update_rollout",
-                target_id: &rollout.id.to_string(),
-                client_id: None,
-                title: "Agent update rollout needs attention",
-                detail: rollout
-                    .automation_blocker
-                    .clone()
-                    .unwrap_or_else(|| format!("rollout status {}", rollout.status)),
-                status: &rollout.status,
-                evidence: json!({
-                    "job_id": rollout.job_id,
-                    "target_count": rollout.target_count,
-                    "failed_count": rollout.failed_count,
-                    "pending_count": rollout.pending_count,
-                    "automation_status": &rollout.automation_status,
-                    "automation_next_action": &rollout.automation_next_action,
-                    "automation_targets": &rollout.automation_targets,
-                }),
-                observed_at: rollout.updated_at.clone(),
-            },
-        );
-    }
-}
-
-async fn append_job_alerts(
-    alerts: &mut Vec<FleetAlertView>,
-    repo: &crate::repository::Repository,
-    jobs: &[JobHistoryView],
-    agents_by_id: &HashMap<&str, &AgentView>,
-) -> Result<()> {
-    for job in jobs {
-        if failed_status(&job.status)
-            && (job.command_type.contains("backup") || job.command_type.contains("restore"))
-        {
-            push_job_alert(
-                alerts,
-                "critical",
-                job,
-                "backup",
-                "Backup or restore job failed",
-                format!("{} job {}", job.command_type, job.status),
-                json!({"command_type": &job.command_type, "target_count": job.target_count}),
-            );
-        } else if failed_status(&job.status) && job.command_type.contains("agent_update") {
-            push_job_alert(
-                alerts,
-                "critical",
-                job,
-                "agent_update",
-                "Agent update job failed",
-                format!("agent update job {}", job.status),
-                json!({"command_type": &job.command_type, "target_count": job.target_count}),
-            );
-        }
-
-        let targets = repo.list_job_targets(job.id).await?;
-        append_unprivileged_target_alerts(alerts, job, &targets, agents_by_id);
-    }
-    Ok(())
 }
 
 fn append_unprivileged_target_alerts(
@@ -734,7 +689,16 @@ fn available_ratio_alert(
 }
 
 fn failed_status(status: &str) -> bool {
-    status.contains("failed")
+    matches!(
+        status,
+        "failed"
+            | "timed_out"
+            | "dispatch_failed"
+            | "partially_completed"
+            | "degraded_unprivileged"
+            | "rejected_authorization_required"
+            | "schedule_no_targets"
+    ) || status.contains("failed")
         || status.contains("rejected")
         || status.contains("timeout")
         || status.contains("error")

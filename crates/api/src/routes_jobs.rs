@@ -2,12 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Context};
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     Json,
 };
 use futures_util::future::join_all;
-use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -29,101 +28,6 @@ use crate::{
     selector_expression::parse_selector_expression,
     state::AppState,
 };
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CancelJobRequest {
-    #[serde(default)]
-    pub(crate) confirmed: bool,
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct CancelJobResponse {
-    pub(crate) job_id: Uuid,
-    pub(crate) canceled: bool,
-    pub(crate) status: String,
-    pub(crate) canceled_targets: i64,
-    pub(crate) cancel_requested_targets: i64,
-}
-
-pub(crate) async fn cancel_job(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(job_id): Path<Uuid>,
-    Json(request): Json<CancelJobRequest>,
-) -> Result<Json<CancelJobResponse>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
-        .await?;
-    validate_cancel_job_request(&request)?;
-    let cancellation = state
-        .repo
-        .cancel_pending_job(job_id, &operator, request.reason.as_deref())
-        .await?
-        .ok_or_else(|| ApiError::not_found("job_not_found"))?;
-    if cancellation.canceled || cancellation.status == "canceled" {
-        return Ok(Json(CancelJobResponse {
-            job_id: cancellation.job_id,
-            canceled: cancellation.canceled,
-            status: cancellation.status,
-            canceled_targets: cancellation.canceled_targets,
-            cancel_requested_targets: 0,
-        }));
-    }
-    if matches!(
-        cancellation.status.as_str(),
-        "dispatching" | "cancel_requested"
-    ) {
-        if !state.gateway.configured() {
-            return Err(ApiError::conflict("gateway_control_url_missing"));
-        }
-        let active = state
-            .repo
-            .request_active_job_cancel(job_id, &operator, request.reason.as_deref())
-            .await?
-            .ok_or_else(|| ApiError::not_found("job_not_found"))?;
-        if !active.requested {
-            return Err(ApiError::conflict("job_not_cancelable"));
-        }
-        let cancel_results = join_all(active.target_clients.iter().map(|client_id| {
-            let gateway = state.gateway.clone();
-            let reason = request.reason.clone();
-            async move {
-                gateway
-                    .cancel(client_id, job_id, reason.as_deref())
-                    .await
-                    .ok()
-                    .is_some_and(|result| result.canceled)
-            }
-        }))
-        .await;
-        let cancel_requested_targets = cancel_results
-            .iter()
-            .filter(|requested| **requested)
-            .count() as i64;
-        return Ok(Json(CancelJobResponse {
-            job_id: active.job_id,
-            canceled: cancel_requested_targets > 0,
-            status: active.status,
-            canceled_targets: 0,
-            cancel_requested_targets,
-        }));
-    }
-    Err(ApiError::conflict("job_not_cancelable"))
-}
-
-fn validate_cancel_job_request(request: &CancelJobRequest) -> Result<(), ApiError> {
-    if !request.confirmed {
-        return Err(ApiError::conflict("job_cancel_confirmation_required"));
-    }
-    if let Some(reason) = request.reason.as_deref() {
-        let reason = reason.trim();
-        if reason.is_empty() || reason.len() > 240 || reason.chars().any(char::is_control) {
-            return Err(ApiError::bad_request("job_cancel_reason_invalid"));
-        }
-    }
-    Ok(())
-}
 
 pub(crate) async fn create_job(
     State(state): State<AppState>,
@@ -182,7 +86,6 @@ async fn create_job_inner(
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
     let job_command = request.job_command()?;
-    validate_rollout_options(&request, &job_command)?;
     if !request.confirmed {
         match &job_command {
             JobCommand::Backup { .. } => {
@@ -190,6 +93,9 @@ async fn create_job_inner(
             }
             JobCommand::HotConfig { .. }
             | JobCommand::DataSourceConfigPatch { .. }
+            | JobCommand::UpdateAgent { .. }
+            | JobCommand::AgentUpdateActivate { .. }
+            | JobCommand::AgentUpdateRollback { .. }
             | JobCommand::AgentUpdateCheck { .. } => {
                 return Err(ApiError::conflict("config_update_confirmation_required"));
             }
@@ -277,7 +183,6 @@ async fn create_job_inner(
             operation_payload_hash: &command_hash,
             resolved_targets: &resolved_targets,
             timeout_secs: request.timeout_secs.unwrap_or(30),
-            canary_count: request.canary_count,
             force_unprivileged: request.force_unprivileged,
             privileged: request.privileged,
         });
@@ -288,10 +193,6 @@ async fn create_job_inner(
         )
         .await?;
     }
-    let rollout_policy = state
-        .repo
-        .resolve_agent_update_rollout_policy(&request, &job_command, &resolved_agents)
-        .await?;
     let signed_envelopes =
         match request.signed_envelopes_for_targets(&resolved_targets, &command_hash, signing_key) {
             Ok(envelopes) => envelopes,
@@ -313,8 +214,6 @@ async fn create_job_inner(
         &resolved_agents,
         request.force_unprivileged,
     );
-    let (dispatch_targets, staged_targets) =
-        split_targets_by_canary(dispatch_targets, request.canary_count);
     if !dispatch_targets.is_empty() && !state.gateway.configured() {
         return reject_job(
             state,
@@ -344,49 +243,50 @@ async fn create_job_inner(
     } else {
         state
             .repo
-            .record_dispatching_job_with_rollout_policy(
-                &request,
-                &command_hash,
-                operator,
-                &resolved_targets,
-                &rollout_policy,
-            )
+            .record_dispatching_job(&request, &command_hash, operator, &resolved_targets)
             .await?
     };
     let precompleted_statuses =
         precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
-    let precompleted_statuses = precomplete_staged_targets(
-        state,
+    let accepted_targets = dispatch_targets.len();
+    let dispatch_state = state.clone();
+    let dispatch_batch = GatewayDispatchBatch {
         job_id,
-        &job_command,
-        staged_targets,
+        job_command,
+        timeout_secs: request.timeout_secs.unwrap_or(30),
+        targets: dispatch_targets,
+        signed_envelopes,
         precompleted_statuses,
-    )
-    .await?;
-    let (accepted_targets, status) = dispatch_to_gateway(
-        state,
-        GatewayDispatchBatch {
-            job_id,
-            job_command: &job_command,
-            timeout_secs: request.timeout_secs.unwrap_or(30),
-            targets: &dispatch_targets,
-            signed_envelopes: &signed_envelopes,
-            precompleted_statuses,
-            target_count: resolved_targets.len(),
-            source_schedule_id,
-            context: DispatchContext {
-                operator,
-                command_hash: &command_hash,
-            },
+        target_count: resolved_targets.len(),
+        source_schedule_id,
+        context: DispatchContext {
+            operator: operator.clone(),
+            command_hash: command_hash.clone(),
         },
-    )
-    .await?;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = dispatch_to_gateway(&dispatch_state, dispatch_batch).await {
+            warn!(?error, job_id = %job_id, "background gateway dispatch failed");
+            if let Err(finish_error) = dispatch_state
+                .repo
+                .finish_job(job_id, "dispatch_failed")
+                .await
+            {
+                warn!(?finish_error, job_id = %job_id, "failed to mark background dispatch failure");
+            }
+            dispatch_state.publish(WsEvent::JobFinished {
+                job_id,
+                accepted_targets: 0,
+                status: "dispatch_failed".to_string(),
+            });
+        }
+    });
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
             job_id,
             accepted_targets,
-            status,
+            status: "dispatching".to_string(),
         }),
     ))
 }
@@ -453,19 +353,6 @@ fn accepted_targets_for_existing_job(existing: &JobHistoryView) -> usize {
     }
 }
 
-fn validate_rollout_options(
-    request: &CreateJobRequest,
-    _job_command: &JobCommand,
-) -> Result<(), ApiError> {
-    let Some(canary_count) = request.canary_count else {
-        return Ok(());
-    };
-    if !(0..=10_000).contains(&canary_count) {
-        return Err(ApiError::bad_request("canary_count_out_of_range"));
-    }
-    Ok(())
-}
-
 async fn agent_update_release_policy_allows(
     state: &AppState,
     job_command: &JobCommand,
@@ -524,71 +411,35 @@ async fn precomplete_capability_skips(
     Ok(precompleted_statuses)
 }
 
-async fn precomplete_staged_targets(
-    state: &AppState,
-    job_id: Uuid,
-    job_command: &JobCommand,
-    staged_targets: Vec<String>,
-    mut precompleted_statuses: Vec<String>,
-) -> Result<Vec<String>, ApiError> {
-    for client_id in staged_targets {
-        let outcome = staged_pending_outcome(job_id, &client_id, job_command)?;
-        precompleted_statuses.push(outcome.status.clone());
-        state
-            .repo
-            .update_job_target_result(job_id, &client_id, &outcome)
-            .await?;
-        state
-            .repo
-            .record_job_outputs_with_config(
-                job_id,
-                &client_id,
-                &outcome.outputs,
-                JobOutputPersistConfig {
-                    object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes,
-                },
-            )
-            .await?;
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id,
-            client_id,
-            seq: 0,
-            done: true,
-        });
-    }
-    Ok(precompleted_statuses)
+struct DispatchContext {
+    operator: AuthContext,
+    command_hash: String,
 }
 
-struct DispatchContext<'a> {
-    operator: &'a AuthContext,
-    command_hash: &'a str,
-}
-
-struct GatewayDispatchBatch<'a> {
+struct GatewayDispatchBatch {
     job_id: Uuid,
-    job_command: &'a JobCommand,
+    job_command: JobCommand,
     timeout_secs: u64,
-    targets: &'a [String],
-    signed_envelopes: &'a HashMap<String, CommandEnvelope>,
+    targets: Vec<String>,
+    signed_envelopes: HashMap<String, CommandEnvelope>,
     precompleted_statuses: Vec<String>,
     target_count: usize,
     source_schedule_id: Option<Uuid>,
-    context: DispatchContext<'a>,
+    context: DispatchContext,
 }
 
 async fn dispatch_to_gateway(
     state: &AppState,
-    batch: GatewayDispatchBatch<'_>,
+    batch: GatewayDispatchBatch,
 ) -> Result<(usize, String), ApiError> {
     record_backup_requests_for_dispatch(state, &batch).await?;
     let mut requests = Vec::new();
-    let command_version = crate::job_request::job_command_protocol_version(batch.job_command);
+    let command_version = crate::job_request::job_command_protocol_version(&batch.job_command);
     debug_assert!(
         command_version
-            >= crate::job_request::job_command_min_supported_protocol_version(batch.job_command)
+            >= crate::job_request::job_command_min_supported_protocol_version(&batch.job_command)
     );
-    for client_id in batch.targets {
+    for client_id in &batch.targets {
         let request = JobRequest {
             job_id: batch.job_id,
             command_version,
@@ -602,6 +453,10 @@ async fn dispatch_to_gateway(
         };
         requests.push((client_id.clone(), request));
     }
+    state
+        .repo
+        .mark_job_targets_dispatching(batch.job_id, &batch.targets)
+        .await?;
     let dispatches = requests.into_iter().map(|(client_id, request)| {
         let gateway = state.gateway.clone();
         async move {
@@ -634,12 +489,12 @@ async fn dispatch_to_gateway(
     });
     let dispatch_results = join_all(dispatches).await;
     let mut accepted_targets = 0_usize;
-    let mut target_statuses = batch.precompleted_statuses;
+    let mut target_statuses = batch.precompleted_statuses.clone();
     for (client_id, mut outcome) in dispatch_results {
         if outcome.accepted {
             accepted_targets += 1;
         }
-        let stale_reason = protocol_mismatch_reason(&outcome, command_version, batch.job_command);
+        let stale_reason = protocol_mismatch_reason(&outcome, command_version, &batch.job_command);
         if let Some(reason) = stale_reason.as_deref() {
             outcome.message = stale_target_message(&outcome.message, reason);
         }
@@ -656,7 +511,7 @@ async fn dispatch_to_gateway(
                     &reason,
                     serde_json::json!({
                         "job_id": batch.job_id,
-                        "command_type": crate::job_request::job_command_type_label(batch.job_command),
+                        "command_type": crate::job_request::job_command_type_label(&batch.job_command),
                         "requested_command_version": command_version,
                         "response_command_version": outcome.command_version,
                         "message": outcome.message,
@@ -684,12 +539,13 @@ async fn dispatch_to_gateway(
                 done: output.done,
             });
         }
-        if matches!(batch.job_command, JobCommand::Backup { .. }) && outcome.status == "completed" {
+        if matches!(&batch.job_command, JobCommand::Backup { .. }) && outcome.status == "completed"
+        {
             if let Err(error) = try_auto_record_backup_artifact(
                 state,
-                batch.context.operator,
+                &batch.context.operator,
                 &client_id,
-                batch.context.command_hash,
+                &batch.context.command_hash,
                 batch.job_id,
                 &outcome.outputs,
             )
@@ -769,20 +625,20 @@ fn status_value_message(value: &serde_json::Value) -> Option<String> {
 
 async fn record_backup_requests_for_dispatch(
     state: &AppState,
-    batch: &GatewayDispatchBatch<'_>,
+    batch: &GatewayDispatchBatch,
 ) -> Result<(), ApiError> {
     let JobCommand::Backup {
         paths,
         include_config,
         recipient_public_key_hex,
-    } = batch.job_command
+    } = &batch.job_command
     else {
         return Ok(());
     };
-    for client_id in batch.targets {
+    for client_id in &batch.targets {
         if let Some(request) = state
             .repo
-            .find_open_backup_request_for_artifact(client_id, batch.context.command_hash)
+            .find_open_backup_request_for_artifact(client_id, &batch.context.command_hash)
             .await?
         {
             state
@@ -791,7 +647,7 @@ async fn record_backup_requests_for_dispatch(
                     request.id,
                     Some(batch.job_id),
                     batch.source_schedule_id,
-                    batch.context.operator,
+                    &batch.context.operator,
                 )
                 .await?;
             continue;
@@ -813,9 +669,9 @@ async fn record_backup_requests_for_dispatch(
             .repo
             .record_backup_request_with_source(
                 &request,
-                batch.context.command_hash,
+                &batch.context.command_hash,
                 envelope,
-                batch.context.operator,
+                &batch.context.operator,
                 BackupRequestStatus::RequestedMetadataOnly,
                 BackupRequestSourceLink {
                     job_id: Some(batch.job_id),
@@ -837,21 +693,6 @@ fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'st
     }
     if completed > 0 {
         return "partially_completed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "staged_pending")
-    {
-        return "staged_pending";
-    }
-    if target_count > 0
-        && target_statuses
-            .iter()
-            .filter(|status| status.as_str() == "canceled")
-            .count()
-            == target_count
-    {
-        return "canceled";
     }
     if target_statuses
         .iter()
@@ -878,22 +719,6 @@ fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'st
         return "accepted";
     }
     "dispatch_failed"
-}
-
-fn split_targets_by_canary(
-    targets: Vec<String>,
-    canary_count: Option<i32>,
-) -> (Vec<String>, Vec<String>) {
-    let Some(canary_count) = canary_count else {
-        return (targets, Vec::new());
-    };
-    if canary_count <= 0 || canary_count as usize >= targets.len() {
-        return (targets, Vec::new());
-    }
-    let canary_count = canary_count as usize;
-    let mut dispatch_targets = targets;
-    let staged_targets = dispatch_targets.split_off(canary_count);
-    (dispatch_targets, staged_targets)
 }
 
 fn split_targets_by_capability(
@@ -1065,34 +890,6 @@ fn capability_degraded_outcome(
     })
 }
 
-fn staged_pending_outcome(
-    job_id: Uuid,
-    client_id: &str,
-    command: &JobCommand,
-) -> Result<TargetDispatchOutcome, ApiError> {
-    let status = serde_json::json!({
-        "type": "bulk_stage_pending",
-        "status": "staged_pending",
-        "client_id": client_id,
-        "command_type": crate::job_request::job_command_type_label(command),
-        "hint": "target is held for a later rollout stage after the canary batch is reviewed",
-    });
-    Ok(TargetDispatchOutcome {
-        status: "staged_pending".to_string(),
-        exit_code: None,
-        command_version: None,
-        accepted: false,
-        message: "target staged for later rollout".to_string(),
-        outputs: vec![CommandOutput {
-            job_id,
-            stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
-            exit_code: Some(0),
-            done: true,
-        }],
-    })
-}
-
 async fn reject_job(
     state: &AppState,
     request: &CreateJobRequest,
@@ -1163,8 +960,6 @@ fn target_outcome_from_gateway(result: GatewayCommandDispatchResult) -> TargetDi
     let exit_code = final_output.and_then(|output| output.exit_code);
     let status = if final_output.is_some_and(output_indicates_timeout) {
         "timed_out"
-    } else if final_output.is_some_and(output_indicates_canceled) {
-        "canceled"
     } else {
         match exit_code {
             Some(0) => "completed",
@@ -1220,21 +1015,6 @@ fn protocol_mismatch_reason(
         (response_version < expected_command_version)
             .then(|| format!("agent_returned_lower_{command_type}_command_version"))
     })
-}
-
-fn output_indicates_canceled(output: &CommandOutput) -> bool {
-    if output.stream != OutputStream::Status {
-        return false;
-    }
-    serde_json::from_slice::<serde_json::Value>(&output.data)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|kind| kind == "command_canceled")
 }
 
 fn output_indicates_timeout(output: &CommandOutput) -> bool {

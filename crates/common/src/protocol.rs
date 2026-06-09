@@ -267,13 +267,6 @@ pub struct GatewayCommandDispatch {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayCommandCancel {
-    pub client_id: String,
-    pub job_id: Uuid,
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayPrivilegeVerification {
     pub intent: String,
     pub assertion: PrivilegeAssertion,
@@ -295,14 +288,6 @@ pub struct GatewayCommandDispatchResult {
     pub accepted: bool,
     pub message: String,
     pub outputs: Vec<CommandOutput>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayCommandCancelResult {
-    pub client_id: String,
-    pub job_id: Uuid,
-    pub canceled: bool,
-    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -328,12 +313,6 @@ pub fn parse_build_number(value: Option<&str>) -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or_else(default_internal_build_number)
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct JobCancelRequest {
-    pub job_id: Uuid,
-    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

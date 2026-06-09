@@ -171,7 +171,6 @@ pub(crate) async fn create_backup_request(
         operation_payload_hash: &command_hash,
         resolved_targets: &resolved_targets,
         timeout_secs: 30,
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
     });

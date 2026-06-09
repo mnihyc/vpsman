@@ -188,7 +188,7 @@ export function AgentUpdateReleasesPanel({
         <div className="releaseFormSection releaseIdentitySection">
           <div className="releaseFormSectionHeader">
             <strong>Release identity</strong>
-            <span>Human-facing name, semantic version, and rollout channel.</span>
+            <span>Human-facing name, semantic version, and release channel.</span>
           </div>
           <label>
             <span>Name</span>
@@ -249,7 +249,7 @@ export function AgentUpdateReleasesPanel({
         <div className="releaseFormSection releaseArtifactSection">
           <div className="releaseFormSectionHeader">
             <strong>Rollback artifact</strong>
-            <span>Optional fallback metadata for safe rollout reversal.</span>
+            <span>Optional fallback metadata for safe update reversal.</span>
           </div>
           <label className="wideField">
             <span>Rollback URL</span>

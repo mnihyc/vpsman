@@ -499,8 +499,7 @@ function BulkConfigApply({
       });
       const response = await onCreateJob({
         argv: [],
-        canary_count: null,
-        command: "data_source_config_patch",
+            command: "data_source_config_patch",
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
@@ -688,8 +687,7 @@ function SingleVpsConfig({
       });
       const response = await onCreateJob({
         argv: [],
-        canary_count: null,
-        command: "config_read",
+            command: "config_read",
         confirmed: true,
         destructive: false,
         force_unprivileged: false,
@@ -745,8 +743,7 @@ function SingleVpsConfig({
       });
       const response = await onCreateJob({
         argv: [],
-        canary_count: null,
-        command: "hot_config",
+            command: "hot_config",
         confirmed: true,
         destructive: true,
         force_unprivileged: false,

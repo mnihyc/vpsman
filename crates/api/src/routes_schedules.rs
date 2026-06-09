@@ -156,7 +156,6 @@ pub(crate) async fn apply_schedule_now(
         argv: Vec::new(),
         operation: Some(schedule.operation.clone()),
         timeout_secs: Some(30),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,

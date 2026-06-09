@@ -12,9 +12,9 @@ use crate::{
     fleet_alerts::FleetAlertPolicy,
     gateway_client::GatewayDispatchClient,
     model::{
-        AgentUpdateReleaseView, AgentUpdateRolloutView, AuthContext, BackupArtifactView,
-        BackupRequestView, MigrationLinkView, NetworkObservationTrendView,
-        NetworkOspfRecommendationView, OperatorView, RestorePlanView, TunnelPlanView, WsEvent,
+        AgentUpdateReleaseView, AuthContext, BackupArtifactView, BackupRequestView,
+        MigrationLinkView, NetworkObservationTrendView, NetworkOspfRecommendationView,
+        OperatorView, RestorePlanView, TunnelPlanView, WsEvent,
     },
     model_data_sources::DataSourceStatusView,
     object_store::BackupObjectStore,
@@ -177,13 +177,7 @@ impl AppState {
             )
         }) {
             let releases = self.repo.list_agent_update_releases(1000).await?;
-            let rollouts = self.repo.list_agent_update_rollouts(1000).await?;
-            enrich_update_status_rows(
-                &mut rows,
-                self.update_object_store.as_ref(),
-                &releases,
-                &rollouts,
-            );
+            enrich_update_status_rows(&mut rows, self.update_object_store.as_ref(), &releases);
         }
         if rows.iter().any(|row| {
             matches!(
@@ -386,7 +380,6 @@ fn enrich_update_status_rows(
     rows: &mut [DataSourceStatusView],
     store: Option<&BackupObjectStore>,
     releases: &[AgentUpdateReleaseView],
-    rollouts: &[AgentUpdateRolloutView],
 ) {
     let release_count = releases.len();
     let hosted_release_count = releases
@@ -403,30 +396,13 @@ fn enrich_update_status_rows(
             "update_artifact_source" | "update_restart_policy" | "update_rollback_heartbeat_source"
         )
     }) {
-        let client_rollouts = rollouts
-            .iter()
-            .filter(|rollout| rollout_touches_client(rollout, &row.client_id))
-            .collect::<Vec<_>>();
-        let rollout_count = client_rollouts.len();
-        let active_rollout_count = client_rollouts
-            .iter()
-            .filter(|rollout| rollout_is_active(rollout))
-            .count();
-        let failed_rollout_count = client_rollouts
-            .iter()
-            .filter(|rollout| rollout.failed_count > 0)
-            .count();
         let runtime_evidence = json!({
             "workflow": "agent_update_releases",
-            "rollout_workflow": "agent_update_rollout",
             "server_object_store_configured": store.is_some(),
             "server_object_store_kind": store.map(BackupObjectStore::kind),
             "release_count": release_count,
             "hosted_release_count": hosted_release_count,
             "external_release_count": external_release_count,
-            "rollout_count": rollout_count,
-            "active_rollout_count": active_rollout_count,
-            "failed_rollout_count": failed_rollout_count,
             "continuous_status": false,
         });
         row.evidence = merge_evidence(row.evidence.take(), runtime_evidence);
@@ -441,19 +417,10 @@ fn enrich_update_status_rows(
             continue;
         }
         if row.domain == "update_rollback_heartbeat_source" {
-            row.status = if failed_rollout_count > 0 {
-                "attention".to_string()
-            } else if rollout_count > 0 {
-                "ready".to_string()
-            } else {
-                "ready_on_demand".to_string()
-            };
-            row.status_reason = if failed_rollout_count > 0 {
-                "rollback heartbeat source is selected and at least one rollout has failure evidence"
-                    .to_string()
-            } else {
-                "rollback heartbeat source is selected for rollout health gates".to_string()
-            };
+            row.status = "ready_on_demand".to_string();
+            row.status_reason =
+                "rollback heartbeat source is selected; activation and rollback jobs report heartbeat evidence"
+                    .to_string();
             continue;
         }
         if store.is_some() {
@@ -469,7 +436,7 @@ fn enrich_update_status_rows(
         } else if update_source_accepts_external_url(row) {
             row.status = "selected_no_artifacts".to_string();
             row.status_reason =
-                "HTTPS-capable update source is selected, but no signed release metadata exists"
+                "update artifact source is selected, but no hosted store or signed external release metadata exists"
                     .to_string();
         } else {
             row.status = "selected_no_store".to_string();
@@ -626,20 +593,6 @@ fn ospf_recommendation_touches_client(
     client_id: &str,
 ) -> bool {
     recommendation.left_client_id == client_id || recommendation.right_client_id == client_id
-}
-
-fn rollout_touches_client(rollout: &AgentUpdateRolloutView, client_id: &str) -> bool {
-    rollout
-        .targets
-        .iter()
-        .any(|target| target.client_id == client_id)
-}
-
-fn rollout_is_active(rollout: &AgentUpdateRolloutView) -> bool {
-    !matches!(
-        rollout.status.as_str(),
-        "heartbeat_verified" | "rolled_back" | "dispatch_failed"
-    )
 }
 
 fn merge_evidence(base: Value, extra: Value) -> Value {

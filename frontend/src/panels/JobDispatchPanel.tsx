@@ -220,7 +220,6 @@ export function JobDispatchPanel({
   const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
   const [updateCheckActivate, setUpdateCheckActivate] = useState(true);
   const [updateCheckRestartAgent, setUpdateCheckRestartAgent] = useState(true);
-  const [updateCanaryCount, setUpdateCanaryCount] = useState(1);
   const [updateActivationSha256Hex, setUpdateActivationSha256Hex] = useState("");
   const [updateRestartAgent, setUpdateRestartAgent] = useState(false);
   const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] = useState("");
@@ -295,7 +294,7 @@ export function JobDispatchPanel({
       setPreview(null);
       return;
     }
-    let canceled = false;
+    let disposed = false;
     setSelectorVerification("checking");
     setSelectorVerificationMessage("Checking");
     const timeout = window.setTimeout(() => {
@@ -303,7 +302,7 @@ export function JobDispatchPanel({
         selector_expression: selectorExpression.trim(),
       })
         .then((response) => {
-          if (canceled) {
+          if (disposed) {
             return;
           }
           setPreview(response);
@@ -311,7 +310,7 @@ export function JobDispatchPanel({
           setSelectorVerificationMessage(`${response.target_count}/${agents.length}`);
         })
         .catch(() => {
-          if (canceled) {
+          if (disposed) {
             return;
           }
           setPreview(null);
@@ -320,7 +319,7 @@ export function JobDispatchPanel({
         });
     }, 300);
     return () => {
-      canceled = true;
+      disposed = true;
       window.clearTimeout(timeout);
     };
   }, [agents.length, mode, onResolveTargets, selectorExpression, selectorParse.error]);
@@ -404,7 +403,6 @@ export function JobDispatchPanel({
       label: "Execution",
       value: forceUnprivileged ? "Forced best effort" : operationNeedsConfirmation ? "Privileged mutation" : "Standard",
     },
-    ...(mode.startsWith("agent_update") ? [{ label: "Canary", value: clampInteger(updateCanaryCount, 0, 10000) || "none" }] : []),
   ];
   const status =
     actionError ??
@@ -745,7 +743,6 @@ export function JobDispatchPanel({
           operationPayloadHash: payloadHashHex,
           resolvedTargets: clientIds,
           timeoutSecs: clampInteger(timeoutSecs, 1, 3600),
-          canaryCount: clampInteger(updateCanaryCount, 0, 10000) || null,
           forceUnprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
           privileged: true,
         }),
@@ -759,7 +756,6 @@ export function JobDispatchPanel({
         argv: mode === "shell" && operation.type === "shell" ? operation.argv : [],
         operation,
         timeout_secs: clampInteger(timeoutSecs, 1, 3600),
-        canary_count: clampInteger(updateCanaryCount, 0, 10000) || null,
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
         privileged: true,
         privilege_assertion: privilegeAssertion,
@@ -767,7 +763,6 @@ export function JobDispatchPanel({
         reconnect_policy: {
           duplicate_delivery: "ignore_completed",
           resume_outputs: true,
-          cancel_on_disconnect: false,
         },
       });
       setLastJob(nextJob);
@@ -965,7 +960,6 @@ export function JobDispatchPanel({
           setUpdateActivationSha256Hex={setUpdateActivationSha256Hex}
           setUpdateRestartAgent={setUpdateRestartAgent}
           setUpdateRollbackSha256Hex={setUpdateRollbackSha256Hex}
-          setUpdateCanaryCount={setUpdateCanaryCount}
           setUpdateSha256Hex={setUpdateSha256Hex}
           setBackupIncludeConfig={setBackupIncludeConfig}
           setBackupPathsText={setBackupPathsText}
@@ -984,7 +978,6 @@ export function JobDispatchPanel({
           updateActivationSha256Hex={updateActivationSha256Hex}
           updateRestartAgent={updateRestartAgent}
           updateRollbackSha256Hex={updateRollbackSha256Hex}
-          updateCanaryCount={updateCanaryCount}
           updateSha256Hex={updateSha256Hex}
           backupIncludeConfig={backupIncludeConfig}
           backupPathsText={backupPathsText}
@@ -1017,8 +1010,6 @@ export function JobDispatchPanel({
           </label>
         )}
         <DispatchOptions
-          canaryCount={updateCanaryCount}
-          setCanaryCount={setUpdateCanaryCount}
           setTimeoutSecs={setTimeoutSecs}
           timeoutSecs={timeoutSecs}
         />

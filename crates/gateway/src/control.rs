@@ -9,13 +9,12 @@ use tokio::{
 };
 use tracing::{info, warn};
 use vpsman_common::{
-    verify_privilege_assertion, GatewayCommandCancel, GatewayCommandCancelResult,
-    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
+    verify_privilege_assertion, GatewayCommandDispatch, GatewayCommandDispatchResult,
+    GatewayPrivilegeVerification, GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
 };
 
 use crate::{
-    state::{GatewayCommand, GatewayCommandCancel as GatewayCancelMessage, GatewayState},
+    state::{GatewayCommand, GatewayState},
     Args,
 };
 
@@ -51,9 +50,7 @@ async fn handle_control_connection(
     if request.method != "POST"
         || !matches!(
             request.path.as_str(),
-            "/internal/v1/gateway/command"
-                | "/internal/v1/gateway/command-cancel"
-                | "/internal/v1/gateway/privilege/verify"
+            "/internal/v1/gateway/command" | "/internal/v1/gateway/privilege/verify"
         )
     {
         write_http_json(
@@ -88,23 +85,6 @@ async fn handle_control_connection(
             }
         };
         match dispatch_gateway_command(&state, dispatch).await {
-            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
-            Err(error) => write_gateway_error(&mut stream, error).await?,
-        }
-    } else if request.path == "/internal/v1/gateway/command-cancel" {
-        let cancel: GatewayCommandCancel = match serde_json::from_slice(&request.body) {
-            Ok(cancel) => cancel,
-            Err(error) => {
-                write_http_json(
-                    &mut stream,
-                    "400 Bad Request",
-                    &serde_json::json!({"error": format!("invalid_command_cancel:{error}")}),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        match cancel_gateway_command(&state, cancel).await {
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
@@ -201,7 +181,12 @@ async fn dispatch_gateway_command(
                 })
                 .await
                 .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
-            return time::timeout(Duration::from_secs(120), response_rx)
+            let wait_secs = dispatch
+                .request
+                .timeout_secs
+                .clamp(1, 3600)
+                .saturating_add(30);
+            return time::timeout(Duration::from_secs(wait_secs), response_rx)
                 .await
                 .context("gateway command timed out")?
                 .context("gateway command response dropped");
@@ -213,52 +198,6 @@ async fn dispatch_gateway_command(
             }
             _ => {
                 return Err(anyhow!("agent_not_online:{}", dispatch.client_id));
-            }
-        }
-    }
-}
-
-async fn cancel_gateway_command(
-    state: &GatewayState,
-    cancel: GatewayCommandCancel,
-) -> Result<GatewayCommandCancelResult> {
-    let grace_deadline = state
-        .disconnected_at
-        .read()
-        .await
-        .get(&cancel.client_id)
-        .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs));
-
-    loop {
-        if let Some(sender) = state
-            .sessions
-            .read()
-            .await
-            .get(&cancel.client_id)
-            .map(|session| session.cancel_sender.clone())
-        {
-            let (response_tx, response_rx) = oneshot::channel();
-            sender
-                .send(GatewayCancelMessage {
-                    client_id: cancel.client_id.clone(),
-                    job_id: cancel.job_id,
-                    reason: cancel.reason.clone(),
-                    response: response_tx,
-                })
-                .await
-                .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
-            return time::timeout(Duration::from_secs(10), response_rx)
-                .await
-                .context("gateway command cancel timed out")?
-                .context("gateway command cancel response dropped");
-        }
-        match grace_deadline {
-            Some(deadline) if std::time::Instant::now() < deadline => {
-                time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-            _ => {
-                return Err(anyhow!("agent_not_online:{}", cancel.client_id));
             }
         }
     }

@@ -548,32 +548,6 @@ assert_large_output_artifact() {
   [[ "$downloaded_hash" == "$expected_hash" ]]
 }
 
-assert_active_cancel_job_output() {
-  local job_json targets_json outputs_json audits_json
-  job_json="$(api_get "/api/v1/jobs/$active_cancel_job_id")"
-  targets_json="$(api_get "/api/v1/jobs/$active_cancel_job_id/targets")"
-  outputs_json="$(api_get "/api/v1/jobs/$active_cancel_job_id/outputs")"
-  audits_json="$(api_get "/api/v1/audit?limit=200")"
-
-  jq -e '.status == "canceled" and .command_type == "shell_script" and .target_count == 1' \
-    <<<"$job_json" >/dev/null
-  jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "canceled" and .[0].exit_code == 130
-  ' <<<"$targets_json" >/dev/null
-  jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 130)
-    | (.data_base64 | @base64d | fromjson)
-    | .type == "command_canceled"
-  ' <<<"$outputs_json" >/dev/null
-  jq -e --arg job_id "$active_cancel_job_id" '
-    any(.[]; .action == "job.cancel_requested" and .metadata.job_id == $job_id)
-    and any(.[]; .action == "job.target_result"
-      and .metadata.job_id == $job_id
-      and .metadata.status == "canceled"
-      and .metadata.exit_code == 130)
-  ' <<<"$audits_json" >/dev/null
-}
-
 assert_timed_out_shell_job() {
   local job_json targets_json outputs_json audits_json
   job_json="$(api_get "/api/v1/jobs/$timeout_job_id")"

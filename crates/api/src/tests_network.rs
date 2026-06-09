@@ -217,6 +217,24 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
         .any(|audit| audit.action == "network.tunnel_plan_rolled_back"));
 }
 
+async fn wait_for_job_status(
+    repo: &crate::repository::Repository,
+    job_id: uuid::Uuid,
+    expected: &str,
+) {
+    for _ in 0..50 {
+        let jobs = repo.list_jobs(100).await.unwrap();
+        if jobs
+            .iter()
+            .any(|job| job.id == job_id && job.status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("job {job_id} did not reach status {expected}");
+}
+
 #[test]
 fn network_apply_validation_rejects_mutating_plan_or_hash_mismatch() {
     let plan = test_plan();
@@ -571,7 +589,6 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
             bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -632,7 +649,6 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         argv: Vec::new(),
         operation: Some(operation),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -648,10 +664,11 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
     )
     .await
     .unwrap();
+    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "degraded_unprivileged");
+    assert_eq!(response.status, "dispatching");
     assert_eq!(response.accepted_targets, 0);
     assert_eq!(targets[0].status, "degraded_unprivileged");
 }
@@ -686,7 +703,6 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
             side: TunnelEndpointSide::Left,
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -735,7 +751,6 @@ async fn network_status_create_job_rejects_wrong_side_target() {
             side: TunnelEndpointSide::Left,
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -786,7 +801,6 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
             interval_ms: 500,
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -840,7 +854,6 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
             connect_timeout_ms: 5000,
         }),
         timeout_secs: Some(60),
-        canary_count: None,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,

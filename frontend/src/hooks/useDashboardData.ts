@@ -71,10 +71,10 @@ export function useDashboardData(activeView: ActiveView) {
   );
 
   useEffect(() => {
-    let cancelled = false;
+    let disposed = false;
 
     async function loadIfActive() {
-      if (!cancelled) {
+      if (!disposed) {
         await fleet.loadFleet();
       }
     }
@@ -82,7 +82,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadIfActive();
     const timer = window.setInterval(loadIfActive, 15_000);
     return () => {
-      cancelled = true;
+      disposed = true;
       window.clearInterval(timer);
     };
   }, [fleet.loadFleet]);
@@ -91,12 +91,12 @@ export function useDashboardData(activeView: ActiveView) {
     if ((authRequired && !apiToken) || activeView !== "Dashboard") {
       return;
     }
-    let cancelled = false;
+    let disposed = false;
     let timer: number | null = null;
 
     async function loadAndSchedule() {
       await dashboardOverview.loadDashboardOverview();
-      if (cancelled) {
+      if (disposed) {
         return;
       }
       timer = window.setTimeout(
@@ -109,7 +109,7 @@ export function useDashboardData(activeView: ActiveView) {
 
     void loadAndSchedule();
     return () => {
-      cancelled = true;
+      disposed = true;
       if (timer !== null) {
         window.clearTimeout(timer);
       }
@@ -135,7 +135,6 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadTagInventory();
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
-      void jobs.loadAgentUpdateRollouts();
       void inventory.loadTagInventory();
     } else if (activeView === "Schedules") {
       void schedules.loadSchedules();
@@ -169,7 +168,6 @@ export function useDashboardData(activeView: ActiveView) {
     backups.loadBackups,
     inventory.loadTagInventory,
     jobs.loadJobs,
-    jobs.loadAgentUpdateRollouts,
     schedules.loadSchedules,
     topology.loadNetworkObservations,
     topology.loadNetworkTrends,
@@ -242,8 +240,7 @@ export function useDashboardData(activeView: ActiveView) {
       if (event.type === "job_finished") {
         void fleet.loadFleet();
         void jobs.loadJobs();
-        void jobs.loadAgentUpdateRollouts();
-        void audit.loadAudits();
+          void audit.loadAudits();
         if (activeView === "Dashboard") {
           scheduleDashboardOverviewReload();
         }
@@ -266,7 +263,6 @@ export function useDashboardData(activeView: ActiveView) {
     backups.loadBackups,
     dashboardOverview.loadDashboardOverview,
     inventory.loadTagInventory,
-    jobs.loadAgentUpdateRollouts,
     jobs.loadJobs,
     jobs.loadTerminalSessions,
     scheduleDashboardOverviewReload,
@@ -346,7 +342,6 @@ export function useDashboardData(activeView: ActiveView) {
     backupsError: backups.backupsError,
     backupsLoading: backups.backupsLoading,
     clearSession,
-    cancelJob: jobs.cancelJob,
     clientKeyRevocations: access.clientKeyRevocations,
     cloneDataSourcePreset: inventory.cloneDataSourcePreset,
     confirmTotp: access.confirmTotp,
@@ -366,8 +361,6 @@ export function useDashboardData(activeView: ActiveView) {
     uploadBackupArtifactChunked: backups.uploadBackupArtifactChunked,
     createJob: jobs.createJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
-    createAgentUpdateRolloutPolicy: jobs.createAgentUpdateRolloutPolicy,
-    updateAgentUpdateRolloutControl: jobs.updateAgentUpdateRolloutControl,
     uploadAgentUpdateArtifact: jobs.uploadAgentUpdateArtifact,
     createDataSourcePreset: inventory.createDataSourcePreset,
     createSchedule: schedules.createSchedule,
@@ -387,8 +380,6 @@ export function useDashboardData(activeView: ActiveView) {
     jobs: jobs.jobs,
     commandTemplates: jobs.commandTemplates,
     agentUpdateReleases: jobs.agentUpdateReleases,
-    agentUpdateRolloutPolicies: jobs.agentUpdateRolloutPolicies,
-    agentUpdateRollouts: jobs.agentUpdateRollouts,
     jobsError: jobs.jobsError,
     jobsLoading: jobs.jobsLoading,
     keyLifecycleReport: access.keyLifecycleReport,
@@ -422,7 +413,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadJobOutputComparison: jobs.loadJobOutputComparison,
     loadJobs: jobs.loadJobs,
     loadTerminalReplay: jobs.loadTerminalReplay,
-    loadAgentUpdateRollouts: jobs.loadAgentUpdateRollouts,
+    loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,
     loadJobTargets: jobs.loadJobTargets,
     updateFleetAlertState: fleet.updateFleetAlertState,
     upsertFleetAlertNotificationChannel:

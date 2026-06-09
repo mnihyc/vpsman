@@ -20,7 +20,6 @@ use crate::cli_access::{
 };
 use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
-    AgentUpdateRolloutPoliciesArgs, AgentUpdateRolloutPolicyCreateArgs,
 };
 use crate::commands_network::{
     TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand, TunnelProbeCommand,
@@ -109,14 +108,6 @@ pub(crate) enum Command {
     Jobs {
         #[arg(long, default_value_t = 50)]
         limit: u16,
-    },
-    JobCancel {
-        #[arg(long)]
-        job_id: String,
-        #[arg(long)]
-        reason: Option<String>,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
     },
     Schedules,
     ScheduleCreate(ScheduleCreateCommand),
@@ -428,8 +419,6 @@ pub(crate) enum Command {
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
-        #[arg(long)]
-        canary_count: Option<u16>,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -454,8 +443,6 @@ pub(crate) enum Command {
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
-        #[arg(long)]
-        canary_count: Option<u16>,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -515,68 +502,6 @@ pub(crate) enum Command {
     AgentUpdateReleases {
         #[arg(long, default_value_t = 25)]
         limit: u16,
-    },
-    AgentUpdateRollouts {
-        #[arg(long, default_value_t = 25)]
-        limit: u16,
-    },
-    AgentUpdateRolloutPolicies(AgentUpdateRolloutPoliciesArgs),
-    AgentUpdateRolloutPolicyCreate(AgentUpdateRolloutPolicyCreateArgs),
-    AgentUpdateRolloutActivate {
-        #[arg(long)]
-        rollout_id: String,
-        #[arg(long)]
-        batch_size: Option<u16>,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        restart_agent: bool,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-    },
-    AgentUpdateRolloutRollback {
-        #[arg(long)]
-        rollout_id: String,
-        #[arg(long)]
-        rollback_sha256_hex: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-    },
-    AgentUpdateRolloutControl {
-        #[arg(long)]
-        rollout_id: String,
-        #[arg(long, default_value_t = false)]
-        pause: bool,
-        #[arg(long, default_value_t = false)]
-        resume: bool,
-        #[arg(long)]
-        pause_reason: Option<String>,
-        #[arg(long)]
-        health_gate: Option<String>,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
     },
     ProcessList {
         #[arg(long, default_value_t = 50)]

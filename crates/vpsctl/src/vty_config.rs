@@ -40,7 +40,6 @@ pub(crate) struct VtyAgentUpdateRequest {
     sha256_hex: String,
     artifact_signature_hex: Option<String>,
     artifact_signing_key_hex: Option<String>,
-    canary_count: Option<u16>,
     selection: VtyJobSelection,
     timeout_secs: u64,
     privilege_ttl_secs: u64,
@@ -221,7 +220,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
     let mut sha256_hex = None;
     let mut artifact_signature_hex = None;
     let mut artifact_signing_key_hex = None;
-    let mut canary_count = None;
     let mut timeout_secs = 300_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
@@ -273,16 +271,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
                     .context("--timeout must be an integer")?;
                 index += 2;
             }
-            "--canary-count" => {
-                canary_count = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--canary-count requires a value")?
-                        .parse()
-                        .context("--canary-count must be an integer")?,
-                );
-                index += 2;
-            }
             "--privilege-ttl" => {
                 privilege_ttl_secs = tokens
                     .get(index + 1)
@@ -312,12 +300,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         (1..=3600).contains(&privilege_ttl_secs),
         "agent-update --privilege-ttl must be between 1 and 3600"
     );
-    if let Some(canary_count) = canary_count {
-        anyhow::ensure!(
-            canary_count <= 10_000,
-            "agent-update --canary-count must be between 0 and 10000"
-        );
-    }
     let artifact_url = artifact_url.context("agent-update requires --artifact-url <https-url>")?;
     let sha256_hex = sha256_hex.context("agent-update requires --sha256-hex <sha256>")?;
     validate_update_input(
@@ -336,7 +318,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         sha256_hex: sha256_hex.to_ascii_lowercase(),
         artifact_signature_hex: artifact_signature_hex.map(|value| value.to_ascii_lowercase()),
         artifact_signing_key_hex: artifact_signing_key_hex.map(|value| value.to_ascii_lowercase()),
-        canary_count,
         selection,
         timeout_secs,
         privilege_ttl_secs,
@@ -527,7 +508,6 @@ pub(crate) fn submit_vty_hot_config(
         request.selection,
         request.timeout_secs,
         request.privilege_ttl_secs,
-        None,
         request.force_unprivileged,
     )
 }
@@ -574,7 +554,6 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
         selection,
         request.timeout_secs,
         request.privilege_ttl_secs,
-        None,
         request.force_unprivileged,
     )
 }
@@ -602,7 +581,6 @@ pub(crate) fn submit_vty_agent_update(
         request.selection,
         request.timeout_secs,
         request.privilege_ttl_secs,
-        request.canary_count,
         request.force_unprivileged,
     )
 }
@@ -627,7 +605,6 @@ pub(crate) fn submit_vty_agent_update_activate(
         request.selection,
         request.timeout_secs,
         request.privilege_ttl_secs,
-        None,
         request.force_unprivileged,
     )
 }
@@ -651,7 +628,6 @@ pub(crate) fn submit_vty_agent_update_rollback(
         request.selection,
         request.timeout_secs,
         request.privilege_ttl_secs,
-        None,
         request.force_unprivileged,
     )
 }
@@ -718,7 +694,6 @@ fn submit_vty_config_operation(
     selection: VtyJobSelection,
     timeout_secs: u64,
     privilege_ttl_secs: u64,
-    canary_count: Option<u16>,
     force_unprivileged: bool,
 ) -> Result<String> {
     let resolved = http_post_json(
@@ -750,7 +725,6 @@ fn submit_vty_config_operation(
         salt_hex,
         privilege_ttl_secs,
         timeout_secs,
-        canary_count.map(i32::from),
         force_unprivileged,
         true,
     )?;
@@ -769,7 +743,6 @@ fn submit_vty_config_operation(
             "confirmed": selection.confirmed,
             "force_unprivileged": force_unprivileged,
             "timeout_secs": timeout_secs,
-            "canary_count": canary_count,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )
@@ -858,8 +831,6 @@ mod tests {
             &signature_hex,
             "--artifact-signing-key-hex",
             &signing_key_hex,
-            "--canary-count",
-            "2",
             "id:edge-a",
             "--timeout",
             "300",
@@ -874,7 +845,6 @@ mod tests {
         assert_eq!(request.sha256_hex, "ab".repeat(32));
         assert_eq!(request.artifact_signature_hex, Some(signature_hex));
         assert_eq!(request.artifact_signing_key_hex, Some(signing_key_hex));
-        assert_eq!(request.canary_count, Some(2));
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert_eq!(request.timeout_secs, 300);

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod agent_update_artifact_ingest;
 mod auth_model;
@@ -14,7 +14,6 @@ mod fleet_alert_notifications;
 mod fleet_alerts;
 mod gateway_client;
 mod job_files;
-mod job_lifecycle;
 mod job_request;
 mod job_target_validation;
 mod job_terminal;
@@ -29,7 +28,6 @@ mod model_dashboard;
 mod model_data_sources;
 mod model_file_transfer;
 mod model_history;
-mod model_rollout_policies;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
@@ -56,7 +54,6 @@ mod repository_history;
 mod repository_hot_config_rule_templates;
 mod repository_ingest;
 mod repository_inventory;
-mod repository_job_lifecycle;
 mod repository_job_outputs;
 mod repository_jobs;
 mod repository_key_lifecycle;
@@ -66,8 +63,6 @@ mod repository_network_observations;
 mod repository_network_recommendations;
 mod repository_operator_totp;
 mod repository_restores;
-mod repository_rollout_policies;
-mod repository_rollouts;
 mod repository_schedules;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
@@ -89,8 +84,6 @@ mod routes_key_lifecycle;
 mod routes_migrations;
 mod routes_network;
 mod routes_restores;
-mod routes_rollout_policies;
-mod routes_rollouts;
 mod routes_schedules;
 mod routes_terminal_sessions;
 mod routes_update_releases;
@@ -108,11 +101,10 @@ use fleet_alerts::FleetAlertPolicy;
 use gateway_client::{decode_server_signing_key, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
-use repository_rollouts::DEFAULT_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS;
 use routes::build_router;
 use state::{AppState, UpdateReleasePolicy};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
@@ -217,18 +209,6 @@ struct Args {
         default_value_t = 32768
     )]
     job_output_artifact_min_bytes: usize,
-    #[arg(
-        long,
-        env = "VPSMAN_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS",
-        default_value_t = DEFAULT_AGENT_UPDATE_HEARTBEAT_TIMEOUT_SECS as u64
-    )]
-    agent_update_heartbeat_timeout_secs: u64,
-    #[arg(
-        long,
-        env = "VPSMAN_AGENT_UPDATE_RECONCILE_INTERVAL_SECS",
-        default_value_t = 30
-    )]
-    agent_update_reconcile_interval_secs: u64,
     #[arg(
         long,
         env = "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
@@ -380,12 +360,6 @@ async fn main() -> Result<()> {
             actor_id: None,
         })
         .await?;
-    spawn_agent_update_rollout_reconciler(
-        state.clone(),
-        args.agent_update_heartbeat_timeout_secs,
-        args.agent_update_reconcile_interval_secs,
-    );
-
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;
@@ -425,36 +399,6 @@ fn reject_api_privilege_verifier_env() -> Result<()> {
 fn forbidden_api_privilege_env_var(mut present: impl FnMut(&str) -> bool) -> Option<&'static str> {
     const FORBIDDEN_ENV: &[&str] = &["VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX"];
     FORBIDDEN_ENV.iter().copied().find(|name| present(name))
-}
-
-fn spawn_agent_update_rollout_reconciler(
-    state: AppState,
-    heartbeat_timeout_secs: u64,
-    reconcile_interval_secs: u64,
-) {
-    let heartbeat_timeout_secs = heartbeat_timeout_secs.clamp(1, 86_400) as i32;
-    let reconcile_interval_secs = reconcile_interval_secs.clamp(5, 3600);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(reconcile_interval_secs));
-        loop {
-            ticker.tick().await;
-            match state
-                .repo
-                .expire_agent_update_heartbeat_timeouts(heartbeat_timeout_secs)
-                .await
-            {
-                Ok(expired) if expired > 0 => {
-                    info!(expired, "agent update heartbeat timeouts reconciled");
-                }
-                Ok(_) => {
-                    debug!("agent update heartbeat timeout reconciliation completed");
-                }
-                Err(error) => {
-                    warn!(%error, "agent update heartbeat timeout reconciliation failed");
-                }
-            }
-        }
-    });
 }
 
 fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
@@ -613,8 +557,6 @@ mod tests_object_store;
 mod tests_process;
 #[cfg(test)]
 mod tests_restores;
-#[cfg(test)]
-mod tests_rollouts;
 #[cfg(test)]
 mod tests_schedules;
 #[cfg(test)]
