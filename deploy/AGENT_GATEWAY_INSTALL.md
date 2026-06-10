@@ -1,8 +1,8 @@
 # Direct Gateway Agent Install
 
 Agents never contact the browser panel or HTTP API during installation. A VPS is
-provisioned with immutable gateway identity material and a prioritized raw TCP
-gateway endpoint list. The panel may register the matching public key for
+provisioned with immutable agent identity material, the pinned gateway Noise public
+key, and a prioritized raw TCP gateway endpoint list. The panel may register the matching public key for
 inventory and revocation, but it does not mint install tokens.
 
 ## Required material
@@ -12,7 +12,6 @@ Generate or obtain these values before running the installer on a VPS:
 - `VPSMAN_AGENT_CLIENT_ID`: stable client id, such as `agent-nrt-04`.
 - `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: agent Noise private key hex.
 - `VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX`: gateway Noise public key hex.
-- `VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX`: server Ed25519 public key for signed jobs and hot config.
 - `VPSMAN_GATEWAY_ENDPOINTS`: comma or newline separated endpoint list in
   `label=host:port=priority` format. DNS names are supported; lower priority
   numbers are tried first.
@@ -53,7 +52,6 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_DISPLAY_NAME=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
-  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
   bash
 ```
@@ -66,10 +64,15 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
-  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
   bash
 ```
 
 The installer writes `agent.toml`, installs a systemd unit, and starts the agent.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint.
+
+Runtime command traffic is protected by the gateway Noise session. No extra
+server-side command-authentication key is provisioned. Operator authentication
+stays at the API token layer, and privileged mutation authorization stays
+request-bound through the local super-password assertion that the private
+gateway verifies.

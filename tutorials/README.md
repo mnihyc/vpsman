@@ -42,15 +42,10 @@ Common environment:
 export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_API_TOKEN=<operator_token>
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-# First-time setup prints both the gateway verifier and operator salt:
-cargo run -p vpsctl -- privilege-verifier --generate-salt
-export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
+export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
 ```
 
 `VPSMAN_API_TOKEN` authenticates the operator to the API. The super password
 and salt stay local to the browser/CLI/VTY and are used to build request-bound
-privilege assertions for the private gateway. Put only the generated
-`privilege_verifier_key_hex` into gateway env as
-`VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX`; never put the password, salt, or verifier
-into API or agent envs. Keep operator-side material out of shell history where
-possible.
+privilege assertions for the private gateway. Keep them out of shell history
+where possible.

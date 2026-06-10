@@ -606,7 +606,6 @@ fn validates_network_apply_root() {
 fn rejects_hot_config_identity_and_secret_changes() {
     let current = AgentConfig {
         auth: super::AgentAuthConfig {
-            server_ed25519_public_key_hex: Some("11".repeat(32)),
             command_timeout_secs: 30,
             ..Default::default()
         },
@@ -626,13 +625,6 @@ fn rejects_hot_config_identity_and_secret_changes() {
     assert_eq!(
         validate_hot_config_update(&current, &updated).unwrap_err(),
         "hot_config_cannot_change_client_id"
-    );
-
-    let mut updated = current.clone();
-    updated.auth.server_ed25519_public_key_hex = Some("44".repeat(32));
-    assert_eq!(
-        validate_hot_config_update(&current, &updated).unwrap_err(),
-        "hot_config_cannot_change_server_signing_key"
     );
 
     let mut updated = current.clone();

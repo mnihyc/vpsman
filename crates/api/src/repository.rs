@@ -49,7 +49,7 @@ pub(crate) struct MemoryState {
     pub(crate) operators: Arc<RwLock<Vec<OperatorRecord>>>,
     pub(crate) sessions: Arc<RwLock<Vec<OperatorSessionRecord>>>,
     pub(crate) jobs: Arc<RwLock<Vec<JobHistoryView>>>,
-    pub(crate) job_idempotency_keys: Arc<RwLock<HashMap<(Uuid, String), Uuid>>>,
+    pub(crate) job_request_fingerprints: Arc<RwLock<HashMap<Uuid, String>>>,
     pub(crate) job_operations: Arc<RwLock<HashMap<Uuid, vpsman_common::JobCommand>>>,
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,

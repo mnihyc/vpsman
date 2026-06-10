@@ -378,7 +378,6 @@ fn internal_gateway_token_requires_matching_bearer() {
         events,
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -427,10 +426,6 @@ fn api_startup_rejects_gateway_verifier_env() {
         forbidden_api_privilege_env_var(|name| name == "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX"),
         Some("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX")
     );
-    assert_eq!(
-        forbidden_api_privilege_env_var(|name| name == "VPSMAN_SERVER_SIGNING_KEY_HEX"),
-        None
-    );
 }
 
 #[test]
@@ -441,7 +436,6 @@ fn internal_gateway_token_is_mandatory_even_for_memory_dev() {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -469,7 +463,6 @@ fn memory_test_state() -> AppState {
         events,
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

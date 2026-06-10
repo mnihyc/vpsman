@@ -306,7 +306,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: Some(store),
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -321,7 +320,9 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
 fn file_push_job_command_uses_operation_payload_and_type() {
     let data = b"file contents";
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -343,7 +344,6 @@ fn file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -409,7 +409,9 @@ fn rejects_invalid_chunked_file_push_job_document() {
 fn chunked_file_push_job_command_uses_operation_payload_and_type() {
     let data = vec![7_u8; MAX_INLINE_FILE_PUSH_BYTES + 17];
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -431,7 +433,6 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 

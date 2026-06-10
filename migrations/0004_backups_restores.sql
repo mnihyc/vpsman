@@ -16,9 +16,7 @@ CREATE TABLE backup_requests (
     include_config BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    signed_command_scope TEXT NOT NULL,
-    signed_command_id UUID,
-    signed_command_expires_unix BIGINT,
+    command_scope TEXT NOT NULL,
     artifact_id UUID REFERENCES backup_artifacts(id),
     source_job_id UUID REFERENCES jobs(id),
     source_schedule_id UUID REFERENCES schedules(id),
@@ -47,9 +45,7 @@ CREATE TABLE restore_plans (
     destination_root TEXT,
     status TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    signed_command_scope TEXT NOT NULL,
-    signed_command_id UUID,
-    signed_command_expires_unix BIGINT,
+    command_scope TEXT NOT NULL,
     note TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

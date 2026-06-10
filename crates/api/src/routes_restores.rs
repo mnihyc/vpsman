@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use vpsman_common::{encode_json, payload_hash, CommandEnvelope, JobCommand};
+use vpsman_common::{encode_json, payload_hash, JobCommand};
 
 use crate::{
     error::ApiError,
@@ -15,7 +15,6 @@ use crate::{
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     selector_expression::id_selector_expression,
     state::AppState,
-    unix_now,
 };
 
 const MAX_RESTORE_PATHS: usize = 64;
@@ -79,7 +78,7 @@ pub(crate) async fn create_restore_plan(
             .await?;
         return Err(error);
     }
-    let envelope = metadata_command_envelope(&request.target_client_id, &command_hash);
+    let command_scope = format!("client:{}", request.target_client_id);
 
     Ok((
         StatusCode::CREATED,
@@ -90,7 +89,7 @@ pub(crate) async fn create_restore_plan(
                     &request,
                     &source_backup,
                     &command_hash,
-                    &envelope,
+                    &command_scope,
                     &operator,
                     RestorePlanStatus::PlannedMetadataOnly,
                 )
@@ -170,17 +169,5 @@ fn restore_command(request: &CreateRestorePlanRequest) -> JobCommand {
         archive_sha256_hex: None,
         dry_run: false,
         post_restore_argv: Vec::new(),
-    }
-}
-
-fn metadata_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
-    let now = unix_now();
-    CommandEnvelope {
-        command_id: uuid::Uuid::new_v4(),
-        scope: format!("client:{client_id}"),
-        payload_hash_hex: command_hash.to_string(),
-        signed_unix: now,
-        expires_unix: now.saturating_add(300),
-        server_signature: Vec::new(),
     }
 }

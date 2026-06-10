@@ -1,29 +1,21 @@
-use std::collections::HashMap;
-
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     Json,
 };
-use futures_util::future::join_all;
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, payload_hash, AgentPrivilegeMode, CommandEnvelope, CommandOutput,
-    GatewayCommandDispatchResult, JobCommand, JobRequest, OutputStream,
+    encode_json, payload_hash, AgentPrivilegeMode, CommandOutput, GatewayCommandDispatchResult,
+    JobCommand, OutputStream,
 };
 
 use crate::{
-    backup_auto_artifacts::try_auto_record_backup_artifact,
     error::ApiError,
     job_target_validation::validate_network_apply_target,
-    model::{
-        AgentView, AuthContext, BackupRequestStatus, CreateBackupRequest, CreateJobRequest,
-        CreateJobResponse, JobHistoryView, WsEvent,
-    },
+    model::{AgentView, AuthContext, CreateJobRequest, CreateJobResponse, WsEvent},
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
-    repository_backups::BackupRequestSourceLink,
     repository_job_outputs::JobOutputPersistConfig,
     selector_expression::parse_selector_expression,
     state::AppState,
@@ -117,40 +109,49 @@ async fn create_job_inner(
         ))
     })?;
     let command_hash = payload_hash(&command_payload);
-    if let Some(response) =
-        idempotent_job_response(state, operator, &request, &command_hash).await?
-    {
-        return Ok((StatusCode::OK, Json(response)));
-    }
+    let job_id = request.job_id.unwrap_or_else(Uuid::new_v4);
+    let fixed_target_ids = request.fixed_target_ids()?;
+    let target_selection = request.target_selection()?;
     let resolved_agents = state
         .repo
-        .resolve_bulk_targets(&request.target_selection())
+        .resolve_bulk_targets(&target_selection)
         .await?
         .targets;
-    let resolved_targets = resolved_agents
+    let resolved_targets = fixed_target_ids;
+    if resolved_targets
         .iter()
-        .map(|agent| agent.id.clone())
-        .collect::<Vec<_>>();
+        .any(|client_id| !resolved_agents.iter().any(|agent| agent.id == *client_id))
+    {
+        return Err(ApiError::conflict("fixed_target_not_found"));
+    }
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
-
-    let Some(signing_key) = state.server_signing_key.as_deref() else {
-        return reject_job(
-            state,
-            &request,
-            &command_hash,
-            operator,
-            "server signing key missing",
-        )
-        .await;
+    let source_schedule_id = match privilege_source {
+        JobPrivilegeSource::RequestAssertion => None,
+        JobPrivilegeSource::SavedSchedule(schedule_id) => Some(schedule_id),
     };
+    let request_fingerprint = request_fingerprint_for_job(
+        &request,
+        &command_hash,
+        &resolved_targets,
+        source_schedule_id,
+    )?;
+    if let Some(response) =
+        existing_job_response_for_id(state, operator, job_id, &request_fingerprint).await?
+    {
+        return Ok((StatusCode::OK, Json(response)));
+    }
+
     if !request.privileged {
         return reject_job(
             state,
+            job_id,
             &request,
             &command_hash,
+            &request_fingerprint,
             operator,
+            "rejected_authorization_required",
             "all non-telemetry jobs require privilege unlock",
         )
         .await;
@@ -158,9 +159,12 @@ async fn create_job_inner(
     if resolved_targets.is_empty() {
         return reject_job(
             state,
+            job_id,
             &request,
             &command_hash,
+            &request_fingerprint,
             operator,
+            "dispatch_failed",
             "job has no resolved targets",
         )
         .await;
@@ -169,9 +173,12 @@ async fn create_job_inner(
     if !agent_update_release_policy_allows(state, &job_command).await? {
         return reject_job(
             state,
+            job_id,
             &request,
             &command_hash,
+            &request_fingerprint,
             operator,
+            "failed",
             "registered agent update release missing",
         )
         .await;
@@ -193,21 +200,6 @@ async fn create_job_inner(
         )
         .await?;
     }
-    let signed_envelopes =
-        match request.signed_envelopes_for_targets(&resolved_targets, &command_hash, signing_key) {
-            Ok(envelopes) => envelopes,
-            Err(error) => {
-                warn!(%error, command_hash, "job rejected because command envelope signing failed");
-                return reject_job(
-                    state,
-                    &request,
-                    &command_hash,
-                    operator,
-                    "command envelope signing failed",
-                )
-                .await;
-            }
-        };
     let (dispatch_targets, capability_skips) = split_targets_by_capability(
         &job_command,
         &resolved_targets,
@@ -217,24 +209,25 @@ async fn create_job_inner(
     if !dispatch_targets.is_empty() && !state.gateway.configured() {
         return reject_job(
             state,
+            job_id,
             &request,
             &command_hash,
+            &request_fingerprint,
             operator,
+            "dispatch_failed",
             "gateway control URL missing",
         )
         .await;
     }
 
-    let source_schedule_id = match privilege_source {
-        JobPrivilegeSource::RequestAssertion => None,
-        JobPrivilegeSource::SavedSchedule(schedule_id) => Some(schedule_id),
-    };
-    let job_id = if let Some(schedule_id) = source_schedule_id {
+    if let Some(schedule_id) = source_schedule_id {
         state
             .repo
             .record_dispatching_job_from_schedule(
+                job_id,
                 &request,
                 &command_hash,
+                &request_fingerprint,
                 operator,
                 &resolved_targets,
                 schedule_id,
@@ -243,66 +236,31 @@ async fn create_job_inner(
     } else {
         state
             .repo
-            .record_dispatching_job(&request, &command_hash, operator, &resolved_targets)
+            .record_dispatching_job(
+                job_id,
+                &request,
+                &command_hash,
+                &request_fingerprint,
+                operator,
+                &resolved_targets,
+            )
             .await?
     };
-    let precompleted_statuses =
-        precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
-    let accepted_targets = dispatch_targets.len();
-    let dispatch_state = state.clone();
-    let dispatch_batch = GatewayDispatchBatch {
-        job_id,
-        job_command,
-        timeout_secs: request.timeout_secs.unwrap_or(30),
-        targets: dispatch_targets,
-        signed_envelopes,
-        precompleted_statuses,
-        target_count: resolved_targets.len(),
-        source_schedule_id,
-        context: DispatchContext {
-            operator: operator.clone(),
-            command_hash: command_hash.clone(),
-        },
-    };
-    tokio::spawn(async move {
-        if let Err(error) = dispatch_to_gateway(&dispatch_state, dispatch_batch).await {
-            warn!(?error, job_id = %job_id, "background gateway dispatch failed");
-            if let Err(finish_error) = dispatch_state
-                .repo
-                .finish_job(job_id, "dispatch_failed")
-                .await
-            {
-                warn!(?finish_error, job_id = %job_id, "failed to mark background dispatch failure");
-            }
-            dispatch_state.publish(WsEvent::JobFinished {
-                job_id,
-                accepted_targets: 0,
-                status: "dispatch_failed".to_string(),
-            });
-        }
-    });
+    precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
+    let _ = state.repo.refresh_job_status_from_targets(job_id).await?;
+    crate::job_dispatcher::wake_job_dispatcher(state.clone());
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
             job_id,
-            accepted_targets,
+            target_count: resolved_targets.len(),
+            accepted_targets: 0,
             status: "dispatching".to_string(),
         }),
     ))
 }
 
 fn validate_job_reconnect_metadata(request: &CreateJobRequest) -> Result<(), ApiError> {
-    if let Some(key) = request.idempotency_key.as_deref() {
-        let key = key.trim();
-        if key.is_empty()
-            || key.len() > 128
-            || !key.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-            })
-        {
-            return Err(ApiError::bad_request("job_idempotency_key_invalid"));
-        }
-    }
     if let Some(policy) = request.reconnect_policy.as_ref() {
         if !policy.is_object() {
             return Err(ApiError::bad_request("job_reconnect_policy_invalid"));
@@ -317,40 +275,54 @@ fn validate_job_reconnect_metadata(request: &CreateJobRequest) -> Result<(), Api
     Ok(())
 }
 
-async fn idempotent_job_response(
-    state: &AppState,
-    operator: &AuthContext,
+fn request_fingerprint_for_job(
     request: &CreateJobRequest,
     command_hash: &str,
+    resolved_targets: &[String],
+    source_schedule_id: Option<Uuid>,
+) -> Result<String, ApiError> {
+    let mut targets = resolved_targets.to_vec();
+    targets.sort();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "selector_expression": request.selector_expression.trim(),
+        "command_type": request.command_type_label(),
+        "operation_payload_hash": command_hash,
+        "targets": targets,
+        "timeout_secs": request.timeout_secs.unwrap_or(30),
+        "privileged": request.privileged,
+        "force_unprivileged": request.force_unprivileged,
+        "source_schedule_id": source_schedule_id,
+    }))
+    .map_err(|error| ApiError::from(anyhow!("failed to encode job fingerprint: {error}")))?;
+    Ok(payload_hash(&bytes))
+}
+
+async fn existing_job_response_for_id(
+    state: &AppState,
+    operator: &AuthContext,
+    job_id: Uuid,
+    request_fingerprint: &str,
 ) -> Result<Option<CreateJobResponse>, ApiError> {
-    let Some(key) = request.idempotency_key.as_deref() else {
+    let Some(existing) = state.repo.get_job(job_id).await? else {
         return Ok(None);
     };
-    let Some(existing) = state
+    if existing.actor_id != Some(operator.operator.id) {
+        return Err(ApiError::conflict("job_id_reused_by_different_actor"));
+    }
+    let stored_fingerprint = state
         .repo
-        .find_job_by_idempotency_key(operator.operator.id, key)
+        .get_job_request_fingerprint(job_id)
         .await?
-    else {
-        return Ok(None);
-    };
-    if existing.payload_hash != command_hash {
-        return Err(ApiError::conflict(
-            "job_idempotency_key_reused_with_different_payload",
-        ));
+        .unwrap_or_default();
+    if stored_fingerprint != request_fingerprint {
+        return Err(ApiError::conflict("job_id_reused_with_different_request"));
     }
     Ok(Some(CreateJobResponse {
         job_id: existing.id,
-        accepted_targets: accepted_targets_for_existing_job(&existing),
+        target_count: existing.target_count.max(0) as usize,
+        accepted_targets: state.repo.count_job_accepted_targets(existing.id).await?,
         status: existing.status,
     }))
-}
-
-fn accepted_targets_for_existing_job(existing: &JobHistoryView) -> usize {
-    if existing.status.starts_with("rejected") {
-        0
-    } else {
-        existing.target_count.max(0) as usize
-    }
 }
 
 async fn agent_update_release_policy_allows(
@@ -411,161 +383,7 @@ async fn precomplete_capability_skips(
     Ok(precompleted_statuses)
 }
 
-struct DispatchContext {
-    operator: AuthContext,
-    command_hash: String,
-}
-
-struct GatewayDispatchBatch {
-    job_id: Uuid,
-    job_command: JobCommand,
-    timeout_secs: u64,
-    targets: Vec<String>,
-    signed_envelopes: HashMap<String, CommandEnvelope>,
-    precompleted_statuses: Vec<String>,
-    target_count: usize,
-    source_schedule_id: Option<Uuid>,
-    context: DispatchContext,
-}
-
-async fn dispatch_to_gateway(
-    state: &AppState,
-    batch: GatewayDispatchBatch,
-) -> Result<(usize, String), ApiError> {
-    record_backup_requests_for_dispatch(state, &batch).await?;
-    let mut requests = Vec::new();
-    let command_version = crate::job_request::job_command_protocol_version(&batch.job_command);
-    debug_assert!(
-        command_version
-            >= crate::job_request::job_command_min_supported_protocol_version(&batch.job_command)
-    );
-    for client_id in &batch.targets {
-        let request = JobRequest {
-            job_id: batch.job_id,
-            command_version,
-            command: batch.job_command.clone(),
-            envelope: batch
-                .signed_envelopes
-                .get(client_id)
-                .cloned()
-                .with_context(|| format!("missing signed envelope for {client_id}"))?,
-            timeout_secs: batch.timeout_secs.clamp(1, 3600),
-        };
-        requests.push((client_id.clone(), request));
-    }
-    state
-        .repo
-        .mark_job_targets_dispatching(batch.job_id, &batch.targets)
-        .await?;
-    let dispatches = requests.into_iter().map(|(client_id, request)| {
-        let gateway = state.gateway.clone();
-        async move {
-            let result = gateway
-                .dispatch(&client_id, request)
-                .await
-                .map(target_outcome_from_gateway);
-            let outcome = match result {
-                Ok(outcome) => outcome,
-                Err(error) => TargetDispatchOutcome {
-                    status: "dispatch_failed".to_string(),
-                    exit_code: None,
-                    command_version: None,
-                    accepted: false,
-                    message: {
-                        let message = error.to_string();
-                        warn!(
-                            client_id,
-                            job_id = %batch.job_id,
-                            error = %message,
-                            "gateway command dispatch failed"
-                        );
-                        message
-                    },
-                    outputs: Vec::new(),
-                },
-            };
-            (client_id, outcome)
-        }
-    });
-    let dispatch_results = join_all(dispatches).await;
-    let mut accepted_targets = 0_usize;
-    let mut target_statuses = batch.precompleted_statuses.clone();
-    for (client_id, mut outcome) in dispatch_results {
-        if outcome.accepted {
-            accepted_targets += 1;
-        }
-        let stale_reason = protocol_mismatch_reason(&outcome, command_version, &batch.job_command);
-        if let Some(reason) = stale_reason.as_deref() {
-            outcome.message = stale_target_message(&outcome.message, reason);
-        }
-        target_statuses.push(outcome.status.clone());
-        state
-            .repo
-            .update_job_target_result(batch.job_id, &client_id, &outcome)
-            .await?;
-        if let Some(reason) = stale_reason {
-            state
-                .repo
-                .mark_agent_stale(
-                    &client_id,
-                    &reason,
-                    serde_json::json!({
-                        "job_id": batch.job_id,
-                        "command_type": crate::job_request::job_command_type_label(&batch.job_command),
-                        "requested_command_version": command_version,
-                        "response_command_version": outcome.command_version,
-                        "message": outcome.message,
-                    }),
-                )
-                .await?;
-        }
-        state
-            .repo
-            .record_job_outputs_with_config(
-                batch.job_id,
-                &client_id,
-                &outcome.outputs,
-                JobOutputPersistConfig {
-                    object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes,
-                },
-            )
-            .await?;
-        if let Some((seq, output)) = outcome.outputs.iter().enumerate().next_back() {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id: batch.job_id,
-                client_id: client_id.clone(),
-                seq: seq as i32,
-                done: output.done,
-            });
-        }
-        if matches!(&batch.job_command, JobCommand::Backup { .. }) && outcome.status == "completed"
-        {
-            if let Err(error) = try_auto_record_backup_artifact(
-                state,
-                &batch.context.operator,
-                &client_id,
-                &batch.context.command_hash,
-                batch.job_id,
-                &outcome.outputs,
-            )
-            .await
-            {
-                warn!(%error, job_id = %batch.job_id, client_id, "backup artifact auto-record failed");
-            }
-        }
-    }
-    let status = aggregate_job_status(&target_statuses, batch.target_count);
-    state.repo.finish_job(batch.job_id, status).await?;
-    state.publish(WsEvent::JobFinished {
-        job_id: batch.job_id,
-        accepted_targets,
-        status: status.to_string(),
-    });
-    Ok((accepted_targets, status.to_string()))
-}
-
-fn stale_target_message(message: &str, reason: &str) -> String {
+pub(crate) fn stale_target_message(message: &str, reason: &str) -> String {
     let trimmed = message.trim();
     if trimmed.to_ascii_lowercase().contains("stale") {
         return trimmed.to_string();
@@ -621,104 +439,6 @@ fn status_value_message(value: &serde_json::Value) -> Option<String> {
         (_, Some(primary)) => Some(primary.to_string()),
         _ => None,
     }
-}
-
-async fn record_backup_requests_for_dispatch(
-    state: &AppState,
-    batch: &GatewayDispatchBatch,
-) -> Result<(), ApiError> {
-    let JobCommand::Backup {
-        paths,
-        include_config,
-        recipient_public_key_hex,
-    } = &batch.job_command
-    else {
-        return Ok(());
-    };
-    for client_id in &batch.targets {
-        if let Some(request) = state
-            .repo
-            .find_open_backup_request_for_artifact(client_id, &batch.context.command_hash)
-            .await?
-        {
-            state
-                .repo
-                .attach_backup_request_source(
-                    request.id,
-                    Some(batch.job_id),
-                    batch.source_schedule_id,
-                    &batch.context.operator,
-                )
-                .await?;
-            continue;
-        }
-        let envelope = batch
-            .signed_envelopes
-            .get(client_id)
-            .with_context(|| format!("missing signed envelope for {client_id}"))?;
-        let request = CreateBackupRequest {
-            client_id: client_id.clone(),
-            paths: paths.clone(),
-            include_config: *include_config,
-            recipient_public_key_hex: recipient_public_key_hex.clone(),
-            confirmed: true,
-            note: Some(format!("auto-linked from backup job {}", batch.job_id)),
-            privilege_assertion: None,
-        };
-        state
-            .repo
-            .record_backup_request_with_source(
-                &request,
-                &batch.context.command_hash,
-                envelope,
-                &batch.context.operator,
-                BackupRequestStatus::RequestedMetadataOnly,
-                BackupRequestSourceLink {
-                    job_id: Some(batch.job_id),
-                    schedule_id: batch.source_schedule_id,
-                },
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'static str {
-    let completed = target_statuses
-        .iter()
-        .filter(|status| status.as_str() == "completed")
-        .count();
-    if target_count > 0 && completed == target_count {
-        return "completed";
-    }
-    if completed > 0 {
-        return "partially_completed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "degraded_unprivileged")
-    {
-        return "degraded_unprivileged";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "timed_out")
-    {
-        return "timed_out";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
-    {
-        return "failed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "accepted")
-    {
-        return "accepted";
-    }
-    "dispatch_failed"
 }
 
 fn split_targets_by_capability(
@@ -890,18 +610,36 @@ fn capability_degraded_outcome(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reject_job(
     state: &AppState,
+    job_id: Uuid,
     request: &CreateJobRequest,
     command_hash: &str,
+    request_fingerprint: &str,
     operator: &AuthContext,
+    status: &'static str,
     reason: &'static str,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
     let job_id = state
         .repo
-        .record_rejected_job(request, command_hash, operator)
+        .record_rejected_job(
+            job_id,
+            request,
+            command_hash,
+            request_fingerprint,
+            operator,
+            status,
+            reason,
+        )
         .await?;
-    let status = "rejected_authorization_required".to_string();
+    let status = status.to_string();
+    let target_count = state
+        .repo
+        .get_job(job_id)
+        .await?
+        .map(|job| job.target_count.max(0) as usize)
+        .unwrap_or_default();
     warn!(
         selector_expression = %request.selector_expression,
         privileged = request.privileged,
@@ -918,6 +656,7 @@ async fn reject_job(
         StatusCode::FORBIDDEN,
         Json(CreateJobResponse {
             job_id,
+            target_count,
             accepted_targets: 0,
             status,
         }),
@@ -925,8 +664,9 @@ async fn reject_job(
 }
 
 fn validate_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
-    if selector_expression.trim().is_empty() {
-        return Err(ApiError::bad_request("selector_expression_required"));
+    let selector_expression = selector_expression.trim();
+    if selector_expression.is_empty() {
+        return Ok(());
     }
     parse_selector_expression(selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
@@ -943,7 +683,9 @@ pub(crate) struct TargetDispatchOutcome {
     pub(crate) outputs: Vec<CommandOutput>,
 }
 
-fn target_outcome_from_gateway(result: GatewayCommandDispatchResult) -> TargetDispatchOutcome {
+pub(crate) fn target_outcome_from_gateway(
+    result: GatewayCommandDispatchResult,
+) -> TargetDispatchOutcome {
     if !result.accepted {
         let message =
             target_message_from_outputs(&result.outputs, &result.message, "rejected_by_agent");
@@ -982,7 +724,7 @@ fn target_outcome_from_gateway(result: GatewayCommandDispatchResult) -> TargetDi
     }
 }
 
-fn protocol_mismatch_reason(
+pub(crate) fn protocol_mismatch_reason(
     outcome: &TargetDispatchOutcome,
     expected_command_version: u16,
     command: &JobCommand,
@@ -1017,7 +759,7 @@ fn protocol_mismatch_reason(
     })
 }
 
-fn output_indicates_timeout(output: &CommandOutput) -> bool {
+pub(crate) fn output_indicates_timeout(output: &CommandOutput) -> bool {
     if output.stream != OutputStream::Status {
         return false;
     }

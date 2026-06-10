@@ -31,6 +31,7 @@ pub(crate) struct FleetAlertPolicyQuery {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateFleetAlertPolicyRequest {
+    pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) scope_kind: String,
     pub(crate) scope_value: Option<String>,

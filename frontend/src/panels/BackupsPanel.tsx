@@ -271,13 +271,14 @@ export function BackupsPanel({
     () => parseSearchExpression(policyTargetsText),
     [policyTargetsText],
   );
-  const policyTargetCount = useMemo(
+  const policyTargetIds = useMemo(
     () =>
       policyTargetParse.error
-        ? 0
-        : agentsMatchingExpression(agents, policyTargetsText).length,
+        ? []
+        : agentsMatchingExpression(agents, policyTargetsText).map((agent) => agent.id),
     [agents, policyTargetParse.error, policyTargetsText],
   );
+  const policyTargetCount = policyTargetIds.length;
   const restorePaths = useMemo(
     () => parseBackupPaths(restorePathsText),
     [restorePathsText],
@@ -365,6 +366,7 @@ export function BackupsPanel({
       const policy = await onCreateBackupPolicy({
         name: policyName.trim(),
         selector_expression: policyTargetsText.trim(),
+        target_client_ids: policyTargetIds,
         paths: policyPaths,
         include_config: policyIncludeConfig,
         recipient_public_key_hex: recipient || null,
@@ -677,6 +679,7 @@ export function BackupsPanel({
     });
     const nextJob = await onCreateJob({
       selector_expression: selectorExpression,
+      target_client_ids: [input.targetClientId],
       destructive: !input.dryRun,
       confirmed: true,
       command: "restore",
@@ -757,6 +760,7 @@ export function BackupsPanel({
       });
       const nextJob = await onCreateJob({
         selector_expression: selectorExpression,
+        target_client_ids: [targetClientId],
         destructive: true,
         confirmed: true,
         command: "restore_rollback",
@@ -843,7 +847,7 @@ export function BackupsPanel({
       case "policy":
         return [
           { label: "Policy", value: policyName.trim() || "unnamed" },
-          { label: "Targets", value: `${policyTargetCount} VPSs` },
+          { label: "Fixed targets", value: `${policyTargetCount} VPSs resolved and saved` },
           {
             label: "Scope",
             value: `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths`,

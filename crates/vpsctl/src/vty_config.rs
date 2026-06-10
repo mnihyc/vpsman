@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use uuid::Uuid;
 use vpsman_common::{
     validate_agent_config_shape, validate_data_source_config_patch_section, AgentConfig,
     JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
@@ -734,10 +735,12 @@ fn submit_vty_config_operation(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": command_label,
             "argv": [],
             "operation": operation,
             "selector_expression": selector_expression,
+            "target_client_ids": client_ids,
             "privileged": true,
             "destructive": false,
             "confirmed": selection.confirmed,

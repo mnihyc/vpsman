@@ -35,7 +35,6 @@ export type KeyLifecycleClientView = {
 };
 
 export type KeyLifecycleReportView = {
-  server_ed25519_public_key_configured: boolean;
   direct_identity_client_count: number;
   current_key_revoked_count: number;
   revocation_count: number;

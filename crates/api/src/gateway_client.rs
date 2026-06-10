@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use ed25519_dalek::SigningKey;
 use serde::de::DeserializeOwned;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -115,15 +114,6 @@ impl GatewayDispatchClient {
         )
         .await
     }
-}
-
-pub(crate) fn decode_server_signing_key(value: &str) -> Result<SigningKey> {
-    let bytes = hex::decode(value.trim()).context("invalid server signing key hex")?;
-    let bytes: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("server signing key must be 32 bytes"))?;
-    Ok(SigningKey::from_bytes(&bytes))
 }
 
 async fn post_gateway_command(

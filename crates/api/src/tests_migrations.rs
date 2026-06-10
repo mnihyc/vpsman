@@ -163,7 +163,6 @@ fn test_state(repo: Repository) -> AppState {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

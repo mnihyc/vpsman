@@ -430,6 +430,35 @@
   min-width: 0;
 }
 
+
+.consoleCrudPanel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.consoleInlineNotice {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 10px 12px;
+  color: #3c4043;
+}
+
+.consoleInlineNotice strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.consoleInlineNotice small {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .consoleFormGroup {
   display: grid;
   gap: 12px;

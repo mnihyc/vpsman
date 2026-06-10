@@ -9,10 +9,14 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    job_request::{job_command_type_label, validate_job_command},
+    job_request::{
+        fixed_target_selection, job_command_type_label, normalized_target_client_ids,
+        validate_job_command,
+    },
     model::{
-        BulkResolveRequest, CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest,
-        ListQuery, SchedulePrivilegeMutationRequest, ScheduleView, UpdateScheduleRequest,
+        CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest, ListQuery,
+        SchedulePrivilegeMutationRequest, ScheduleView, UpdateScheduleRequest,
+        UpdateScheduleTargetsRequest,
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository_schedules::next_cron_runs,
@@ -34,12 +38,13 @@ pub(crate) async fn list_schedules(
 pub(crate) async fn create_schedule(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateScheduleRequest>,
+    Json(mut request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<ScheduleView>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_schedule_request(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     verify_schedule_privilege_for_definition(
         &state,
         "schedule.create",
@@ -60,12 +65,13 @@ pub(crate) async fn update_schedule(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(schedule_id): Path<Uuid>,
-    Json(request): Json<UpdateScheduleRequest>,
+    Json(mut request): Json<UpdateScheduleRequest>,
 ) -> Result<Json<ScheduleView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_update_schedule_request(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     verify_schedule_privilege_for_definition(
         &state,
         "schedule.update",
@@ -80,6 +86,57 @@ pub(crate) async fn update_schedule(
         state
             .repo
             .update_schedule_record(schedule_id, request.into(), &operator)
+            .await?,
+    ))
+}
+
+pub(crate) async fn update_schedule_targets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(schedule_id): Path<Uuid>,
+    Json(request): Json<UpdateScheduleTargetsRequest>,
+) -> Result<Json<ScheduleView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "schedules:write")
+        .await?;
+    let target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    let selector_expression = request.selector_expression.trim().to_string();
+    if !selector_expression.is_empty() {
+        parse_selector_expression(&selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+    }
+    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    verify_schedule_privilege_for_definition(
+        &state,
+        "schedule.targets.update",
+        Some(schedule_id),
+        ScheduleDefinitionRef {
+            name: &schedule.name,
+            operation: &schedule.operation,
+            selector_expression: &selector_expression,
+            target_client_ids: &target_client_ids,
+            cron_expr: &schedule.cron_expr,
+            timezone: &schedule.timezone,
+            enabled: schedule.enabled,
+            catch_up_policy: &schedule.catch_up_policy,
+            catch_up_limit: schedule.catch_up_limit,
+            retry_delay_secs: schedule.retry_delay_secs,
+            max_failures: schedule.max_failures,
+        },
+        schedule.deferred_until.as_deref(),
+        false,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
+    Ok(Json(
+        state
+            .repo
+            .update_schedule_targets(
+                schedule_id,
+                selector_expression,
+                target_client_ids,
+                &operator,
+            )
             .await?,
     ))
 }
@@ -149,7 +206,9 @@ pub(crate) async fn apply_schedule_now(
         return Err(ApiError::conflict("schedule_apply_now_requires_enabled"));
     }
     let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
         selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -159,11 +218,6 @@ pub(crate) async fn apply_schedule_now(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: Some(format!(
-            "schedule-apply-now:{}:{}",
-            schedule.id,
-            Uuid::new_v4()
-        )),
         reconnect_policy: None,
     };
     create_job_from_saved_schedule(&state, &operator, request, schedule_id).await
@@ -255,11 +309,11 @@ fn validate_schedule_definition(request: ScheduleDefinitionRef<'_>) -> Result<()
     if next_cron_runs(request.cron_expr, 1).is_err() {
         return Err(ApiError::bad_request("schedule_cron_invalid"));
     }
-    if request.selector_expression.trim().is_empty() {
-        return Err(ApiError::bad_request("schedule_targets_required"));
+    normalized_target_client_ids(request.target_client_ids)?;
+    if !request.selector_expression.trim().is_empty() {
+        parse_selector_expression(request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     }
-    parse_selector_expression(request.selector_expression)
-        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     if !matches!(
         request.catch_up_policy,
         "skip_missed" | "run_once" | "run_all_limited"
@@ -308,7 +362,7 @@ async fn verify_schedule_privilege_for_definition(
     deleted: bool,
     assertion: Option<PrivilegeAssertion>,
 ) -> Result<(), ApiError> {
-    let resolved_targets = resolved_schedule_targets(state, request.selector_expression).await?;
+    let resolved_targets = resolved_schedule_targets(state, request.target_client_ids).await?;
     let operation_payload = encode_json(request.operation)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     let operation_payload_hash = payload_hash(&operation_payload);
@@ -357,28 +411,33 @@ async fn verify_schedule_privilege_for_view(
 
 async fn resolved_schedule_targets(
     state: &AppState,
-    selector_expression: &str,
+    target_client_ids: &[String],
 ) -> Result<Vec<String>, ApiError> {
-    let resolved_targets = state
+    let target_client_ids = normalized_target_client_ids(target_client_ids)?;
+    let resolved = state
         .repo
-        .resolve_bulk_targets(&BulkResolveRequest {
-            selector_expression: selector_expression.to_string(),
-        })
+        .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
         .await?
         .targets
         .into_iter()
         .map(|agent| agent.id)
         .collect::<Vec<_>>();
-    if resolved_targets.is_empty() {
-        return Err(ApiError::conflict("schedule_targets_resolved_empty"));
+    let missing = target_client_ids
+        .iter()
+        .filter(|client_id| !resolved.iter().any(|resolved_id| resolved_id == *client_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(ApiError::conflict("schedule_fixed_targets_not_found"));
     }
-    Ok(resolved_targets)
+    Ok(target_client_ids)
 }
 
 struct ScheduleDefinitionRef<'a> {
     name: &'a str,
     operation: &'a vpsman_common::JobCommand,
     selector_expression: &'a str,
+    target_client_ids: &'a [String],
     cron_expr: &'a str,
     timezone: &'a str,
     enabled: bool,
@@ -394,6 +453,7 @@ impl<'a> ScheduleDefinitionRef<'a> {
             name: &request.name,
             operation: &request.operation,
             selector_expression: &request.selector_expression,
+            target_client_ids: &request.target_client_ids,
             cron_expr: &request.cron_expr,
             timezone: &request.timezone,
             enabled: request.enabled,
@@ -409,6 +469,7 @@ impl<'a> ScheduleDefinitionRef<'a> {
             name: &request.name,
             operation: &request.operation,
             selector_expression: &request.selector_expression,
+            target_client_ids: &request.target_client_ids,
             cron_expr: &request.cron_expr,
             timezone: &request.timezone,
             enabled: request.enabled,
@@ -424,6 +485,7 @@ impl<'a> ScheduleDefinitionRef<'a> {
             name: &schedule.name,
             operation: &schedule.operation,
             selector_expression: &schedule.selector_expression,
+            target_client_ids: &schedule.target_client_ids,
             cron_expr: &schedule.cron_expr,
             timezone: &schedule.timezone,
             enabled,
@@ -441,6 +503,7 @@ impl From<UpdateScheduleRequest> for crate::repository_schedules::ScheduleCreate
             name: request.name,
             operation: request.operation,
             selector_expression: request.selector_expression,
+            target_client_ids: request.target_client_ids,
             cron_expr: request.cron_expr,
             timezone: request.timezone,
             enabled: request.enabled,

@@ -29,9 +29,6 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_pid=""
 api_log=""
@@ -123,7 +120,8 @@ start_api() {
     VPSMAN_POSTGRES_URL="$postgres_url" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-    VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+    VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+    VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -226,7 +224,6 @@ assert_outputs_redacted() {
     -e "privilege_assertion" \
     -e "client_private_key_hex" \
     -e "server_public_key_hex" \
-    -e "server_ed25519_public_key_hex" \
     <<<"$decoded_outputs" >/dev/null; then
     echo "network apply/rollback outputs leaked privilege or trust material" >&2
     exit 1
@@ -501,27 +498,32 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "bgp,network-apply-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags bgp,network-apply-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+peer_token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags bgp,network-apply-smoke)"
+peer_enrollment_token="$(jq -r '.token' <<<"$peer_token_json")"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$peer_agent_config" \
-  "$peer_client_id" \
-  "$peer_client_id" \
-  "bgp,network-apply-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write primary client_id for live network apply smoke"
+fi
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$peer_enrollment_token" \
+  --output-file "$peer_agent_config" >/dev/null
+peer_client_id="$(smoke_agent_config_client_id "$peer_agent_config")"
+if [[ -z "$peer_client_id" ]]; then
+  smoke_fail "enroll-config did not write peer client_id for live network apply smoke"
+fi
 
 sed -i \
   -e 's/^apply_enabled = .*/apply_enabled = true/' \
@@ -586,6 +588,7 @@ reject_body="$(jq -nc \
       bird2_sha256_hex: $bird2_sha
     },
     selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
     privileged: true,
     confirmed: true,
     timeout_secs: 30
@@ -615,7 +618,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 apply_job_id="$(jq -r '.job_id' <<<"$apply_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$apply_json" >/dev/null
+smoke_assert_job_create_queued "$apply_json" 1
+smoke_wait_api_job_status "$api_url" "$apply_job_id" completed 45 >/dev/null
 
 grep -q "# vpsman-managed ifupdown begin $client_id $peer_client_id live-apply vpsap0" "$ifupdown_file"
 grep -q "# vpsman-managed bird2 begin $client_id $peer_client_id live-apply vpsap0" "$bird2_file"
@@ -634,7 +638,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$rollback_json" >/dev/null
+smoke_assert_job_create_queued "$rollback_json" 1
+smoke_wait_api_job_status "$api_url" "$rollback_job_id" completed 45 >/dev/null
 
 assert_managed_blocks_removed
 assert_rollback_evidence
@@ -707,7 +712,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 adapter_apply_job_id="$(jq -r '.job_id' <<<"$adapter_apply_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$adapter_apply_json" >/dev/null
+smoke_assert_job_create_queued "$adapter_apply_json" 1
+smoke_wait_api_job_status "$api_url" "$adapter_apply_job_id" completed 45 >/dev/null
 assert_adapter_apply_evidence
 assert_adapter_tunnel_plan_after_apply
 
@@ -721,7 +727,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 adapter_rollback_job_id="$(jq -r '.job_id' <<<"$adapter_rollback_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$adapter_rollback_json" >/dev/null
+smoke_assert_job_create_queued "$adapter_rollback_json" 1
+smoke_wait_api_job_status "$api_url" "$adapter_rollback_job_id" completed 45 >/dev/null
 assert_adapter_rollback_evidence
 assert_adapter_tunnel_plan_after_rollback
 assert_adapter_log_evidence

@@ -118,7 +118,9 @@ CREATE TABLE gateway_sessions (
     started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at TIMESTAMPTZ,
-    end_reason TEXT
+    end_reason TEXT,
+    CONSTRAINT gateway_sessions_status_check
+        CHECK (status IN ('active', 'ended', 'expired'))
 );
 
 CREATE INDEX gateway_sessions_client_status_idx
@@ -126,13 +128,6 @@ CREATE INDEX gateway_sessions_client_status_idx
 
 CREATE INDEX gateway_sessions_gateway_seen_idx
     ON gateway_sessions (gateway_id, last_seen_at DESC, id DESC);
-
-ALTER TABLE gateway_sessions
-  ADD CONSTRAINT gateway_sessions_status_common_check CHECK (status IN (
-    'active',
-    'ended',
-    'expired'
-  ));
 
 CREATE TABLE client_key_revocations (
     id UUID PRIMARY KEY,

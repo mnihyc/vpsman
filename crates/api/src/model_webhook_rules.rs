@@ -27,6 +27,7 @@ pub(crate) struct WebhookRuleQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateWebhookRuleRequest {
+    pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
     #[serde(default = "default_webhook_rule_enabled")]
     pub(crate) enabled: bool,

@@ -318,6 +318,7 @@ export type FleetAlertPolicyRecord = {
 };
 
 export type FleetAlertPolicyRequest = {
+  id?: string;
   name: string;
   scope_kind: string;
   scope_value?: string | null;
@@ -352,6 +353,7 @@ export type FleetAlertNotificationChannelRecord = {
 };
 
 export type FleetAlertNotificationChannelRequest = {
+  id?: string;
   name: string;
   scope_kind: string;
   scope_value?: string | null;
@@ -421,6 +423,7 @@ export type WebhookRuleRecord = {
 };
 
 export type WebhookRuleRequest = {
+  id?: string;
   name: string;
   enabled?: boolean;
   expression: string;
@@ -819,6 +822,7 @@ export type ScheduleRecord = {
   command_type: string;
   operation: JobOperation;
   selector_expression: string;
+  target_client_ids: string[];
   cron_expr: string;
   timezone: "UTC" | string;
   next_runs: string[];
@@ -1276,14 +1280,6 @@ export type PrivilegeAssertion = {
   assertion_hex: string;
 };
 
-export type CommandEnvelope = {
-  command_id: string;
-  scope: string;
-  payload_hash_hex: string;
-  signed_unix: number;
-  expires_unix: number;
-  server_signature: number[];
-};
 
 export type JobOperation =
   | { type: "shell"; argv: string[]; pty: boolean }
@@ -1589,7 +1585,9 @@ export type FileExistingPolicy = "skip" | "replace";
 export type FileOwnershipPolicy = "fail" | "ignore";
 
 export type CreateJobRequest = {
+  job_id?: string;
   selector_expression: string;
+  target_client_ids: string[];
   destructive: boolean;
   confirmed: boolean;
   command: string;
@@ -1600,12 +1598,12 @@ export type CreateJobRequest = {
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
-  idempotency_key?: string | null;
   reconnect_policy?: JsonValue | null;
 };
 
 export type CreateJobResponse = {
   job_id: string;
+  target_count: number;
   accepted_targets: number;
   status: string;
 };
@@ -1614,6 +1612,7 @@ export type CreateScheduleRequest = {
   name: string;
   operation: JobOperation;
   selector_expression: string;
+  target_client_ids: string[];
   cron_expr: string;
   timezone: "UTC";
   enabled: boolean;
@@ -1625,6 +1624,12 @@ export type CreateScheduleRequest = {
 };
 
 export type UpdateScheduleRequest = CreateScheduleRequest;
+
+export type UpdateScheduleTargetsRequest = {
+  selector_expression: string;
+  target_client_ids: string[];
+  privilege_assertion?: PrivilegeAssertion | null;
+};
 
 export type SchedulePrivilegeMutationRequest = {
   privilege_assertion?: PrivilegeAssertion | null;
@@ -1641,6 +1646,7 @@ export type BackupPolicyRecord = {
   name: string;
   enabled: boolean;
   selector_expression: string;
+  target_client_ids: string[];
   paths: string[];
   include_config: boolean;
   recipient_public_key_hex: string | null;
@@ -1665,6 +1671,7 @@ export type BackupPolicyRecord = {
 export type CreateBackupPolicyRequest = {
   name: string;
   selector_expression: string;
+  target_client_ids: string[];
   paths: string[];
   include_config: boolean;
   recipient_public_key_hex?: string | null;
@@ -1691,9 +1698,7 @@ export type BackupRequestRecord = {
   include_config: boolean;
   status: string;
   payload_hash: string;
-  signed_command_scope: string;
-  signed_command_id: string | null;
-  signed_command_expires_unix: number | null;
+  command_scope: string;
   artifact_id: string | null;
   source_job_id: string | null;
   source_schedule_id: string | null;
@@ -1809,9 +1814,7 @@ export type RestorePlanRecord = {
   destination_root: string | null;
   status: string;
   payload_hash: string;
-  signed_command_scope: string;
-  signed_command_id: string | null;
-  signed_command_expires_unix: number | null;
+  command_scope: string;
   note: string | null;
   created_at: string;
 };

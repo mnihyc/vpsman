@@ -186,6 +186,7 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
     }
     repo.upsert_fleet_alert_policy(
         &CreateFleetAlertPolicyRequest {
+            id: None,
             name: "provider-a-cpu".to_string(),
             scope_kind: "provider".to_string(),
             scope_value: Some("provider-a".to_string()),
@@ -206,6 +207,7 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
     .unwrap();
     repo.upsert_fleet_alert_policy(
         &CreateFleetAlertPolicyRequest {
+            id: None,
             name: "edge-memory".to_string(),
             scope_kind: "tag".to_string(),
             scope_value: Some("edge".to_string()),
@@ -440,6 +442,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     }
     repo.upsert_fleet_alert_notification_channel(
         &CreateFleetAlertNotificationChannelRequest {
+            id: None,
             name: "edge-audit".to_string(),
             scope_kind: "tag".to_string(),
             scope_value: Some("edge".to_string()),
@@ -459,6 +462,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     .unwrap();
     repo.upsert_fleet_alert_notification_channel(
         &CreateFleetAlertNotificationChannelRequest {
+            id: None,
             name: "provider-webhook".to_string(),
             scope_kind: "provider".to_string(),
             scope_value: Some("provider-a".to_string()),
@@ -478,6 +482,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     .unwrap();
     repo.upsert_fleet_alert_notification_channel(
         &CreateFleetAlertNotificationChannelRequest {
+            id: None,
             name: "provider-custom-adapter".to_string(),
             scope_kind: "provider".to_string(),
             scope_value: Some("provider-a".to_string()),
@@ -631,7 +636,6 @@ fn alert_test_state(repo: Repository) -> AppState {
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

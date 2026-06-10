@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{extract::State, http::HeaderMap, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
@@ -102,7 +100,7 @@ fn validates_agent_update_job_document() {
 
     let signing_key = SigningKey::from_bytes(&[31_u8; 32]);
     let sha256_hex = "cd".repeat(32);
-    let signed_command = JobCommand::UpdateAgent {
+    let command = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: sha256_hex.clone(),
         artifact_signature_hex: Some(hex::encode(sign_update_artifact_hash(
@@ -111,7 +109,7 @@ fn validates_agent_update_job_document() {
         ))),
         artifact_signing_key_hex: Some(hex::encode(signing_key.verifying_key().to_bytes())),
     };
-    validate_job_command(&signed_command).unwrap();
+    validate_job_command(&command).unwrap();
 
     validate_job_command(&JobCommand::AgentUpdateActivate {
         staged_sha256_hex: "ef".repeat(32),
@@ -200,7 +198,9 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         artifact_signing_key_hex: None,
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -210,14 +210,11 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
     let (status, Json(response)) = create_job(
-        State(test_state_with_signing_key_and_privilege_auto_approve(
-            repo.clone(),
-        )),
+        State(test_state_with_privilege_auto_approve(repo.clone())),
         HeaderMap::new(),
         Json(request),
     )
@@ -239,14 +236,13 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
     );
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[19_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -257,9 +253,9 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
     }
 }
 
-fn test_state_with_signing_key_and_privilege_auto_approve(repo: Repository) -> AppState {
+fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
     AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        ..test_state_with_signing_key(repo)
+        ..test_state(repo)
     }
 }

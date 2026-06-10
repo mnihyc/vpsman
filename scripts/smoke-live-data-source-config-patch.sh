@@ -35,9 +35,6 @@ terminal_reject_job_id=""
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_pid=""
 api_log=""
@@ -94,7 +91,8 @@ start_api() {
     VPSMAN_POSTGRES_URL="$postgres_url" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-    VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+    VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+    VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -195,7 +193,6 @@ assert_patch_persisted() {
     -e "client_private_key_hex" \
     -e "privilege_assertion" \
     -e "server_public_key_hex" \
-    -e "server_ed25519_public_key_hex" \
     <<<"$decoded_outputs" >/dev/null; then
     echo "job outputs leaked data-source patch secrets or trust anchors" >&2
     exit 1
@@ -215,7 +212,7 @@ assert_execution_policy_applied() {
       --timeout-secs 10 \
       --confirmed)"
   execution_policy_job_id="$(jq -r '.job_id' <<<"$shell_json")"
-  if ! jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$shell_json" >/dev/null; then
+  if ! smoke_assert_job_create_queued "$shell_json" 1 || ! smoke_wait_api_job_status "$api_url" "$shell_job_id" completed 45 >/dev/null; then
     dump_job_diagnostics "command execution policy shell script did not complete" \
       "$execution_policy_job_id"
     exit 1
@@ -246,8 +243,7 @@ assert_execution_policy_applied() {
       --timeout-secs 1 \
       --confirmed)"
   execution_timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
-  if ! jq -e '.accepted_targets == 1 and .status == "timed_out"' \
-    <<<"$timeout_json" >/dev/null; then
+  if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$timeout_job_id" timed_out 45 >/dev/null; then
     dump_job_diagnostics "direct-child execution policy timeout did not report timed_out" \
       "$execution_timeout_job_id"
     exit 1
@@ -270,8 +266,8 @@ assert_execution_policy_applied() {
       --timeout-secs 10 \
       --confirmed)"
   terminal_reject_job_id="$(jq -r '.job.job_id' <<<"$terminal_json")"
-  if ! jq -e '.job.accepted_targets == 1 and .job.status == "failed"' \
-    <<<"$terminal_json" >/dev/null; then
+  if ! jq -e '.job.target_count == 1' <<<"$terminal_json" >/dev/null \
+    || ! smoke_wait_api_job_status "$api_url" "$terminal_reject_job_id" failed 45 >/dev/null; then
     dump_job_diagnostics "disabled PTY policy did not reject terminal open" \
       "$terminal_reject_job_id"
     exit 1
@@ -322,16 +318,19 @@ if ! SMOKE_WAIT_TCP_SECS=90 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; th
   exit 1
 fi
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "data-source-patch-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags data-source-patch-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write client_id for live data-source patch smoke"
+fi
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 RUST_LOG="vpsman_agent=warn" \
@@ -403,6 +402,7 @@ reject_body="$(jq -nc \
       toml: $toml
     },
     selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
     privileged: true,
     confirmed: true,
     timeout_secs: 30
@@ -433,7 +433,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$push_json")"
-if ! jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$push_json" >/dev/null; then
+if ! smoke_assert_job_create_queued "$push_json" 1 || ! smoke_wait_api_job_status "$api_url" "$push_job_id" completed 45 >/dev/null; then
   echo "expected privilege-unlocked data-source patch to complete; got:" >&2
   echo "$push_json" >&2
   dump_job_diagnostics "privilege-unlocked data-source patch did not complete" "$job_id"

@@ -14,11 +14,6 @@ use crate::{
     util::unix_now,
 };
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct KeyLifecycleTrustReport {
-    pub(crate) server_ed25519_public_key_configured: bool,
-}
-
 impl Repository {
     pub(crate) async fn upsert_agent_identity(
         &self,
@@ -487,10 +482,7 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn key_lifecycle_report(
-        &self,
-        trust: KeyLifecycleTrustReport,
-    ) -> Result<KeyLifecycleReportView> {
+    pub(crate) async fn key_lifecycle_report(&self) -> Result<KeyLifecycleReportView> {
         match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await.clone();
@@ -536,8 +528,6 @@ impl Repository {
                     .filter(|client| client.current_public_key_sha256_hex.is_some())
                     .count();
                 Ok(KeyLifecycleReportView {
-                    server_ed25519_public_key_configured: trust
-                        .server_ed25519_public_key_configured,
                     direct_identity_client_count,
                     current_key_revoked_count,
                     revocation_count: revocations.len(),
@@ -610,8 +600,6 @@ impl Repository {
                     .filter(|client| client.current_public_key_sha256_hex.is_some())
                     .count();
                 Ok(KeyLifecycleReportView {
-                    server_ed25519_public_key_configured: trust
-                        .server_ed25519_public_key_configured,
                     direct_identity_client_count,
                     current_key_revoked_count,
                     revocation_count: revocations.len(),

@@ -409,7 +409,7 @@ export function JobDispatchPanel({
     (visibleDispatchProgress
       ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
       : lastJob
-        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
+        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
       : preview
         ? `${preview.target_count} resolved targets`
         : privilegeMaterial
@@ -438,7 +438,7 @@ export function JobDispatchPanel({
     });
   }
 
-  function submitJob(event: FormEvent<HTMLFormElement>) {
+  async function submitJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setActionError(null);
     if (!privilegeMaterial) {
@@ -458,7 +458,14 @@ export function JobDispatchPanel({
       return;
     }
     blurActiveElement();
-    window.setTimeout(() => setDispatchPromptOpen(true), 140);
+    await runPanelAction(setPending, setActionError, async () => {
+      const resolved = await onResolveTargets(targetSelection());
+      if (!resolved.targets.length) {
+        throw new Error("Target confirmation resolved no VPSs");
+      }
+      setPreview(resolved);
+      setDispatchPromptOpen(true);
+    });
   }
 
   function applyCommandTemplate(templateId: string) {
@@ -615,9 +622,11 @@ export function JobDispatchPanel({
       if (!privilegeMaterial) {
         throw new Error("Privilege unlock is locked");
       }
+      const resolved = preview;
+      if (!resolved?.targets.length) {
+        throw new Error("Confirmed target snapshot is missing; preview the targets again");
+      }
       if (mode === "file_transfer_upload") {
-        const resolved = await onResolveTargets(targetSelection());
-        setPreview(resolved);
         const clientIds = resolved.targets.map((target) => target.id);
         const uploadSourceFile =
           fileTransferUploadSourceKind === "source-artifact"
@@ -656,8 +665,6 @@ export function JobDispatchPanel({
         return;
       }
       if (mode === "file_transfer_download") {
-        const resolved = await onResolveTargets(targetSelection());
-        setPreview(resolved);
         const clientIds = resolved.targets.map((target) => target.id);
         const startJob = await runBrowserResumableDownload({
           clientIds,
@@ -731,8 +738,6 @@ export function JobDispatchPanel({
         filePushMode,
         filePushPayload,
       );
-      const resolved = await onResolveTargets(targetSelection());
-      setPreview(resolved);
       const clientIds = resolved.targets.map((target) => target.id);
       const payloadHashHex = await operationPayloadHashHex(operation);
       const commandType = commandTypeForApi(operation);
@@ -749,7 +754,9 @@ export function JobDispatchPanel({
         privilegeMaterial,
       });
       const nextJob = await onCreateJob({
+        job_id: crypto.randomUUID(),
         selector_expression: selectorExpression.trim(),
+        target_client_ids: clientIds,
         destructive: operationNeedsConfirmation,
         confirmed: operationNeedsConfirmation,
         command: commandType,
@@ -759,7 +766,6 @@ export function JobDispatchPanel({
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
         privileged: true,
         privilege_assertion: privilegeAssertion,
-        idempotency_key: `panel:${mode}:${payloadHashHex.slice(0, 16)}:${clientIds.join(".").slice(0, 72)}`,
         reconnect_policy: {
           duplicate_delivery: "ignore_completed",
           resume_outputs: true,
@@ -774,9 +780,9 @@ export function JobDispatchPanel({
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[]) {
     setLastDispatchProgress(null);
     setDispatchProgress({
-      accepted: Math.min(job.accepted_targets, targets.length),
+      accepted: Math.min(job.target_count, targets.length),
       completed: 0,
-      doing: Math.min(job.accepted_targets, targets.length),
+      doing: Math.min(job.target_count, targets.length),
       expected: targets.length,
       failed: 0,
       jobId: job.job_id,
@@ -785,7 +791,7 @@ export function JobDispatchPanel({
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        acceptedTargets: job.accepted_targets,
+        acceptedTargets: job.target_count,
         onProgress: setDispatchProgress,
         targets,
       });

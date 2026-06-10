@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use uuid::Uuid;
 use vpsman_common::{
     payload_hash, render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
 };
@@ -204,9 +205,11 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": "network_ospf_cost_update",
             "argv": [],
             "selector_expression": selector_expression,
+            "target_client_ids": target_clients,
             "privileged": true,
             "destructive": true,
             "confirmed": request.confirmed,

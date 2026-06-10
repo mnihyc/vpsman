@@ -4,22 +4,18 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use croner::Cron;
-use ed25519_dalek::SigningKey;
 use serde_json::Value;
 use sqlx::{
     postgres::{PgListener, PgPoolOptions},
     types::Json as SqlJson,
     PgPool, Row,
 };
-use tokio::{task::JoinSet, time};
+use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use vpsman_common::{
-    expression_matches, job_command_protocol_version, parse_expression, payload_hash,
-    sign_command_envelope, CommandEnvelope, CommandOutput, ExpressionContext,
-    GatewayCommandDispatch, GatewayCommandDispatchResult, JobCommand, JobRequest, OutputStream,
-    VpsMetadata, MAX_COMMAND_SIGNATURE_AGE_SECS,
-};
+#[cfg(test)]
+use vpsman_common::{expression_matches, parse_expression, ExpressionContext, VpsMetadata};
+use vpsman_common::{payload_hash, JobCommand};
 
 mod alert_notifications;
 mod backup_policy_retention;
@@ -143,12 +139,6 @@ struct Args {
     backup_policy_prune_delete_objects: bool,
     #[arg(long, env = "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR")]
     backup_policy_prune_object_store_dir: Option<PathBuf>,
-    #[arg(long, env = "VPSMAN_WORKER_GATEWAY_CONTROL_URL")]
-    schedule_gateway_control_url: Option<String>,
-    #[arg(long, env = "VPSMAN_WORKER_INTERNAL_TOKEN")]
-    schedule_internal_token: Option<String>,
-    #[arg(long, env = "VPSMAN_WORKER_SERVER_SIGNING_KEY_HEX")]
-    schedule_server_signing_key_hex: Option<String>,
     #[arg(
         long,
         env = "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
@@ -209,12 +199,7 @@ async fn main() -> Result<()> {
         args.backup_policy_prune_delete_objects,
         args.backup_policy_prune_object_store_dir.clone(),
     );
-    let schedule_dispatch_config = ScheduleDispatchConfig::new(
-        args.schedule_gateway_control_url.clone(),
-        args.schedule_internal_token.clone(),
-        args.schedule_server_signing_key_hex.clone(),
-        args.schedule_command_timeout_secs,
-    )?;
+    let schedule_dispatch_config = ScheduleDispatchConfig::new(args.schedule_command_timeout_secs);
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
         let schedules_processed = process_due_schedules_if_leader(
@@ -604,6 +589,7 @@ async fn process_due_schedule(
             name,
             operation,
             selector_expression,
+            target_client_ids,
             cron_expr,
             EXTRACT(EPOCH FROM next_run_at)::BIGINT AS next_run_at_unix,
             catch_up_policy,
@@ -634,6 +620,7 @@ async fn process_due_schedule(
             name: row.try_get("name")?,
             operation: row.try_get::<SqlJson<Value>, _>("operation")?.0,
             selector_expression: row.try_get("selector_expression")?,
+            target_client_ids: row.try_get("target_client_ids")?,
             cron_expr: row.try_get("cron_expr")?,
             next_run_at_unix: row.try_get("next_run_at_unix")?,
             catch_up_policy: row.try_get("catch_up_policy")?,
@@ -645,21 +632,18 @@ async fn process_due_schedule(
         };
         let due_occurrences = calculate_due_occurrences(&schedule, Utc::now())?;
         let run_count = catch_up_run_count(&schedule, due_occurrences);
-        let mut dispatches = Vec::new();
         for run_index in 0..run_count {
-            if let Some(dispatch) =
-                materialize_due_schedule(&mut tx, &schedule, run_index, run_count).await?
-            {
-                dispatches.push(dispatch);
-            }
+            materialize_due_schedule(
+                &mut tx,
+                &schedule,
+                run_index,
+                run_count,
+                dispatch_config.timeout_secs,
+            )
+            .await?;
         }
         advance_schedule_after_success(&mut tx, &schedule, run_count).await?;
         tx.commit().await?;
-        for dispatch in dispatches {
-            if let Err(error) = dispatch_scheduled_run(pool, dispatch_config, dispatch).await {
-                warn!(%error, schedule_id = %schedule.id, "scheduled command dispatch failed");
-            }
-        }
         Ok(run_count as usize)
     }
     .await;
@@ -679,6 +663,7 @@ struct DueSchedule {
     name: String,
     operation: Value,
     selector_expression: String,
+    target_client_ids: Vec<String>,
     cron_expr: String,
     next_run_at_unix: i64,
     catch_up_policy: String,
@@ -690,69 +675,16 @@ struct DueSchedule {
 }
 
 #[derive(Clone)]
-struct ScheduledDispatch {
-    job_id: Uuid,
-    schedule_id: Uuid,
-    schedule_name: String,
-    selector_expression: String,
-    actor_id: Option<Uuid>,
-    operation: JobCommand,
-    command_type: String,
-    command_hash: String,
-    targets: Vec<String>,
-}
-
-#[derive(Clone)]
 struct ScheduleDispatchConfig {
-    gateway_control_url: Option<String>,
-    internal_token: Option<String>,
-    signing_key: Option<SigningKey>,
     timeout_secs: u64,
-    http: reqwest::Client,
 }
 
 impl ScheduleDispatchConfig {
-    fn new(
-        gateway_control_url: Option<String>,
-        internal_token: Option<String>,
-        server_signing_key_hex: Option<String>,
-        timeout_secs: u64,
-    ) -> Result<Self> {
-        let signing_key = server_signing_key_hex
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(decode_server_signing_key)
-            .transpose()?;
-        Ok(Self {
-            gateway_control_url: gateway_control_url
-                .map(|value| value.trim_end_matches('/').to_string())
-                .filter(|value| !value.is_empty()),
-            internal_token: internal_token
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            signing_key,
+    fn new(timeout_secs: u64) -> Self {
+        Self {
             timeout_secs: timeout_secs.clamp(1, 3600),
-            http: reqwest::Client::new(),
-        })
+        }
     }
-
-    fn configured(&self) -> bool {
-        self.gateway_control_url.is_some()
-            && self.internal_token.is_some()
-            && self.signing_key.is_some()
-    }
-}
-
-#[derive(Debug)]
-struct ScheduledTargetOutcome {
-    client_id: String,
-    status: String,
-    exit_code: Option<i32>,
-    command_version: Option<u16>,
-    accepted: bool,
-    message: String,
-    outputs: Vec<CommandOutput>,
 }
 
 struct ScheduleDueWebhookEvent<'a> {
@@ -770,8 +702,17 @@ async fn materialize_due_schedule(
     schedule: &DueSchedule,
     run_index: i64,
     run_count: i64,
-) -> Result<Option<ScheduledDispatch>> {
-    let targets = resolve_schedule_targets(tx, schedule).await?;
+    timeout_secs: u64,
+) -> Result<bool> {
+    let mut targets = schedule
+        .target_client_ids
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
     let operation_bytes = serde_json::to_vec(&schedule.operation)?;
     let command_hash = payload_hash(&operation_bytes);
     let operation: JobCommand = serde_json::from_value(schedule.operation.clone())
@@ -791,13 +732,26 @@ async fn materialize_due_schedule(
         "scheduled_{}",
         scheduled_command_type_label(&operation, operation_type)
     );
+    let mut fingerprint_targets = targets.clone();
+    fingerprint_targets.sort();
+    let request_fingerprint = payload_hash(&serde_json::to_vec(&serde_json::json!({
+        "selector_expression": schedule.selector_expression.trim(),
+        "command_type": &command_type,
+        "operation_payload_hash": &command_hash,
+        "targets": fingerprint_targets,
+        "timeout_secs": timeout_secs.clamp(1, 3600),
+        "privileged": true,
+        "force_unprivileged": false,
+        "source_schedule_id": schedule.id,
+    }))?);
     sqlx::query(
         r#"
         INSERT INTO jobs (
             id, actor_id, command_type, privileged, status, target_count,
-            payload_hash, operation, source_schedule_id, completed_at
+            payload_hash, operation, source_schedule_id, request_fingerprint,
+            timeout_secs, completed_at
         )
-        VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8,
+        VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10,
             CASE WHEN $4 = 'schedule_no_targets' THEN now() ELSE NULL END)
         "#,
     )
@@ -809,6 +763,8 @@ async fn materialize_due_schedule(
     .bind(&command_hash)
     .bind(SqlJson(&schedule.operation))
     .bind(schedule.id)
+    .bind(&request_fingerprint)
+    .bind(timeout_secs.clamp(1, 3600) as i64)
     .execute(&mut **tx)
     .await?;
 
@@ -848,7 +804,7 @@ async fn materialize_due_schedule(
         "schedule_name": schedule.name,
         "operation_type": operation_type,
         "job_id": job_id,
-        "resolved_targets": &targets,
+        "fixed_targets": &targets,
         "selector_expression": &schedule.selector_expression,
         "catch_up_policy": &schedule.catch_up_policy,
         "catch_up_run_index": run_index + 1,
@@ -857,7 +813,7 @@ async fn materialize_due_schedule(
         "max_failures": schedule.max_failures,
         "failure_count_before_run": schedule.failure_count,
         "last_error_before_run": &schedule.last_error,
-        "reason": "saved schedule intent was previously privilege-unlocked; worker automation is dispatching through private gateway control",
+        "reason": "saved schedule intent was previously privilege-unlocked; worker materialized a durable queued job from the fixed target snapshot",
     }))
     .execute(&mut **tx)
     .await?;
@@ -876,416 +832,7 @@ async fn materialize_due_schedule(
     )
     .await?;
 
-    if targets.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(ScheduledDispatch {
-            job_id,
-            schedule_id: schedule.id,
-            schedule_name: schedule.name.clone(),
-            selector_expression: schedule.selector_expression.clone(),
-            actor_id: schedule.actor_id,
-            operation,
-            command_type,
-            command_hash,
-            targets,
-        }))
-    }
-}
-
-async fn dispatch_scheduled_run(
-    pool: &PgPool,
-    config: &ScheduleDispatchConfig,
-    dispatch: ScheduledDispatch,
-) -> Result<()> {
-    if !config.configured() {
-        let outcomes = dispatch
-            .targets
-            .iter()
-            .map(|client_id| ScheduledTargetOutcome {
-                client_id: client_id.clone(),
-                status: "dispatch_failed".to_string(),
-                exit_code: None,
-                command_version: None,
-                accepted: false,
-                message: "worker schedule gateway dispatch is not configured".to_string(),
-                outputs: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        record_scheduled_dispatch_outcomes(pool, &dispatch, outcomes).await?;
-        return Ok(());
-    }
-    let signing_key = config
-        .signing_key
-        .as_ref()
-        .context("worker schedule signing key is not configured")?;
-    let command_version = job_command_protocol_version(&dispatch.operation);
-    let max_in_flight = dispatch.targets.len().clamp(1, 8);
-    let mut outcomes = Vec::new();
-    let mut jobs = JoinSet::new();
-    let mut targets = dispatch.targets.iter();
-
-    loop {
-        while jobs.len() < max_in_flight {
-            let Some(client_id) = targets.next().cloned() else {
-                break;
-            };
-            let envelope =
-                signed_schedule_envelope(&client_id, &dispatch.command_hash, signing_key);
-            let request = JobRequest {
-                job_id: dispatch.job_id,
-                command_version,
-                command: dispatch.operation.clone(),
-                envelope,
-                timeout_secs: config.timeout_secs,
-            };
-            let config = config.clone();
-            jobs.spawn(async move {
-                let result = dispatch_schedule_command(&config, &client_id, request).await;
-                match result {
-                    Ok(result) => scheduled_outcome_from_gateway(result),
-                    Err(error) => ScheduledTargetOutcome {
-                        client_id,
-                        status: "dispatch_failed".to_string(),
-                        exit_code: None,
-                        command_version: None,
-                        accepted: false,
-                        message: error.to_string(),
-                        outputs: Vec::new(),
-                    },
-                }
-            });
-        }
-        let Some(result) = jobs.join_next().await else {
-            break;
-        };
-        match result {
-            Ok(outcome) => outcomes.push(outcome),
-            Err(error) => {
-                warn!(%error, job_id = %dispatch.job_id, "scheduled dispatch worker task failed")
-            }
-        }
-    }
-
-    record_scheduled_dispatch_outcomes(pool, &dispatch, outcomes).await
-}
-
-fn signed_schedule_envelope(
-    client_id: &str,
-    command_hash: &str,
-    signing_key: &SigningKey,
-) -> CommandEnvelope {
-    let now = Utc::now().timestamp().max(0) as u64;
-    let mut envelope = CommandEnvelope {
-        command_id: Uuid::new_v4(),
-        scope: format!("client:{client_id}"),
-        payload_hash_hex: command_hash.to_string(),
-        signed_unix: now,
-        expires_unix: now.saturating_add(MAX_COMMAND_SIGNATURE_AGE_SECS),
-        server_signature: Vec::new(),
-    };
-    envelope.server_signature = sign_command_envelope(signing_key, &envelope);
-    envelope
-}
-
-async fn dispatch_schedule_command(
-    config: &ScheduleDispatchConfig,
-    client_id: &str,
-    request: JobRequest,
-) -> Result<GatewayCommandDispatchResult> {
-    let url = format!(
-        "{}/internal/v1/gateway/command",
-        config
-            .gateway_control_url
-            .as_deref()
-            .context("worker schedule gateway control URL is not configured")?
-    );
-    let response = config
-        .http
-        .post(url)
-        .bearer_auth(
-            config
-                .internal_token
-                .as_deref()
-                .context("worker schedule internal token is not configured")?,
-        )
-        .json(&GatewayCommandDispatch {
-            client_id: client_id.to_string(),
-            request,
-        })
-        .send()
-        .await
-        .with_context(|| format!("failed to dispatch scheduled command to {client_id}"))?;
-    let status = response.status();
-    let body = response.bytes().await?;
-    anyhow::ensure!(
-        status.is_success(),
-        "gateway control returned {status}: {}",
-        String::from_utf8_lossy(&body)
-    );
-    serde_json::from_slice(&body).context("failed to decode gateway scheduled dispatch result")
-}
-
-fn scheduled_outcome_from_gateway(result: GatewayCommandDispatchResult) -> ScheduledTargetOutcome {
-    if !result.accepted {
-        let message =
-            target_message_from_outputs(&result.outputs, &result.message, "rejected_by_agent");
-        return ScheduledTargetOutcome {
-            client_id: result.client_id,
-            status: "rejected_by_agent".to_string(),
-            exit_code: None,
-            command_version: Some(result.command_version),
-            accepted: false,
-            message,
-            outputs: result.outputs,
-        };
-    }
-    let final_output = result.outputs.iter().rev().find(|output| output.done);
-    let exit_code = final_output.and_then(|output| output.exit_code);
-    let status = if final_output.is_some_and(output_indicates_timeout) {
-        "timed_out"
-    } else {
-        match exit_code {
-            Some(0) => "completed",
-            Some(_) => "failed",
-            None => "accepted",
-        }
-    };
-    let message = if target_status_needs_reason(status) {
-        target_message_from_outputs(&result.outputs, &result.message, status)
-    } else {
-        result.message
-    };
-    ScheduledTargetOutcome {
-        client_id: result.client_id,
-        status: status.to_string(),
-        exit_code,
-        command_version: Some(result.command_version),
-        accepted: true,
-        message,
-        outputs: result.outputs,
-    }
-}
-
-fn scheduled_protocol_mismatch_reason(
-    outcome: &ScheduledTargetOutcome,
-    expected_command_version: u16,
-) -> Option<String> {
-    if outcome
-        .command_version
-        .is_some_and(|seen| seen < expected_command_version)
-    {
-        return Some("agent_returned_lower_command_version".to_string());
-    }
-    if outcome.message == "unsupported_command_version" {
-        return Some("agent_rejected_unsupported_command_version".to_string());
-    }
-    outcome.outputs.iter().find_map(|output| {
-        if output.stream != OutputStream::Status {
-            return None;
-        }
-        let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
-        let kind = value.get("type").and_then(serde_json::Value::as_str)?;
-        if kind == "unsupported_command_version" {
-            return Some("agent_rejected_unsupported_command_version".to_string());
-        }
-        let response_version = value
-            .get("command_version")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|version| u16::try_from(version).ok())?;
-        (response_version < expected_command_version)
-            .then(|| "agent_returned_lower_command_version".to_string())
-    })
-}
-
-async fn mark_scheduled_agent_stale(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch: &ScheduledDispatch,
-    outcome: &ScheduledTargetOutcome,
-    reason: &str,
-) -> Result<()> {
-    let prior = sqlx::query(
-        r#"
-        SELECT status, internal_build_number
-        FROM clients
-        WHERE id = $1 AND hidden_at IS NULL
-        FOR UPDATE
-        "#,
-    )
-    .bind(&outcome.client_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(prior) = prior else {
-        return Ok(());
-    };
-    let from_status: String = prior.try_get("status")?;
-    let internal_build_number = prior.try_get::<i64, _>("internal_build_number")?.max(1);
-    sqlx::query(
-        r#"
-        UPDATE clients
-        SET
-            status = 'stale',
-            stale_since = COALESCE(stale_since, now()),
-            stale_reason = $2,
-            stale_build_number = COALESCE(stale_build_number, internal_build_number)
-        WHERE id = $1 AND hidden_at IS NULL
-        "#,
-    )
-    .bind(&outcome.client_id)
-    .bind(reason)
-    .execute(&mut **tx)
-    .await?;
-    if from_status != "stale" {
-        let metadata = serde_json::json!({
-            "reason": reason,
-            "schedule_id": dispatch.schedule_id,
-            "job_id": dispatch.job_id,
-            "client_id": outcome.client_id,
-            "command_type": scheduled_command_type_label(&dispatch.operation, "unknown"),
-            "internal_build_number": internal_build_number,
-            "response_command_version": outcome.command_version,
-            "message": outcome.message,
-        });
-        sqlx::query(
-            r#"
-            INSERT INTO client_status_history (
-                id, client_id, from_status, to_status, reason, metadata
-            )
-            VALUES ($1, $2, $3, 'stale', $4, $5)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(&outcome.client_id)
-        .bind(&from_status)
-        .bind(reason)
-        .bind(metadata.clone())
-        .execute(&mut **tx)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO audit_logs (
-                id, actor_id, action, target, command_hash, metadata
-            )
-            VALUES ($1, NULL, 'agent.status_stale', $2, $3, $4)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(format!("client:{}", outcome.client_id))
-        .bind(&dispatch.command_hash)
-        .bind(metadata)
-        .execute(&mut **tx)
-        .await?;
-    }
-    Ok(())
-}
-
-async fn record_scheduled_dispatch_outcomes(
-    pool: &PgPool,
-    dispatch: &ScheduledDispatch,
-    outcomes: Vec<ScheduledTargetOutcome>,
-) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    let mut statuses = Vec::new();
-    for outcome in &outcomes {
-        statuses.push(outcome.status.clone());
-        let stale_reason = scheduled_protocol_mismatch_reason(
-            outcome,
-            job_command_protocol_version(&dispatch.operation),
-        );
-        let message = if let Some(reason) = stale_reason.as_deref() {
-            stale_target_message(&outcome.message, reason)
-        } else {
-            outcome.message.clone()
-        };
-        if let Some(reason) = stale_reason {
-            mark_scheduled_agent_stale(&mut tx, dispatch, outcome, &reason).await?;
-        }
-        sqlx::query(
-            r#"
-            UPDATE job_targets
-            SET
-                status = $3,
-                message = $4,
-                exit_code = $5,
-                started_at = COALESCE(started_at, now()),
-                completed_at = CASE
-                    WHEN $3 IN ('completed', 'failed', 'timed_out', 'rejected_by_agent', 'dispatch_failed') THEN now()
-                    ELSE completed_at
-                END
-            WHERE job_id = $1 AND client_id = $2
-            "#,
-        )
-        .bind(dispatch.job_id)
-        .bind(&outcome.client_id)
-        .bind(&outcome.status)
-        .bind(&message)
-        .bind(outcome.exit_code)
-        .execute(&mut *tx)
-        .await?;
-        for (seq, output) in outcome.outputs.iter().enumerate() {
-            sqlx::query(
-                r#"
-                INSERT INTO job_outputs (job_id, client_id, seq, stream, data, exit_code, done)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (job_id, client_id, seq) DO UPDATE
-                SET stream = EXCLUDED.stream,
-                    data = EXCLUDED.data,
-                    exit_code = EXCLUDED.exit_code,
-                    done = EXCLUDED.done
-                "#,
-            )
-            .bind(dispatch.job_id)
-            .bind(&outcome.client_id)
-            .bind(seq as i32)
-            .bind(output_stream_name(output.stream))
-            .bind(&output.data)
-            .bind(output.exit_code)
-            .bind(output.done)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO audit_logs (
-                id, actor_id, action, target, command_hash, metadata
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(dispatch.actor_id)
-        .bind("schedule.target_result")
-        .bind(format!(
-            "job:{}:client:{}",
-            dispatch.job_id, outcome.client_id
-        ))
-        .bind(&dispatch.command_hash)
-        .bind(serde_json::json!({
-            "schedule_id": dispatch.schedule_id,
-            "job_id": dispatch.job_id,
-            "client_id": outcome.client_id,
-            "status": outcome.status,
-            "accepted": outcome.accepted,
-            "message": message,
-        }))
-        .execute(&mut *tx)
-        .await?;
-    }
-    let job_status = aggregate_job_status(&statuses, dispatch.targets.len());
-    sqlx::query(
-        r#"
-        UPDATE jobs
-        SET status = $2, completed_at = now()
-        WHERE id = $1
-        "#,
-    )
-    .bind(dispatch.job_id)
-    .bind(job_status)
-    .execute(&mut *tx)
-    .await?;
-    record_schedule_dispatched_webhook_event(&mut tx, dispatch, &outcomes, job_status).await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(!targets.is_empty())
 }
 
 async fn record_schedule_due_webhook_event(
@@ -1317,6 +864,7 @@ async fn record_schedule_due_webhook_event(
                 "name": &schedule.name,
                 "command_type": input.command_type,
                 "selector_expression": &schedule.selector_expression,
+                "fixed_target_ids": input.targets,
                 "catch_up_policy": &schedule.catch_up_policy,
                 "catch_up_run_index": input.run_index + 1,
                 "catch_up_run_count": input.run_count,
@@ -1328,71 +876,6 @@ async fn record_schedule_due_webhook_event(
                 "type": input.command_type,
                 "source_schedule_id": schedule.id,
                 "target_count": input.targets.len(),
-            },
-        }),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn record_schedule_dispatched_webhook_event(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch: &ScheduledDispatch,
-    outcomes: &[ScheduledTargetOutcome],
-    job_status: &str,
-) -> Result<()> {
-    let event_id = format!(
-        "schedule:{}:job:{}:dispatched",
-        dispatch.schedule_id, dispatch.job_id
-    );
-    let mut predicates = vec![
-        "schedule.dispatched".to_string(),
-        format!("schedule.id:{}", dispatch.schedule_id),
-        format!("schedule.name:{}", dispatch.schedule_name),
-        format!("job.status:{job_status}"),
-        format!("job.status.become_{job_status}"),
-        format!("job.type:{}", dispatch.command_type),
-    ];
-    for outcome in outcomes {
-        predicates.push(format!("job.target.status:{}", outcome.status));
-    }
-    predicates.sort();
-    predicates.dedup();
-    insert_webhook_event_in_tx(
-        tx,
-        "schedule.dispatched",
-        &event_id,
-        &predicates,
-        &dispatch.targets,
-        serde_json::json!({
-            "event": {
-                "kind": "schedule.dispatched",
-                "id": event_id,
-                "predicates": &predicates,
-            },
-            "schedule": {
-                "id": dispatch.schedule_id,
-                "name": &dispatch.schedule_name,
-                "command_type": &dispatch.command_type,
-                "selector_expression": &dispatch.selector_expression,
-                "target_ids": &dispatch.targets,
-            },
-            "job": {
-                "id": dispatch.job_id,
-                "status": job_status,
-                "type": &dispatch.command_type,
-                "source_schedule_id": dispatch.schedule_id,
-                "target_count": dispatch.targets.len(),
-                "targets": outcomes
-                    .iter()
-                    .map(|outcome| serde_json::json!({
-                        "client_id": &outcome.client_id,
-                        "status": &outcome.status,
-                        "accepted": outcome.accepted,
-                        "exit_code": outcome.exit_code,
-                        "message": &outcome.message,
-                    }))
-                    .collect::<Vec<_>>(),
             },
         }),
     )
@@ -1420,120 +903,6 @@ fn schedule_job_predicates(
     predicates
 }
 
-fn stale_target_message(message: &str, reason: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.to_ascii_lowercase().contains("stale") {
-        return trimmed.to_string();
-    }
-    if trimmed.is_empty() || trimmed == reason {
-        return format!("stale: {reason}");
-    }
-    format!("stale: {reason}; {trimmed}")
-}
-
-fn target_status_needs_reason(status: &str) -> bool {
-    !matches!(status, "accepted" | "completed")
-}
-
-fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status: &str) -> String {
-    if let Some(message) = outputs.iter().rev().find_map(status_output_message) {
-        return message;
-    }
-    let trimmed = fallback.trim();
-    if trimmed.is_empty() || trimmed == "accepted" {
-        status.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn status_output_message(output: &CommandOutput) -> Option<String> {
-    if output.stream != OutputStream::Status {
-        return None;
-    }
-    let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
-    status_value_message(&value)
-}
-
-fn status_value_message(value: &serde_json::Value) -> Option<String> {
-    let kind = value
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let primary = ["message", "error", "reason", "hint", "status"]
-        .iter()
-        .find_map(|field| {
-            value
-                .get(*field)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        });
-    match (kind, primary) {
-        (Some(kind), Some(primary)) if kind != primary => Some(format!("{kind}: {primary}")),
-        (Some(kind), _) => Some(kind.to_string()),
-        (_, Some(primary)) => Some(primary.to_string()),
-        _ => None,
-    }
-}
-
-fn output_indicates_timeout(output: &CommandOutput) -> bool {
-    if output.stream != OutputStream::Status {
-        return false;
-    }
-    serde_json::from_slice::<serde_json::Value>(&output.data)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|kind| kind == "command_timeout")
-}
-
-fn aggregate_job_status(target_statuses: &[String], target_count: usize) -> &'static str {
-    let completed = target_statuses
-        .iter()
-        .filter(|status| status.as_str() == "completed")
-        .count();
-    if target_count > 0 && completed == target_count {
-        return "completed";
-    }
-    if completed > 0 {
-        return "partially_completed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "timed_out")
-    {
-        return "timed_out";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
-    {
-        return "failed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "accepted")
-    {
-        return "accepted";
-    }
-    "dispatch_failed"
-}
-
-fn output_stream_name(stream: OutputStream) -> &'static str {
-    match stream {
-        OutputStream::Stdout => "stdout",
-        OutputStream::Stderr => "stderr",
-        OutputStream::Pty => "pty",
-        OutputStream::Status => "status",
-    }
-}
-
 fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
     match command {
         JobCommand::Shell { pty: true, .. } => "shell_pty",
@@ -1556,15 +925,6 @@ fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String 
         _ => fallback,
     }
     .to_string()
-}
-
-fn decode_server_signing_key(value: &str) -> Result<SigningKey> {
-    let bytes = hex::decode(value.trim()).context("invalid worker server signing key hex")?;
-    let bytes: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("worker server signing key must be 32 bytes"))?;
-    Ok(SigningKey::from_bytes(&bytes))
 }
 
 async fn advance_schedule_after_success(
@@ -1759,61 +1119,6 @@ fn truncate_schedule_error(error: &str) -> String {
     error.chars().take(1024).collect()
 }
 
-async fn resolve_schedule_targets(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    schedule: &DueSchedule,
-) -> Result<Vec<String>> {
-    let expression = parse_expression(&schedule.selector_expression)
-        .map_err(anyhow::Error::msg)?
-        .context("schedule selector expression is empty")?;
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            c.id,
-            c.display_name,
-            c.status,
-            c.registration_ip::text AS registration_ip,
-            c.last_ip::text AS last_ip,
-            c.last_seen_at::text AS last_seen_at,
-            c.internal_build_number,
-            c.stale_since::text AS stale_since,
-            c.stale_reason,
-            COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), ARRAY[]::TEXT[]) AS tags
-        FROM clients c
-        LEFT JOIN client_tags ct ON ct.client_id = c.id
-        LEFT JOIN tags t ON t.id = ct.tag_id
-        WHERE c.hidden_at IS NULL
-        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason
-        ORDER BY c.id
-        "#,
-    )
-    .fetch_all(&mut **tx)
-    .await?;
-    let mut targets = Vec::new();
-    for row in rows {
-        let id: String = row.try_get("id")?;
-        let context = ExpressionContext::for_vps(VpsMetadata {
-            id: id.clone(),
-            display_name: row.try_get("display_name")?,
-            status: row.try_get("status")?,
-            registration_ip: row.try_get("registration_ip")?,
-            last_ip: row.try_get("last_ip")?,
-            last_seen_at: row.try_get("last_seen_at")?,
-            internal_build_number: Some(
-                row.try_get::<i64, _>("internal_build_number")?.max(1) as u64
-            ),
-            stale_since: row.try_get("stale_since")?,
-            stale_reason: row.try_get("stale_reason")?,
-            tags: row.try_get("tags")?,
-            extra: None,
-        });
-        if expression_matches(&context, &expression) {
-            targets.push(id);
-        }
-    }
-    Ok(targets)
-}
-
 #[cfg(test)]
 mod schedule_tests {
     use super::*;
@@ -1825,6 +1130,7 @@ mod schedule_tests {
             name: "test".to_string(),
             operation: serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
             selector_expression: "tag:edge".to_string(),
+            target_client_ids: vec!["edge-a".to_string()],
             cron_expr: "* * * * *".to_string(),
             next_run_at_unix: 1_800_000_000,
             catch_up_policy: policy.to_string(),

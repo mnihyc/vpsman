@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
-use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use vpsman_common::{AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand};
 
@@ -37,6 +34,7 @@ fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
             pty: false,
         },
         selector_expression: "tag:edge".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         cron_expr: "0 * * * *".to_string(),
         timezone: "UTC".to_string(),
         enabled,
@@ -55,7 +53,6 @@ fn schedule_test_state(repo: Repository) -> AppState {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[41_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -146,6 +143,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
                     pty: false,
                 },
                 selector_expression: "tag:edge && id:client-a".to_string(),
+                target_client_ids: vec!["client-a".to_string()],
                 cron_expr: "15 * * * *".to_string(),
                 timezone: "UTC".to_string(),
                 enabled: false,
@@ -302,6 +300,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
             pty: false,
         },
         selector_expression: "".to_string(),
+        target_client_ids: Vec::new(),
         cron_expr: "*/5 * * * *".to_string(),
         timezone: "UTC".to_string(),
         enabled: true,
@@ -317,6 +316,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         axum::http::StatusCode::BAD_REQUEST
     );
     request.selector_expression = "tag:edge".to_string();
+    request.target_client_ids = vec!["client-a".to_string()];
     request.cron_expr = "bad cron".to_string();
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,

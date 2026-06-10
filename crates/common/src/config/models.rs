@@ -50,7 +50,6 @@ pub struct AgentNoiseConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
-    pub server_ed25519_public_key_hex: Option<String>,
     pub command_timeout_secs: u64,
     #[serde(default = "default_agent_gateway_retry_secs")]
     pub gateway_retry_secs: u64,
@@ -459,7 +458,6 @@ fn default_execution_process_proc_root() -> String {
 impl Default for AgentAuthConfig {
     fn default() -> Self {
         Self {
-            server_ed25519_public_key_hex: None,
             command_timeout_secs: 30,
             gateway_retry_secs: default_agent_gateway_retry_secs(),
             gateway_connect_timeout_secs: default_agent_gateway_connect_timeout_secs(),

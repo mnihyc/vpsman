@@ -239,6 +239,7 @@ export function MultiFileActionsPanel({
       setLastRunProgress(null);
       const job = await onCreateJob({
         selector_expression: confirmation.selectorExpression,
+        target_client_ids: confirmation.targets.map((target) => target.id),
         destructive: mutatesFileSystem(confirmation.operation),
         confirmed: true,
         command: confirmation.operation.type,
@@ -247,8 +248,7 @@ export function MultiFileActionsPanel({
         timeout_secs: BULK_JOB_TIMEOUT_SECS,
             force_unprivileged: false,
         privileged: true,
-        idempotency_key: null,
-        reconnect_policy: {
+          reconnect_policy: {
           duplicate_delivery: "ignore_completed",
           resume_outputs: true,
           },
@@ -257,7 +257,7 @@ export function MultiFileActionsPanel({
       let outputs: JobOutputRecord[] = [];
       let targets: JobTargetRecord[] = [];
       let finalProgress = buildBulkProgress({
-        acceptedTargets: job.accepted_targets,
+        acceptedTargets: job.target_count,
         jobId: job.job_id,
         outputs,
         targetRecords: targets,
@@ -266,7 +266,7 @@ export function MultiFileActionsPanel({
       setBulkProgress(finalProgress);
       try {
         const result = await waitForOutputs(job.job_id, onLoadOutputs, onLoadTargets, {
-          acceptedTargets: job.accepted_targets,
+          acceptedTargets: job.target_count,
           targets: confirmation.targets,
           onProgress: (progress) => {
             finalProgress = progress;

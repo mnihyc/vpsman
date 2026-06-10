@@ -6,6 +6,7 @@ use axum::{
 
 use crate::{
     routes_alerts::{
+        delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
         dispatch_fleet_alert_notifications, export_fleet_alerts,
         list_fleet_alert_notification_channels, list_fleet_alert_notifications,
         list_fleet_alert_policies, list_fleet_alert_states, list_fleet_alerts,
@@ -75,7 +76,7 @@ use crate::{
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
-        enable_schedule, list_schedules, update_schedule,
+        enable_schedule, list_schedules, update_schedule, update_schedule_targets,
     },
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
@@ -85,9 +86,9 @@ use crate::{
         MAX_RELEASE_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_webhook_rules::{
-        dispatch_webhook_rules, dry_run_webhook_rule, list_webhook_rule_deliveries,
-        list_webhook_rules, process_webhook_rule_deliveries, rotate_webhook_delivery_history,
-        upsert_webhook_rule,
+        delete_webhook_rule, dispatch_webhook_rules, dry_run_webhook_rule,
+        list_webhook_rule_deliveries, list_webhook_rules, process_webhook_rule_deliveries,
+        rotate_webhook_delivery_history, upsert_webhook_rule,
     },
     routes_ws::ws_handler,
     state::AppState,
@@ -137,9 +138,17 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(list_fleet_alert_policies).post(upsert_fleet_alert_policy),
         )
         .route(
+            "/api/v1/fleet-alert-policies/{policy_id}",
+            delete(delete_fleet_alert_policy),
+        )
+        .route(
             "/api/v1/fleet-alert-notification-channels",
             get(list_fleet_alert_notification_channels)
                 .post(upsert_fleet_alert_notification_channel),
+        )
+        .route(
+            "/api/v1/fleet-alert-notification-channels/{channel_id}",
+            delete(delete_fleet_alert_notification_channel),
         )
         .route(
             "/api/v1/fleet-alert-notifications",
@@ -156,6 +165,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/webhook-rules",
             get(list_webhook_rules).post(upsert_webhook_rule),
+        )
+        .route(
+            "/api/v1/webhook-rules/{rule_id}",
+            delete(delete_webhook_rule),
         )
         .route("/api/v1/webhook-rules/dry-run", post(dry_run_webhook_rule))
         .route(
@@ -355,6 +368,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/schedules/{schedule_id}/apply-now",
             post(apply_schedule_now),
+        )
+        .route(
+            "/api/v1/schedules/{schedule_id}/targets",
+            post(update_schedule_targets),
         )
         .route(
             "/api/v1/tunnel-plans",

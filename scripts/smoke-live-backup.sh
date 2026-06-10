@@ -28,9 +28,6 @@ gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
 backup_keys="$(target/debug/vpsctl noise-keygen)"
 backup_private_hex="$(jq -r '.private_key_hex' <<<"$backup_keys")"
 backup_public_hex="$(jq -r '.public_key_hex' <<<"$backup_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
@@ -48,7 +45,8 @@ selected_sha="$(sha256sum "$selected_file" | awk '{print $1}')"
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
 VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
 VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
 RUST_LOG="vpsman_api=warn" \
@@ -81,16 +79,18 @@ if ! smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
   exit 1
 fi
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "backup-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+  --ttl-secs 600 \
+  --default-tags backup-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write client_id for live backup smoke"
+fi
 
 if grep -q '^\[backup\]' "$agent_config"; then
   sed -i "/^\[backup\]/a recipient_public_key_hex = \"$backup_public_hex\"" "$agent_config"
@@ -132,6 +132,7 @@ reject_body="$(jq -nc \
       include_config: true
     },
     selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
     privileged: true,
     confirmed: true,
     timeout_secs: 30
@@ -169,7 +170,8 @@ backup_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --timeout-secs 30 \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$backup_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$backup_json" >/dev/null
+smoke_assert_job_create_queued "$backup_json" 1
+smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
 job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id")"
 targets_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id/targets")"
@@ -246,7 +248,8 @@ restore_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --timeout-secs 30 \
     --confirmed)"
 restore_job_id="$(jq -r '.job_id' <<<"$restore_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$restore_json" >/dev/null
+smoke_assert_job_create_queued "$restore_json" 1
+smoke_wait_api_job_status "$api_url" "$restore_job_id" completed 45 >/dev/null
 cmp -s "$selected_file" "$restored_selected"
 test -s "$restored_config"
 restore_outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$restore_job_id/outputs")"
@@ -265,7 +268,8 @@ rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --timeout-secs 30 \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$rollback_json" >/dev/null
+smoke_assert_job_create_queued "$rollback_json" 1
+smoke_wait_api_job_status "$api_url" "$rollback_job_id" completed 45 >/dev/null
 if [[ "$(cat "$restored_selected")" != "$restore_preexisting_payload" ]]; then
   echo "restore rollback did not restore the preexisting selected file content" >&2
   exit 1
@@ -332,9 +336,9 @@ jq -e --arg plan "$migration_restore_plan_id" --arg target "$client_id" '
   .restore_plan_id == $plan
   and .target_client_id == $target
   and .migration_link.status == "linked_metadata_only"
-  and .restore_job.accepted_targets == 1
-  and .restore_job.status == "completed"
+  and .restore_job.target_count == 1
 ' <<<"$migration_json" >/dev/null
+smoke_wait_api_job_status "$api_url" "$migration_job_id" completed 45 >/dev/null
 migration_restored_selected="$migration_restore_root${selected_file}"
 cmp -s "$selected_file" "$migration_restored_selected"
 audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=120")"

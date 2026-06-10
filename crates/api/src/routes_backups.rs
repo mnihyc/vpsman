@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use vpsman_common::{encode_json, payload_hash, CommandEnvelope, JobCommand};
+use vpsman_common::{encode_json, payload_hash, JobCommand};
 
 use crate::{
     backup_artifact_crypto::prepare_backup_archive_for_restore,
@@ -192,7 +192,7 @@ pub(crate) async fn create_backup_request(
             .await?;
         return Err(error);
     }
-    let envelope = metadata_command_envelope(&request.client_id, &command_hash);
+    let command_scope = format!("client:{}", request.client_id);
 
     Ok((
         StatusCode::CREATED,
@@ -202,7 +202,7 @@ pub(crate) async fn create_backup_request(
                 .record_backup_request(
                     &request,
                     &command_hash,
-                    &envelope,
+                    &command_scope,
                     &operator,
                     BackupRequestStatus::RequestedMetadataOnly,
                 )
@@ -786,6 +786,7 @@ pub(crate) fn validate_create_backup_policy_request(
                 .map(|value| value.to_ascii_lowercase()),
         },
         selector_expression: request.selector_expression.clone(),
+        target_client_ids: request.target_client_ids.clone(),
         cron_expr: request.cron_expr.clone(),
         timezone: request.timezone.clone(),
         enabled: request.enabled,
@@ -877,18 +878,6 @@ fn backup_command(request: &CreateBackupRequest) -> JobCommand {
             .recipient_public_key_hex
             .clone()
             .map(|value| value.to_ascii_lowercase()),
-    }
-}
-
-fn metadata_command_envelope(client_id: &str, command_hash: &str) -> CommandEnvelope {
-    let now = unix_now();
-    CommandEnvelope {
-        command_id: uuid::Uuid::new_v4(),
-        scope: format!("client:{client_id}"),
-        payload_hash_hex: command_hash.to_string(),
-        signed_unix: now,
-        expires_unix: now.saturating_add(300),
-        server_signature: Vec::new(),
     }
 }
 

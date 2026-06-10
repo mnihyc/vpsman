@@ -6,6 +6,7 @@ import type {
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
   UpdateScheduleRequest,
+  UpdateScheduleTargetsRequest,
 } from "../types";
 
 export function useSchedulesData(
@@ -56,6 +57,14 @@ export function useSchedulesData(
     [apiToken, loadSchedules, onAuditChanged],
   );
 
+  const updateScheduleTargets = useCallback(
+    async (scheduleId: string, request: UpdateScheduleTargetsRequest) => {
+      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/targets`, apiToken, request);
+      await Promise.all([loadSchedules(), onAuditChanged()]);
+    },
+    [apiToken, loadSchedules, onAuditChanged],
+  );
+
   const enableSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
       await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/enable`, apiToken, request);
@@ -99,6 +108,7 @@ export function useSchedulesData(
   return {
     createSchedule,
     updateSchedule,
+    updateScheduleTargets,
     enableSchedule,
     disableSchedule,
     deferSchedule,

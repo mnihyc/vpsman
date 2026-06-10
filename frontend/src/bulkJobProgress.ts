@@ -118,7 +118,7 @@ export async function waitForBulkJobTargets(
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {
   return [
-    `pushed ${progress.accepted}/${progress.expected}`,
+    `queued ${progress.accepted}/${progress.expected}`,
     `doing ${progress.doing}`,
     `retrieved ${progress.retrieved}`,
     `done ${progress.completed}`,

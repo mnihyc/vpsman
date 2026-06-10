@@ -162,7 +162,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
     start.job_id,
     sessionId,
     "file_transfer_start",
-    start.accepted_targets,
+    start.target_count,
     request.clientIds,
   );
   let targetOffsets = targetOffsetsFromStatuses(startStatuses, sizeBytes);
@@ -217,7 +217,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
         chunkJob.job_id,
         sessionId,
         "file_transfer_chunk_ack",
-        chunkJob.accepted_targets,
+        chunkJob.target_count,
         activeClientIds,
       );
       const acknowledgedOffset = uniformNextOffset(chunkStatuses, sizeBytes);
@@ -249,7 +249,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
       commit.job_id,
       sessionId,
       "file_transfer_commit",
-      commit.accepted_targets,
+      commit.target_count,
       activeClientIds,
     );
     const committedOffset = uniformNextOffset(commitStatuses, sizeBytes);
@@ -304,7 +304,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
         chunkJob.job_id,
         sessionId,
         "file_transfer_chunk_ack",
-        chunkJob.accepted_targets,
+        chunkJob.target_count,
         targetClientIds,
       );
       const chunkTargetOffsets = targetOffsetsFromStatuses(chunkStatuses, sizeBytes);
@@ -339,7 +339,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
     commit.job_id,
     sessionId,
     "file_transfer_commit",
-    commit.accepted_targets,
+    commit.target_count,
     activeClientIds,
   );
   targetOffsets = { ...targetOffsets, ...targetOffsetsFromStatuses(commitStatuses, sizeBytes) };
@@ -387,7 +387,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
     rate_limit_kbps: rateLimitKbps,
     resume_token_hash: resumeTokenHash,
   });
-  const startStatuses = await waitForTransferStatus(request, start.job_id, sessionId, "file_transfer_download_start", start.accepted_targets);
+  const startStatuses = await waitForTransferStatus(request, start.job_id, sessionId, "file_transfer_download_start", start.target_count);
   const sizeBytes = startStatuses[0].payload.size_bytes ?? null;
   if (sizeBytes == null) {
     throw new Error("Resumable download start did not report size");
@@ -487,6 +487,7 @@ async function submitTransferStep(
   return request.createJob({
     argv: [],
     selector_expression: selectorExpression,
+    target_client_ids: targetClientIds,
     destructive: false,
     confirmed: request.confirmed,
     command,

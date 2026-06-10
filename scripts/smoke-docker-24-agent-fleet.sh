@@ -115,9 +115,6 @@ smoke_wait_tcp 127.0.0.1 "$pg_port"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 docker run -d \
   --name "$api_container" \
@@ -128,8 +125,12 @@ docker run -d \
   -e VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
   -e VPSMAN_INTERNAL_TOKEN="$internal_token" \
   -e VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-  -e VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+  -e VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+  -e VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
   -e VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
+  -e VPSMAN_ENROLLMENT_TELEMETRY_LIGHT_SECS=2 \
+  -e VPSMAN_ENROLLMENT_TELEMETRY_FULL_SECS=4 \
+  -e VPSMAN_ENROLLMENT_DEFAULT_COUNTRY="" \
   -e RUST_LOG=vpsman_api=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \
@@ -190,25 +191,24 @@ for ((i = 1; i <= agent_count; i += 1)); do
   display_name="$(printf 'df-%s-%s-%02d' "$provider" "$country" "$i")"
   tag_csv="provider:$provider,country:$country,role:$role,audit:docker-fleet,bulk-target"
 
+  token_json="$(vpsctl_json enrollment-token-create \
+    --ttl-secs 900 \
+    --default-tags "$tag_csv" \
+    --default-display-name "$display_name")"
+  enrollment_token="$(jq -r '.token' <<<"$token_json")"
   agent_dir="$SMOKE_TMPDIR/$logical_client_id"
   agent_config="$agent_dir/agent.toml"
   mkdir -p "$agent_dir/state"
-  smoke_register_direct_agent_config \
-    "$api_url" \
-    "$access_token" \
-    "$agent_config" \
-    "$logical_client_id" \
-    "$display_name" \
-    "$tag_csv" \
-    "$gateway_addr" \
-    "$gateway_public_hex" \
-    "$server_signing_public_hex" \
-    30 \
-    2 \
-    4
-  [[ -n "$first_client_id" ]] || first_client_id="$logical_client_id"
-  if [[ -z "$second_client_id" && "$logical_client_id" != "$first_client_id" ]]; then
-    second_client_id="$logical_client_id"
+  target/debug/vpsctl --api-url "$api_url" enroll-config \
+    --token "$enrollment_token" \
+    --output-file "$agent_config" >/dev/null
+  enrolled_client_id="$(sed -n 's/^client_id = "\(.*\)"$/\1/p' "$agent_config" | head -n 1)"
+  if [[ -z "$enrolled_client_id" ]]; then
+    smoke_fail "enroll-config did not write client_id for $logical_client_id"
+  fi
+  [[ -n "$first_client_id" ]] || first_client_id="$enrolled_client_id"
+  if [[ -z "$second_client_id" && "$enrolled_client_id" != "$first_client_id" ]]; then
+    second_client_id="$enrolled_client_id"
   fi
 
   docker run -d \
@@ -329,7 +329,7 @@ schedule_json="$(vpsctl_json schedule-create \
   --catch-up-policy skip_missed \
   --retry-delay-secs 120 \
   --max-failures 5)"
-jq -e '.name == "docker-provider-alpha-hourly" and .enabled == false and .selector_expression == "provider:alpha" and .cron_expr == "0 * * * *"' \
+jq -e '.name == "docker-provider-alpha-hourly" and .enabled == false and .selector_expression == "provider:alpha" and (.target_client_ids | length) == 8 and .cron_expr == "0 * * * *"' \
   <<<"$schedule_json" >/dev/null
 
 api_post "/api/v1/tunnel-plans" "$(jq -n \
@@ -374,7 +374,7 @@ job_json="$(vpsctl_json job-shell \
   --timeout-secs 45 \
   --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$job_json")"
-jq -e '.accepted_targets == 8' <<<"$job_json" >/dev/null
+smoke_assert_job_create_queued "$job_json" 8
 
 vpsctl_json job-follow --job-id "$job_id" --interval-ms 250 --max-polls 240 --json >"$SMOKE_TMPDIR/job-follow.jsonl"
 api_get "/api/v1/jobs/$job_id" | jq -e '.status == "completed" and .target_count == 8' >/dev/null
@@ -431,7 +431,7 @@ jq -n \
       "tag_registry_and_bulk_resolve_any_all",
       "dashboard_scope_filter_and_group_by",
       "telemetry_rollups_network_speed_and_traffic",
-      "signed_bulk_job_dispatch_outputs",
+      "durable_bulk_job_dispatch_outputs",
       "schedule_registry",
       "topology_plan_create",
       "backup_metadata_request",

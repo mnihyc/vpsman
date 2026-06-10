@@ -88,7 +88,7 @@ export function TopologyApplyControls({
     (visibleJobProgress
       ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
-        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
+        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
       : privilegeMaterial
         ? "Ready"
         : "Locked");
@@ -206,6 +206,7 @@ export function TopologyApplyControls({
       const job = await onCreateJob({
         argv: [],
         selector_expression: selectorExpression,
+        target_client_ids: targetClientIds,
         command: commandName(mode),
         confirmed: isMutation(mode),
         destructive: isMutation(mode),
@@ -225,9 +226,9 @@ export function TopologyApplyControls({
   async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[]) {
     setLastJobProgress(null);
     setJobProgress({
-      accepted: Math.min(job.accepted_targets, targets.length),
+      accepted: Math.min(job.target_count, targets.length),
       completed: 0,
-      doing: Math.min(job.accepted_targets, targets.length),
+      doing: Math.min(job.target_count, targets.length),
       expected: targets.length,
       failed: 0,
       jobId: job.job_id,
@@ -236,7 +237,7 @@ export function TopologyApplyControls({
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        acceptedTargets: job.accepted_targets,
+        acceptedTargets: job.target_count,
         onProgress: setJobProgress,
         targets,
       });

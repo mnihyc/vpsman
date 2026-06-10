@@ -5,14 +5,11 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub const MAX_PRIVILEGE_ASSERTION_AGE_SECS: u64 = 300;
 pub const MAX_PRIVILEGE_ASSERTION_CLOCK_SKEW_SECS: u64 = 60;
-pub const MAX_COMMAND_SIGNATURE_AGE_SECS: u64 = 300;
-pub const MAX_COMMAND_SIGNATURE_CLOCK_SKEW_SECS: u64 = 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PrivilegeAssertion {
@@ -20,73 +17,6 @@ pub struct PrivilegeAssertion {
     pub issued_unix: u64,
     pub expires_unix: u64,
     pub assertion_hex: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CommandEnvelope {
-    pub command_id: Uuid,
-    pub scope: String,
-    pub payload_hash_hex: String,
-    #[serde(default)]
-    pub signed_unix: u64,
-    #[serde(default)]
-    pub expires_unix: u64,
-    pub server_signature: Vec<u8>,
-}
-
-#[derive(Debug, thiserror::Error, Eq, PartialEq)]
-pub enum AuthorizationError {
-    #[error("command scope mismatch: expected {expected}, got {actual}")]
-    ScopeMismatch { expected: String, actual: String },
-    #[error("command payload hash mismatch")]
-    PayloadHashMismatch,
-    #[error("command server signature timestamp is invalid or expired")]
-    InvalidCommandSignatureTime,
-    #[error("command is missing server signature")]
-    MissingServerSignature,
-    #[error("command server signature is invalid")]
-    InvalidServerSignature,
-    #[error("command id was already used")]
-    Replay,
-}
-
-#[derive(Debug)]
-pub struct PrivilegeReplayCache {
-    max_entries: usize,
-    seen: HashSet<(Uuid, String)>,
-    order: VecDeque<(Uuid, String)>,
-}
-
-impl Default for PrivilegeReplayCache {
-    fn default() -> Self {
-        Self::new(4096)
-    }
-}
-
-impl PrivilegeReplayCache {
-    pub fn new(max_entries: usize) -> Self {
-        Self {
-            max_entries: max_entries.max(1),
-            seen: HashSet::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn remember(&mut self, command_id: Uuid, nonce_hex: &str) -> Result<(), AuthorizationError> {
-        let key = (command_id, nonce_hex.to_string());
-        if self.seen.contains(&key) {
-            return Err(AuthorizationError::Replay);
-        }
-
-        self.seen.insert(key.clone());
-        self.order.push_back(key);
-        while self.order.len() > self.max_entries {
-            if let Some(expired) = self.order.pop_front() {
-                self.seen.remove(&expired);
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
@@ -218,16 +148,6 @@ pub fn verify_privilege_assertion(
     Ok(intent_hash_hex)
 }
 
-pub fn sign_command_envelope(
-    server_signing_key: &SigningKey,
-    envelope: &CommandEnvelope,
-) -> Vec<u8> {
-    server_signing_key
-        .sign(&command_signature_payload(envelope))
-        .to_bytes()
-        .to_vec()
-}
-
 pub fn sign_update_artifact_hash(signing_key: &SigningKey, sha256_hex: &str) -> Vec<u8> {
     signing_key
         .sign(&update_artifact_signature_payload(sha256_hex))
@@ -260,56 +180,6 @@ pub fn verify_update_artifact_signature(
         .is_ok()
 }
 
-pub fn verify_command_envelope(
-    server_verifying_key: &VerifyingKey,
-    expected_scope: &str,
-    payload: &[u8],
-    envelope: &CommandEnvelope,
-    now_unix: u64,
-    replay_cache: &mut PrivilegeReplayCache,
-) -> Result<(), AuthorizationError> {
-    if envelope.scope != expected_scope {
-        return Err(AuthorizationError::ScopeMismatch {
-            expected: expected_scope.to_string(),
-            actual: envelope.scope.clone(),
-        });
-    }
-
-    if envelope.payload_hash_hex != payload_hash(payload) {
-        return Err(AuthorizationError::PayloadHashMismatch);
-    }
-
-    if envelope.expires_unix < envelope.signed_unix
-        || envelope.expires_unix < now_unix
-        || envelope.signed_unix > now_unix.saturating_add(MAX_COMMAND_SIGNATURE_CLOCK_SKEW_SECS)
-        || now_unix.saturating_sub(envelope.signed_unix) > MAX_COMMAND_SIGNATURE_AGE_SECS
-    {
-        return Err(AuthorizationError::InvalidCommandSignatureTime);
-    }
-
-    if envelope.server_signature.is_empty() {
-        return Err(AuthorizationError::MissingServerSignature);
-    }
-    let signature = Signature::from_slice(&envelope.server_signature)
-        .map_err(|_| AuthorizationError::InvalidServerSignature)?;
-    server_verifying_key
-        .verify(&command_signature_payload(envelope), &signature)
-        .map_err(|_| AuthorizationError::InvalidServerSignature)?;
-
-    replay_cache.remember(envelope.command_id, "server-signature")
-}
-
-fn command_signature_payload(envelope: &CommandEnvelope) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(160);
-    push_len_prefixed(&mut payload, b"vpsman-server-command-envelope-v1");
-    payload.extend_from_slice(envelope.command_id.as_bytes());
-    push_len_prefixed(&mut payload, envelope.scope.as_bytes());
-    push_len_prefixed(&mut payload, envelope.payload_hash_hex.as_bytes());
-    payload.extend_from_slice(&envelope.signed_unix.to_be_bytes());
-    payload.extend_from_slice(&envelope.expires_unix.to_be_bytes());
-    payload
-}
-
 fn update_artifact_signature_payload(sha256_hex: &str) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     push_len_prefixed(&mut payload, b"vpsman-update-artifact-v1");
@@ -337,48 +207,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_envelope_authorizes_once() {
-        let signing = SigningKey::from_bytes(&[7_u8; 32]);
-        let verifying = signing.verifying_key();
-        let payload = br#"{"argv":["/bin/true"]}"#;
-        let id = Uuid::new_v4();
-        let hash = payload_hash(payload);
-        let mut envelope = CommandEnvelope {
-            command_id: id,
-            scope: "client:lax-edge-01".to_string(),
-            payload_hash_hex: hash,
-            signed_unix: 100,
-            expires_unix: 200,
-            server_signature: Vec::new(),
-        };
-        envelope.server_signature = sign_command_envelope(&signing, &envelope);
-
-        let mut replay_cache = PrivilegeReplayCache::default();
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:lax-edge-01",
-                payload,
-                &envelope,
-                100,
-                &mut replay_cache,
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:lax-edge-01",
-                payload,
-                &envelope,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::Replay)
-        );
-    }
-
-    #[test]
     fn update_artifact_signature_rejects_hash_tampering() {
         let signing = SigningKey::from_bytes(&[23_u8; 32]);
         let public_key_hex = hex::encode(signing.verifying_key().to_bytes());
@@ -400,94 +228,6 @@ mod tests {
             &signature_hex,
             &sha256_hex
         ));
-    }
-
-    #[test]
-    fn command_envelope_rejects_scope_payload_and_signature_mismatch() {
-        let signing = SigningKey::from_bytes(&[9_u8; 32]);
-        let verifying = signing.verifying_key();
-        let payload = b"payload";
-        let id = Uuid::new_v4();
-        let hash = payload_hash(payload);
-        let mut envelope = CommandEnvelope {
-            command_id: id,
-            scope: "client:one".to_string(),
-            payload_hash_hex: hash,
-            signed_unix: 100,
-            expires_unix: 200,
-            server_signature: Vec::new(),
-        };
-        envelope.server_signature = sign_command_envelope(&signing, &envelope);
-
-        let mut replay_cache = PrivilegeReplayCache::default();
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:two",
-                payload,
-                &envelope,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::ScopeMismatch {
-                expected: "client:two".to_string(),
-                actual: "client:one".to_string(),
-            })
-        );
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:one",
-                b"different",
-                &envelope,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::PayloadHashMismatch)
-        );
-
-        let mut tampered = envelope;
-        tampered.server_signature[0] ^= 0x01;
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:one",
-                payload,
-                &tampered,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::InvalidServerSignature)
-        );
-    }
-
-    #[test]
-    fn command_envelope_rejects_expired_signature_time() {
-        let signing = SigningKey::from_bytes(&[11_u8; 32]);
-        let verifying = signing.verifying_key();
-        let payload = b"payload";
-        let id = Uuid::new_v4();
-        let mut expired = CommandEnvelope {
-            command_id: id,
-            scope: "client:one".to_string(),
-            payload_hash_hex: payload_hash(payload),
-            signed_unix: 90,
-            expires_unix: 99,
-            server_signature: Vec::new(),
-        };
-        expired.server_signature = sign_command_envelope(&signing, &expired);
-        let mut replay_cache = PrivilegeReplayCache::default();
-        assert_eq!(
-            verify_command_envelope(
-                &verifying,
-                "client:one",
-                payload,
-                &expired,
-                100,
-                &mut replay_cache,
-            ),
-            Err(AuthorizationError::InvalidCommandSignatureTime)
-        );
     }
 
     #[test]

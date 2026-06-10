@@ -120,7 +120,7 @@ impl FileTransferMultiTargetPolicy {
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateJobResponse {
     pub(crate) job_id: Uuid,
-    pub(crate) accepted_targets: usize,
+    pub(crate) target_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,7 +298,7 @@ pub(crate) fn execute_file_transfer_upload(
         start.job_id,
         session_id,
         "file_transfer_start",
-        start.accepted_targets,
+        start.target_count,
         plan.poll_interval_ms,
         plan.max_polls,
     )?;
@@ -323,7 +323,7 @@ pub(crate) fn execute_file_transfer_upload(
             "next_offset": next_offset,
             "target_offsets": &target_offsets,
             "multi_target_policy": plan.multi_target_policy.as_str(),
-            "accepted_targets": start.accepted_targets,
+            "target_count": start.target_count,
         }),
     )?;
 
@@ -356,7 +356,7 @@ pub(crate) fn execute_file_transfer_upload(
                     chunk_job.job_id,
                     session_id,
                     "file_transfer_chunk_ack",
-                    chunk_job.accepted_targets,
+                    chunk_job.target_count,
                     plan.poll_interval_ms,
                     plan.max_polls,
                 )?;
@@ -412,7 +412,7 @@ pub(crate) fn execute_file_transfer_upload(
                         chunk_job.job_id,
                         session_id,
                         "file_transfer_chunk_ack",
-                        chunk_job.accepted_targets,
+                        chunk_job.target_count,
                         plan.poll_interval_ms,
                         plan.max_polls,
                     )?;
@@ -444,9 +444,9 @@ pub(crate) fn execute_file_transfer_upload(
         }
     }
 
-    let (complete_job_id, complete_accepted_targets, committed_offsets) =
+    let (complete_job_id, complete_target_count, committed_offsets) =
         if active_target_ids.is_empty() {
-            (start.job_id, start.accepted_targets, target_offsets.clone())
+            (start.job_id, start.target_count, target_offsets.clone())
         } else {
             let commit_submit = TransferSubmitContext {
                 api_url,
@@ -472,16 +472,12 @@ pub(crate) fn execute_file_transfer_upload(
                 commit.job_id,
                 session_id,
                 "file_transfer_commit",
-                commit.accepted_targets,
+                commit.target_count,
                 plan.poll_interval_ms,
                 plan.max_polls,
             )?;
             target_offsets.extend(target_offsets_from_statuses(&commit_statuses, size_bytes)?);
-            (
-                commit.job_id,
-                commit.accepted_targets,
-                target_offsets.clone(),
-            )
+            (commit.job_id, commit.target_count, target_offsets.clone())
         };
     ensure_all_targets_at_offset(&committed_offsets, size_bytes, "file transfer commit")?;
     push_event(
@@ -496,7 +492,7 @@ pub(crate) fn execute_file_transfer_upload(
             "target_offsets": &committed_offsets,
             "active_targets": &active_target_ids,
             "multi_target_policy": plan.multi_target_policy.as_str(),
-            "accepted_targets": complete_accepted_targets,
+            "target_count": complete_target_count,
         }),
     )?;
     Ok(events)
@@ -536,10 +532,12 @@ pub(crate) fn submit_transfer_step(
         "/api/v1/jobs",
         ctx.token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": command_label,
             "argv": [],
             "operation": operation,
             "selector_expression": selector_expression,
+            "target_client_ids": ctx.target_ids,
             "privileged": true,
             "destructive": false,
             "confirmed": ctx.confirmed,
@@ -551,9 +549,9 @@ pub(crate) fn submit_transfer_step(
     let response: CreateJobResponse =
         serde_json::from_str(&response).context("failed to parse file transfer job response")?;
     anyhow::ensure!(
-        response.accepted_targets == ctx.target_ids.len(),
-        "{command_label} accepted {} of {} targets; resumable multi-target upload requires a fixed target set",
-        response.accepted_targets,
+        response.target_count == ctx.target_ids.len(),
+        "{command_label} queued {} of {} targets; resumable multi-target upload requires a fixed target set",
+        response.target_count,
         ctx.target_ids.len()
     );
     Ok(response)

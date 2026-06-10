@@ -3,8 +3,9 @@ use std::net::IpAddr;
 use axum::{extract::State, http::HeaderMap, Json};
 use serde::Serialize;
 use vpsman_common::{
-    GatewayAgentHelloIngest, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
-    GatewayTelemetryIngest, GatewayTerminalOutputIngest,
+    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
+    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest,
+    OutputStream,
 };
 
 use crate::{
@@ -12,6 +13,7 @@ use crate::{
     model::{GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent},
     repository_job_outputs::JobOutputPersistConfig,
     state::AppState,
+    TargetDispatchOutcome,
 };
 
 pub(crate) async fn validate_agent_identity(
@@ -139,14 +141,90 @@ pub(crate) async fn ingest_command_output(
         .await?;
     state.publish(WsEvent::JobOutputRecorded {
         job_id: event.job_id,
-        client_id: event.client_id,
+        client_id: event.client_id.clone(),
         seq: event.seq,
         done: event.output.done,
     });
+    if event.output.done {
+        let outcome = target_outcome_from_done_output(event.job_id, &event.output);
+        state
+            .repo
+            .update_job_target_result(event.job_id, &event.client_id, &outcome)
+            .await?;
+        if let Some((status, accepted_targets)) = state
+            .repo
+            .refresh_job_status_from_targets(event.job_id)
+            .await?
+        {
+            if !matches!(status.as_str(), "queued" | "dispatching" | "running") {
+                state.publish(WsEvent::JobFinished {
+                    job_id: event.job_id,
+                    accepted_targets,
+                    status,
+                });
+            }
+        }
+    }
     Ok(Json(IngestResponse {
         accepted: true,
         message: "command output recorded".to_string(),
     }))
+}
+
+fn target_outcome_from_done_output(
+    job_id: uuid::Uuid,
+    output: &CommandOutput,
+) -> TargetDispatchOutcome {
+    let timed_out = crate::routes_jobs::output_indicates_timeout(output);
+    let exit_code = output.exit_code;
+    let status = if timed_out {
+        "timed_out"
+    } else if exit_code.unwrap_or(0) == 0 {
+        "completed"
+    } else {
+        "failed"
+    };
+    TargetDispatchOutcome {
+        status: status.to_string(),
+        exit_code,
+        command_version: None,
+        accepted: true,
+        message: status_output_message(output).unwrap_or_else(|| status.to_string()),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: output.stream,
+            data: output.data.clone(),
+            exit_code: output.exit_code,
+            done: output.done,
+        }],
+    }
+}
+
+fn status_output_message(output: &CommandOutput) -> Option<String> {
+    if output.stream != OutputStream::Status {
+        return None;
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&output.data).ok()?;
+    let kind = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let primary = ["message", "error", "reason", "hint", "status"]
+        .iter()
+        .find_map(|field| {
+            value
+                .get(*field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    match (kind, primary) {
+        (Some(kind), Some(primary)) if kind != primary => Some(format!("{kind}: {primary}")),
+        (Some(kind), _) => Some(kind.to_string()),
+        (_, Some(primary)) => Some(primary.to_string()),
+        _ => None,
+    }
 }
 
 pub(crate) async fn ingest_terminal_output(

@@ -93,10 +93,10 @@ function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
     },
     {
       id: "targets",
-      header: "Targets",
-      size: 130,
+      header: "Fixed targets",
+      size: 150,
       sortValue: policyTargetLabel,
-      searchValue: policyTargetLabel,
+      searchValue: (policy) => `${policyTargetLabel(policy)} ${policy.selector_expression} ${policy.target_client_ids.join(" ")}`,
       cell: policyTargetLabel,
     },
     {
@@ -734,7 +734,14 @@ function backupScopeLabel(backup: BackupRequestRecord): string {
 }
 
 function policyTargetLabel(policy: BackupPolicyRecord): string {
-  return policy.selector_expression || "none";
+  const ids = Array.isArray(policy.target_client_ids)
+    ? policy.target_client_ids
+    : [];
+  if (ids.length === 0) {
+    return "no fixed targets";
+  }
+  const preview = ids.slice(0, 3).join(", ");
+  return `${ids.length} VPS${ids.length === 1 ? "" : "s"}${preview ? ` · ${preview}` : ""}`;
 }
 
 function policyScopeLabel(policy: BackupPolicyRecord): string {

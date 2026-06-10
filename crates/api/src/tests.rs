@@ -1,7 +1,5 @@
 use super::*;
-use vpsman_common::{
-    verify_command_envelope, AgentHello, GatewayAgentHelloIngest, JobCommand, PrivilegeReplayCache,
-};
+use vpsman_common::{AgentHello, GatewayAgentHelloIngest, JobCommand};
 
 #[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
@@ -305,7 +303,9 @@ async fn rejected_job_records_frozen_target_results() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a || id:client-a || id:missing-client".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: "uptime".to_string(),
@@ -315,15 +315,18 @@ async fn rejected_job_records_frozen_target_results() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
     let job_id = repo
         .record_rejected_job(
+            Uuid::new_v4(),
             &request,
             &payload_hash(request.command.as_bytes()),
+            "test_request_fingerprint",
             &operator,
+            "rejected_authorization_required",
+            "authorization required",
         )
         .await
         .unwrap();
@@ -374,7 +377,9 @@ async fn rejected_job_freezes_tag_targets() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "provider:provider-a || tag:bgp".to_string(),
+        target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
         destructive: true,
         confirmed: true,
         command: "uptime".to_string(),
@@ -384,15 +389,18 @@ async fn rejected_job_freezes_tag_targets() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
     let job_id = repo
         .record_rejected_job(
+            Uuid::new_v4(),
             &request,
             &payload_hash(request.command.as_bytes()),
+            "test_request_fingerprint",
             &operator,
+            "rejected_authorization_required",
+            "authorization required",
         )
         .await
         .unwrap();
@@ -404,50 +412,11 @@ async fn rejected_job_freezes_tag_targets() {
 }
 
 #[test]
-fn server_signs_command_envelope_for_resolved_target() {
-    let signing_key = SigningKey::from_bytes(&[3_u8; 32]);
-    let command = JobCommand::Shell {
-        argv: vec!["true".to_string()],
-        pty: false,
-    };
-    let command_payload = encode_json(&command).unwrap();
-    let command_hash = payload_hash(&command_payload);
-    let scope = "client:client-a";
-    let request = CreateJobRequest {
-        selector_expression: "id:client-a".to_string(),
-        destructive: false,
-        confirmed: false,
-        command: "true".to_string(),
-        argv: vec!["true".to_string()],
-        operation: None,
-        timeout_secs: Some(5),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-        idempotency_key: None,
-        reconnect_policy: None,
-    };
-
-    let signed = request
-        .signed_envelopes_for_targets(&["client-a".to_string()], &command_hash, &signing_key)
-        .unwrap();
-    let envelope = signed.get("client-a").unwrap();
-    assert!(!envelope.server_signature.is_empty());
-    assert!(verify_command_envelope(
-        &signing_key.verifying_key(),
-        scope,
-        &command_payload,
-        envelope,
-        unix_now(),
-        &mut PrivilegeReplayCache::default(),
-    )
-    .is_ok());
-}
-
-#[test]
 fn file_pull_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -459,7 +428,6 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -473,7 +441,9 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
 #[test]
 fn shell_pty_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: "ignored".to_string(),
@@ -486,7 +456,6 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -504,7 +473,9 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
 #[test]
 fn file_pull_job_command_requires_absolute_path() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -516,7 +487,6 @@ fn file_pull_job_command_requires_absolute_path() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -527,7 +497,9 @@ fn file_pull_job_command_requires_absolute_path() {
 #[test]
 fn file_browser_job_commands_use_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -542,7 +514,6 @@ fn file_browser_job_commands_use_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -559,7 +530,9 @@ fn file_browser_job_commands_use_operation_payload_and_type() {
 #[test]
 fn file_browser_job_commands_validate_paths_and_limits() {
     let mut request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: String::new(),
@@ -574,7 +547,6 @@ fn file_browser_job_commands_validate_paths_and_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
     assert_eq!(
@@ -597,7 +569,9 @@ fn file_browser_job_commands_validate_paths_and_limits() {
 #[test]
 fn shell_script_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -609,7 +583,6 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -623,7 +596,9 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
 #[test]
 fn shell_script_job_command_rejects_empty_and_control_payloads() {
     let mut request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -635,7 +610,6 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -652,7 +626,9 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
 #[test]
 fn user_sessions_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -662,7 +638,6 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -676,7 +651,9 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
 #[test]
 fn process_list_job_command_uses_operation_payload_and_type() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -686,7 +663,6 @@ fn process_list_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -700,7 +676,9 @@ fn process_list_job_command_uses_operation_payload_and_type() {
 #[test]
 fn process_list_job_command_bounds_limit() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -710,7 +688,6 @@ fn process_list_job_command_bounds_limit() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -733,7 +710,9 @@ async fn dispatching_job_records_and_updates_target_results() {
         session_id: Uuid::nil(),
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: "true".to_string(),
@@ -743,15 +722,16 @@ async fn dispatching_job_records_and_updates_target_results() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
         .record_dispatching_job(
+            Uuid::new_v4(),
             &request,
             &command_hash,
+            "test_request_fingerprint",
             &operator,
             &["client-a".to_string()],
         )
@@ -842,7 +822,14 @@ async fn job_output_comparison_groups_execution_summaries_by_status_and_output()
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "test_request_fingerprint",
+            &operator,
+            &target_clients,
+        )
         .await
         .unwrap();
 
@@ -914,7 +901,14 @@ async fn job_output_comparison_text_mode_normalizes_line_endings_and_trailing_sp
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "test_request_fingerprint",
+            &operator,
+            &target_clients,
+        )
         .await
         .unwrap();
 
@@ -961,7 +955,14 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let job_id = repo
-        .record_dispatching_job(&request, &command_hash, &operator, &target_clients)
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "test_request_fingerprint",
+            &operator,
+            &target_clients,
+        )
         .await
         .unwrap();
 
@@ -1041,7 +1042,9 @@ fn test_operator() -> AuthContext {
 
 fn test_job_request(clients: &[&str]) -> CreateJobRequest {
     CreateJobRequest {
+        job_id: None,
         selector_expression: test_selector_expression_for_clients(clients),
+        target_client_ids: clients.iter().map(|client| (*client).to_string()).collect(),
         destructive: false,
         confirmed: false,
         command: "true".to_string(),
@@ -1051,7 +1054,6 @@ fn test_job_request(clients: &[&str]) -> CreateJobRequest {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     }
 }

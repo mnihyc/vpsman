@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use axum::http::HeaderMap;
-use ed25519_dalek::SigningKey;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -30,7 +27,6 @@ pub(crate) struct AppState {
     pub(crate) events: broadcast::Sender<WsEvent>,
     pub(crate) internal_token: Option<String>,
     pub(crate) gateway: GatewayDispatchClient,
-    pub(crate) server_signing_key: Option<Arc<SigningKey>>,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
     pub(crate) update_object_store: Option<BackupObjectStore>,
     pub(crate) update_artifact_public_base_url: Option<String>,

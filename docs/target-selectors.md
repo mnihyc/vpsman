@@ -1,9 +1,41 @@
 # Target Selectors
 
-`vpsman` target selectors are expression strings used by bulk jobs, schedules,
-tag mutation, data-source assignment, previews, and expression webhook rules.
+`vpsman` target selectors are expression strings used for target previews,
+bulk resolution, tag mutation, data-source assignment, and expression webhook
+rules. Jobs and schedules store the concrete VPS IDs resolved during CLI preview
+or browser confirmation; their selector expression is kept as audit context and
+for an explicit future Target update, not for implicit re-resolution at run time.
 The Rust parser/evaluator lives in `vpsman-common`; the frontend parser mirrors
 the same grammar for local previews and token tooltips.
+
+## Fixed Target Workflow
+
+Selectors are operator input and audit context. They are not a live binding for
+job or schedule execution. The panel confirmation step and CLI preview resolve
+the selector to concrete VPS ids and submit that fixed `target_client_ids` list
+to the API. The backend dispatches only that list.
+
+Schedules follow the same rule. A schedule stores both the audit selector and a
+fixed target snapshot. Due runs use the saved snapshot. If tags, display names,
+or other selector inputs later drift, the Schedules table shows Target Update as
+an available maintenance action; pressing it resolves the audit selector again,
+shows the new fixed target list, and saves the replacement snapshot.
+
+This keeps human review as the authority for bulk work: changing tags never
+silently changes the targets of an already-created job or schedule.
+
+
+## Fixed Target Snapshots
+
+Job submission and schedule creation are fixed-target workflows. Operators
+preview or confirm a selector, then the API receives the resolved
+`target_client_ids` alongside the audit selector. A later tag or alias change
+does not silently change the VPSs affected by an existing job or schedule.
+
+For schedules, the browser shows **Update targets** only when the saved fixed
+target list differs from the selector's current resolution. Pressing that button
+replaces the saved target snapshot after privilege confirmation. CLI schedule
+creation follows the same rule: the previewed target set is the saved target set.
 
 ## Grammar
 
@@ -69,7 +101,7 @@ Canonical VPS fields use `vps.<path>`.
 - `untagged` is true only when VPS metadata exists and the tag list is empty.
 - `last_seen` aliases `vps.last_seen_at`.
 
-`client:<id>` is not an operator selector. Internal audit and signed command
+`client:<id>` is not an operator selector. Internal audit and command
 records may still render concrete resolved targets as `client:<id>`.
 
 ## Event Contexts

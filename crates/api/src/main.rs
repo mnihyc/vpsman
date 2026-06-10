@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf};
 
 mod agent_update_artifact_ingest;
 mod auth_model;
@@ -13,6 +13,7 @@ mod error;
 mod fleet_alert_notifications;
 mod fleet_alerts;
 mod gateway_client;
+mod job_dispatcher;
 mod job_files;
 mod job_request;
 mod job_target_validation;
@@ -98,7 +99,7 @@ mod webhook_rules;
 use anyhow::{Context, Result};
 use clap::Parser;
 use fleet_alerts::FleetAlertPolicy;
-use gateway_client::{decode_server_signing_key, GatewayDispatchClient};
+use gateway_client::GatewayDispatchClient;
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
@@ -117,8 +118,6 @@ pub(crate) use util::{output_stream_name, unix_now};
 #[cfg(test)]
 use axum::http::HeaderMap;
 #[cfg(test)]
-use ed25519_dalek::SigningKey;
-#[cfg(test)]
 use model::*;
 #[cfg(test)]
 use model_alert_notifications::*;
@@ -130,8 +129,6 @@ use model_alert_states::*;
 use repository::MemoryState;
 #[cfg(test)]
 use repository_ingest::upsert_memory_agent;
-#[cfg(test)]
-use repository_key_lifecycle::KeyLifecycleTrustReport;
 #[cfg(test)]
 use routes_schedules::validate_schedule_request;
 #[cfg(test)]
@@ -155,8 +152,6 @@ struct Args {
     internal_token: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_CONTROL_URL")]
     gateway_control_url: Option<String>,
-    #[arg(long, env = "VPSMAN_SERVER_SIGNING_KEY_HEX")]
-    server_signing_key_hex: Option<String>,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
@@ -273,24 +268,6 @@ async fn main() -> Result<()> {
         args.gateway_control_url.clone(),
         Some(internal_token.clone()),
     );
-    let server_signing_key = args
-        .server_signing_key_hex
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(decode_server_signing_key)
-        .transpose()?
-        .map(Arc::new);
-    if server_signing_key.is_none() {
-        if !args.debug_internal_test_mode {
-            anyhow::bail!(
-                "VPSMAN_SERVER_SIGNING_KEY_HEX is required. Missing signing keys are allowed only with VPSMAN_DEBUG_INTERNAL_TEST_MODE=true for dangerous internal tests."
-            );
-        }
-        warn!(
-            "DANGEROUS INTERNAL TEST MODE: VPSMAN_SERVER_SIGNING_KEY_HEX is not configured; privilege-gated job dispatch remains disabled"
-        );
-    }
     let backup_object_store = build_backup_object_store(&args)?;
     if let Some(store) = &backup_object_store {
         info!(kind = store.kind(), "backup object store enabled");
@@ -330,7 +307,6 @@ async fn main() -> Result<()> {
         events,
         internal_token: Some(internal_token),
         gateway,
-        server_signing_key,
         backup_object_store,
         update_object_store,
         update_artifact_public_base_url,
@@ -360,6 +336,7 @@ async fn main() -> Result<()> {
             actor_id: None,
         })
         .await?;
+    job_dispatcher::spawn_job_dispatcher(state.clone());
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;

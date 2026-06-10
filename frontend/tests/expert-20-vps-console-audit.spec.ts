@@ -283,7 +283,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     resultPanel
       .locator(".executionResultStats span")
-      .filter({ hasText: "pushed" })
+      .filter({ hasText: "queued" })
       .filter({ hasText: "22/24" }),
   ).toBeVisible();
   await expect(
@@ -622,6 +622,7 @@ async function installTwentyFourVpsExpertMock(page: Page) {
         }));
         return jsonResponse({
           accepted_targets: acceptedTargets.length,
+          target_count: targets.length,
           job_id: jobId,
           status: "accepted",
         });

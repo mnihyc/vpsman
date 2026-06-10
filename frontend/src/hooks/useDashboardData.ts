@@ -240,7 +240,7 @@ export function useDashboardData(activeView: ActiveView) {
       if (event.type === "job_finished") {
         void fleet.loadFleet();
         void jobs.loadJobs();
-          void audit.loadAudits();
+        void audit.loadAudits();
         if (activeView === "Dashboard") {
           scheduleDashboardOverviewReload();
         }
@@ -365,6 +365,7 @@ export function useDashboardData(activeView: ActiveView) {
     createDataSourcePreset: inventory.createDataSourcePreset,
     createSchedule: schedules.createSchedule,
     updateSchedule: schedules.updateSchedule,
+    updateScheduleTargets: schedules.updateScheduleTargets,
     enableSchedule: schedules.enableSchedule,
     disableSchedule: schedules.disableSchedule,
     deferSchedule: schedules.deferSchedule,
@@ -418,9 +419,12 @@ export function useDashboardData(activeView: ActiveView) {
     updateFleetAlertState: fleet.updateFleetAlertState,
     upsertFleetAlertNotificationChannel:
       fleet.upsertFleetAlertNotificationChannel,
+    deleteFleetAlertNotificationChannel:
+      fleet.deleteFleetAlertNotificationChannel,
     dispatchFleetAlertNotifications: fleet.dispatchFleetAlertNotifications,
     processFleetAlertNotifications: fleet.processFleetAlertNotifications,
     upsertWebhookRule: fleet.upsertWebhookRule,
+    deleteWebhookRule: fleet.deleteWebhookRule,
     dryRunWebhookRule: fleet.dryRunWebhookRule,
     dispatchWebhookRules: fleet.dispatchWebhookRules,
     processWebhookRuleDeliveries: fleet.processWebhookRuleDeliveries,
@@ -486,6 +490,7 @@ export function useDashboardData(activeView: ActiveView) {
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,
+    deleteFleetAlertPolicy: fleet.deleteFleetAlertPolicy,
     updateOperatorPreferences: access.updateOperatorPreferences,
     wsState,
   };

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
@@ -190,10 +191,12 @@ pub(crate) fn vty_submit_operation_with_force(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": command_label,
             "argv": [],
             "operation": operation,
             "selector_expression": selector_expression,
+            "target_client_ids": client_ids,
             "privileged": true,
             "destructive": selection.destructive,
             "confirmed": selection.confirmed,

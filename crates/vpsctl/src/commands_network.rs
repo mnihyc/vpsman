@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
+use uuid::Uuid;
 use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
@@ -664,9 +665,11 @@ fn submit_network_job(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": command_label,
             "argv": [],
             "selector_expression": selector_expression,
+            "target_client_ids": target_clients,
             "privileged": true,
             "destructive": destructive,
             "confirmed": confirmed,

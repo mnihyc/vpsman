@@ -29,15 +29,9 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
         .await
         .unwrap());
 
-    let report = repo
-        .key_lifecycle_report(KeyLifecycleTrustReport {
-            server_ed25519_public_key_configured: true,
-        })
-        .await
-        .unwrap();
+    let report = repo.key_lifecycle_report().await.unwrap();
     assert_eq!(report.direct_identity_client_count, 1);
     assert_eq!(report.current_key_revoked_count, 0);
-    assert!(report.server_ed25519_public_key_configured);
 }
 
 #[tokio::test]

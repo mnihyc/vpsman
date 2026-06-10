@@ -174,7 +174,7 @@ export function DataSourcePresetPanel({
     (lastAssignment
       ? `${lastAssignment.target_count} VPS preset assignments evaluated`
       : lastApplyJob
-        ? `Data-source patch job ${lastApplyJob.job_id} accepted ${lastApplyJob.accepted_targets} target`
+        ? `Data-source patch job ${lastApplyJob.job_id} queued ${lastApplyJob.target_count} target`
       : `${presets.length} presets across ${new Set(presets.map((preset) => preset.domain)).size} domains`);
 
   useEffect(() => {
@@ -265,6 +265,7 @@ export function DataSourcePresetPanel({
       const response = await onCreateJob({
         argv: [],
             selector_expression: selectorExpression,
+        target_client_ids: [renderClientId],
         command: "data_source_config_patch",
         confirmed: true,
         destructive: false,

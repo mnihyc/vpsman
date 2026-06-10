@@ -18,6 +18,8 @@ use crate::{
     Args,
 };
 
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) async fn run_control_listener(args: Args, state: GatewayState) -> Result<()> {
     let listener = TcpListener::bind(&args.control_bind)
         .await
@@ -241,7 +243,9 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut buffer = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk).await?;
+        let read = time::timeout(HTTP_READ_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .context("HTTP header read timed out")??;
         if read == 0 {
             return Err(anyhow!("connection closed before HTTP headers"));
         }
@@ -276,7 +280,9 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut body = buffer[body_start..].to_vec();
     while body.len() < content_length {
         let mut chunk = vec![0_u8; content_length - body.len()];
-        let read = stream.read(&mut chunk).await?;
+        let read = time::timeout(HTTP_READ_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .context("HTTP body read timed out")??;
         if read == 0 {
             return Err(anyhow!("connection closed before HTTP body"));
         }
@@ -303,7 +309,18 @@ fn authorized_internal_request(headers: &[(String, String)], internal_token: Opt
         .iter()
         .find(|(name, _)| name == "authorization")
         .and_then(|(_, value)| value.strip_prefix("Bearer "))
-        .is_some_and(|provided| provided == expected)
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (left, right) in left.iter().zip(right.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
 }
 
 async fn write_http_json<T: serde::Serialize>(

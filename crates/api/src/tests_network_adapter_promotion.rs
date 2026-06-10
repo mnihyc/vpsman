@@ -1,8 +1,6 @@
 use super::*;
-use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
-use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use vpsman_common::{
     BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
@@ -17,7 +15,7 @@ async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
     let observed = create_observed_plan(&repo, "observed-wg", "wg42", TunnelKind::Wireguard).await;
 
     let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state(repo.clone())),
         HeaderMap::new(),
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
@@ -86,7 +84,7 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
         create_observed_plan(&repo, "observed-openvpn", "ovpn42", TunnelKind::Openvpn).await;
 
     let error = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state(repo.clone())),
         HeaderMap::new(),
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
@@ -101,7 +99,7 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
     assert_eq!(error.code, "adapter_promotion_requires_confirmation");
 
     let error = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state_with_signing_key(repo)),
+        State(test_state(repo)),
         HeaderMap::new(),
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
@@ -133,7 +131,7 @@ async fn create_observed_plan(
         ..RuntimeTunnelTopologyIntent::default()
     };
     let (status, Json(observed)) = crate::routes_network::create_tunnel_plan(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state(repo.clone())),
         HeaderMap::new(),
         Json(CreateTunnelPlanRequest { input }),
     )
@@ -175,14 +173,13 @@ fn test_plan_input(name: &str, interface_name: &str, kind: TunnelKind) -> Tunnel
     }
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

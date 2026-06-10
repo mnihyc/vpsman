@@ -10,7 +10,6 @@ use crate::{
         AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest, HistoryQuery,
         KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
     },
-    repository_key_lifecycle::KeyLifecycleTrustReport,
     state::AppState,
     util::limit_or_default,
 };
@@ -84,14 +83,7 @@ pub(crate) async fn key_lifecycle_report(
     headers: HeaderMap,
 ) -> Result<Json<KeyLifecycleReportView>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        state
-            .repo
-            .key_lifecycle_report(KeyLifecycleTrustReport {
-                server_ed25519_public_key_configured: state.server_signing_key.is_some(),
-            })
-            .await?,
-    ))
+    Ok(Json(state.repo.key_lifecycle_report().await?))
 }
 
 fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Result<(), ApiError> {

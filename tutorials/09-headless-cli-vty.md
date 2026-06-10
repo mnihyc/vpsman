@@ -16,8 +16,7 @@ Set local privilege unlock material only when dispatching privileged work:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-# Generate once with: cargo run -p vpsctl -- privilege-verifier --generate-salt
-export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
+export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
 ```
 
 Check available commands:
@@ -123,6 +122,8 @@ agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 1. Inspect: `summary`, `agents`, `fleet-alerts`, `gateway-sessions`.
 2. Resolve targets: `bulk-resolve`, inner `id:<client_id>` or
    `name:<display_name>` selectors, explicit `tag:<name>`, or bare tag names.
+   Job and schedule submissions send the resolved VPS IDs as the fixed target
+   set; the selector remains audit context.
 3. Dispatch: privilege-gated command with confirmation for destructive work.
 4. Observe: `jobs`, `job-targets`, `job-outputs`, `job-follow`.
 5. Recover: inspect job outputs, then run an explicit compensating operation such as

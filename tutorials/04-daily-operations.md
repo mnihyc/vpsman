@@ -6,14 +6,14 @@ output.
 
 ## Run Commands
 
-Privileged command execution resolves targets, builds a request-bound
-privilege assertion locally, and sends that assertion to the API. The API
-recomputes the operation intent and asks the private gateway to verify it:
+Privileged command execution first resolves the selector into a fixed VPS
+target list, builds a request-bound privilege assertion locally, and sends both
+the audit selector and concrete `target_client_ids` to the API. Retries reuse the
+client-generated job ID and cannot silently change targets:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-# Generate once with: cargo run -p vpsctl -- privilege-verifier --generate-salt
-export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
+export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
 
 cargo run -p vpsctl -- job-create --command uptime --tags edge
 cargo run -p vpsctl -- job-create --command /bin/sh --argv '/bin/sh,-lc,uname -a' --clients edge-01
@@ -30,6 +30,19 @@ data-source preset domain. Use it to choose shell argv prefix, default working
 directory, inherited/clean/minimal environment handling, explicit env values,
 PTY enabled/disabled policy, and process-group or direct-child cleanup for a
 VPS, pool, or tag. Explicit argv jobs remain the preferred frequent-use path.
+
+### Target confirmation is the execution boundary
+
+Selectors are resolved before submission. In the browser, the confirmation modal
+shows the concrete VPS list and that list is sent as `target_client_ids`. In the
+CLI, preview/confirmation performs the same freeze. The API stores the selector
+for audit but dispatches only the fixed target list it receives.
+
+Schedules also store a fixed target snapshot. Tag changes may show schedules
+that involve the edited VPSs, but this is a maintenance notification, not a
+warning that schedule targets changed automatically. Use the Schedules table
+Target Update action when the saved snapshot should be replaced by the selector's
+current resolution.
 
 ## Inspect Jobs And Output
 
@@ -50,12 +63,10 @@ cargo run -p vpsctl -- job-output-artifact \
   --output-file ./stdout.bin
 ```
 
-Timeout, terminal close, and process-stop status output includes a
-`cleanup` object when the agent had to terminate a process group. Dispatched
-jobs are intentionally not cancelable after handoff; inspect job output and run
-a compensating follow-up operation when recovery is needed. Inspect cleanup
-objects for the signal path, fallback use, and final running state during
-incident review.
+Timeout, cancel, terminal close, and process-stop status output includes a
+`cleanup` object when the agent had to terminate a process group. Inspect it
+for the signal path, fallback use, and final running state during incident
+review.
 
 ## Use Record Tables In The Panel
 
@@ -240,22 +251,23 @@ Limit-bearing starts on unprivileged agents default to degraded status. Use
 
 ## Schedules And Job Observation
 
-Create a schedule. Privilege is verified when the schedule intent is created
-or changed; due execution is handled by the trusted worker after the schedule
-time:
+Create a schedule. The selector is resolved once during preview/confirmation,
+and that fixed VPS target snapshot is saved with the schedule. Privilege is
+verified when the schedule intent or fixed target list is created or changed;
+due execution uses the saved snapshot through the durable dispatch queue:
 
 ```sh
 cargo run -p vpsctl -- schedule-create \
   --name hourly-uptime \
   --command /usr/bin/uptime \
   --tags edge \
-  --cron-expr '0 * * * *' \
+  --interval-secs 3600 \
   --catch-up-policy run_once \
   --retry-delay-secs 300 \
   --max-failures 5
 ```
 
-Use `--catch-up-policy skip_missed` for compatibility, `run_once` to work
+Use `--catch-up-policy skip_missed` to ignore missed runs, `run_once` to work
 through missed intervals one worker pass at a time, or `run_all_limited` with
 `--catch-up-limit <1-25>` for bounded backlog materialization. Keep a stable
 `--worker-id` for repeated `vpsman-worker --once` runs in the same smoke or
@@ -271,11 +283,15 @@ cargo run -p vpsctl -- jobs --limit 20
 ```
 
 In the browser, use the Schedules page and its Schedule runs subpage for the
-same review flow.
+same review flow. If tag changes make a schedule selector resolve to a different
+set of VPSs, the schedule shows **Update targets**; use it to deliberately
+replace the saved fixed snapshot. Tag mutation dialogs show this as a target
+update notice, not as an automatic schedule edit.
 
-Dispatched jobs are treated as already handed to the target. Observe them with
-job polling commands and run an explicit compensating operation when a completed
-result needs recovery:
+Submitted and scheduled jobs enter a durable queued/dispatching state before
+they are accepted by gateways or agents. Observe them with job polling commands
+and run an explicit compensating operation when a completed result needs
+recovery:
 
 ```sh
 cargo run -p vpsctl -- job-follow --job-id <job_uuid>

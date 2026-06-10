@@ -482,12 +482,8 @@ export function AccessPanel({
               </div>
               <div className="metricRows">
                 <MetricRow
-                  label="Server signing public key"
-                  value={
-                    keyLifecycleReport?.server_ed25519_public_key_configured
-                      ? "configured"
-                      : "not configured"
-                  }
+                  label="Command transport"
+                  value="Noise-secured gateway sessions"
                 />
                 <MetricRow
                   label="Direct identity clients"

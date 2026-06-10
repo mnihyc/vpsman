@@ -912,7 +912,6 @@ const keyLifecycleReport = {
   current_key_revoked_count: 1,
   direct_identity_client_count: agents.length,
   revocation_count: clientKeyRevocations.length,
-  server_ed25519_public_key_configured: true,
 };
 
 export const backupId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -928,9 +927,7 @@ const backupRequests = [
     note: "fixture backup",
     paths: ["/etc/hostname"],
     payload_hash: "a".repeat(64),
-    signed_command_id: null,
-    signed_command_expires_unix: null,
-    signed_command_scope: "client:agent-sfo-01",
+    command_scope: "client:agent-sfo-01",
     status: "artifact_metadata_recorded",
   },
 ];
@@ -1186,6 +1183,7 @@ const schedules = [
     operation: { argv: ["uptime"], pty: false, type: "shell" },
     retry_delay_secs: 300,
     selector_expression: "id:agent-sfo-01 || provider:alpha",
+    target_client_ids: ["agent-sfo-01", "agent-fra-02"],
     timezone: "UTC",
   },
 ];
@@ -1666,6 +1664,24 @@ export async function installConsoleApiMock(page: Page) {
         }
         return operation.type;
       };
+      const scheduleTargetIdsFromSelector = (selector: unknown): string[] => {
+        const expression = typeof selector === "string" ? selector : "";
+        if (!expression.trim() || expression.trim() === "id:*") {
+          return visibleAgents().map((agent) => agent.id);
+        }
+        const ids = new Set<string>();
+        for (const agent of visibleAgents()) {
+          const tags = Array.isArray(agent.tags) ? agent.tags : [];
+          const matchesId = expression.includes(`id:${agent.id}`);
+          const matchesTag = tags.some((tag) =>
+            expression.includes(`tag:${tag}`) || expression.includes(tag),
+          );
+          if (matchesId || matchesTag) {
+            ids.add(agent.id);
+          }
+        }
+        return Array.from(ids);
+      };
       const normalizeScheduleRecord = (schedule: Record<string, unknown>) => ({
         catch_up_limit: schedule.catch_up_limit ?? 1,
         catch_up_policy: schedule.catch_up_policy ?? "run_once",
@@ -1701,6 +1717,9 @@ export async function installConsoleApiMock(page: Page) {
         },
         retry_delay_secs: schedule.retry_delay_secs ?? 300,
         selector_expression: schedule.selector_expression ?? "id:*",
+        target_client_ids: Array.isArray(schedule.target_client_ids)
+          ? schedule.target_client_ids
+          : scheduleTargetIdsFromSelector(schedule.selector_expression ?? "id:*"),
         timezone: schedule.timezone ?? "UTC",
         updated_at:
           schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
@@ -2826,6 +2845,7 @@ export async function installConsoleApiMock(page: Page) {
             operation?: Record<string, unknown>;
             retry_delay_secs?: number;
             selector_expression?: string;
+            target_client_ids?: string[];
             timezone?: string;
           };
           const cronExpr = request.cron_expr ?? "0 * * * *";
@@ -2859,6 +2879,7 @@ export async function installConsoleApiMock(page: Page) {
             },
             retry_delay_secs: request.retry_delay_secs ?? 300,
             selector_expression: request.selector_expression ?? "id:*",
+            target_client_ids: request.target_client_ids ?? scheduleTargetIdsFromSelector(request.selector_expression ?? "id:*"),
             timezone: request.timezone ?? "UTC",
             updated_at: "2026-06-02T10:04:00Z",
           });
@@ -2883,6 +2904,7 @@ export async function installConsoleApiMock(page: Page) {
             operation?: Record<string, unknown>;
             retry_delay_secs?: number;
             selector_expression?: string;
+            target_client_ids?: string[];
             timezone?: string;
           };
           Object.assign(schedule, {
@@ -2901,6 +2923,8 @@ export async function installConsoleApiMock(page: Page) {
               request.retry_delay_secs ?? schedule.retry_delay_secs,
             selector_expression:
               request.selector_expression ?? schedule.selector_expression,
+            target_client_ids:
+              request.target_client_ids ?? schedule.target_client_ids,
             timezone: request.timezone ?? schedule.timezone,
             updated_at: "2026-06-02T10:05:00Z",
           });
@@ -2916,6 +2940,23 @@ export async function installConsoleApiMock(page: Page) {
           schedule.deleted_at = "2026-06-02T10:08:00Z";
           schedule.enabled = false;
           schedule.updated_at = "2026-06-02T10:08:00Z";
+          return jsonResponse(schedule);
+        }
+        const scheduleTargetsMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)\/targets$/);
+        if (scheduleTargetsMatch && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.scheduleActions.push({ body, method, path: pathname });
+          const schedule = findSchedule(scheduleTargetsMatch[1]);
+          if (!schedule) {
+            return jsonResponse({ error: "schedule_not_found" }, 404);
+          }
+          const request = body as {
+            selector_expression?: string;
+            target_client_ids?: string[];
+          };
+          schedule.selector_expression = request.selector_expression ?? schedule.selector_expression;
+          schedule.target_client_ids = request.target_client_ids ?? schedule.target_client_ids;
+          schedule.updated_at = "2026-06-02T10:06:30Z";
           return jsonResponse(schedule);
         }
         const scheduleActionMatch = pathname.match(
@@ -2946,14 +2987,19 @@ export async function installConsoleApiMock(page: Page) {
             schedule.updated_at = "2026-06-02T10:07:00Z";
             return jsonResponse(schedule);
           }
-          return jsonResponse({
-            accepted_targets: resolveBulkTargets({
-              selector_expression: schedule.selector_expression,
-            }).filter((agent) => agent.status !== "offline").length,
-            job_id: "abababab-2323-4545-8989-cdcdcdcdcdcd",
-            schedule_id: schedule.id,
-            status: "accepted",
-          });
+          {
+            const fixedTargetIds = Array.isArray(schedule.target_client_ids)
+              ? schedule.target_client_ids
+              : scheduleTargetIdsFromSelector(schedule.selector_expression);
+            const selectedTargets = visibleAgents().filter((agent) => fixedTargetIds.includes(agent.id));
+            return jsonResponse({
+              accepted_targets: selectedTargets.filter((agent) => agent.status !== "offline").length,
+              target_count: fixedTargetIds.length,
+              job_id: "abababab-2323-4545-8989-cdcdcdcdcdcd",
+              schedule_id: schedule.id,
+              status: "accepted",
+            });
+          }
         }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
           return jsonResponse([]);
@@ -3055,9 +3101,7 @@ export async function installConsoleApiMock(page: Page) {
             note: null,
             paths: ["/etc/hostname"],
             payload_hash: "c".repeat(64),
-            signed_command_id: null,
-            signed_command_expires_unix: null,
-            signed_command_scope: "client:agent-fra-02",
+            command_scope: "client:agent-fra-02",
             source_backup_request_id: backupsFixture[0].id,
             source_client_id: "agent-sfo-01",
             status: "planned_metadata_only",
@@ -3216,6 +3260,7 @@ export async function installConsoleApiMock(page: Page) {
           createdJobTargets.set(jobId, targetRecords);
           return jsonResponse({
             accepted_targets: acceptedTargets.length,
+            target_count: clientIds.length,
             job_id: jobId,
             status: "accepted",
           });

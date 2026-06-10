@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
-    http::HeaderMap,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     Json,
 };
 
@@ -130,6 +130,21 @@ pub(crate) async fn upsert_fleet_alert_policy(
     ))
 }
 
+pub(crate) async fn delete_fleet_alert_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(policy_id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    state
+        .repo
+        .delete_fleet_alert_policy(policy_id, &operator)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn list_fleet_alert_notification_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -166,6 +181,21 @@ pub(crate) async fn upsert_fleet_alert_notification_channel(
             .upsert_fleet_alert_notification_channel(&request, &operator)
             .await?,
     ))
+}
+
+pub(crate) async fn delete_fleet_alert_notification_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(channel_id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    state
+        .repo
+        .delete_fleet_alert_notification_channel(channel_id, &operator)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn list_fleet_alert_notifications(

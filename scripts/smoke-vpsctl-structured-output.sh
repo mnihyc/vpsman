@@ -25,15 +25,6 @@ jq -e '
   and (.public_key_hex | test("^[0-9a-f]{64}$"))
 ' <<<"$noise_json" >/dev/null
 
-export VPSMAN_SUPER_PASSWORD="structured output password"
-privilege_json="$("$bin" --output json privilege-verifier --super-salt-hex 01020304)"
-jq -e '
-  .super_salt_hex == "01020304"
-  and (.privilege_verifier_key_hex | test("^[0-9a-f]{64}$"))
-  and .gateway_env.VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX == .privilege_verifier_key_hex
-  and .operator_env.VPSMAN_SUPER_SALT_HEX == .super_salt_hex
-' <<<"$privilege_json" >/dev/null
-
 plan_json="$("$bin" --output pretty-json tunnel-plan \
   --name edge-structured \
   --interface-name tunstructured \
@@ -72,5 +63,5 @@ help_text="$("$bin" --help)"
 
 printf '{\n'
 printf '  "vpsctl_structured_output_smoke": "ok",\n'
-printf '  "checks": ["global_output_help", "compact_json", "pretty_json", "privilege_verifier_json", "interactive_vty_rejection"]\n'
+printf '  "checks": ["global_output_help", "compact_json", "pretty_json", "interactive_vty_rejection"]\n'
 printf '}\n'

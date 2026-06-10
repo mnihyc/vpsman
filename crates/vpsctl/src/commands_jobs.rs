@@ -53,10 +53,10 @@ pub(crate) fn job_create(
         pty: true,
     });
     let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
     let privilege_assertion = if privileged {
         let password = load_super_password(&password_env)?;
         let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-        let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
         let assertion_command = if let Some(operation) = &operation {
             operation.clone()
         } else {
@@ -94,10 +94,12 @@ pub(crate) fn job_create(
             "/api/v1/jobs",
             token,
             &serde_json::json!({
+                "job_id": Uuid::new_v4(),
                 "command": command,
                 "argv": if operation.is_some() { Vec::<String>::new() } else { argv },
                 "operation": operation,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "privileged": privileged,
                 "destructive": destructive,
                 "confirmed": confirmed,

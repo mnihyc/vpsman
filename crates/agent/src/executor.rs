@@ -1,14 +1,11 @@
 use anyhow::{Context, Result};
-use ed25519_dalek::VerifyingKey;
 use tokio::{
     sync::mpsc,
     time::{self, Duration},
 };
 use vpsman_common::{
-    decode_noise_key_hex, encode_json, verify_command_envelope, AgentConfig,
-    AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy,
-    CommandOutput, JobCommand, JobRequest, OutputStream, PrivilegeReplayCache,
-    MAX_SHELL_SCRIPT_BYTES,
+    AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
+    AgentExecutionPtyPolicy, CommandOutput, JobCommand, OutputStream, MAX_SHELL_SCRIPT_BYTES,
 };
 
 use crate::{
@@ -30,7 +27,6 @@ use crate::{
     network_interfaces::{execute_network_interfaces_command, NetworkInterfacesInput},
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
-    telemetry::unix_now,
     terminal::execute_terminal_command,
     update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
     update_activation::{
@@ -42,40 +38,6 @@ use crate::{
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const PRESET_USER_SESSIONS_W: &str = "/usr/bin/w";
 const PRESET_USER_SESSIONS_WHO: &str = "/usr/bin/who";
-
-pub(crate) fn authorize_job(
-    config: &AgentConfig,
-    request: &JobRequest,
-    replay_cache: &mut PrivilegeReplayCache,
-) -> std::result::Result<(), String> {
-    let server_public_key = decode_required_32_hex(
-        config.auth.server_ed25519_public_key_hex.as_deref(),
-        "missing server signing public key",
-    )?;
-    let server_public_key: [u8; 32] = server_public_key
-        .try_into()
-        .map_err(|_| "server signing public key must be 32 bytes".to_string())?;
-    let verifying_key = VerifyingKey::from_bytes(&server_public_key)
-        .map_err(|_| "invalid server signing public key".to_string())?;
-    let payload = encode_json(&request.command).map_err(|error| error.to_string())?;
-    verify_command_envelope(
-        &verifying_key,
-        &format!("client:{}", config.client_id),
-        &payload,
-        &request.envelope,
-        unix_now(),
-        replay_cache,
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn decode_required_32_hex(
-    value: Option<&str>,
-    missing_message: &str,
-) -> std::result::Result<Vec<u8>, String> {
-    let value = value.ok_or_else(|| missing_message.to_string())?;
-    decode_noise_key_hex(value).map_err(|error| error.to_string())
-}
 
 #[cfg(test)]
 pub(crate) async fn execute_job_command(

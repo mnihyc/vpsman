@@ -31,9 +31,6 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_pid=""
 api_log=""
@@ -128,7 +125,8 @@ start_api() {
     VPSMAN_POSTGRES_URL="$postgres_url" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-    VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+    VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+    VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
     VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
     VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES=2048 \
     RUST_LOG="vpsman_api=warn" \
@@ -600,6 +598,7 @@ assert_user_sessions_no_privilege_unlock_rejection() {
       argv: [],
       operation: {type: "user_sessions"},
       selector_expression: ("id:" + $client),
+      target_client_ids: [$client],
       privileged: true,
       confirmed: true,
       timeout_secs: 10

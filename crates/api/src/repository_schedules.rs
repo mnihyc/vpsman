@@ -27,7 +27,11 @@ fn compare_schedule(left: &ScheduleView, right: &ScheduleView, sort: Option<&str
         "enabled" | "state" => left.enabled.cmp(&right.enabled),
         "cron_expr" | "cron" => left.cron_expr.cmp(&right.cron_expr),
         "command_type" | "operation" => left.command_type.cmp(&right.command_type),
-        "targets" => left.selector_expression.cmp(&right.selector_expression),
+        "targets" => left
+            .target_client_ids
+            .len()
+            .cmp(&right.target_client_ids.len())
+            .then_with(|| left.selector_expression.cmp(&right.selector_expression)),
         "failures" | "failure_count" => left.failure_count.cmp(&right.failure_count),
         "name" => left.name.cmp(&right.name),
         _ => compare_text_or_number(&left.next_run_at, &right.next_run_at),
@@ -56,6 +60,10 @@ fn schedule_matches_search(schedule: &ScheduleView, needle: &str) -> bool {
             .selector_expression
             .to_ascii_lowercase()
             .contains(needle)
+        || schedule
+            .target_client_ids
+            .iter()
+            .any(|id| id.to_ascii_lowercase().contains(needle))
 }
 
 fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -69,8 +77,12 @@ fn schedule_order_by(sort: Option<&str>, descending: bool) -> &'static str {
         (Some("cron_expr" | "cron"), false) => "cron_expr ASC, id ASC",
         (Some("name"), true) => "name DESC, id DESC",
         (Some("name"), false) => "name ASC, id ASC",
-        (Some("targets"), true) => "selector_expression DESC, id DESC",
-        (Some("targets"), false) => "selector_expression ASC, id ASC",
+        (Some("targets"), true) => {
+            "cardinality(target_client_ids) DESC, selector_expression DESC, id DESC"
+        }
+        (Some("targets"), false) => {
+            "cardinality(target_client_ids) ASC, selector_expression ASC, id ASC"
+        }
         (Some("failures" | "failure_count"), true) => "failure_count DESC, id DESC",
         (Some("failures" | "failure_count"), false) => "failure_count ASC, id ASC",
         (_, true) => "next_run_at DESC, id DESC",
@@ -147,6 +159,7 @@ impl Repository {
                         enabled,
                         operation,
                         selector_expression,
+                        target_client_ids,
                         cron_expr,
                         timezone,
                         catch_up_policy,
@@ -169,6 +182,7 @@ impl Repository {
                         OR name ILIKE $3 ESCAPE '\'
                         OR operation::text ILIKE $3 ESCAPE '\'
                         OR selector_expression ILIKE $3 ESCAPE '\'
+                        OR target_client_ids::text ILIKE $3 ESCAPE '\'
                         OR cron_expr ILIKE $3 ESCAPE '\'
                         OR catch_up_policy ILIKE $3 ESCAPE '\'
                         OR last_error ILIKE $3 ESCAPE '\'
@@ -193,6 +207,7 @@ impl Repository {
                             enabled: row.try_get("enabled")?,
                             operation: operation.0,
                             selector_expression: row.try_get("selector_expression")?,
+                            target_client_ids: row.try_get("target_client_ids")?,
                             cron_expr: row.try_get("cron_expr")?,
                             timezone: row.try_get("timezone")?,
                             catch_up_policy: row.try_get("catch_up_policy")?,
@@ -223,6 +238,7 @@ impl Repository {
             name,
             operation,
             selector_expression,
+            target_client_ids,
             cron_expr,
             timezone,
             enabled,
@@ -237,6 +253,7 @@ impl Repository {
                 name,
                 operation,
                 selector_expression,
+                target_client_ids,
                 cron_expr,
                 timezone,
                 enabled,
@@ -272,6 +289,7 @@ impl Repository {
                     enabled: request.enabled,
                     operation: request.operation,
                     selector_expression: request.selector_expression,
+                    target_client_ids: request.target_client_ids,
                     cron_expr: request.cron_expr,
                     timezone: request.timezone,
                     catch_up_policy: request.catch_up_policy,
@@ -299,6 +317,8 @@ impl Repository {
                         "name": &schedule.name,
                         "operation_type": &schedule.command_type,
                         "selector_expression": &schedule.selector_expression,
+                        "target_client_ids": &schedule.target_client_ids,
+                        "target_count": schedule.target_client_ids.len(),
                         "cron_expr": &schedule.cron_expr,
                         "timezone": &schedule.timezone,
                         "next_runs": &schedule.next_runs,
@@ -325,6 +345,7 @@ impl Repository {
                         enabled,
                         operation,
                         selector_expression,
+                        target_client_ids,
                         cron_expr,
                         timezone,
                         catch_up_policy,
@@ -333,13 +354,14 @@ impl Repository {
                         max_failures,
                         next_run_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, to_timestamp($13))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14))
                     RETURNING
                         id,
                         name,
                         enabled,
                         operation,
                         selector_expression,
+                        target_client_ids,
                         cron_expr,
                         timezone,
                         catch_up_policy,
@@ -362,6 +384,7 @@ impl Repository {
                 .bind(request.enabled)
                 .bind(SqlJson(request.operation.clone()))
                 .bind(request.selector_expression.trim())
+                .bind(&request.target_client_ids)
                 .bind(&request.cron_expr)
                 .bind(&request.timezone)
                 .bind(&request.catch_up_policy)
@@ -378,6 +401,7 @@ impl Repository {
                     enabled: row.try_get("enabled")?,
                     operation: operation.0,
                     selector_expression: row.try_get("selector_expression")?,
+                    target_client_ids: row.try_get("target_client_ids")?,
                     cron_expr: row.try_get("cron_expr")?,
                     timezone: row.try_get("timezone")?,
                     catch_up_policy: row.try_get("catch_up_policy")?,
@@ -409,6 +433,8 @@ impl Repository {
                     "name": &schedule.name,
                     "operation_type": &schedule.command_type,
                     "selector_expression": &schedule.selector_expression,
+                    "target_client_ids": &schedule.target_client_ids,
+                    "target_count": schedule.target_client_ids.len(),
                     "cron_expr": &schedule.cron_expr,
                     "timezone": &schedule.timezone,
                     "next_runs": &schedule.next_runs,
@@ -469,6 +495,7 @@ impl Repository {
                 schedule.command_type = job_command_type_label(&request.operation).to_string();
                 schedule.operation = request.operation;
                 schedule.selector_expression = request.selector_expression;
+                schedule.target_client_ids = request.target_client_ids;
                 schedule.cron_expr = request.cron_expr;
                 schedule.timezone = request.timezone;
                 schedule.next_runs = next_runs;
@@ -495,13 +522,14 @@ impl Repository {
                         enabled = $4,
                         operation = $5,
                         selector_expression = $6,
-                        cron_expr = $7,
-                        timezone = $8,
-                        catch_up_policy = $9,
-                        catch_up_limit = $10,
-                        retry_delay_secs = $11,
-                        max_failures = $12,
-                        next_run_at = to_timestamp($13),
+                        target_client_ids = $7,
+                        cron_expr = $8,
+                        timezone = $9,
+                        catch_up_policy = $10,
+                        catch_up_limit = $11,
+                        retry_delay_secs = $12,
+                        max_failures = $13,
+                        next_run_at = to_timestamp($14),
                         failure_count = 0,
                         last_error = NULL,
                         updated_at = now()
@@ -514,6 +542,7 @@ impl Repository {
                 .bind(request.enabled)
                 .bind(SqlJson(request.operation))
                 .bind(request.selector_expression.trim())
+                .bind(&request.target_client_ids)
                 .bind(&request.cron_expr)
                 .bind(&request.timezone)
                 .bind(&request.catch_up_policy)
@@ -530,6 +559,70 @@ impl Repository {
                 let schedule = self.schedule_by_id(schedule_id).await?;
                 record_postgres_schedule_audit(pool, &schedule, operator, "schedule.updated")
                     .await?;
+                Ok(schedule)
+            }
+        }
+    }
+
+    pub(crate) async fn update_schedule_targets(
+        &self,
+        schedule_id: Uuid,
+        selector_expression: String,
+        target_client_ids: Vec<String>,
+        operator: &AuthContext,
+    ) -> Result<ScheduleView> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let mut schedules = memory.schedules.write().await;
+                let schedule = schedules
+                    .iter_mut()
+                    .find(|schedule| schedule.id == schedule_id && schedule.deleted_at.is_none())
+                    .ok_or_else(|| anyhow::anyhow!("schedule_not_found:{schedule_id}"))?;
+                schedule.selector_expression = selector_expression;
+                schedule.target_client_ids = target_client_ids;
+                schedule.updated_at = now;
+                let schedule = schedule.clone();
+                drop(schedules);
+                record_memory_schedule_audit(
+                    memory,
+                    &schedule,
+                    operator,
+                    "schedule.targets_updated",
+                )
+                .await;
+                Ok(schedule)
+            }
+            Self::Postgres(pool) => {
+                let result = sqlx::query(
+                    r#"
+                    UPDATE schedules
+                    SET
+                        actor_id = $2,
+                        selector_expression = $3,
+                        target_client_ids = $4,
+                        updated_at = now()
+                    WHERE id = $1 AND deleted_at IS NULL
+                    "#,
+                )
+                .bind(schedule_id)
+                .bind(operator.operator.id)
+                .bind(selector_expression.trim())
+                .bind(&target_client_ids)
+                .execute(pool)
+                .await?;
+                anyhow::ensure!(
+                    result.rows_affected() > 0,
+                    "schedule_not_found:{schedule_id}"
+                );
+                let schedule = self.schedule_by_id(schedule_id).await?;
+                record_postgres_schedule_audit(
+                    pool,
+                    &schedule,
+                    operator,
+                    "schedule.targets_updated",
+                )
+                .await?;
                 Ok(schedule)
             }
         }
@@ -710,6 +803,7 @@ pub(crate) struct ScheduleCreateInput {
     pub(crate) name: String,
     pub(crate) operation: vpsman_common::JobCommand,
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     pub(crate) timezone: String,
     pub(crate) enabled: bool,
@@ -725,6 +819,7 @@ struct ScheduleRowParts {
     enabled: bool,
     operation: vpsman_common::JobCommand,
     selector_expression: String,
+    target_client_ids: Vec<String>,
     cron_expr: String,
     timezone: String,
     catch_up_policy: String,
@@ -750,6 +845,7 @@ fn schedule_view_from_row(parts: ScheduleRowParts) -> ScheduleView {
         command_type,
         operation: parts.operation,
         selector_expression: parts.selector_expression,
+        target_client_ids: parts.target_client_ids,
         next_runs: next_cron_runs(&parts.cron_expr, 5).unwrap_or_default(),
         cron_expr: parts.cron_expr,
         timezone: parts.timezone,
@@ -777,6 +873,7 @@ fn schedule_select_sql(where_clause: &str) -> String {
             enabled,
             operation,
             selector_expression,
+            target_client_ids,
             cron_expr,
             timezone,
             catch_up_policy,
@@ -805,6 +902,7 @@ fn schedule_from_postgres_row(row: sqlx::postgres::PgRow) -> Result<ScheduleView
         enabled: row.try_get("enabled")?,
         operation: operation.0,
         selector_expression: row.try_get("selector_expression")?,
+        target_client_ids: row.try_get("target_client_ids")?,
         cron_expr: row.try_get("cron_expr")?,
         timezone: row.try_get("timezone")?,
         catch_up_policy: row.try_get("catch_up_policy")?,
@@ -907,6 +1005,8 @@ fn schedule_audit_metadata(
         "name": &schedule.name,
         "operation_type": &schedule.command_type,
         "selector_expression": &schedule.selector_expression,
+        "target_client_ids": &schedule.target_client_ids,
+        "target_count": schedule.target_client_ids.len(),
         "cron_expr": &schedule.cron_expr,
         "timezone": &schedule.timezone,
         "next_runs": &schedule.next_runs,

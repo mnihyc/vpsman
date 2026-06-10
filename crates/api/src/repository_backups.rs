@@ -5,7 +5,6 @@ use base64::Engine as _;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::CommandEnvelope;
 
 use crate::{
     model::{
@@ -41,7 +40,7 @@ fn compare_backup_request(
         "include_config" | "scope" => left.include_config.cmp(&right.include_config),
         "paths" => left.paths.len().cmp(&right.paths.len()),
         "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
-        "signed_command_scope" => left.signed_command_scope.cmp(&right.signed_command_scope),
+        "command_scope" => left.command_scope.cmp(&right.command_scope),
         "status" => left.status.cmp(&right.status),
         _ => compare_text_or_number(&left.created_at, &right.created_at),
     }
@@ -56,10 +55,7 @@ fn backup_request_matches_search(request: &BackupRequestView, needle: &str) -> b
         || request.client_id.to_ascii_lowercase().contains(needle)
         || request.status.to_ascii_lowercase().contains(needle)
         || request.payload_hash.to_ascii_lowercase().contains(needle)
-        || request
-            .signed_command_scope
-            .to_ascii_lowercase()
-            .contains(needle)
+        || request.command_scope.to_ascii_lowercase().contains(needle)
         || request
             .artifact_id
             .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
@@ -95,8 +91,8 @@ fn backup_request_order_by(sort: Option<&str>, descending: bool) -> &'static str
         ("paths", false) => "cardinality(paths) ASC, id ASC",
         ("payload_hash" | "hash", true) => "payload_hash DESC, id DESC",
         ("payload_hash" | "hash", false) => "payload_hash ASC, id ASC",
-        ("signed_command_scope", true) => "signed_command_scope DESC, id DESC",
-        ("signed_command_scope", false) => "signed_command_scope ASC, id ASC",
+        ("command_scope", true) => "command_scope DESC, id DESC",
+        ("command_scope", false) => "command_scope ASC, id ASC",
         ("status", true) => "status DESC, id DESC",
         ("status", false) => "status ASC, id ASC",
         (_, true) => "created_at DESC, id DESC",
@@ -127,9 +123,7 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -200,9 +194,7 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -217,7 +209,7 @@ impl Repository {
                         OR array_to_string(paths, ' ') ILIKE $3 ESCAPE '\'
                         OR status ILIKE $3 ESCAPE '\'
                         OR payload_hash ILIKE $3 ESCAPE '\'
-                        OR signed_command_scope ILIKE $3 ESCAPE '\'
+                        OR command_scope ILIKE $3 ESCAPE '\'
                         OR artifact_id::text ILIKE $3 ESCAPE '\'
                         OR source_job_id::text ILIKE $3 ESCAPE '\'
                         OR source_schedule_id::text ILIKE $3 ESCAPE '\'
@@ -242,14 +234,14 @@ impl Repository {
         &self,
         request: &CreateBackupRequest,
         payload_hash: &str,
-        envelope: &CommandEnvelope,
+        command_scope: &str,
         operator: &AuthContext,
         status: BackupRequestStatus,
     ) -> Result<BackupRequestView> {
         self.record_backup_request_with_source(
             request,
             payload_hash,
-            envelope,
+            command_scope,
             operator,
             status,
             BackupRequestSourceLink::default(),
@@ -261,12 +253,11 @@ impl Repository {
         &self,
         request: &CreateBackupRequest,
         payload_hash: &str,
-        envelope: &CommandEnvelope,
+        command_scope: &str,
         operator: &AuthContext,
         status: BackupRequestStatus,
         source: BackupRequestSourceLink,
     ) -> Result<BackupRequestView> {
-        let signed_command_expires_unix = None;
         let view = BackupRequestView {
             id: Uuid::new_v4(),
             actor_id: Some(operator.operator.id),
@@ -275,9 +266,7 @@ impl Repository {
             include_config: request.include_config,
             status: status.as_str().to_string(),
             payload_hash: payload_hash.to_string(),
-            signed_command_scope: envelope.scope.clone(),
-            signed_command_id: Some(envelope.command_id),
-            signed_command_expires_unix,
+            command_scope: command_scope.to_string(),
             artifact_id: None,
             source_job_id: source.job_id,
             source_schedule_id: source.schedule_id,
@@ -306,15 +295,13 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
                         note
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11)
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -325,9 +312,7 @@ impl Repository {
                 .bind(view.include_config)
                 .bind(&view.status)
                 .bind(&view.payload_hash)
-                .bind(&view.signed_command_scope)
-                .bind(view.signed_command_id)
-                .bind(signed_command_expires_unix.map(|value| value as i64))
+                .bind(&view.command_scope)
                 .bind(source.job_id)
                 .bind(source.schedule_id)
                 .bind(&view.note)
@@ -414,9 +399,7 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -527,9 +510,7 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -693,9 +674,6 @@ pub(crate) struct BackupArtifactOutputCandidate {
 }
 
 pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<BackupRequestView> {
-    let signed_command_expires_unix = row
-        .try_get::<Option<i64>, _>("signed_command_expires_unix")?
-        .map(|value| value.max(0) as u64);
     let status: String = row.try_get("status")?;
     Ok(BackupRequestView {
         id: row.try_get("id")?,
@@ -707,9 +685,7 @@ pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<Back
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
         payload_hash: row.try_get("payload_hash")?,
-        signed_command_scope: row.try_get("signed_command_scope")?,
-        signed_command_id: row.try_get("signed_command_id")?,
-        signed_command_expires_unix,
+        command_scope: row.try_get("command_scope")?,
         artifact_id: row.try_get("artifact_id")?,
         source_job_id: row.try_get("source_job_id")?,
         source_schedule_id: row.try_get("source_schedule_id")?,
@@ -746,9 +722,7 @@ fn backup_request_metadata(
         "include_config": view.include_config,
         "status": &view.status,
         "payload_hash": &view.payload_hash,
-        "signed_command_scope": &view.signed_command_scope,
-        "signed_command_id": view.signed_command_id,
-        "signed_command_expires_unix": view.signed_command_expires_unix,
+        "command_scope": &view.command_scope,
         "artifact_id": view.artifact_id,
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,

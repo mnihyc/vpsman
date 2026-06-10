@@ -251,7 +251,7 @@ viewer_access_token="$(jq -r '.access_token' <<<"$viewer_login_json")"
 viewer_job_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $viewer_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
+  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
   "$api_url/api/v1/jobs")"
 viewer_job_status="${viewer_job_response##*$'\n'}"
 viewer_job_body="${viewer_job_response%$'\n'*}"
@@ -323,7 +323,7 @@ jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_tag_body" >/dev/null
 scoped_job_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
+  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
   "$api_url/api/v1/jobs")"
 scoped_job_status="${scoped_job_response##*$'\n'}"
 scoped_job_body="${scoped_job_response%$'\n'*}"
@@ -332,26 +332,12 @@ if [[ "$scoped_job_status" != "403" ]]; then
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_job_body" >/dev/null
 
-agent_a_keys="$(vpsctl_auth noise-keygen)"
-agent_a_public_hex="$(jq -r '.public_key_hex' <<<"$agent_a_keys")"
-agent_b_keys="$(vpsctl_auth noise-keygen)"
-agent_b_public_hex="$(jq -r '.public_key_hex' <<<"$agent_b_keys")"
-agent_identity_json="$(vpsctl_auth agent-identity-upsert \
-  --client-id cli-agent-a \
-  --client-public-key-hex "$agent_a_public_hex" \
-  --display-name cli-edge-a \
-  --tags edge,bgp \
-  --confirmed)"
-jq -e '.client_id == "cli-agent-a" and .display_name == "cli-edge-a" and ((.tags | sort) == ["bgp", "edge"])' \
-  <<<"$agent_identity_json" >/dev/null
-agent_identity_b_json="$(vpsctl_auth agent-identity-upsert \
-  --client-id cli-agent-b \
-  --client-public-key-hex "$agent_b_public_hex" \
-  --display-name cli-edge-b \
-  --tags edge,bird2 \
-  --confirmed)"
-jq -e '.client_id == "cli-agent-b" and .display_name == "cli-edge-b" and ((.tags | sort) == ["bird2", "edge"])' \
-  <<<"$agent_identity_b_json" >/dev/null
+token_json="$(vpsctl_auth enrollment-token-create --ttl-secs 600 --default-tags edge,bgp)"
+jq -e '.token and ((.default_tags | sort) == ["bgp", "edge"]) and (.expires_at | tonumber) > 0' \
+  <<<"$token_json" >/dev/null
+tokens_json="$(vpsctl_auth enrollment-tokens)"
+jq -e 'length == 1 and ((.[0].default_tags | sort) == ["bgp", "edge"])' \
+  <<<"$tokens_json" >/dev/null
 
 root_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"vpsctl smoke agent is running without root"}'
@@ -682,10 +668,10 @@ schedule_json="$(vpsctl_auth schedule-create \
   --catch-up-policy run_once \
   --retry-delay-secs 120 \
   --max-failures 7)"
-jq -e '.name == "cli-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and .cron_expr == "0 * * * *" and .catch_up_policy == "run_once" and .retry_delay_secs == 120 and .max_failures == 7' \
+jq -e '.name == "cli-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and (.target_client_ids | index("cli-agent-a")) and .cron_expr == "0 * * * *" and .catch_up_policy == "run_once" and .retry_delay_secs == 120 and .max_failures == 7' \
   <<<"$schedule_json" >/dev/null
 schedules_json="$(vpsctl_auth schedules)"
-jq -e 'length == 1 and .[0].name == "cli-hourly-uptime" and .[0].catch_up_policy == "run_once" and .[0].failure_count == 0' <<<"$schedules_json" >/dev/null
+jq -e 'length == 1 and .[0].name == "cli-hourly-uptime" and .[0].catch_up_policy == "run_once" and .[0].failure_count == 0 and (.[0].target_client_ids | index("cli-agent-a"))' <<<"$schedules_json" >/dev/null
 
 backup_json="$(vpsctl_auth backup-request \
   --client-id cli-agent-a \
@@ -695,7 +681,7 @@ backup_json="$(vpsctl_auth backup-request \
   --confirmed)"
 require_no_secret "$backup_json" "$super_password" "backup-request"
 backup_id="$(jq -r '.id' <<<"$backup_json")"
-jq -e '.client_id == "cli-agent-a" and .status == "requested_metadata_only" and .signed_command_scope == "client:cli-agent-a" and .include_config == true' \
+jq -e '.client_id == "cli-agent-a" and .status == "requested_metadata_only" and .command_scope == "client:cli-agent-a" and .include_config == true' \
   <<<"$backup_json" >/dev/null
 
 restore_json="$(vpsctl_auth restore-plan \
@@ -707,7 +693,7 @@ restore_json="$(vpsctl_auth restore-plan \
   --note "vpsctl live api restore" \
   --confirmed)"
 require_no_secret "$restore_json" "$super_password" "restore-plan"
-jq -e --arg backup_id "$backup_id" '.source_backup_request_id == $backup_id and .source_client_id == "cli-agent-a" and .target_client_id == "cli-agent-b" and .status == "planned_metadata_only" and .signed_command_scope == "client:cli-agent-b"' \
+jq -e --arg backup_id "$backup_id" '.source_backup_request_id == $backup_id and .source_client_id == "cli-agent-a" and .target_client_id == "cli-agent-b" and .status == "planned_metadata_only" and .command_scope == "client:cli-agent-b"' \
   <<<"$restore_json" >/dev/null
 
 backups_json="$(vpsctl_auth backups --limit 10)"
@@ -757,7 +743,7 @@ jq -n \
       "fleet_alert_states",
       "fleet_alert_policies",
       "fleet_alert_notifications",
-      "agent_identity_upsert",
+      "enrollment_tokens",
       "agents_summary",
       "data_source_status",
       "data_source_object_store_readiness",

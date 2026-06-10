@@ -67,6 +67,7 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
             "name": request.name,
             "operation": operation,
             "selector_expression": selector_expression,
+            "target_client_ids": target_ids,
             "cron_expr": request.cron_expr,
             "timezone": "UTC",
             "enabled": true,

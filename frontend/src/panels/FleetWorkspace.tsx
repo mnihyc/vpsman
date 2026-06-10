@@ -156,6 +156,9 @@ export function FleetWorkspace({
   onBulkMutateTags,
   onNavigatePanel,
   onRenderDataSourceHotConfig,
+  onDeleteFleetAlertNotificationChannel,
+  onDeleteFleetAlertPolicy,
+  onDeleteWebhookRule,
   onDispatchFleetAlertNotifications,
   onDispatchWebhookRules,
   onDryRunWebhookRule,
@@ -204,6 +207,9 @@ export function FleetWorkspace({
   onRenderDataSourceHotConfig: (
     clientId: string,
   ) => Promise<DataSourceHotConfigResponse>;
+  onDeleteFleetAlertNotificationChannel: (channelId: string) => Promise<void>;
+  onDeleteFleetAlertPolicy: (policyId: string) => Promise<void>;
+  onDeleteWebhookRule: (ruleId: string) => Promise<void>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -678,8 +684,9 @@ export function FleetWorkspace({
             </span>
           </div>
           <FleetAlertPolicyManager
-            policies={fleetAlertPolicies}
+            onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
+            policies={fleetAlertPolicies}
           />
         </div>
       )}
@@ -702,6 +709,7 @@ export function FleetWorkspace({
           <FleetAlertNotificationManager
             channels={fleetAlertNotificationChannels}
             deliveries={fleetAlertNotifications}
+            onDelete={onDeleteFleetAlertNotificationChannel}
             onDispatch={onDispatchFleetAlertNotifications}
             onProcess={onProcessFleetAlertNotifications}
             onUpsert={onUpsertFleetAlertNotificationChannel}
@@ -709,6 +717,7 @@ export function FleetWorkspace({
           <WebhookRuleManager
             agents={agents}
             deliveries={webhookRuleDeliveries}
+            onDelete={onDeleteWebhookRule}
             onDispatch={onDispatchWebhookRules}
             onDryRun={onDryRunWebhookRule}
             onProcess={onProcessWebhookRuleDeliveries}
@@ -901,6 +910,7 @@ function FleetInstanceDetail({
       const job = await onCreateJob({
         argv: [],
         selector_expression: selectorExpression,
+        target_client_ids: [agent.id],
         command: "network_interfaces",
         confirmed: false,
         destructive: false,
@@ -915,7 +925,7 @@ function FleetInstanceDetail({
         job.job_id,
         onLoadJobTargets,
         {
-          acceptedTargets: job.accepted_targets,
+          acceptedTargets: job.target_count,
           onProgress: setInterfaceProgress,
           targets: [agent],
         },
@@ -2090,7 +2100,11 @@ function ConsoleFormGroup({
   title: ReactNode;
 }) {
   return (
-    <section className={className ? `consoleFormGroup ${className}` : "consoleFormGroup"}>
+    <section
+      className={
+        className ? `consoleFormGroup ${className}` : "consoleFormGroup"
+      }
+    >
       <div className="consoleFormGroupHeader">
         <strong>{title}</strong>
         {description && <span>{description}</span>}
@@ -2101,173 +2115,8 @@ function ConsoleFormGroup({
   );
 }
 
-function FleetAlertPolicyManager({
-  policies,
-  onUpsert,
-}: {
-  policies: FleetAlertPolicyRecord[];
-  onUpsert: (
-    request: FleetAlertPolicyRequest,
-  ) => Promise<FleetAlertPolicyRecord>;
-}) {
-  const [name, setName] = useState("edge-resource-policy");
-  const [scopeKind, setScopeKind] = useState("tag");
-  const [scopeValue, setScopeValue] = useState("edge");
-  const [memoryWarning, setMemoryWarning] = useState("0.20");
-  const [memoryCritical, setMemoryCritical] = useState("0.10");
-  const [diskWarning, setDiskWarning] = useState("");
-  const [diskCritical, setDiskCritical] = useState("");
-  const [cpuWarning, setCpuWarning] = useState("");
-  const [cpuCritical, setCpuCritical] = useState("");
-  const [priority, setPriority] = useState("0");
-  const [status, setStatus] = useState<string | null>(null);
-  const topPolicies = policies.slice(0, 4);
-
-  async function submit() {
-    setStatus("saving");
-    try {
-      await onUpsert({
-        name,
-        scope_kind: scopeKind,
-        scope_value: scopeKind === "global" ? null : scopeValue,
-        memory_available_warning_ratio: optionalNumber(memoryWarning),
-        memory_available_critical_ratio: optionalNumber(memoryCritical),
-        disk_available_warning_ratio: optionalNumber(diskWarning),
-        disk_available_critical_ratio: optionalNumber(diskCritical),
-        cpu_load_warning: optionalNumber(cpuWarning),
-        cpu_load_critical: optionalNumber(cpuCritical),
-        priority: Number.parseInt(priority || "0", 10),
-        enabled: true,
-        confirmed: true,
-      });
-      setStatus("saved");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "save failed");
-    }
-  }
-
-  return (
-    <div className="fleetPolicyManager professionalFormManager" aria-label="Fleet alert policy manager">
-      <div className="fleetPolicyHeader">
-        <strong>Alert policies</strong>
-        <span>{policies.length} scoped</span>
-      </div>
-      <div className="consoleFormStack">
-        <ConsoleFormGroup
-          title="Policy identity and scope"
-          description="Decide which VPS records this policy evaluates before setting thresholds."
-        >
-          <ConsoleField label="Policy name" className="fieldWide">
-            <input
-              aria-label="Policy name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Scope kind">
-            <select
-              aria-label="Policy scope kind"
-              value={scopeKind}
-              onChange={(event) => setScopeKind(event.target.value)}
-            >
-              <option value="global">global</option>
-              <option value="provider">provider</option>
-              <option value="tag">tag</option>
-              <option value="client">client</option>
-            </select>
-          </ConsoleField>
-          <ConsoleField
-            label="Scope value"
-            hint={scopeKind === "global" ? "Global policies do not need a value." : "Tag, provider, or client id to match."}
-          >
-            <input
-              aria-label="Policy scope value"
-              disabled={scopeKind === "global"}
-              value={scopeValue}
-              onChange={(event) => setScopeValue(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Priority" hint="Lower numbers run first.">
-            <input
-              aria-label="Policy priority"
-              value={priority}
-              onChange={(event) => setPriority(event.target.value)}
-            />
-          </ConsoleField>
-        </ConsoleFormGroup>
-        <ConsoleFormGroup
-          title="Thresholds"
-          description="Memory and disk values are available-resource ratios; CPU is load. Leave fields blank to ignore that signal."
-          actions={
-            <button className="primaryAction" type="button" onClick={() => void submit()}>
-              Save policy
-            </button>
-          }
-        >
-          <ConsoleField label="Memory warning ratio" hint="Example: 0.20 means less than 20% memory free.">
-            <input
-              aria-label="Memory warning ratio"
-              value={memoryWarning}
-              onChange={(event) => setMemoryWarning(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Memory critical ratio">
-            <input
-              aria-label="Memory critical ratio"
-              value={memoryCritical}
-              onChange={(event) => setMemoryCritical(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Disk warning ratio">
-            <input
-              aria-label="Disk warning ratio"
-              value={diskWarning}
-              onChange={(event) => setDiskWarning(event.target.value)}
-              placeholder="0.15"
-            />
-          </ConsoleField>
-          <ConsoleField label="Disk critical ratio">
-            <input
-              aria-label="Disk critical ratio"
-              value={diskCritical}
-              onChange={(event) => setDiskCritical(event.target.value)}
-              placeholder="0.08"
-            />
-          </ConsoleField>
-          <ConsoleField label="CPU warning load">
-            <input
-              aria-label="CPU warning load"
-              value={cpuWarning}
-              onChange={(event) => setCpuWarning(event.target.value)}
-              placeholder="4.0"
-            />
-          </ConsoleField>
-          <ConsoleField label="CPU critical load">
-            <input
-              aria-label="CPU critical load"
-              value={cpuCritical}
-              onChange={(event) => setCpuCritical(event.target.value)}
-              placeholder="8.0"
-            />
-          </ConsoleField>
-        </ConsoleFormGroup>
-      </div>
-      {status && <small className="fleetPolicyStatus">{status}</small>}
-      <div className="fleetPolicyRows">
-        {topPolicies.map((policy) => (
-          <span key={policy.id}>
-            <strong>{policy.name}</strong>
-            <small>
-              {policy.scope_kind}
-              {policy.scope_value ? `:${policy.scope_value}` : ""} priority{" "}
-              {policy.priority}
-            </small>
-          </span>
-        ))}
-        {topPolicies.length === 0 && <small>No scoped policies saved</small>}
-      </div>
-    </div>
-  );
+function formatEditableNumber(value: number | null | undefined): string {
+  return value == null ? "" : String(value);
 }
 
 function optionalNumber(value: string): number | null {
@@ -2291,8 +2140,12 @@ function optionalInteger(value: string): number | null {
 function csvValues(value: string): string[] {
   return value
     .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function compactArray(values: string[]): string {
+  return values.length > 0 ? values.join(", ") : "all";
 }
 
 function agentNamesById(
@@ -2368,15 +2221,446 @@ async function copyText(value: string) {
   await navigator.clipboard?.writeText(value);
 }
 
+function thresholdSummary(policy: FleetAlertPolicyRecord): string {
+  const parts = [
+    policy.memory_available_warning_ratio == null
+      ? null
+      : `mem warn ${policy.memory_available_warning_ratio}`,
+    policy.memory_available_critical_ratio == null
+      ? null
+      : `mem crit ${policy.memory_available_critical_ratio}`,
+    policy.disk_available_warning_ratio == null
+      ? null
+      : `disk warn ${policy.disk_available_warning_ratio}`,
+    policy.disk_available_critical_ratio == null
+      ? null
+      : `disk crit ${policy.disk_available_critical_ratio}`,
+    policy.cpu_load_warning == null
+      ? null
+      : `cpu warn ${policy.cpu_load_warning}`,
+    policy.cpu_load_critical == null
+      ? null
+      : `cpu crit ${policy.cpu_load_critical}`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : "no thresholds";
+}
+
+function FleetAlertPolicyManager({
+  policies,
+  onDelete,
+  onUpsert,
+}: {
+  policies: FleetAlertPolicyRecord[];
+  onDelete: (policyId: string) => Promise<void>;
+  onUpsert: (
+    request: FleetAlertPolicyRequest,
+  ) => Promise<FleetAlertPolicyRecord>;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState("edge-resource-policy");
+  const [scopeKind, setScopeKind] = useState("tag");
+  const [scopeValue, setScopeValue] = useState("edge");
+  const [memoryWarning, setMemoryWarning] = useState("0.20");
+  const [memoryCritical, setMemoryCritical] = useState("0.10");
+  const [diskWarning, setDiskWarning] = useState("");
+  const [diskCritical, setDiskCritical] = useState("");
+  const [cpuWarning, setCpuWarning] = useState("");
+  const [cpuCritical, setCpuCritical] = useState("");
+  const [priority, setPriority] = useState("0");
+  const [enabled, setEnabled] = useState(true);
+  const [notes, setNotes] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+
+  const policyColumns = useMemo<
+    ConsoleDataGridColumn<FleetAlertPolicyRecord>[]
+  >(
+    () => [
+      {
+        id: "name",
+        header: "Policy",
+        size: 250,
+        minSize: 180,
+        sortValue: (policy) => policy.name,
+        searchValue: (policy) => `${policy.name} ${policy.notes ?? ""}`,
+        cell: (policy) => (
+          <span className="historyPrimary">
+            <strong>{policy.name}</strong>
+            <small>{policy.notes || "no notes"}</small>
+          </span>
+        ),
+      },
+      {
+        id: "scope",
+        header: "Scope",
+        size: 170,
+        minSize: 130,
+        sortValue: (policy) =>
+          `${policy.scope_kind}:${policy.scope_value ?? ""}`,
+        searchValue: (policy) =>
+          `${policy.scope_kind} ${policy.scope_value ?? ""}`,
+        cell: (policy) => (
+          <span className="monoValue">
+            {policy.scope_kind}
+            {policy.scope_value ? `:${policy.scope_value}` : ""}
+          </span>
+        ),
+      },
+      {
+        id: "enabled",
+        header: "State",
+        size: 105,
+        minSize: 90,
+        sortValue: (policy) => policy.enabled,
+        searchValue: (policy) => (policy.enabled ? "enabled" : "disabled"),
+        cell: (policy) => (
+          <ConsoleStatusBadge tone={policy.enabled ? "ok" : "warning"}>
+            {policy.enabled ? "enabled" : "disabled"}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "priority",
+        header: "Priority",
+        size: 95,
+        minSize: 80,
+        sortValue: (policy) => policy.priority,
+        cell: (policy) => <span className="monoValue">{policy.priority}</span>,
+      },
+      {
+        id: "thresholds",
+        header: "Thresholds",
+        size: 380,
+        minSize: 240,
+        searchValue: thresholdSummary,
+        cell: (policy) => (
+          <span className="historyPrimary">
+            <strong>{thresholdSummary(policy)}</strong>
+            <small>
+              Memory, disk, and CPU thresholds are independently optional.
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "updated",
+        header: "Updated",
+        size: 140,
+        minSize: 110,
+        sortValue: (policy) => policy.updated_at,
+        cell: (policy) => formatCompactTime(policy.updated_at),
+      },
+    ],
+    [],
+  );
+
+  function resetForm() {
+    setEditingId(null);
+    setName("edge-resource-policy");
+    setScopeKind("tag");
+    setScopeValue("edge");
+    setMemoryWarning("0.20");
+    setMemoryCritical("0.10");
+    setDiskWarning("");
+    setDiskCritical("");
+    setCpuWarning("");
+    setCpuCritical("");
+    setPriority("0");
+    setEnabled(true);
+    setNotes("");
+    setStatus(null);
+  }
+
+  function editPolicy(policy: FleetAlertPolicyRecord) {
+    setEditingId(policy.id);
+    setName(policy.name);
+    setScopeKind(policy.scope_kind);
+    setScopeValue(policy.scope_value ?? "");
+    setMemoryWarning(
+      formatEditableNumber(policy.memory_available_warning_ratio),
+    );
+    setMemoryCritical(
+      formatEditableNumber(policy.memory_available_critical_ratio),
+    );
+    setDiskWarning(formatEditableNumber(policy.disk_available_warning_ratio));
+    setDiskCritical(formatEditableNumber(policy.disk_available_critical_ratio));
+    setCpuWarning(formatEditableNumber(policy.cpu_load_warning));
+    setCpuCritical(formatEditableNumber(policy.cpu_load_critical));
+    setPriority(String(policy.priority));
+    setEnabled(policy.enabled);
+    setNotes(policy.notes ?? "");
+    setStatus(`editing ${policy.name}`);
+  }
+
+  function requestFromPolicy(
+    policy: FleetAlertPolicyRecord,
+    overrides: Partial<FleetAlertPolicyRequest> = {},
+  ): FleetAlertPolicyRequest {
+    return {
+      id: policy.id,
+      name: policy.name,
+      scope_kind: policy.scope_kind,
+      scope_value: policy.scope_value,
+      memory_available_warning_ratio: policy.memory_available_warning_ratio,
+      memory_available_critical_ratio: policy.memory_available_critical_ratio,
+      disk_available_warning_ratio: policy.disk_available_warning_ratio,
+      disk_available_critical_ratio: policy.disk_available_critical_ratio,
+      cpu_load_warning: policy.cpu_load_warning,
+      cpu_load_critical: policy.cpu_load_critical,
+      priority: policy.priority,
+      enabled: policy.enabled,
+      notes: policy.notes,
+      confirmed: true,
+      ...overrides,
+    };
+  }
+
+  async function submit() {
+    setStatus(editingId ? "updating policy" : "creating policy");
+    try {
+      const policy = await onUpsert({
+        id: editingId ?? undefined,
+        name: name.trim(),
+        scope_kind: scopeKind,
+        scope_value: scopeKind === "global" ? null : scopeValue.trim(),
+        memory_available_warning_ratio: optionalNumber(memoryWarning),
+        memory_available_critical_ratio: optionalNumber(memoryCritical),
+        disk_available_warning_ratio: optionalNumber(diskWarning),
+        disk_available_critical_ratio: optionalNumber(diskCritical),
+        cpu_load_warning: optionalNumber(cpuWarning),
+        cpu_load_critical: optionalNumber(cpuCritical),
+        priority: optionalInteger(priority) ?? 0,
+        enabled,
+        notes: notes.trim() || null,
+        confirmed: true,
+      });
+      setEditingId(policy.id);
+      setStatus(`saved ${policy.name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "policy save failed");
+    }
+  }
+
+  async function deletePolicies(rows: FleetAlertPolicyRecord[]) {
+    if (rows.length === 0) return;
+    const label = rows.length === 1 ? rows[0].name : `${rows.length} policies`;
+    if (!window.confirm(`Delete ${label}?`)) return;
+    setStatus("deleting policies");
+    try {
+      for (const policy of rows) {
+        await onDelete(policy.id);
+      }
+      if (rows.some((policy) => policy.id === editingId)) {
+        resetForm();
+      }
+      setStatus(`deleted ${rows.length}`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "policy delete failed",
+      );
+    }
+  }
+
+  async function setPoliciesEnabled(
+    rows: FleetAlertPolicyRecord[],
+    nextEnabled: boolean,
+  ) {
+    if (rows.length === 0) return;
+    setStatus(nextEnabled ? "enabling policies" : "disabling policies");
+    try {
+      for (const policy of rows) {
+        await onUpsert(requestFromPolicy(policy, { enabled: nextEnabled }));
+      }
+      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "policy update failed",
+      );
+    }
+  }
+
+  return (
+    <div className="consoleCrudPanel">
+      <ConsoleDataGrid
+        actions={[
+          {
+            label: "Edit policy",
+            disabled: (rows) => rows.length !== 1,
+            onSelect: (rows) => rows[0] && editPolicy(rows[0]),
+          },
+          {
+            label: "Enable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setPoliciesEnabled(rows, true),
+          },
+          {
+            label: "Disable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setPoliciesEnabled(rows, false),
+          },
+          {
+            label: "Delete",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void deletePolicies(rows),
+            tone: "danger",
+          },
+        ]}
+        columns={policyColumns}
+        defaultPageSize={10}
+        empty="No alert policies saved."
+        getRowId={(policy) => policy.id}
+        itemLabel="policies"
+        onOpenRow={editPolicy}
+        rows={policies}
+        searchPlaceholder="Search policies by name, scope, thresholds, or notes"
+        storageKey="vpsman.grid.fleet.alertPolicies.v1"
+        title="Alert policy rules"
+      />
+      <ConsoleFormGroup
+        title={editingId ? "Edit selected policy" : "Create alert policy"}
+        description="Threshold policies are editable records with explicit scope, priority, and independent resource thresholds."
+        actions={
+          <>
+            <button
+              className="primaryAction"
+              type="button"
+              onClick={() => void submit()}
+            >
+              {editingId ? "Update policy" : "Create policy"}
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={resetForm}
+            >
+              New policy
+            </button>
+          </>
+        }
+      >
+        <ConsoleField label="Policy name" className="fieldWide">
+          <input
+            aria-label="Policy name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Scope kind">
+          <select
+            aria-label="Policy scope kind"
+            value={scopeKind}
+            onChange={(event) => setScopeKind(event.target.value)}
+          >
+            <option value="global">global</option>
+            <option value="provider">provider</option>
+            <option value="tag">tag</option>
+            <option value="client">client</option>
+          </select>
+        </ConsoleField>
+        <ConsoleField
+          label="Scope value"
+          hint={
+            scopeKind === "global"
+              ? "Global policies do not need a value."
+              : "Tag, provider, or client id."
+          }
+        >
+          <input
+            aria-label="Policy scope value"
+            disabled={scopeKind === "global"}
+            value={scopeValue}
+            onChange={(event) => setScopeValue(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Priority">
+          <input
+            aria-label="Policy priority"
+            value={priority}
+            onChange={(event) => setPriority(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Enabled">
+          <label className="checkboxRow">
+            <input
+              checked={enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Evaluate policy</span>
+          </label>
+        </ConsoleField>
+        <ConsoleField
+          label="Memory warning ratio"
+          hint="Example: 0.20 means less than 20% memory free."
+        >
+          <input
+            aria-label="Memory warning ratio"
+            value={memoryWarning}
+            onChange={(event) => setMemoryWarning(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Memory critical ratio">
+          <input
+            aria-label="Memory critical ratio"
+            value={memoryCritical}
+            onChange={(event) => setMemoryCritical(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Disk warning ratio">
+          <input
+            aria-label="Disk warning ratio"
+            value={diskWarning}
+            onChange={(event) => setDiskWarning(event.target.value)}
+            placeholder="0.15"
+          />
+        </ConsoleField>
+        <ConsoleField label="Disk critical ratio">
+          <input
+            aria-label="Disk critical ratio"
+            value={diskCritical}
+            onChange={(event) => setDiskCritical(event.target.value)}
+            placeholder="0.08"
+          />
+        </ConsoleField>
+        <ConsoleField label="CPU warning load">
+          <input
+            aria-label="CPU warning load"
+            value={cpuWarning}
+            onChange={(event) => setCpuWarning(event.target.value)}
+            placeholder="4.0"
+          />
+        </ConsoleField>
+        <ConsoleField label="CPU critical load">
+          <input
+            aria-label="CPU critical load"
+            value={cpuCritical}
+            onChange={(event) => setCpuCritical(event.target.value)}
+            placeholder="8.0"
+          />
+        </ConsoleField>
+        <ConsoleField label="Notes" className="fieldFull">
+          <textarea
+            aria-label="Policy notes"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+          />
+        </ConsoleField>
+      </ConsoleFormGroup>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+    </div>
+  );
+}
+
 function FleetAlertNotificationManager({
   channels,
   deliveries,
+  onDelete,
   onDispatch,
   onProcess,
   onUpsert,
 }: {
   channels: FleetAlertNotificationChannelRecord[];
   deliveries: FleetAlertNotificationDeliveryRecord[];
+  onDelete: (channelId: string) => Promise<void>;
   onDispatch: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -2387,219 +2671,582 @@ function FleetAlertNotificationManager({
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
 }) {
-  const [name, setName] = useState("edge-audit-channel");
-  const [scopeKind, setScopeKind] = useState("tag");
-  const [scopeValue, setScopeValue] = useState("edge");
-  const [minSeverity, setMinSeverity] = useState("warning");
-  const [categories, setCategories] = useState("agent_status,network");
-  const [operatorStates, setOperatorStates] = useState("open,escalated");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState("critical-audit-channel");
+  const [scopeKind, setScopeKind] = useState("global");
+  const [scopeValue, setScopeValue] = useState("");
+  const [minSeverity, setMinSeverity] = useState("critical");
+  const [categories, setCategories] = useState("");
+  const [operatorStates, setOperatorStates] = useState("");
   const [deliveryKind, setDeliveryKind] = useState("audit_log");
-  const [target, setTarget] = useState("audit:fleet");
-  const [cooldownSecs, setCooldownSecs] = useState("3600");
+  const [target, setTarget] = useState("fleet-alerts");
+  const [cooldownSecs, setCooldownSecs] = useState("300");
+  const [enabled, setEnabled] = useState(true);
+  const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<string | null>(null);
-  const topChannels = channels.slice(0, 4);
-  const topDeliveries = deliveries.slice(0, 4);
+  const [previewRows, setPreviewRows] = useState<
+    FleetAlertNotificationDeliveryRecord[]
+  >([]);
+
+  const channelColumns = useMemo<
+    ConsoleDataGridColumn<FleetAlertNotificationChannelRecord>[]
+  >(
+    () => [
+      {
+        id: "name",
+        header: "Channel",
+        size: 240,
+        minSize: 170,
+        sortValue: (channel) => channel.name,
+        searchValue: (channel) => `${channel.name} ${channel.notes ?? ""}`,
+        cell: (channel) => (
+          <span className="historyPrimary">
+            <strong>{channel.name}</strong>
+            <small>{channel.notes || "no notes"}</small>
+          </span>
+        ),
+      },
+      {
+        id: "scope",
+        header: "Scope",
+        size: 170,
+        minSize: 130,
+        sortValue: (channel) =>
+          `${channel.scope_kind}:${channel.scope_value ?? ""}`,
+        searchValue: (channel) =>
+          `${channel.scope_kind} ${channel.scope_value ?? ""}`,
+        cell: (channel) => (
+          <span className="monoValue">
+            {channel.scope_kind}
+            {channel.scope_value ? `:${channel.scope_value}` : ""}
+          </span>
+        ),
+      },
+      {
+        id: "severity",
+        header: "Severity",
+        size: 110,
+        minSize: 90,
+        sortValue: (channel) => channel.min_severity,
+        searchValue: (channel) => channel.min_severity,
+        cell: (channel) => (
+          <span className="monoValue">{channel.min_severity}</span>
+        ),
+      },
+      {
+        id: "delivery",
+        header: "Delivery",
+        size: 260,
+        minSize: 190,
+        sortValue: (channel) => `${channel.delivery_kind}:${channel.target}`,
+        searchValue: (channel) => `${channel.delivery_kind} ${channel.target}`,
+        cell: (channel) => (
+          <span className="historyPrimary">
+            <strong>{channel.delivery_kind}</strong>
+            <small>{channel.target}</small>
+          </span>
+        ),
+      },
+      {
+        id: "filters",
+        header: "Filters",
+        size: 260,
+        minSize: 200,
+        searchValue: (channel) =>
+          `${channel.categories.join(" ")} ${channel.operator_states.join(" ")}`,
+        cell: (channel) => (
+          <span className="historyPrimary">
+            <strong>{compactArray(channel.categories)} categories</strong>
+            <small>{compactArray(channel.operator_states)} states</small>
+          </span>
+        ),
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 100,
+        minSize: 90,
+        sortValue: (channel) => channel.enabled,
+        searchValue: (channel) => (channel.enabled ? "enabled" : "disabled"),
+        cell: (channel) => (
+          <ConsoleStatusBadge tone={channel.enabled ? "ok" : "warning"}>
+            {channel.enabled ? "enabled" : "disabled"}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "updated",
+        header: "Updated",
+        size: 140,
+        minSize: 110,
+        sortValue: (channel) => channel.updated_at,
+        cell: (channel) => formatCompactTime(channel.updated_at),
+      },
+    ],
+    [],
+  );
+
+  const deliveryColumns = useMemo<
+    ConsoleDataGridColumn<FleetAlertNotificationDeliveryRecord>[]
+  >(
+    () => [
+      {
+        id: "channel",
+        header: "Channel",
+        size: 230,
+        minSize: 170,
+        sortValue: (delivery) => delivery.channel_name,
+        searchValue: (delivery) =>
+          `${delivery.channel_name} ${delivery.alert_category}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.channel_name}</strong>
+            <small>
+              {delivery.alert_category} · {delivery.alert_severity}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        size: 110,
+        minSize: 90,
+        sortValue: (delivery) => delivery.status,
+        searchValue: (delivery) => delivery.status,
+        cell: (delivery) => (
+          <ConsoleStatusBadge
+            tone={
+              delivery.status === "delivered"
+                ? "ok"
+                : delivery.status === "failed"
+                  ? "critical"
+                  : "warning"
+            }
+          >
+            {delivery.status}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 260,
+        minSize: 180,
+        sortValue: (delivery) => `${delivery.delivery_kind}:${delivery.target}`,
+        searchValue: (delivery) =>
+          `${delivery.delivery_kind} ${delivery.target}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.delivery_kind}</strong>
+            <small>{delivery.target}</small>
+          </span>
+        ),
+      },
+      {
+        id: "attempts",
+        header: "Attempts",
+        size: 110,
+        minSize: 90,
+        sortValue: (delivery) => delivery.attempt_count,
+        cell: (delivery) => (
+          <span className="monoValue">{delivery.attempt_count}</span>
+        ),
+      },
+      {
+        id: "error",
+        header: "Error",
+        size: 260,
+        minSize: 160,
+        searchValue: (delivery) => delivery.error ?? "",
+        cell: (delivery) =>
+          delivery.error ? <small>{delivery.error}</small> : "-",
+      },
+      {
+        id: "created",
+        header: "Created",
+        size: 140,
+        minSize: 110,
+        sortValue: (delivery) => delivery.created_at,
+        cell: (delivery) => formatCompactTime(delivery.created_at),
+      },
+    ],
+    [],
+  );
+
+  function resetForm() {
+    setEditingId(null);
+    setName("critical-audit-channel");
+    setScopeKind("global");
+    setScopeValue("");
+    setMinSeverity("critical");
+    setCategories("");
+    setOperatorStates("");
+    setDeliveryKind("audit_log");
+    setTarget("fleet-alerts");
+    setCooldownSecs("300");
+    setEnabled(true);
+    setNotes("");
+    setStatus(null);
+  }
+
+  function editChannel(channel: FleetAlertNotificationChannelRecord) {
+    setEditingId(channel.id);
+    setName(channel.name);
+    setScopeKind(channel.scope_kind);
+    setScopeValue(channel.scope_value ?? "");
+    setMinSeverity(channel.min_severity);
+    setCategories(channel.categories.join(", "));
+    setOperatorStates(channel.operator_states.join(", "));
+    setDeliveryKind(channel.delivery_kind);
+    setTarget(channel.target);
+    setCooldownSecs(String(channel.cooldown_secs));
+    setEnabled(channel.enabled);
+    setNotes(channel.notes ?? "");
+    setStatus(`editing ${channel.name}`);
+  }
+
+  function requestFromChannel(
+    channel: FleetAlertNotificationChannelRecord,
+    overrides: Partial<FleetAlertNotificationChannelRequest> = {},
+  ): FleetAlertNotificationChannelRequest {
+    return {
+      id: channel.id,
+      name: channel.name,
+      scope_kind: channel.scope_kind,
+      scope_value: channel.scope_value,
+      min_severity: channel.min_severity,
+      categories: channel.categories,
+      operator_states: channel.operator_states,
+      delivery_kind: channel.delivery_kind,
+      target: channel.target,
+      cooldown_secs: channel.cooldown_secs,
+      enabled: channel.enabled,
+      notes: channel.notes,
+      confirmed: true,
+      ...overrides,
+    };
+  }
 
   async function submit() {
-    setStatus("saving channel");
+    setStatus(editingId ? "updating channel" : "creating channel");
     try {
-      await onUpsert({
-        name,
+      const channel = await onUpsert({
+        id: editingId ?? undefined,
+        name: name.trim(),
         scope_kind: scopeKind,
-        scope_value: scopeKind === "global" ? null : scopeValue,
+        scope_value: scopeKind === "global" ? null : scopeValue.trim(),
         min_severity: minSeverity,
         categories: csvValues(categories),
         operator_states: csvValues(operatorStates),
-        delivery_kind: deliveryKind,
-        target,
+        delivery_kind: deliveryKind.trim(),
+        target: target.trim(),
         cooldown_secs: optionalInteger(cooldownSecs),
-        enabled: true,
+        enabled,
+        notes: notes.trim() || null,
         confirmed: true,
       });
-      setStatus("channel saved");
+      setEditingId(channel.id);
+      setStatus(`saved ${channel.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "channel save failed");
     }
   }
 
-  async function dispatch(dryRun: boolean) {
-    setStatus(dryRun ? "matching" : "dispatching");
+  async function deleteChannels(rows: FleetAlertNotificationChannelRecord[]) {
+    if (rows.length === 0) return;
+    const label = rows.length === 1 ? rows[0].name : `${rows.length} channels`;
+    if (!window.confirm(`Delete ${label}?`)) return;
+    setStatus("deleting channels");
     try {
-      const rows = await onDispatch({
-        limit: 100,
-        include_muted: true,
-        dry_run: dryRun,
-        confirmed: !dryRun,
-      });
-      setStatus(`${dryRun ? "matched" : "dispatched"} ${rows.length}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "dispatch failed");
-    }
-  }
-
-  async function process(dryRun: boolean) {
-    setStatus(dryRun ? "previewing delivery" : "delivering queued");
-    try {
-      const rows = await onProcess({
-        limit: 50,
-        status: "queued",
-        delivery_kind: deliveryKind.trim() || null,
-        dry_run: dryRun,
-        confirmed: !dryRun,
-      });
-      setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
+      for (const channel of rows) {
+        await onDelete(channel.id);
+      }
+      if (rows.some((channel) => channel.id === editingId)) {
+        resetForm();
+      }
+      setStatus(`deleted ${rows.length}`);
     } catch (error) {
       setStatus(
-        error instanceof Error ? error.message : "delivery processing failed",
+        error instanceof Error ? error.message : "channel delete failed",
       );
     }
   }
 
+  async function setChannelsEnabled(
+    rows: FleetAlertNotificationChannelRecord[],
+    nextEnabled: boolean,
+  ) {
+    if (rows.length === 0) return;
+    setStatus(nextEnabled ? "enabling channels" : "disabling channels");
+    try {
+      for (const channel of rows) {
+        await onUpsert(requestFromChannel(channel, { enabled: nextEnabled }));
+      }
+      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "channel update failed",
+      );
+    }
+  }
+
+  async function dispatch(dryRun: boolean) {
+    setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
+    try {
+      const rows = await onDispatch({
+        limit: 50,
+        dry_run: dryRun,
+        confirmed: !dryRun,
+      });
+      if (dryRun) {
+        setPreviewRows(rows);
+      }
+      setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "notification dispatch failed",
+      );
+    }
+  }
+
+  async function process(dryRun: boolean) {
+    setStatus(
+      dryRun ? "previewing notification queue" : "delivering notifications",
+    );
+    try {
+      const rows = await onProcess({
+        limit: 50,
+        status: "queued",
+        dry_run: dryRun,
+        confirmed: !dryRun,
+      });
+      if (dryRun) {
+        setPreviewRows(rows);
+      }
+      setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "notification processing failed",
+      );
+    }
+  }
+
+  const previewDeliveries = previewRows.length > 0 ? previewRows : deliveries;
+
   return (
-    <div
-      className="fleetPolicyManager fleetNotificationManager professionalFormManager"
-      aria-label="Fleet alert notification manager"
-    >
-      <div className="fleetPolicyHeader">
-        <span>
-          <Bell size={16} />
-          <strong>Notification channels</strong>
-        </span>
-        <span>{channels.length} channels</span>
-      </div>
-      <div className="consoleFormStack">
-        <ConsoleFormGroup
-          title="Channel scope and filters"
-          description="Name the channel, choose which alerts it listens to, and keep comma-separated filters explicit."
-        >
-          <ConsoleField label="Channel name" className="fieldWide">
-            <input
-              aria-label="Notification channel name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Scope kind">
-            <select
-              aria-label="Notification scope kind"
-              value={scopeKind}
-              onChange={(event) => setScopeKind(event.target.value)}
+    <div className="consoleCrudPanel">
+      <ConsoleDataGrid
+        actions={[
+          {
+            label: "Edit channel",
+            disabled: (rows) => rows.length !== 1,
+            onSelect: (rows) => rows[0] && editChannel(rows[0]),
+          },
+          {
+            label: "Enable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setChannelsEnabled(rows, true),
+          },
+          {
+            label: "Disable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setChannelsEnabled(rows, false),
+          },
+          {
+            label: "Delete",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void deleteChannels(rows),
+            tone: "danger",
+          },
+        ]}
+        columns={channelColumns}
+        defaultPageSize={10}
+        empty="No notification channels saved."
+        getRowId={(channel) => channel.id}
+        itemLabel="channels"
+        onOpenRow={editChannel}
+        rows={channels}
+        searchPlaceholder="Search channels by name, scope, delivery target, or filters"
+        storageKey="vpsman.grid.fleet.notificationChannels.v1"
+        title="Alert notification channels"
+      />
+      <ConsoleFormGroup
+        title={
+          editingId ? "Edit selected channel" : "Create notification channel"
+        }
+        description="Channels are explicit CRUD records for alert routing. Delivery actions below preview or process the queue."
+        actions={
+          <>
+            <button
+              className="primaryAction"
+              type="button"
+              onClick={() => void submit()}
             >
-              <option value="global">global</option>
-              <option value="provider">provider</option>
-              <option value="tag">tag</option>
-              <option value="client">client</option>
-            </select>
-          </ConsoleField>
-          <ConsoleField
-            label="Scope value"
-            hint={scopeKind === "global" ? "Global channels do not need a value." : "Tag, provider, or client id to match."}
+              {editingId ? "Update channel" : "Create channel"}
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={resetForm}
+            >
+              New channel
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={() => void dispatch(true)}
+            >
+              Match alerts
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={() => void dispatch(false)}
+            >
+              Queue dispatch
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={() => void process(true)}
+            >
+              Preview queue
+            </button>
+            <button
+              className="secondaryAction"
+              type="button"
+              onClick={() => void process(false)}
+            >
+              Deliver queued
+            </button>
+          </>
+        }
+      >
+        <ConsoleField label="Channel name" className="fieldWide">
+          <input
+            aria-label="Notification channel name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Scope kind">
+          <select
+            aria-label="Notification scope kind"
+            value={scopeKind}
+            onChange={(event) => setScopeKind(event.target.value)}
           >
-            <input
-              aria-label="Notification scope value"
-              disabled={scopeKind === "global"}
-              value={scopeValue}
-              onChange={(event) => setScopeValue(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Minimum severity">
-            <select
-              aria-label="Minimum severity"
-              value={minSeverity}
-              onChange={(event) => setMinSeverity(event.target.value)}
-            >
-              <option value="critical">critical</option>
-              <option value="warning">warning</option>
-              <option value="info">info</option>
-            </select>
-          </ConsoleField>
-          <ConsoleField label="Alert categories" className="fieldWide" hint="Comma-separated categories, for example agent_status,network.">
-            <input
-              aria-label="Alert categories"
-              value={categories}
-              onChange={(event) => setCategories(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Operator states" className="fieldWide" hint="Comma-separated states accepted by this channel.">
-            <input
-              aria-label="Operator states"
-              value={operatorStates}
-              onChange={(event) => setOperatorStates(event.target.value)}
-            />
-          </ConsoleField>
-        </ConsoleFormGroup>
-        <ConsoleFormGroup
-          title="Delivery target"
-          description="Configure the actual sink, then preview matches before queueing or processing deliveries."
-          actions={
-            <>
-              <button className="primaryAction" type="button" onClick={() => void submit()}>
-                Save channel
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void dispatch(true)}>
-                Match alerts
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void dispatch(false)}>
-                Queue dispatch
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void process(true)}>
-                Preview queue
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void process(false)}>
-                Deliver queued
-              </button>
-            </>
+            <option value="global">global</option>
+            <option value="provider">provider</option>
+            <option value="tag">tag</option>
+            <option value="client">client</option>
+          </select>
+        </ConsoleField>
+        <ConsoleField
+          label="Scope value"
+          hint={
+            scopeKind === "global"
+              ? "Global channels do not need a value."
+              : "Tag, provider, or client id."
           }
         >
-          <ConsoleField label="Delivery kind" hint="For example audit_log or webhook.">
+          <input
+            aria-label="Notification scope value"
+            disabled={scopeKind === "global"}
+            value={scopeValue}
+            onChange={(event) => setScopeValue(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Minimum severity">
+          <select
+            aria-label="Minimum severity"
+            value={minSeverity}
+            onChange={(event) => setMinSeverity(event.target.value)}
+          >
+            <option value="critical">critical</option>
+            <option value="warning">warning</option>
+            <option value="info">info</option>
+          </select>
+        </ConsoleField>
+        <ConsoleField
+          label="Categories"
+          className="fieldWide"
+          hint="Comma-separated alert categories. Empty matches all categories."
+        >
+          <input
+            aria-label="Alert categories"
+            value={categories}
+            onChange={(event) => setCategories(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField
+          label="Operator states"
+          className="fieldWide"
+          hint="Comma-separated operator states. Empty matches all states."
+        >
+          <input
+            aria-label="Operator states"
+            value={operatorStates}
+            onChange={(event) => setOperatorStates(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Delivery kind">
+          <input
+            aria-label="Delivery kind"
+            value={deliveryKind}
+            onChange={(event) => setDeliveryKind(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Delivery target" className="fieldWide">
+          <input
+            aria-label="Delivery target"
+            value={target}
+            onChange={(event) => setTarget(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Cooldown seconds">
+          <input
+            aria-label="Notification cooldown seconds"
+            value={cooldownSecs}
+            onChange={(event) => setCooldownSecs(event.target.value)}
+          />
+        </ConsoleField>
+        <ConsoleField label="Enabled">
+          <label className="checkboxRow">
             <input
-              aria-label="Delivery kind"
-              value={deliveryKind}
-              onChange={(event) => setDeliveryKind(event.target.value)}
+              checked={enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+              type="checkbox"
             />
-          </ConsoleField>
-          <ConsoleField label="Delivery target" className="fieldWide" hint="Audit stream, endpoint, or channel-specific target identifier.">
-            <input
-              aria-label="Delivery target"
-              value={target}
-              onChange={(event) => setTarget(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Cooldown seconds">
-            <input
-              aria-label="Cooldown seconds"
-              value={cooldownSecs}
-              onChange={(event) => setCooldownSecs(event.target.value)}
-            />
-          </ConsoleField>
-        </ConsoleFormGroup>
-      </div>
+            <span>Route matching alerts</span>
+          </label>
+        </ConsoleField>
+        <ConsoleField label="Notes" className="fieldFull">
+          <textarea
+            aria-label="Notification channel notes"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+          />
+        </ConsoleField>
+      </ConsoleFormGroup>
       {status && <small className="fleetPolicyStatus">{status}</small>}
-      <div className="fleetPolicyRows notificationRows">
-        {topChannels.map((channel) => (
-          <span key={channel.id}>
-            <strong>{channel.name}</strong>
-            <small>
-              {channel.scope_kind}
-              {channel.scope_value ? `:${channel.scope_value}` : ""}{" "}
-              {channel.delivery_kind} {channel.min_severity}
-            </small>
-          </span>
-        ))}
-        {topDeliveries.map((delivery) => (
-          <span key={delivery.id}>
-            <strong>{delivery.channel_name}</strong>
-            <small>
-              {delivery.status} {delivery.alert_category}{" "}
-              {delivery.delivery_kind} attempts {delivery.attempt_count}
-              {delivery.error ? ` error ${delivery.error}` : ""}
-            </small>
-          </span>
-        ))}
-        {topChannels.length === 0 && topDeliveries.length === 0 && (
-          <small>No notification channel saved</small>
-        )}
-      </div>
+      <ConsoleDataGrid
+        columns={deliveryColumns}
+        defaultPageSize={8}
+        empty="No notification deliveries retained."
+        getRowId={(delivery) => delivery.id}
+        itemLabel="deliveries"
+        rows={previewDeliveries}
+        searchPlaceholder="Search delivery history"
+        storageKey="vpsman.grid.fleet.notificationDeliveries.v1"
+        title={
+          previewRows.length > 0
+            ? "Notification delivery preview"
+            : "Notification delivery history"
+        }
+      />
     </div>
   );
 }
@@ -2607,6 +3254,7 @@ function FleetAlertNotificationManager({
 function WebhookRuleManager({
   agents,
   deliveries,
+  onDelete,
   onDispatch,
   onDryRun,
   onProcess,
@@ -2616,6 +3264,7 @@ function WebhookRuleManager({
 }: {
   agents: AgentView[];
   deliveries: WebhookRuleDeliveryRecord[];
+  onDelete: (ruleId: string) => Promise<void>;
   onDispatch: (
     request: WebhookRuleDispatchRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
@@ -2631,62 +3280,255 @@ function WebhookRuleManager({
   onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
   rules: WebhookRuleRecord[];
 }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("edge-interval-webhook");
   const [enabled, setEnabled] = useState(true);
   const [expression, setExpression] = useState("interval.30sec && tag:edge");
   const [target, setTarget] = useState("https://hooks.example/vpsman");
-  const [bodyTemplate, setBodyTemplate] = useState(
-    "{rule.name} {event.kind} {vps.id}",
-  );
+  const [bodyTemplate, setBodyTemplate] = useState("{rule.name} {event.kind} {vps.id}");
   const [cooldownSecs, setCooldownSecs] = useState("300");
+  const [notes, setNotes] = useState("");
   const [eventKind, setEventKind] = useState("interval.30sec");
   const [eventId, setEventId] = useState("");
   const [rotationDays, setRotationDays] = useState("90");
   const [rotationStatus, setRotationStatus] = useState("delivered");
   const [status, setStatus] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>(
+  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
+  const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
+  const [rotationPreview, setRotationPreview] = useState<WebhookDeliveryRotationResponse | null>(null);
+
+  const ruleColumns = useMemo<ConsoleDataGridColumn<WebhookRuleRecord>[]>(
+    () => [
+      {
+        id: "name",
+        header: "Rule",
+        size: 250,
+        minSize: 180,
+        sortValue: (rule) => rule.name,
+        searchValue: (rule) => `${rule.name} ${rule.notes ?? ""}`,
+        cell: (rule) => (
+          <span className="historyPrimary">
+            <strong>{rule.name}</strong>
+            <small>{rule.notes || "no notes"}</small>
+          </span>
+        ),
+      },
+      {
+        id: "expression",
+        header: "Expression",
+        size: 320,
+        minSize: 220,
+        sortValue: (rule) => rule.expression,
+        searchValue: (rule) => rule.expression,
+        cell: (rule) => <span className="monoValue">{rule.expression}</span>,
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 260,
+        minSize: 180,
+        sortValue: (rule) => rule.target,
+        searchValue: (rule) => rule.target,
+        cell: (rule) => <small>{rule.target}</small>,
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 100,
+        minSize: 90,
+        sortValue: (rule) => rule.enabled,
+        searchValue: (rule) => (rule.enabled ? "enabled" : "disabled"),
+        cell: (rule) => (
+          <ConsoleStatusBadge tone={rule.enabled ? "ok" : "warning"}>
+            {rule.enabled ? "enabled" : "disabled"}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "cooldown",
+        header: "Cooldown",
+        size: 110,
+        minSize: 90,
+        sortValue: (rule) => rule.cooldown_secs,
+        cell: (rule) => <span className="monoValue">{rule.cooldown_secs}s</span>,
+      },
+      {
+        id: "updated",
+        header: "Updated",
+        size: 140,
+        minSize: 110,
+        sortValue: (rule) => rule.updated_at,
+        cell: (rule) => formatCompactTime(rule.updated_at),
+      },
+    ],
     [],
   );
-  const [dryRunPreview, setDryRunPreview] =
-    useState<WebhookRuleDryRunRecord | null>(null);
-  const [rotationPreview, setRotationPreview] =
-    useState<WebhookDeliveryRotationResponse | null>(null);
-  const [localRulePreview, setLocalRulePreview] =
-    useState<WebhookRuleRecord | null>(null);
-  const visibleRules = useMemo(() => {
-    if (!localRulePreview) {
-      return rules;
-    }
-    return [
-      localRulePreview,
-      ...rules.filter(
-        (rule) =>
-          rule.id !== localRulePreview.id &&
-          rule.name !== localRulePreview.name,
-      ),
-    ].sort((left, right) => left.name.localeCompare(right.name));
-  }, [localRulePreview, rules]);
-  const topRules = visibleRules.slice(0, 4);
-  const topDeliveries = deliveries.slice(0, 4);
+
+  const deliveryColumns = useMemo<ConsoleDataGridColumn<WebhookRuleDeliveryRecord>[]>(
+    () => [
+      {
+        id: "rule",
+        header: "Rule",
+        size: 230,
+        minSize: 160,
+        sortValue: (delivery) => delivery.rule_name,
+        searchValue: (delivery) => `${delivery.rule_name} ${delivery.event_kind}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.rule_name}</strong>
+            <small>{delivery.event_kind}{delivery.event_id ? ` · ${delivery.event_id}` : ""}</small>
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        size: 110,
+        minSize: 90,
+        sortValue: (delivery) => delivery.status,
+        searchValue: (delivery) => delivery.status,
+        cell: (delivery) => (
+          <ConsoleStatusBadge tone={delivery.status === "delivered" ? "ok" : delivery.status === "failed" ? "critical" : "warning"}>
+            {delivery.status}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 260,
+        minSize: 180,
+        sortValue: (delivery) => delivery.target,
+        searchValue: (delivery) => delivery.target,
+        cell: (delivery) => <small>{delivery.target}</small>,
+      },
+      {
+        id: "matched",
+        header: "Matched VPSs",
+        size: 180,
+        minSize: 130,
+        searchValue: (delivery) => delivery.matched_vps.map((vps) => vps.display_name || vps.id).join(" "),
+        cell: (delivery) => <span className="monoValue">{delivery.matched_vps.length}</span>,
+      },
+      {
+        id: "attempts",
+        header: "Attempts",
+        size: 100,
+        minSize: 80,
+        sortValue: (delivery) => delivery.attempt_count,
+        cell: (delivery) => <span className="monoValue">{delivery.attempt_count}</span>,
+      },
+      {
+        id: "error",
+        header: "Error",
+        size: 240,
+        minSize: 160,
+        searchValue: (delivery) => delivery.error ?? "",
+        cell: (delivery) => delivery.error ? <small>{delivery.error}</small> : "-",
+      },
+      {
+        id: "created",
+        header: "Created",
+        size: 140,
+        minSize: 110,
+        sortValue: (delivery) => delivery.created_at,
+        cell: (delivery) => formatCompactTime(delivery.created_at),
+      },
+    ],
+    [],
+  );
+
+  function resetForm() {
+    setEditingId(null);
+    setName("edge-interval-webhook");
+    setEnabled(true);
+    setExpression("interval.30sec && tag:edge");
+    setTarget("https://hooks.example/vpsman");
+    setBodyTemplate("{rule.name} {event.kind} {vps.id}");
+    setCooldownSecs("300");
+    setNotes("");
+    setStatus(null);
+  }
+
+  function editRule(rule: WebhookRuleRecord) {
+    setEditingId(rule.id);
+    setName(rule.name);
+    setEnabled(rule.enabled);
+    setExpression(rule.expression);
+    setTarget(rule.target);
+    setBodyTemplate(rule.body_template);
+    setCooldownSecs(String(rule.cooldown_secs));
+    setNotes(rule.notes ?? "");
+    setStatus(`editing ${rule.name}`);
+  }
+
+  function requestFromRule(
+    rule: WebhookRuleRecord,
+    overrides: Partial<WebhookRuleRequest> = {},
+  ): WebhookRuleRequest {
+    return {
+      id: rule.id,
+      name: rule.name,
+      enabled: rule.enabled,
+      expression: rule.expression,
+      target: rule.target,
+      body_template: rule.body_template,
+      cooldown_secs: rule.cooldown_secs,
+      notes: rule.notes,
+      confirmed: true,
+      ...overrides,
+    };
+  }
 
   async function submit() {
-    setStatus("saving webhook rule");
+    setStatus(editingId ? "updating webhook rule" : "creating webhook rule");
     try {
       const rule = await onUpsert({
-        name,
+        id: editingId ?? undefined,
+        name: name.trim(),
         enabled,
-        expression,
-        target,
+        expression: expression.trim(),
+        target: target.trim(),
         body_template: bodyTemplate,
         cooldown_secs: optionalInteger(cooldownSecs),
+        notes: notes.trim() || null,
         confirmed: true,
       });
-      setLocalRulePreview(rule);
-      setStatus("webhook rule saved");
+      setEditingId(rule.id);
+      setStatus(`saved ${rule.name}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "webhook rule save failed",
-      );
+      setStatus(error instanceof Error ? error.message : "webhook rule save failed");
+    }
+  }
+
+  async function deleteRules(rows: WebhookRuleRecord[]) {
+    if (rows.length === 0) return;
+    const label = rows.length === 1 ? rows[0].name : `${rows.length} webhook rules`;
+    if (!window.confirm(`Delete ${label}?`)) return;
+    setStatus("deleting webhook rules");
+    try {
+      for (const rule of rows) {
+        await onDelete(rule.id);
+      }
+      if (rows.some((rule) => rule.id === editingId)) {
+        resetForm();
+      }
+      setStatus(`deleted ${rows.length}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook rule delete failed");
+    }
+  }
+
+  async function setRulesEnabled(rows: WebhookRuleRecord[], nextEnabled: boolean) {
+    if (rows.length === 0) return;
+    setStatus(nextEnabled ? "enabling webhook rules" : "disabling webhook rules");
+    try {
+      for (const rule of rows) {
+        await onUpsert(requestFromRule(rule, { enabled: nextEnabled }));
+      }
+      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "webhook rule update failed");
     }
   }
 
@@ -2702,23 +3544,23 @@ function WebhookRuleManager({
         event_id: eventId.trim() || null,
         body_template: bodyTemplate,
         cooldown_secs: optionalInteger(cooldownSecs),
+        notes: notes.trim() || null,
       });
       setDryRunPreview(rows);
       setPreviewRows(rows.delivery ? [rows.delivery] : []);
       setStatus(`previewed ${rows.matched_vps.length} matched VPSs`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "webhook rule preview failed",
-      );
+      setStatus(error instanceof Error ? error.message : "webhook rule preview failed");
     }
   }
 
   async function dispatchRules(dryRun: boolean) {
-    setStatus(dryRun ? "matching rules" : "dispatching webhooks");
+    setStatus(dryRun ? "matching webhook rules" : "queueing webhook deliveries");
     try {
       const rows = await onDispatch({
         event_kind: eventKind,
         event_id: eventId.trim() || null,
+        limit: 50,
         dry_run: dryRun,
         confirmed: !dryRun,
       });
@@ -2727,14 +3569,12 @@ function WebhookRuleManager({
       }
       setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "webhook dispatch failed",
-      );
+      setStatus(error instanceof Error ? error.message : "webhook dispatch failed");
     }
   }
 
   async function process(dryRun: boolean) {
-    setStatus(dryRun ? "previewing queued webhooks" : "delivering webhooks");
+    setStatus(dryRun ? "previewing webhook queue" : "delivering webhooks");
     try {
       const rows = await onProcess({
         limit: 50,
@@ -2747,18 +3587,12 @@ function WebhookRuleManager({
       }
       setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "webhook delivery failed",
-      );
+      setStatus(error instanceof Error ? error.message : "webhook delivery failed");
     }
   }
 
   async function rotate(confirmed: boolean) {
-    setStatus(
-      confirmed
-        ? "rotating delivery history"
-        : "previewing delivery history rotation",
-    );
+    setStatus(confirmed ? "rotating delivery history" : "previewing delivery history rotation");
     try {
       const response = await onRotate({
         older_than_days: optionalInteger(rotationDays),
@@ -2766,221 +3600,160 @@ function WebhookRuleManager({
         confirmed,
       });
       setRotationPreview(response);
-      setStatus(
-        confirmed
-          ? `deleted ${response.deleted_count}`
-          : `matched ${response.matched_count}`,
-      );
+      setStatus(confirmed ? `deleted ${response.deleted_count}` : `matched ${response.matched_count}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "webhook delivery rotation failed",
-      );
+      setStatus(error instanceof Error ? error.message : "webhook rotation failed");
     }
   }
 
+  const deliveryRows = previewRows.length > 0 ? previewRows : deliveries;
+  const previewNames = dryRunPreview?.matched_vps.map((vps) => formatVpsName(vps)).join(", ") ?? "";
+
   return (
-    <div
-      className="fleetPolicyManager fleetNotificationManager professionalFormManager"
-      aria-label="Expression webhook rule manager"
-    >
-      <div className="fleetPolicyHeader">
-        <span>
-          <Bell size={16} />
-          <strong>Expression webhooks</strong>
-        </span>
-        <span>{visibleRules.length} rules</span>
-      </div>
-      <div className="consoleFormStack">
-        <ConsoleFormGroup
-          title="Rule definition"
-          description="Bind event predicates to a concrete target; preview the rendered body before queueing deliveries."
-          actions={
-            <>
-              <button className="primaryAction" type="button" onClick={() => void submit()}>
-                Save rule
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void dryRunRule()}>
-                Preview rule
-              </button>
-            </>
-          }
-        >
-          <ConsoleField label="Rule name" className="fieldWide">
-            <input
-              aria-label="Webhook rule name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Rule state">
-            <label className="inlineToggle borderedToggle">
-              <input
-                checked={enabled}
-                onChange={(event) => setEnabled(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Enabled</span>
-            </label>
-          </ConsoleField>
-          <ConsoleField label="Target URL" className="fieldWide">
-            <input
-              aria-label="Webhook target URL"
-              value={target}
-              onChange={(event) => setTarget(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Cooldown seconds">
-            <input
-              aria-label="Webhook cooldown seconds"
-              value={cooldownSecs}
-              onChange={(event) => setCooldownSecs(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Rule expression" className="fieldFull" hint="Matches event and VPS predicates, for example interval.30sec && tag:edge.">
-            <SearchExpressionInput
-              agents={agents}
-              ariaLabel="Webhook rule expression"
-              onChange={setExpression}
-              placeholder="interval.30sec && status = stale"
-              value={expression}
-              verification="neutral"
-              verificationMessage={`${agents.length} VPSs`}
-            />
-          </ConsoleField>
-          <ConsoleField label="Body template" className="fieldFull" hint="Use supported template variables such as rule, event, and vps fields.">
-            <div className="webhookTemplateEditor">
-              <WebhookTemplateEditor
-                onChange={setBodyTemplate}
-                value={bodyTemplate}
-              />
-            </div>
-          </ConsoleField>
-        </ConsoleFormGroup>
-        <ConsoleFormGroup
-          title="Dispatch, delivery, and retention"
-          description="Operate on saved rules and queued deliveries without mixing lifecycle controls into the rule editor."
-          actions={
-            <>
-              <button className="secondaryAction" type="button" onClick={() => void dispatchRules(true)}>
-                Match rules
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void dispatchRules(false)}>
-                Queue dispatch
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void process(true)}>
-                Preview queue
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void process(false)}>
-                Deliver queued
-              </button>
-              <button className="secondaryAction" type="button" onClick={() => void rotate(false)}>
-                Preview rotation
-              </button>
-              <button className="secondaryAction dangerAction" type="button" onClick={() => void rotate(true)}>
-                Rotate history
-              </button>
-            </>
-          }
-        >
-          <ConsoleField label="Event kind">
-            <input
-              aria-label="Webhook event kind"
-              value={eventKind}
-              onChange={(event) => setEventKind(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Event id" hint="Optional; blank processes the latest matching event set." className="fieldWide">
-            <input
-              aria-label="Webhook event id"
-              value={eventId}
-              onChange={(event) => setEventId(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Rotation age days">
-            <input
-              aria-label="Webhook rotation days"
-              value={rotationDays}
-              onChange={(event) => setRotationDays(event.target.value)}
-            />
-          </ConsoleField>
-          <ConsoleField label="Rotation status">
-            <select
-              aria-label="Webhook rotation status"
-              value={rotationStatus}
-              onChange={(event) => setRotationStatus(event.target.value)}
-            >
-              <option value="">Any status</option>
-              <option value="delivered">Delivered</option>
-              <option value="failed">Failed</option>
-              <option value="permanently_failed">Permanently failed</option>
-              <option value="queued">Queued</option>
-            </select>
-          </ConsoleField>
-        </ConsoleFormGroup>
-      </div>
-      {status && <small className="fleetPolicyStatus">{status}</small>}
+    <div className="consoleCrudPanel">
+      <ConsoleDataGrid
+        actions={[
+          {
+            label: "Edit rule",
+            disabled: (rows) => rows.length !== 1,
+            onSelect: (rows) => rows[0] && editRule(rows[0]),
+          },
+          {
+            label: "Enable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setRulesEnabled(rows, true),
+          },
+          {
+            label: "Disable",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void setRulesEnabled(rows, false),
+          },
+          {
+            label: "Delete",
+            disabled: (rows) => rows.length === 0,
+            onSelect: (rows) => void deleteRules(rows),
+            tone: "danger",
+          },
+        ]}
+        columns={ruleColumns}
+        defaultPageSize={10}
+        empty="No webhook rules saved."
+        getRowId={(rule) => rule.id}
+        itemLabel="rules"
+        onOpenRow={editRule}
+        rows={rules}
+        searchPlaceholder="Search webhook rules by name, expression, target, or notes"
+        storageKey="vpsman.grid.fleet.webhookRules.v1"
+        title="Webhook rules"
+      />
+      <ConsoleFormGroup
+        title={editingId ? "Edit selected webhook rule" : "Create webhook rule"}
+        description={`Rules evaluate against current fleet events and currently visible VPS records (${agents.length} loaded).`}
+        actions={
+          <>
+            <button className="primaryAction" type="button" onClick={() => void submit()}>
+              {editingId ? "Update rule" : "Create rule"}
+            </button>
+            <button className="secondaryAction" type="button" onClick={resetForm}>
+              New rule
+            </button>
+            <button className="secondaryAction" type="button" onClick={() => void dryRunRule()}>
+              Preview rule
+            </button>
+            <button className="secondaryAction" type="button" onClick={() => void dispatchRules(true)}>
+              Match rules
+            </button>
+            <button className="secondaryAction" type="button" onClick={() => void dispatchRules(false)}>
+              Queue dispatch
+            </button>
+            <button className="secondaryAction" type="button" onClick={() => void process(true)}>
+              Preview queue
+            </button>
+            <button className="secondaryAction" type="button" onClick={() => void process(false)}>
+              Deliver queued
+            </button>
+          </>
+        }
+      >
+        <ConsoleField label="Rule name" className="fieldWide">
+          <input aria-label="Webhook rule name" value={name} onChange={(event) => setName(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Enabled">
+          <label className="checkboxRow">
+            <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
+            <span>Evaluate rule</span>
+          </label>
+        </ConsoleField>
+        <ConsoleField label="Event kind">
+          <input aria-label="Webhook event kind" value={eventKind} onChange={(event) => setEventKind(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Event id">
+          <input aria-label="Webhook event id" value={eventId} onChange={(event) => setEventId(event.target.value)} placeholder="optional" />
+        </ConsoleField>
+        <ConsoleField label="Expression" className="fieldWide" hint="Example: interval.30sec && tag:edge">
+          <input aria-label="Webhook expression" value={expression} onChange={(event) => setExpression(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Target URL" className="fieldWide">
+          <input aria-label="Webhook target" value={target} onChange={(event) => setTarget(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Cooldown seconds">
+          <input aria-label="Webhook cooldown seconds" value={cooldownSecs} onChange={(event) => setCooldownSecs(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Notes" className="fieldFull">
+          <textarea aria-label="Webhook rule notes" value={notes} onChange={(event) => setNotes(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Body template" className="fieldFull">
+          <WebhookTemplateEditor value={bodyTemplate} onChange={setBodyTemplate} />
+        </ConsoleField>
+      </ConsoleFormGroup>
+      <ConsoleFormGroup
+        title="Delivery maintenance"
+        description="Preview rotation before deleting retained webhook delivery rows."
+        actions={
+          <>
+            <button className="secondaryAction" type="button" onClick={() => void rotate(false)}>
+              Preview rotation
+            </button>
+            <button className="dangerAction" type="button" onClick={() => void rotate(true)}>
+              Delete matched history
+            </button>
+          </>
+        }
+      >
+        <ConsoleField label="Older than days">
+          <input aria-label="Webhook rotation days" value={rotationDays} onChange={(event) => setRotationDays(event.target.value)} />
+        </ConsoleField>
+        <ConsoleField label="Status">
+          <input aria-label="Webhook rotation status" value={rotationStatus} onChange={(event) => setRotationStatus(event.target.value)} placeholder="delivered" />
+        </ConsoleField>
+        <ConsoleField label="Rotation result" className="fieldWide">
+          <span className="monoValue">
+            {rotationPreview ? `${rotationPreview.matched_count} matched / ${rotationPreview.deleted_count} deleted` : "not previewed"}
+          </span>
+        </ConsoleField>
+      </ConsoleFormGroup>
       {dryRunPreview && (
-        <div className="webhookPreviewSplit">
-          <div>
-            <strong>Rendered message</strong>
-            <pre>{dryRunPreview.rendered_message || "-"}</pre>
-          </div>
-          <div>
-            <strong>Payload context</strong>
-            <pre>{JSON.stringify(dryRunPreview.payload_context, null, 2)}</pre>
-          </div>
+        <div className="consoleInlineNotice">
+          <strong>{dryRunPreview.matched_vps.length} VPSs matched dry run</strong>
+          <small>{previewNames || "No VPSs matched this rule."}</small>
+          {dryRunPreview.validation_errors.length > 0 && (
+            <small>{dryRunPreview.validation_errors.join(" · ")}</small>
+          )}
+          <small>{dryRunPreview.rendered_message}</small>
         </div>
       )}
-      {rotationPreview && (
-        <small className="fleetPolicyStatus">
-          Rotation{" "}
-          {rotationPreview.confirmation_required ? "preview" : "applied"}{" "}
-          matched {rotationPreview.matched_count}, deleted{" "}
-          {rotationPreview.deleted_count}
-        </small>
-      )}
-      {previewRows.length > 0 && (
-        <div className="fleetPolicyRows notificationRows">
-          {previewRows.slice(0, 3).map((delivery) => (
-            <span key={delivery.id}>
-              <strong>{delivery.rule_name}</strong>
-              <small>
-                {delivery.event_kind} matched {delivery.matched_vps.length}:{" "}
-                {delivery.matched_vps.map((vps) => vps.id).join(" ")}
-              </small>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="fleetPolicyRows notificationRows">
-        {topRules.map((rule) => (
-          <span key={rule.id}>
-            <strong>{rule.name}</strong>
-            <small>
-              {rule.enabled ? "enabled" : "disabled"} {rule.expression} cooldown{" "}
-              {rule.cooldown_secs}s
-            </small>
-          </span>
-        ))}
-        {topDeliveries.map((delivery) => (
-          <span key={delivery.id}>
-            <strong>{delivery.rule_name}</strong>
-            <small>
-              {delivery.status} {delivery.event_kind} matched{" "}
-              {delivery.matched_vps.length} attempts {delivery.attempt_count}
-              {delivery.next_attempt_at
-                ? ` next ${formatCompactTime(delivery.next_attempt_at)}`
-                : ""}
-              {delivery.error ? ` error ${delivery.error}` : ""}
-            </small>
-          </span>
-        ))}
-        {topRules.length === 0 && topDeliveries.length === 0 && (
-          <small>No expression webhook rule saved</small>
-        )}
-      </div>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConsoleDataGrid
+        columns={deliveryColumns}
+        defaultPageSize={8}
+        empty="No webhook deliveries retained."
+        getRowId={(delivery) => delivery.id}
+        itemLabel="deliveries"
+        rows={deliveryRows}
+        searchPlaceholder="Search webhook deliveries"
+        storageKey="vpsman.grid.fleet.webhookDeliveries.v1"
+        title={previewRows.length > 0 ? "Webhook delivery preview" : "Webhook delivery history"}
+      />
     </div>
   );
 }
@@ -3045,11 +3818,8 @@ function FleetAlertList({
   stateCount: number;
   onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
 }) {
-  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [selectionStatsMode, setSelectionStatsMode] =
-    useState<FleetSelectionStatsMode>("telemetry");
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [pending, setPending] = useState<string | null>(null);
-  const topAlerts = alerts.slice(0, 6);
   const criticalCount = alerts.filter(
     (alert) => alert.severity === "critical",
   ).length;
@@ -3061,29 +3831,174 @@ function FleetAlertList({
     [agents, vpsNameDisplayMode],
   );
 
-  async function updateAlert(
-    alert: FleetAlertRecord,
+  const alertColumns = useMemo<ConsoleDataGridColumn<FleetAlertRecord>[]>(
+    () => [
+      {
+        id: "severity",
+        header: "Severity",
+        size: 115,
+        minSize: 95,
+        sortValue: (alert) => alert.severity,
+        searchValue: (alert) => alert.severity,
+        cell: (alert) => (
+          <ConsoleStatusBadge tone={alertTone(alert.severity)}>
+            {alert.severity}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "alert",
+        header: "Alert",
+        size: 360,
+        minSize: 240,
+        sortValue: (alert) => alert.title,
+        searchValue: (alert) => `${alert.title} ${alert.detail}`,
+        cell: (alert) => (
+          <span className="historyPrimary">
+            <strong>{alert.title}</strong>
+            <small>{alert.detail}</small>
+          </span>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 190,
+        minSize: 140,
+        sortValue: (alert) =>
+          alert.client_id
+            ? nameById.get(alert.client_id) ?? alert.client_id
+            : alertTargetLabel(alert),
+        searchValue: (alert) =>
+          `${alert.target_kind} ${alert.target_id} ${alert.client_id ?? ""} ${
+            alert.client_id ? nameById.get(alert.client_id) ?? "" : ""
+          }`,
+        cell: (alert) => (
+          <span className="historyPrimary">
+            <strong>
+              {alert.client_id
+                ? nameById.get(alert.client_id) ?? "Unnamed VPS"
+                : alertTargetLabel(alert)}
+            </strong>
+            <small className="monoValue">{alert.client_id ?? alert.target_id}</small>
+          </span>
+        ),
+      },
+      {
+        id: "category",
+        header: "Category",
+        size: 140,
+        minSize: 110,
+        sortValue: (alert) => alert.category,
+        searchValue: (alert) => alert.category,
+        cell: (alert) => <span className="monoValue">{alert.category}</span>,
+      },
+      {
+        id: "state",
+        header: "Operator state",
+        size: 150,
+        minSize: 120,
+        sortValue: (alert) => alert.operator_state,
+        searchValue: (alert) => `${alert.operator_state} ${alert.state_reason ?? ""}`,
+        cell: (alert) => (
+          <span className="historyPrimary">
+            <ConsoleStatusBadge tone={alert.operator_state === "open" ? "warning" : "info"}>
+              {alert.operator_state}
+            </ConsoleStatusBadge>
+            {alert.state_reason && <small>{alert.state_reason}</small>}
+          </span>
+        ),
+      },
+      {
+        id: "observed",
+        header: "Observed",
+        size: 140,
+        minSize: 110,
+        sortValue: (alert) => alert.observed_at,
+        cell: (alert) => formatCompactTime(alert.observed_at),
+      },
+      {
+        id: "actions",
+        header: "Actions",
+        size: 245,
+        minSize: 220,
+        enableHiding: false,
+        cell: (alert) => (
+          <span className="inlineActions">
+            {alert.operator_state === "open" ? (
+              <>
+                <button
+                  type="button"
+                  disabled={Boolean(pending)}
+                  onClick={() => void updateAlerts([alert], "acknowledge")}
+                >
+                  Ack
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(pending)}
+                  onClick={() => void updateAlerts([alert], "mute")}
+                >
+                  Mute
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(pending)}
+                  onClick={() => void updateAlerts([alert], "escalate")}
+                >
+                  Escalate
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                disabled={Boolean(pending)}
+                onClick={() => void updateAlerts([alert], "clear")}
+              >
+                Clear
+              </button>
+            )}
+          </span>
+        ),
+      },
+    ],
+    [nameById, pending],
+  );
+
+  async function updateAlerts(
+    rows: FleetAlertRecord[],
     action: FleetAlertStateRequest["action"],
   ) {
-    const pendingKey = `${alert.id}:${action}`;
-    setPending(pendingKey);
+    if (rows.length === 0 || pending) {
+      return;
+    }
+    setPending(`${action}:${rows.map((alert) => alert.id).join(",")}`);
     try {
-      await onUpdate({
-        alert_id: alert.id,
-        action,
-        muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
-        reason:
-          action === "mute"
-            ? "panel mute"
-            : action === "acknowledge"
-              ? "panel acknowledgement"
-              : "panel action",
-        confirmed: true,
-      });
+      for (const alert of rows) {
+        await onUpdate({
+          alert_id: alert.id,
+          action,
+          muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
+          reason:
+            action === "mute"
+              ? "panel mute"
+              : action === "acknowledge"
+                ? "panel acknowledgement"
+                : action === "escalate"
+                  ? "panel escalation"
+                  : "panel clear",
+          confirmed: true,
+        });
+      }
     } finally {
       setPending(null);
     }
   }
+
+  const openRows = (rows: FleetAlertRecord[]) =>
+    rows.filter((alert) => alert.operator_state === "open");
+  const triagedRows = (rows: FleetAlertRecord[]) =>
+    rows.filter((alert) => alert.operator_state !== "open");
 
   return (
     <div className="fleetAlertList" aria-label="Fleet alerts">
@@ -3098,72 +4013,68 @@ function FleetAlertList({
             : `${criticalCount} critical / ${warningCount} warning / ${stateCount} triaged`}
         </small>
       </div>
-      {topAlerts.length === 0 ? (
-        <span className="fleetAlertEmpty">No active alerts</span>
-      ) : (
-        topAlerts.map((alert) => (
-          <div
-            className={`fleetAlertRow ${alertTone(alert.severity)}`}
-            key={alert.id}
-          >
-            <span className="status">{alert.severity}</span>
-            <strong>{alert.title}</strong>
-            <small>
-              {alert.client_id
-                ? (nameById.get(alert.client_id) ?? "Unnamed VPS")
-                : alertTargetLabel(alert)}
-            </small>
-            <span>{alert.detail}</span>
-            <span className={`fleetAlertState ${alert.operator_state}`}>
-              {alert.operator_state}
-            </span>
-            <div className="fleetAlertActions">
-              {alert.operator_state === "open" && (
-                <>
-                  <button
-                    type="button"
-                    disabled={pending === `${alert.id}:acknowledge`}
-                    onClick={() => void updateAlert(alert, "acknowledge")}
-                  >
-                    Ack
-                  </button>
-                  <button
-                    type="button"
-                    disabled={pending === `${alert.id}:mute`}
-                    onClick={() => void updateAlert(alert, "mute")}
-                  >
-                    Mute
-                  </button>
-                  <button
-                    type="button"
-                    disabled={pending === `${alert.id}:escalate`}
-                    onClick={() => void updateAlert(alert, "escalate")}
-                  >
-                    Escalate
-                  </button>
-                </>
-              )}
-              {alert.operator_state !== "open" && (
-                <button
-                  type="button"
-                  disabled={pending === `${alert.id}:clear`}
-                  onClick={() => void updateAlert(alert, "clear")}
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            {alert.state_reason && (
-              <small className="fleetAlertReason">{alert.state_reason}</small>
+      <ConsoleDataGrid
+        actions={[
+          {
+            label: "Acknowledge open",
+            disabled: (rows) => pending != null || openRows(rows).length === 0,
+            onSelect: (rows) => void updateAlerts(openRows(rows), "acknowledge"),
+          },
+          {
+            label: "Mute open 4h",
+            disabled: (rows) => pending != null || openRows(rows).length === 0,
+            onSelect: (rows) => void updateAlerts(openRows(rows), "mute"),
+          },
+          {
+            label: "Escalate open",
+            disabled: (rows) => pending != null || openRows(rows).length === 0,
+            onSelect: (rows) => void updateAlerts(openRows(rows), "escalate"),
+          },
+          {
+            label: "Clear triaged",
+            disabled: (rows) => pending != null || triagedRows(rows).length === 0,
+            onSelect: (rows) => void updateAlerts(triagedRows(rows), "clear"),
+          },
+        ]}
+        columns={alertColumns}
+        defaultPageSize={10}
+        empty="No active fleet alerts."
+        getRowId={(alert) => alert.id}
+        itemLabel="alerts"
+        renderExpandedRow={(alert) => (
+          <div className="consoleGridDetails">
+            <span><strong>Status:</strong> {alert.status}</span>
+            <span><strong>Target:</strong> {alert.target_kind}:{alert.target_id}</span>
+            {alert.muted_until_unix && (
+              <span><strong>Muted until:</strong> {formatUnixTime(alert.muted_until_unix)}</span>
             )}
+            <span><strong>Escalation:</strong> {alert.escalation_level}</span>
+            <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
           </div>
-        ))
-      )}
+        )}
+        renderSelectionPanel={(rows) => {
+          const selectedOpen = openRows(rows).length;
+          const selectedTriaged = triagedRows(rows).length;
+          return (
+            <span>
+              {rows.length} selected · {selectedOpen} open · {selectedTriaged} triaged
+            </span>
+          );
+        }}
+        rows={alerts}
+        searchPlaceholder="Search alerts by VPS, category, state, or detail"
+        storageKey="vpsman.grid.fleet.alerts.v1"
+        title="Fleet alerts"
+      />
     </div>
   );
 }
 
-function alertTone(severity: string) {
+function formatUnixTime(value: number): string {
+  return formatCompactTime(new Date(value * 1000).toISOString());
+}
+
+function alertTone(severity: string): "critical" | "warning" | "info" {
   if (severity === "critical") {
     return "critical";
   }

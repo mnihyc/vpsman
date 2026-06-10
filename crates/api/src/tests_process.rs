@@ -1,5 +1,5 @@
 use super::*;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 use axum::{extract::State, http::HeaderMap, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -32,7 +32,9 @@ async fn wait_for_job_status(
 #[test]
 fn process_supervisor_job_commands_validate_operation_payloads() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -49,7 +51,6 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -77,7 +78,9 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
 #[test]
 fn process_supervisor_job_commands_accept_policy_and_limits() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -105,7 +108,6 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -115,7 +117,9 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
 #[test]
 fn process_supervisor_job_commands_reject_unbounded_limits() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -135,7 +139,6 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -147,7 +150,9 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
 #[test]
 fn process_supervisor_job_commands_reject_bad_payloads() {
     let mut request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: String::new(),
@@ -164,7 +169,6 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -221,7 +225,9 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         },
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: "process_start".to_string(),
@@ -231,14 +237,11 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
     let (status, Json(response)) = create_job(
-        State(test_state_with_signing_key_and_privilege_auto_approve(
-            repo.clone(),
-        )),
+        State(test_state_with_privilege_auto_approve(repo.clone())),
         HeaderMap::new(),
         Json(request),
     )
@@ -264,14 +267,13 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         .contains("force_unprivileged"));
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[17_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -282,9 +284,9 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
     }
 }
 
-fn test_state_with_signing_key_and_privilege_auto_approve(repo: Repository) -> AppState {
+fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
     AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        ..test_state_with_signing_key(repo)
+        ..test_state(repo)
     }
 }

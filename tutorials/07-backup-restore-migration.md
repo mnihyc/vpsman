@@ -22,7 +22,7 @@ cargo run -p vpsctl -- backup-policy-upsert \
   --include-config \
   --recipient-public-key-hex <32_byte_hex_public_key> \
   --tags backup-critical \
-  --cron-expr '0 3 * * *' \
+  --interval-secs 86400 \
   --retention-days 30 \
   --keep-last 7 \
   --rotation-generation keyring/v2 \

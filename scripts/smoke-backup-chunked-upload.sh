@@ -15,7 +15,6 @@ gateway_control_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
 internal_token="chunked-upload-internal-token-000000"
-client_id="chunked-backup-smoke-$(date +%s)"
 super_password="smoke-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -51,14 +50,20 @@ if ! smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
   exit 1
 fi
 
+token_json="$(target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+  --ttl-secs 600 \
+  --default-tags chunked-backup-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+client_id="$(jq -r '.assigned_client_id' <<<"$token_json")"
+[[ -n "$client_id" && "$client_id" != "null" ]] || {
+  echo "enrollment token did not return assigned_client_id" >&2
+  exit 1
+}
 client_keys="$(target/debug/vpsctl noise-keygen)"
 client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
-target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
-  --client-id "$client_id" \
-  --client-public-key-hex "$client_public_hex" \
-  --display-name "$client_id" \
-  --tags chunked-backup-smoke \
-  --confirmed >/dev/null
+target/debug/vpsctl --api-url "$api_url" enroll-claim \
+  --token "$enrollment_token" \
+  --client-public-key-hex "$client_public_hex" >/dev/null
 
 backup_request_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" backup-request \

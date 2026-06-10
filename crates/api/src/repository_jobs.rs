@@ -54,6 +54,63 @@ fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
         || job.payload_hash.to_ascii_lowercase().contains(needle)
 }
 
+fn target_status_counts_as_accepted(status: &str) -> bool {
+    matches!(status, "accepted" | "completed" | "failed" | "timed_out")
+}
+
+fn target_status_is_pending(status: &str) -> bool {
+    matches!(status, "queued" | "dispatching")
+}
+
+fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str {
+    let statuses = targets
+        .iter()
+        .map(|target| target.status.clone())
+        .collect::<Vec<_>>();
+    aggregate_job_status_from_statuses(&statuses, targets.len())
+}
+
+pub(crate) fn aggregate_job_status_from_statuses(
+    target_statuses: &[String],
+    target_count: usize,
+) -> &'static str {
+    let completed = target_statuses
+        .iter()
+        .filter(|status| status.as_str() == "completed")
+        .count();
+    if target_count > 0 && completed == target_count {
+        return "completed";
+    }
+    if completed > 0 {
+        return "partially_completed";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "degraded_unprivileged")
+    {
+        return "degraded_unprivileged";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "timed_out")
+    {
+        return "timed_out";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
+    {
+        return "failed";
+    }
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == "accepted")
+    {
+        return "accepted";
+    }
+    "dispatch_failed"
+}
+
 fn job_history_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort.unwrap_or("created_at"), descending) {
         ("actor_id", true) => "actor_id DESC NULLS LAST, id DESC",
@@ -138,6 +195,18 @@ struct JobCreatedWebhookEvent<'a> {
     operation: Option<&'a JobCommand>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedJobTarget {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) actor_id: Option<Uuid>,
+    pub(crate) command_type: String,
+    pub(crate) payload_hash: String,
+    pub(crate) operation: JobCommand,
+    pub(crate) source_schedule_id: Option<Uuid>,
+    pub(crate) timeout_secs: u64,
+}
+
 fn job_webhook_predicates(command_type: &str, status: &str, include_created: bool) -> Vec<String> {
     let mut predicates = vec![
         format!("job.status:{status}"),
@@ -153,72 +222,6 @@ fn job_webhook_predicates(command_type: &str, status: &str, include_created: boo
 }
 
 impl Repository {
-    pub(crate) async fn find_job_by_idempotency_key(
-        &self,
-        actor_id: Uuid,
-        idempotency_key: &str,
-    ) -> Result<Option<JobHistoryView>> {
-        match self {
-            Self::Memory(memory) => {
-                let Some(job_id) = memory
-                    .job_idempotency_keys
-                    .read()
-                    .await
-                    .get(&(actor_id, idempotency_key.to_string()))
-                    .copied()
-                else {
-                    return Ok(None);
-                };
-                Ok(memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .find(|job| job.id == job_id)
-                    .cloned())
-            }
-            Self::Postgres(pool) => {
-                let Some(row) = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        command_type,
-                        privileged,
-                        status,
-                        target_count,
-                        payload_hash,
-                        created_at::text AS created_at,
-                        completed_at::text AS completed_at
-                    FROM jobs
-                    WHERE actor_id = $1
-                      AND idempotency_key = $2
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    "#,
-                )
-                .bind(actor_id)
-                .bind(idempotency_key)
-                .fetch_optional(pool)
-                .await?
-                else {
-                    return Ok(None);
-                };
-                Ok(Some(JobHistoryView {
-                    id: row.try_get("id")?,
-                    actor_id: row.try_get("actor_id")?,
-                    command_type: row.try_get("command_type")?,
-                    privileged: row.try_get("privileged")?,
-                    status: row.try_get("status")?,
-                    target_count: row.try_get("target_count")?,
-                    payload_hash: row.try_get("payload_hash")?,
-                    created_at: row.try_get("created_at")?,
-                    completed_at: row.try_get("completed_at")?,
-                }))
-            }
-        }
-    }
-
     pub(crate) async fn get_job(&self, job_id: Uuid) -> Result<Option<JobHistoryView>> {
         match self {
             Self::Memory(memory) => Ok(memory
@@ -262,6 +265,56 @@ impl Repository {
                     created_at: row.try_get("created_at")?,
                     completed_at: row.try_get("completed_at")?,
                 }))
+            }
+        }
+    }
+
+    pub(crate) async fn get_job_request_fingerprint(&self, job_id: Uuid) -> Result<Option<String>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .job_request_fingerprints
+                .read()
+                .await
+                .get(&job_id)
+                .cloned()),
+            Self::Postgres(pool) => sqlx::query_scalar(
+                r#"
+                    SELECT request_fingerprint
+                    FROM jobs
+                    WHERE id = $1
+                    "#,
+            )
+            .bind(job_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(Into::into),
+        }
+    }
+
+    pub(crate) async fn count_job_accepted_targets(&self, job_id: Uuid) -> Result<usize> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .job_targets
+                .read()
+                .await
+                .iter()
+                .filter(|target| {
+                    target.job_id == job_id && target_status_counts_as_accepted(&target.status)
+                })
+                .count()),
+            Self::Postgres(pool) => {
+                let count: i64 = sqlx::query_scalar(
+                    r#"
+                    SELECT count(*)
+                    FROM job_targets
+                    WHERE job_id = $1
+                      AND status IN ('accepted', 'completed', 'failed', 'timed_out')
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(count.max(0) as usize)
             }
         }
     }
@@ -578,20 +631,18 @@ impl Repository {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_rejected_job(
         &self,
+        job_id: Uuid,
         request: &CreateJobRequest,
         command_hash: &str,
+        request_fingerprint: &str,
         operator: &AuthContext,
+        status: &str,
+        reason: &str,
     ) -> Result<Uuid> {
-        let job_id = Uuid::new_v4();
-        let selection = request.target_selection();
-        let resolved_agents = self.resolve_bulk_targets(&selection).await?;
-        let resolved_targets = resolved_agents
-            .targets
-            .into_iter()
-            .map(|agent| agent.id)
-            .collect::<Vec<_>>();
+        let resolved_targets = request.fixed_target_ids().unwrap_or_default();
         let metadata = json!({
             "selector_expression": request.selector_expression,
             "resolved_targets": &resolved_targets,
@@ -599,12 +650,12 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
-            "idempotency_key": request.idempotency_key,
             "reconnect_policy": request.reconnect_policy,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
             "session_id": operator.session_id,
+            "reason": reason,
         });
         let operation = request.job_command().ok();
         match self {
@@ -615,19 +666,17 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     command_type: "api_job_request".to_string(),
                     privileged: request.privileged,
-                    status: "rejected_authorization_required".to_string(),
+                    status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
                     created_at: created_at.clone(),
                     completed_at: Some(created_at.clone()),
                 });
-                if let Some(key) = request.idempotency_key.as_deref() {
-                    memory
-                        .job_idempotency_keys
-                        .write()
-                        .await
-                        .insert((operator.operator.id, key.to_string()), job_id);
-                }
+                memory
+                    .job_request_fingerprints
+                    .write()
+                    .await
+                    .insert(job_id, request_fingerprint.to_string());
                 memory
                     .job_targets
                     .write()
@@ -639,8 +688,8 @@ impl Repository {
                             .map(|client_id| JobTargetView {
                                 job_id,
                                 client_id,
-                                status: "rejected_authorization_required".to_string(),
-                                message: Some("authorization required".to_string()),
+                                status: status.to_string(),
+                                message: Some(reason.to_string()),
                                 exit_code: None,
                                 started_at: None,
                                 completed_at: Some(created_at.clone()),
@@ -649,7 +698,7 @@ impl Repository {
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
-                    action: "job.rejected_authorization_required".to_string(),
+                    action: format!("job.{status}"),
                     target: "api:/api/v1/jobs".to_string(),
                     command_hash: Some(command_hash.to_string()),
                     metadata,
@@ -662,21 +711,22 @@ impl Repository {
                     r#"
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
-                        target_count, payload_hash, operation, idempotency_key,
-                        reconnect_policy, completed_at
+                        target_count, payload_hash, operation, request_fingerprint,
+                        timeout_secs, reconnect_policy, completed_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb), now())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb), now())
                     "#,
                 )
                 .bind(job_id)
                 .bind(operator.operator.id)
                 .bind("api_job_request")
                 .bind(request.privileged)
-                .bind("rejected_authorization_required")
+                .bind(status)
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
                 .bind(operation.clone().map(sqlx::types::Json))
-                .bind(request.idempotency_key.as_deref())
+                .bind(request_fingerprint)
+                .bind(request.timeout_secs.unwrap_or(30) as i64)
                 .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
                 .await?;
@@ -691,8 +741,8 @@ impl Repository {
                     )
                     .bind(job_id)
                     .bind(client_id)
-                    .bind("rejected_authorization_required")
-                    .bind("authorization required")
+                    .bind(status)
+                    .bind(reason)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -706,7 +756,7 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("job.rejected_authorization_required")
+                .bind(format!("job.{status}"))
                 .bind("api:/api/v1/jobs")
                 .bind(command_hash)
                 .bind(metadata)
@@ -718,7 +768,7 @@ impl Repository {
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
             command_type: "api_job_request",
-            status: "rejected_authorization_required",
+            status,
             privileged: request.privileged,
             command_hash,
             resolved_targets: &resolved_targets,
@@ -732,14 +782,18 @@ impl Repository {
 
     pub(crate) async fn record_dispatching_job(
         &self,
+        job_id: Uuid,
         request: &CreateJobRequest,
         command_hash: &str,
+        request_fingerprint: &str,
         operator: &AuthContext,
         resolved_targets: &[String],
     ) -> Result<Uuid> {
         self.record_dispatching_job_with_source(
+            job_id,
             request,
             command_hash,
+            request_fingerprint,
             operator,
             resolved_targets,
             None,
@@ -747,17 +801,22 @@ impl Repository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_dispatching_job_from_schedule(
         &self,
+        job_id: Uuid,
         request: &CreateJobRequest,
         command_hash: &str,
+        request_fingerprint: &str,
         operator: &AuthContext,
         resolved_targets: &[String],
         source_schedule_id: Uuid,
     ) -> Result<Uuid> {
         self.record_dispatching_job_with_source(
+            job_id,
             request,
             command_hash,
+            request_fingerprint,
             operator,
             resolved_targets,
             Some(source_schedule_id),
@@ -765,15 +824,17 @@ impl Repository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_dispatching_job_with_source(
         &self,
+        job_id: Uuid,
         request: &CreateJobRequest,
         command_hash: &str,
+        request_fingerprint: &str,
         operator: &AuthContext,
         resolved_targets: &[String],
         source_schedule_id: Option<Uuid>,
     ) -> Result<Uuid> {
-        let job_id = Uuid::new_v4();
         let command_type = request.command_type_label().to_string();
         let metadata = json!({
             "selector_expression": request.selector_expression,
@@ -782,7 +843,6 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
-            "idempotency_key": request.idempotency_key,
             "reconnect_policy": request.reconnect_policy,
             "source_schedule_id": source_schedule_id,
             "operator_id": operator.operator.id,
@@ -807,13 +867,11 @@ impl Repository {
                     created_at: created_at.clone(),
                     completed_at: None,
                 });
-                if let Some(key) = request.idempotency_key.as_deref() {
-                    memory
-                        .job_idempotency_keys
-                        .write()
-                        .await
-                        .insert((operator.operator.id, key.to_string()), job_id);
-                }
+                memory
+                    .job_request_fingerprints
+                    .write()
+                    .await
+                    .insert(job_id, request_fingerprint.to_string());
                 memory
                     .job_operations
                     .write()
@@ -853,10 +911,10 @@ impl Repository {
                     r#"
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
-                        target_count, payload_hash, operation, source_schedule_id, idempotency_key,
-                        reconnect_policy
+                        target_count, payload_hash, operation, source_schedule_id, request_fingerprint,
+                        timeout_secs, reconnect_policy
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb))
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb))
                     "#,
                 )
                 .bind(job_id)
@@ -868,7 +926,8 @@ impl Repository {
                 .bind(command_hash)
                 .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
-                .bind(request.idempotency_key.as_deref())
+                .bind(request_fingerprint)
+                .bind(request.timeout_secs.unwrap_or(30) as i64)
                 .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
                 .await?;
@@ -921,47 +980,142 @@ impl Repository {
         Ok(job_id)
     }
 
-    pub(crate) async fn mark_job_targets_dispatching(
+    pub(crate) async fn claim_due_job_targets(
         &self,
-        job_id: Uuid,
-        client_ids: &[String],
-    ) -> Result<()> {
-        if client_ids.is_empty() {
-            return Ok(());
-        }
+        limit: i64,
+        lease_secs: i64,
+    ) -> Result<Vec<ClaimedJobTarget>> {
         match self {
             Self::Memory(memory) => {
-                let started_at = unix_now().to_string();
+                let now = unix_now().to_string();
+                let operations = memory.job_operations.read().await.clone();
+                let jobs = memory.jobs.read().await.clone();
                 let mut targets = memory.job_targets.write().await;
-                for target in targets.iter_mut().filter(|target| {
-                    target.job_id == job_id
-                        && client_ids
-                            .iter()
-                            .any(|client_id| client_id == &target.client_id)
-                        && target.completed_at.is_none()
-                }) {
+                let mut claimed = Vec::new();
+                for target in targets
+                    .iter_mut()
+                    .filter(|target| target.completed_at.is_none() && target.status == "queued")
+                {
+                    if claimed.len() >= limit.clamp(1, 100) as usize {
+                        break;
+                    }
+                    let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
+                        continue;
+                    };
+                    let Some(operation) = operations.get(&target.job_id).cloned() else {
+                        continue;
+                    };
                     target.status = "dispatching".to_string();
-                    target.started_at.get_or_insert_with(|| started_at.clone());
+                    target.started_at.get_or_insert_with(|| now.clone());
+                    claimed.push(ClaimedJobTarget {
+                        job_id: target.job_id,
+                        client_id: target.client_id.clone(),
+                        actor_id: job.actor_id,
+                        command_type: job.command_type.clone(),
+                        payload_hash: job.payload_hash.clone(),
+                        operation,
+                        source_schedule_id: None,
+                        timeout_secs: 30,
+                    });
                 }
+                Ok(claimed)
             }
             Self::Postgres(pool) => {
-                sqlx::query(
+                let rows = sqlx::query(
                     r#"
-                    UPDATE job_targets
-                    SET status = 'dispatching',
-                        started_at = COALESCE(started_at, now())
-                    WHERE job_id = $1
-                      AND client_id = ANY($2)
-                      AND completed_at IS NULL
+                    WITH due AS (
+                        SELECT
+                            target.job_id,
+                            target.client_id,
+                            job.actor_id,
+                            job.command_type,
+                            job.payload_hash,
+                            job.operation,
+                            job.source_schedule_id,
+                            job.timeout_secs
+                        FROM job_targets target
+                        JOIN jobs job ON job.id = target.job_id
+                        WHERE target.completed_at IS NULL
+                          AND target.status IN ('queued', 'dispatching')
+                          AND job.completed_at IS NULL
+                          AND job.status IN ('queued', 'dispatching', 'running')
+                          AND (
+                            target.status = 'queued'
+                            OR target.dispatch_lease_until IS NULL
+                            OR target.dispatch_lease_until < now()
+                          )
+                        ORDER BY job.created_at ASC, target.client_id ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE job_targets target
+                    SET
+                        status = 'dispatching',
+                        started_at = COALESCE(target.started_at, now()),
+                        dispatch_attempts = target.dispatch_attempts + 1,
+                        dispatch_lease_until = now() + make_interval(secs => $2::integer),
+                        last_dispatch_error = NULL
+                    FROM due
+                    WHERE target.job_id = due.job_id
+                      AND target.client_id = due.client_id
+                    RETURNING
+                        due.job_id,
+                        due.client_id,
+                        due.actor_id,
+                        due.command_type,
+                        due.payload_hash,
+                        due.operation,
+                        due.source_schedule_id,
+                        due.timeout_secs
                     "#,
                 )
-                .bind(job_id)
-                .bind(client_ids.to_vec())
-                .execute(pool)
+                .bind(limit.clamp(1, 100))
+                .bind(lease_secs.clamp(1, 3600) as i32)
+                .fetch_all(pool)
                 .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                        let timeout_secs =
+                            row.try_get::<i64, _>("timeout_secs")?.clamp(1, 3600) as u64;
+                        Ok(ClaimedJobTarget {
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                            actor_id: row.try_get("actor_id")?,
+                            command_type: row.try_get("command_type")?,
+                            payload_hash: row.try_get("payload_hash")?,
+                            operation: operation.0,
+                            source_schedule_id: row.try_get("source_schedule_id")?,
+                            timeout_secs,
+                        })
+                    })
+                    .collect()
             }
         }
-        Ok(())
+    }
+
+    pub(crate) async fn refresh_job_status_from_targets(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<(String, usize)>> {
+        let Some(job) = self.get_job(job_id).await? else {
+            return Ok(None);
+        };
+        let accepted_targets = self.count_job_accepted_targets(job_id).await?;
+        if job.completed_at.is_some() {
+            return Ok(None);
+        }
+        let targets = self.list_job_targets(job_id).await?;
+        if targets.is_empty()
+            || targets
+                .iter()
+                .any(|target| target_status_is_pending(&target.status))
+        {
+            return Ok(Some((job.status, accepted_targets)));
+        }
+        let status = aggregate_job_status_from_targets(&targets);
+        self.finish_job(job_id, status).await?;
+        Ok(Some((status.to_string(), accepted_targets)))
     }
 
     pub(crate) async fn update_job_target_result(
@@ -1061,7 +1215,9 @@ impl Repository {
                         message = $4,
                         exit_code = $5,
                         started_at = COALESCE(started_at, now()),
-                        completed_at = now()
+                        completed_at = now(),
+                        dispatch_lease_until = NULL,
+                        last_dispatch_error = CASE WHEN $3 = 'dispatch_failed' THEN $4 ELSE NULL END
                     WHERE job_id = $1 AND client_id = $2
                     "#,
                 )

@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
-    http::HeaderMap,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     Json,
 };
 
@@ -46,6 +46,18 @@ pub(crate) async fn upsert_webhook_rule(
     Ok(Json(
         state.repo.upsert_webhook_rule(&request, &operator).await?,
     ))
+}
+
+pub(crate) async fn delete_webhook_rule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rule_id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    state.repo.delete_webhook_rule(rule_id, &operator).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn dry_run_webhook_rule(
@@ -143,10 +155,6 @@ fn validate_webhook_rule_request(request: &CreateWebhookRuleRequest) -> Result<(
         .map_err(|_| ApiError::bad_request("webhook_rule_target_invalid"))?;
     if request.body_template.len() > 4096 {
         return Err(ApiError::bad_request("webhook_rule_body_template_too_long"));
-    }
-    if !request.body_template.trim().is_empty() {
-        validate_template(&request.body_template)
-            .map_err(|_| ApiError::bad_request("webhook_rule_template_invalid"))?;
     }
     if !request.body_template.trim().is_empty() {
         validate_template(&request.body_template)

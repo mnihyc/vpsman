@@ -183,6 +183,7 @@ export function FileBrowserPanel({
     const destructive = mutatesFileSystem(operation);
     const job = await onCreateJob({
       selector_expression: targetExpression.trim(),
+      target_client_ids: [selectedAgent.id],
       destructive,
       confirmed: true,
       command: operation.type,
@@ -191,7 +192,6 @@ export function FileBrowserPanel({
       timeout_secs: timeoutSecs,
         force_unprivileged: false,
       privileged: true,
-      idempotency_key: null,
       reconnect_policy: {
         duplicate_delivery: "ignore_completed",
         resume_outputs: true,

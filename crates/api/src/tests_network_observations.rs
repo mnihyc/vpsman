@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 use axum::{
     extract::{Query, State},
@@ -683,7 +682,6 @@ fn test_state(repo: Repository) -> AppState {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

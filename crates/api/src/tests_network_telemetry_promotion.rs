@@ -1,12 +1,10 @@
 use super::*;
-use std::sync::Arc;
 
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     Json,
 };
-use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use vpsman_common::{
     AgentMetrics, BandwidthTier, GatewayTelemetryIngest, RuntimeTunnelManager, RuntimeTunnelStat,
@@ -39,7 +37,7 @@ async fn promote_telemetry_tunnel_creates_external_observed_plan_and_audit() {
     .await;
 
     let (status, Json(view)) = crate::routes_network::promote_telemetry_tunnel_plan(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state(repo.clone())),
         HeaderMap::new(),
         Json(PromoteTelemetryTunnelRequest {
             client_id: "left-a".to_string(),
@@ -118,7 +116,7 @@ async fn promote_telemetry_tunnel_rejects_non_import_candidate() {
     .await;
 
     let error = crate::routes_network::promote_telemetry_tunnel_plan(
-        State(test_state_with_signing_key(repo)),
+        State(test_state(repo)),
         HeaderMap::new(),
         Json(PromoteTelemetryTunnelRequest {
             client_id: "left-a".to_string(),
@@ -161,14 +159,13 @@ async fn seed_tunnel_telemetry(repo: &Repository, tunnel: RuntimeTunnelStat) {
     .unwrap();
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

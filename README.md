@@ -25,6 +25,18 @@ ignored and are not part of the public tree.
 Targeting is tag-first. Provider/country/group labels are ordinary tags, while
 resolver-only inner selectors such as `id:<client_id>` and
 `name:<display_name>` are documented in [target selectors](docs/target-selectors.md).
+Jobs and schedules execute fixed, reviewed target snapshots: frontend
+confirmation and CLI preview resolve selectors to concrete VPS IDs, submit those
+IDs to the API, and keep selector text only as audit context for deliberate
+manual Target update.
+
+
+## Operator Tutorials
+
+The operator-facing tutorial index is [tutorials/README.md](tutorials/README.md).
+It covers quickstart setup, local control-plane operation, direct gateway agent
+installation, fleet organization, daily jobs/schedules, backups, updates, and
+headless CLI/VTY workflows.
 
 ## Release Assets
 
@@ -125,8 +137,12 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   bash
 ```
 
-Endpoint DNS names and priorities are part of the agent config; no separate panel-side endpoint lookup is used. See `deploy/AGENT_GATEWAY_INSTALL.md` and
-`deploy/install-agent.sh`.
+Endpoint DNS names and priorities are part of the agent config; no separate
+panel-side endpoint lookup is used. Gateway Noise sessions protect agent traffic
+from tampering, so there is no extra server-side command-authentication key.
+Privilege for mutating work is still request-bound through the local
+super-password assertion verified by the private gateway. See
+`deploy/AGENT_GATEWAY_INSTALL.md` and `deploy/install-agent.sh`.
 
 ## Local Build
 

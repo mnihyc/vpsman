@@ -27,6 +27,7 @@ export function TagsPanel({
   onCreateTag,
   onDeleteTag,
   onOpenPrivilegeUnlock,
+  onOpenSchedules,
   onRefresh,
   onResolveBulk,
   privilegeMaterial,
@@ -41,6 +42,7 @@ export function TagsPanel({
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
   onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
+  onOpenSchedules?: () => void;
   onRefresh: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -77,6 +79,7 @@ export function TagsPanel({
             onCreateTag={onCreateTag}
             onDeleteTag={onDeleteTag}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onOpenSchedules={onOpenSchedules}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
@@ -103,6 +106,7 @@ export function TagsPanel({
             onBulkMutateTags={onBulkMutateTags}
             onDeleteTag={onDeleteTag}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onOpenSchedules={onOpenSchedules}
             onResolveBulk={onResolveBulk}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
@@ -120,6 +124,7 @@ function TagRegistry({
   onCreateTag,
   onDeleteTag,
   onOpenPrivilegeUnlock,
+  onOpenSchedules,
   pending,
   privilegeMaterial,
   runAction,
@@ -129,6 +134,7 @@ function TagRegistry({
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
   onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
+  onOpenSchedules?: () => void;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -245,7 +251,7 @@ function TagRegistry({
         items={[
           { label: "Tag", value: deleteCandidate?.name ?? "-" },
           { label: "Assignments", value: String(deletePreview?.target_count ?? deleteCandidate?.clients.length ?? 0) },
-          { label: "Schedules", value: <ScheduleImpactTable impacts={deletePreview?.schedule_impacts ?? []} /> },
+          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={deletePreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
         ]}
         onCancel={() => {
           setDeleteCandidate(null);
@@ -392,6 +398,7 @@ function BulkTagPanel({
   onBulkMutateTags,
   onDeleteTag,
   onOpenPrivilegeUnlock,
+  onOpenSchedules,
   onResolveBulk,
   pending,
   privilegeMaterial,
@@ -403,6 +410,7 @@ function BulkTagPanel({
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
   onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
+  onOpenSchedules?: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -583,7 +591,7 @@ function BulkTagPanel({
         ) : (
           <div className="bulkTagPreviewEmpty">
             <ShieldCheck size={18} />
-            <span>{preview ? "No VPSs would change for this mutation." : "Run preview to show selected VPSs and schedule impact."}</span>
+            <span>{preview ? "No VPSs would change for this mutation." : "Run preview to show selected VPSs and schedule target-update notices."}</span>
           </div>
         )}
       </section>
@@ -596,7 +604,7 @@ function BulkTagPanel({
           { label: "Selector", value: action === "delete" ? "all assignments" : selectorExpression || "-" },
           { label: "Targets", value: String(preview?.target_count ?? 0) },
           { label: "Changed", value: String(preview?.changed_count ?? 0) },
-          { label: "Schedules", value: <ScheduleImpactTable impacts={preview?.schedule_impacts ?? []} /> },
+          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={preview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
         ]}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={() => void submitMutation()}
@@ -608,17 +616,23 @@ function BulkTagPanel({
   );
 }
 
-function ScheduleImpactTable({ impacts }: { impacts: TagMutationResponse["schedule_impacts"] }) {
+function ScheduleImpactTable({
+  impacts,
+  onOpenSchedules,
+}: {
+  impacts: TagMutationResponse["schedule_impacts"];
+  onOpenSchedules?: () => void;
+}) {
   if (impacts.length === 0) {
-    return <span>No enabled schedule targets change</span>;
+    return <span>No saved schedule target snapshots need review</span>;
   }
   return (
     <div className="tagScheduleImpactTable">
       <div className="tagScheduleImpactRow heading">
         <span>Schedule</span>
         <span>Command</span>
-        <span>Targets</span>
-        <span>Summary</span>
+        <span>Selector result</span>
+        <span>Manual action</span>
         <span>Added</span>
         <span>Removed</span>
       </div>
@@ -632,7 +646,14 @@ function ScheduleImpactTable({ impacts }: { impacts: TagMutationResponse["schedu
           <span>
             {impact.before_target_count} -&gt; {impact.after_target_count}
           </span>
-          <span>{impact.summary}</span>
+          <span className="tagScheduleManualAction">
+            <span>{impact.summary}; saved targets stay fixed until you update them.</span>
+            {onOpenSchedules && (
+              <button className="secondaryAction compactAction" type="button" onClick={onOpenSchedules}>
+                Open schedules
+              </button>
+            )}
+          </span>
           <VpsChipList agents={impact.added_targets} />
           <VpsChipList agents={impact.removed_targets} />
         </div>

@@ -507,24 +507,25 @@ function BulkConfigApply({
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
         selector_expression: selectorExpression.trim(),
+        target_client_ids: clientIds,
         timeout_secs: boundedTimeoutSecs,
       });
       const initial = buildBulkJobProgress({
-        acceptedTargets: response.accepted_targets,
+        acceptedTargets: response.target_count,
         jobId: response.job_id,
         targetRecords: [],
         targets: preview.targets,
       });
       setProgress(initial);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.accepted_targets,
+        acceptedTargets: response.target_count,
         onProgress: setProgress,
         targets: preview.targets,
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.accepted_targets,
+          acceptedTargets: response.target_count,
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
@@ -695,18 +696,19 @@ function SingleVpsConfig({
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
         selector_expression: selectorExpressionForTarget,
+        target_client_ids: [singleTarget.id],
         timeout_secs: boundedTimeoutSecs,
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.accepted_targets,
+        acceptedTargets: response.target_count,
         onProgress: setProgress,
         targets: [singleTarget],
       });
       const outputs = await onLoadJobOutputs(response.job_id);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.accepted_targets,
+          acceptedTargets: response.target_count,
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
@@ -751,18 +753,19 @@ function SingleVpsConfig({
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
         selector_expression: selectorExpressionForTarget,
+        target_client_ids: [singleTarget.id],
         timeout_secs: boundedTimeoutSecs,
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.accepted_targets,
+        acceptedTargets: response.target_count,
         onProgress: setProgress,
         targets: [singleTarget],
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.accepted_targets,
+          acceptedTargets: response.target_count,
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,

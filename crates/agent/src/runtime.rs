@@ -15,8 +15,8 @@ use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
     AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode, CommandOutput, Frame, JobAck,
-    JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream, PrivilegeReplayCache,
-    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream, ServerEndpoint,
+    ServerHello, TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
     config_update::{
         apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
     },
-    executor::{authorize_job, execute_job_command_with_config_and_output_sink},
+    executor::execute_job_command_with_config_and_output_sink,
     network_apply::{
         execute_network_apply_command, execute_network_ospf_cost_update_command,
         execute_network_rollback_command, NetworkApplyInput, NetworkOspfCostUpdateInput,
@@ -133,7 +133,6 @@ async fn connect_and_stream(
     );
 
     let mut seq = 2_u64;
-    let mut replay_cache = PrivilegeReplayCache::default();
     let (command_event_tx, mut command_event_rx) = mpsc::channel::<CommandExecutionEvent>(32);
     let (terminal_stream_tx, mut terminal_stream_rx) = mpsc::channel::<TerminalStreamOutput>(64);
     let mut active_commands = HashMap::<uuid::Uuid, ActiveCommand>::new();
@@ -166,7 +165,6 @@ async fn connect_and_stream(
                                 config_path,
                                 stream: &mut stream,
                                 seq: &mut seq,
-                                replay_cache: &mut replay_cache,
                                 active_commands: &mut active_commands,
                                 recent_commands,
                                 command_event_tx: &command_event_tx,
@@ -413,7 +411,6 @@ struct CommandFrameContext<'a> {
     config_path: &'a Path,
     stream: &'a mut NoiseFrameStream<TcpStream>,
     seq: &'a mut u64,
-    replay_cache: &'a mut PrivilegeReplayCache,
     active_commands: &'a mut HashMap<uuid::Uuid, ActiveCommand>,
     recent_commands: &'a mut RecentCommandCache,
     command_event_tx: &'a mpsc::Sender<CommandExecutionEvent>,
@@ -514,7 +511,6 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         config_path,
         stream,
         seq,
-        replay_cache,
         active_commands,
         recent_commands,
         command_event_tx,
@@ -603,23 +599,6 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         *seq += 1;
         return Ok(false);
     }
-    let authorization = authorize_job(config, &request, replay_cache);
-    if let Err(message) = authorization {
-        warn!(
-            job_id = %request.job_id,
-            reason = %message,
-            "rejected command frame"
-        );
-        let ack = JobAck {
-            job_id: request.job_id,
-            accepted: false,
-            message,
-        };
-        send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
-        *seq += 1;
-        return Ok(false);
-    }
-
     let ack = JobAck {
         job_id: request.job_id,
         accepted: true,

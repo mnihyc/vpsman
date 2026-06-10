@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
@@ -90,10 +91,12 @@ pub(crate) fn submit_privileged_operation(
         "/api/v1/jobs",
         request.token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": request.command_label,
             "argv": [],
             "operation": request.operation,
             "selector_expression": selector_expression,
+            "target_client_ids": target_ids,
             "privileged": true,
             "destructive": false,
             "confirmed": request.confirmed,

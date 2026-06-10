@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Clock3, Pencil, Play, RefreshCcw, Save, Trash2 } from "lucide-react";
+import {
+  Clock3,
+  Pencil,
+  Play,
+  RefreshCcw,
+  Save,
+  Target,
+  Trash2,
+} from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -24,9 +32,10 @@ import type {
   CreateScheduleRequest,
   DeferScheduleRequest,
   JobOperation,
-  ScheduleRecord,
   SchedulePrivilegeMutationRequest,
+  ScheduleRecord,
   UpdateScheduleRequest,
+  UpdateScheduleTargetsRequest,
 } from "../types";
 import {
   formatCompactTime,
@@ -52,6 +61,7 @@ export function SchedulesPanel({
   onOpenPrivilegeUnlock,
   onRefresh,
   onUpdateSchedule,
+  onUpdateScheduleTargets,
   privilegeMaterial,
   schedules,
 }: {
@@ -62,13 +72,32 @@ export function SchedulesPanel({
   loading: boolean;
   onApplyScheduleNow: (scheduleId: string) => Promise<void>;
   onCreateSchedule: (request: CreateScheduleRequest) => Promise<void>;
-  onDeferSchedule: (scheduleId: string, request: DeferScheduleRequest) => Promise<void>;
-  onDeleteSchedule: (scheduleId: string, request: SchedulePrivilegeMutationRequest) => Promise<void>;
-  onDisableSchedule: (scheduleId: string, request: SchedulePrivilegeMutationRequest) => Promise<void>;
-  onEnableSchedule: (scheduleId: string, request: SchedulePrivilegeMutationRequest) => Promise<void>;
+  onDeferSchedule: (
+    scheduleId: string,
+    request: DeferScheduleRequest,
+  ) => Promise<void>;
+  onDeleteSchedule: (
+    scheduleId: string,
+    request: SchedulePrivilegeMutationRequest,
+  ) => Promise<void>;
+  onDisableSchedule: (
+    scheduleId: string,
+    request: SchedulePrivilegeMutationRequest,
+  ) => Promise<void>;
+  onEnableSchedule: (
+    scheduleId: string,
+    request: SchedulePrivilegeMutationRequest,
+  ) => Promise<void>;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => Promise<void>;
-  onUpdateSchedule: (scheduleId: string, request: UpdateScheduleRequest) => Promise<void>;
+  onUpdateSchedule: (
+    scheduleId: string,
+    request: UpdateScheduleRequest,
+  ) => Promise<void>;
+  onUpdateScheduleTargets: (
+    scheduleId: string,
+    request: UpdateScheduleTargetsRequest,
+  ) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
   schedules: ScheduleRecord[];
 }) {
@@ -87,9 +116,17 @@ export function SchedulesPanel({
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null);
-  const [scheduleAction, setScheduleAction] = useState<ScheduleAction | null>(null);
-  const [deferDraft, setDeferDraft] = useState<{ schedule: ScheduleRecord; deferredUntil: string; reason: string } | null>(null);
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(
+    null,
+  );
+  const [scheduleAction, setScheduleAction] = useState<ScheduleAction | null>(
+    null,
+  );
+  const [deferDraft, setDeferDraft] = useState<{
+    schedule: ScheduleRecord;
+    deferredUntil: string;
+    reason: string;
+  } | null>(null);
 
   const argv = useMemo(() => {
     try {
@@ -99,32 +136,32 @@ export function SchedulesPanel({
     }
   }, [commandText]);
   const selectedTemplate = useMemo(
-    () => commandTemplates.find((template) => template.id === selectedTemplateId) ?? null,
+    () =>
+      commandTemplates.find((template) => template.id === selectedTemplateId) ??
+      null,
     [commandTemplates, selectedTemplateId],
   );
   const scheduleOperation = useMemo<JobOperation | null>(
-    () => selectedTemplate?.operation ?? (argv.length > 0 ? { type: "shell", argv, pty: false } : null),
+    () =>
+      selectedTemplate?.operation ??
+      (argv.length > 0 ? { type: "shell", argv, pty: false } : null),
     [argv, selectedTemplate],
   );
   const selectorParse = useMemo(
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
-  const nextRuns = useMemo(() => previewNextCronRuns(cronExpr, 5), [cronExpr]);
-  const selectedTargetCount = useMemo(
-    () =>
-      selectorParse.error
-        ? 0
-        : agentsMatchingExpression(agents, selectorExpression).length,
-    [agents, selectorExpression, selectorParse.error],
-  );
   const selectedTargetIds = useMemo(
     () =>
       selectorParse.error
         ? []
-        : agentsMatchingExpression(agents, selectorExpression).map((agent) => agent.id),
+        : agentsMatchingExpression(agents, selectorExpression).map(
+            (agent) => agent.id,
+          ),
     [agents, selectorExpression, selectorParse.error],
   );
+  const selectedTargetCount = selectedTargetIds.length;
+  const nextRuns = useMemo(() => previewNextCronRuns(cronExpr, 5), [cronExpr]);
   const ready =
     name.trim().length > 0 &&
     scheduleOperation !== null &&
@@ -136,32 +173,83 @@ export function SchedulesPanel({
     actionError ??
     error ??
     (loading ? "Loading" : `${schedules.length} schedules`);
+
+  function resolvedTargetIdsForSchedule(schedule: ScheduleRecord): string[] {
+    if (!schedule.selector_expression.trim()) {
+      return [];
+    }
+    const parsed = parseSearchExpression(schedule.selector_expression);
+    if (parsed.error) {
+      return [];
+    }
+    return agentsMatchingExpression(agents, schedule.selector_expression).map(
+      (agent) => agent.id,
+    );
+  }
+
+  function scheduleTargetDrifted(schedule: ScheduleRecord): boolean {
+    const currentIds = resolvedTargetIdsForSchedule(schedule);
+    return currentIds.length > 0 && !sameStringSet(fixedTargetIds(schedule), currentIds);
+  }
+
   const confirmationItems = [
     { label: "Name", value: name.trim() || "-" },
-    { label: "Selector", value: selectorExpression.trim() || "-" },
-    { label: "Targets", value: `${selectedTargetCount} resolved` },
-    { label: "Operation", value: selectedTemplate ? selectedTemplate.name : operationSummary(scheduleOperation) },
+    { label: "Audit selector", value: selectorExpression.trim() || "-" },
+    {
+      label: "Fixed targets",
+      value: `${selectedTargetCount} resolved and saved`,
+    },
+    {
+      label: "Target preview",
+      value: selectedTargetIds.slice(0, 8).join(", ") || "-",
+    },
+    {
+      label: "Operation",
+      value: selectedTemplate
+        ? selectedTemplate.name
+        : operationSummary(scheduleOperation),
+    },
     { label: "Cron", value: `${cronExpr.trim()} UTC` },
-    { label: "Next", value: nextRuns[0] ? formatCompactTime(nextRuns[0]) : "invalid" },
+    {
+      label: "Next",
+      value: nextRuns[0] ? formatCompactTime(nextRuns[0]) : "invalid",
+    },
     { label: "Catch-up", value: formatCatchUpPolicy(catchUpPolicy) },
-    { label: "Retry", value: formatInterval(clampInteger(retryDelaySecs, 1, 86_400)) },
+    {
+      label: "Retry",
+      value: formatInterval(clampInteger(retryDelaySecs, 1, 86_400)),
+    },
     { label: "State", value: enabled ? "Enabled" : "Disabled" },
   ];
+
   const scheduleColumns = useMemo<ConsoleDataGridColumn<ScheduleRecord>[]>(
     () => [
       {
         id: "actions",
         header: "",
-        size: 210,
-        minSize: 180,
+        size: 330,
+        minSize: 300,
         cell: (schedule) => (
           <div className="rowActionGroup">
-            <button aria-label={`Edit ${schedule.name}`} onClick={() => editSchedule(schedule)} type="button">
+            <button
+              aria-label={`Edit ${schedule.name}`}
+              onClick={() => editSchedule(schedule)}
+              type="button"
+            >
               <Pencil size={15} />
             </button>
             <button
-              aria-label={schedule.enabled ? `Disable ${schedule.name}` : `Enable ${schedule.name}`}
-              onClick={() => setScheduleAction({ type: schedule.enabled ? "disable" : "enable", schedule })}
+              aria-label={
+                schedule.enabled
+                  ? `Disable ${schedule.name}`
+                  : `Enable ${schedule.name}`
+              }
+              onClick={() =>
+                setScheduleAction({
+                  type: schedule.enabled ? "disable" : "enable",
+                  schedule,
+                })
+              }
               type="button"
             >
               {schedule.enabled ? "Disable" : "Enable"}
@@ -174,10 +262,34 @@ export function SchedulesPanel({
             >
               <Play size={15} />
             </button>
-            <button aria-label={`Defer ${schedule.name}`} onClick={() => startDefer(schedule)} type="button">
+            <button
+              aria-label={`Update fixed targets for ${schedule.name}`}
+              disabled={!scheduleTargetDrifted(schedule)}
+              onClick={() =>
+                setScheduleAction({
+                  type: "targetUpdate",
+                  schedule,
+                  selectorExpression: schedule.selector_expression,
+                  targetClientIds: resolvedTargetIdsForSchedule(schedule),
+                })
+              }
+              type="button"
+            >
+              <Target size={15} />
+              Update targets
+            </button>
+            <button
+              aria-label={`Defer ${schedule.name}`}
+              onClick={() => startDefer(schedule)}
+              type="button"
+            >
               <Clock3 size={15} />
             </button>
-            <button aria-label={`Delete ${schedule.name}`} onClick={() => setScheduleAction({ type: "delete", schedule })} type="button">
+            <button
+              aria-label={`Delete ${schedule.name}`}
+              onClick={() => setScheduleAction({ type: "delete", schedule })}
+              type="button"
+            >
               <Trash2 size={15} />
             </button>
           </div>
@@ -200,25 +312,32 @@ export function SchedulesPanel({
       {
         id: "operation",
         header: "Operation",
-        size: 100,
-        minSize: 90,
+        size: 110,
+        minSize: 95,
         sortValue: (schedule) => schedule.command_type,
         searchValue: (schedule) => schedule.command_type,
         cell: (schedule) => schedule.command_type,
       },
       {
         id: "targets",
-        header: "Targets",
-        size: 85,
-        minSize: 75,
-        align: "end",
-        sortValue: (schedule) => schedule.selector_expression,
-        searchValue: (schedule) => schedule.selector_expression,
-        cell: (schedule) => (
-          <span className="monoCell compactSelectorText">
-            {schedule.selector_expression}
-          </span>
-        ),
+        header: "Fixed targets",
+        size: 190,
+        minSize: 170,
+        sortValue: (schedule) => fixedTargetIds(schedule).length,
+        searchValue: (schedule) =>
+          `${schedule.selector_expression} ${fixedTargetIds(schedule).join(" ")}`,
+        cell: (schedule) => {
+          const fixedCount = fixedTargetIds(schedule).length;
+          const drifted = scheduleTargetDrifted(schedule);
+          return (
+            <span className="historyPrimary">
+              <strong>{fixedCount} VPSs</strong>
+              <small className="mutedText">
+                {drifted ? "target update available" : "selector aligned"}
+              </small>
+            </span>
+          );
+        },
       },
       {
         id: "cron",
@@ -286,7 +405,7 @@ export function SchedulesPanel({
         ),
       },
     ],
-    [commandTemplates],
+    [agents, commandTemplates],
   );
 
   async function submitSchedule(event: FormEvent<HTMLFormElement>) {
@@ -336,6 +455,7 @@ export function SchedulesPanel({
         name: name.trim(),
         operation: scheduleOperation,
         selector_expression: selectorExpression.trim(),
+        target_client_ids: selectedTargetIds,
         cron_expr: cronExpr.trim(),
         timezone: "UTC",
         enabled,
@@ -359,16 +479,24 @@ export function SchedulesPanel({
 
   function editSchedule(schedule: ScheduleRecord) {
     const matchingTemplate = commandTemplates.find(
-      (template) => JSON.stringify(template.operation) === JSON.stringify(schedule.operation),
+      (template) =>
+        JSON.stringify(template.operation) ===
+        JSON.stringify(schedule.operation),
     );
     if (schedule.operation.type !== "shell" && !matchingTemplate) {
-      setActionError("Non-shell schedules can be modified from their command template");
+      setActionError(
+        "Non-shell schedules can be modified from their command template",
+      );
       return;
     }
     setEditingScheduleId(schedule.id);
     setName(schedule.name);
     setSelectedTemplateId(matchingTemplate?.id ?? "");
-    setCommandText(schedule.operation.type === "shell" ? operationToCommandText(schedule.operation) : "");
+    setCommandText(
+      schedule.operation.type === "shell"
+        ? operationToCommandText(schedule.operation)
+        : "",
+    );
     setCronExpr(schedule.cron_expr);
     setEnabled(schedule.enabled);
     setCatchUpPolicy(schedule.catch_up_policy);
@@ -398,14 +526,41 @@ export function SchedulesPanel({
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required");
       }
-      const enabledForIntent =
-        action.type === "enable" ? true : action.type === "disable" || action.type === "delete" ? false : action.schedule.enabled;
-      const deferredUntil = action.type === "defer" ? action.deferredUntil : action.schedule.deferred_until;
-      const privilegeAssertion = await buildSchedulePrivilege(action.schedule, actionName(action), enabledForIntent, deferredUntil, action.type === "delete");
+      const nextEnabled =
+        action.type === "enable"
+          ? true
+          : action.type === "disable" || action.type === "delete"
+            ? false
+            : action.schedule.enabled;
+      const deferredUntil =
+        action.type === "defer"
+          ? action.deferredUntil
+          : action.schedule.deferred_until;
+      const targetIds =
+        action.type === "targetUpdate"
+          ? action.targetClientIds
+          : fixedTargetIds(action.schedule);
+      const selectorExpressionForIntent =
+        action.type === "targetUpdate"
+          ? action.selectorExpression
+          : action.schedule.selector_expression;
+      const privilegeAssertion = await buildSchedulePrivilege(
+        action.schedule,
+        actionName(action),
+        nextEnabled,
+        deferredUntil,
+        action.type === "delete",
+        targetIds,
+        selectorExpressionForIntent,
+      );
       if (action.type === "enable") {
-        await onEnableSchedule(action.schedule.id, { privilege_assertion: privilegeAssertion });
+        await onEnableSchedule(action.schedule.id, {
+          privilege_assertion: privilegeAssertion,
+        });
       } else if (action.type === "disable") {
-        await onDisableSchedule(action.schedule.id, { privilege_assertion: privilegeAssertion });
+        await onDisableSchedule(action.schedule.id, {
+          privilege_assertion: privilegeAssertion,
+        });
       } else if (action.type === "defer") {
         await onDeferSchedule(action.schedule.id, {
           deferred_until: action.deferredUntil,
@@ -413,7 +568,15 @@ export function SchedulesPanel({
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "delete") {
-        await onDeleteSchedule(action.schedule.id, { privilege_assertion: privilegeAssertion });
+        await onDeleteSchedule(action.schedule.id, {
+          privilege_assertion: privilegeAssertion,
+        });
+      } else if (action.type === "targetUpdate") {
+        await onUpdateScheduleTargets(action.schedule.id, {
+          selector_expression: action.selectorExpression,
+          target_client_ids: action.targetClientIds,
+          privilege_assertion: privilegeAssertion,
+        });
       }
     });
   }
@@ -424,14 +587,15 @@ export function SchedulesPanel({
     nextEnabled: boolean,
     deferredUntil: string | null,
     deleted: boolean,
+    targetIds: string[],
+    selectorExpressionForIntent: string,
   ) {
     if (!privilegeMaterial) {
       onOpenPrivilegeUnlock();
       throw new Error("Privilege unlock is required");
     }
-    const resolvedTargets = agentsMatchingExpression(agents, schedule.selector_expression).map((agent) => agent.id);
-    if (!resolvedTargets.length) {
-      throw new Error("Schedule target selector resolves no VPSs");
+    if (!targetIds.length) {
+      throw new Error("Schedule has no fixed VPS targets");
     }
     const operationHash = await operationPayloadHashHex(schedule.operation);
     return buildPrivilegeAssertion({
@@ -441,8 +605,8 @@ export function SchedulesPanel({
         name: schedule.name,
         commandType: schedule.command_type,
         operationPayloadHash: operationHash,
-        selectorExpression: schedule.selector_expression,
-        resolvedTargets,
+        selectorExpression: selectorExpressionForIntent,
+        resolvedTargets: targetIds,
         cronExpr: schedule.cron_expr,
         timezone: schedule.timezone,
         enabled: nextEnabled,
@@ -459,13 +623,64 @@ export function SchedulesPanel({
 
   function selectCommandTemplate(templateId: string) {
     setSelectedTemplateId(templateId);
-    const template = commandTemplates.find((candidate) => candidate.id === templateId);
-    if (!template) {
-      return;
-    }
-    if (!name.trim()) {
+    const template = commandTemplates.find(
+      (candidate) => candidate.id === templateId,
+    );
+    if (template && !name.trim()) {
       setName(`${template.name} schedule`);
     }
+  }
+
+  function actionDetail(action: ScheduleAction): string {
+    if (action.type === "applyNow") {
+      return "Dispatches a normal job from the saved fixed target snapshot without changing the next scheduled run.";
+    }
+    if (action.type === "defer") {
+      return `Pauses automatic execution until ${formatCompactTime(action.deferredUntil)}.`;
+    }
+    if (action.type === "targetUpdate") {
+      return "Replaces the saved fixed target snapshot with the audit selector's current resolution. Future runs use the new fixed target list.";
+    }
+    return `${actionConfirmLabel(action.type)} ${action.schedule.name}.`;
+  }
+
+  function actionConfirmationItems(action: ScheduleAction) {
+    const items = [
+      {
+        label: "Schedule",
+        value: `${action.schedule.name} (${shortId(action.schedule.id)})`,
+      },
+      { label: "Operation", value: action.schedule.command_type },
+      {
+        label: "Fixed targets",
+        value: `${fixedTargetIds(action.schedule).length} saved`,
+      },
+      {
+        label: "Audit selector",
+        value: action.schedule.selector_expression || "-",
+      },
+      {
+        label: "State",
+        value: action.schedule.enabled ? "enabled" : "disabled",
+      },
+    ];
+    if (action.type === "targetUpdate") {
+      items.push({
+        label: "Selector resolves now",
+        value: `${action.targetClientIds.length} VPSs`,
+      });
+      items.push({
+        label: "Target preview",
+        value: action.targetClientIds.slice(0, 8).join(", ") || "-",
+      });
+    }
+    if (action.type === "defer") {
+      items.push({ label: "Deferred until", value: action.deferredUntil });
+      if (action.reason.trim()) {
+        items.push({ label: "Reason", value: action.reason.trim() });
+      }
+    }
+    return items;
   }
 
   useEffect(() => {
@@ -498,7 +713,16 @@ export function SchedulesPanel({
                 void copyText(rows.map((schedule) => schedule.id).join("\n")),
             },
             {
-              label: "Copy target selectors",
+              label: "Copy fixed target IDs",
+              onSelect: (rows) =>
+                void copyText(
+                  rows
+                    .flatMap((schedule) => fixedTargetIds(schedule))
+                    .join("\n"),
+                ),
+            },
+            {
+              label: "Copy audit selectors",
               onSelect: (rows) =>
                 void copyText(
                   rows
@@ -519,7 +743,10 @@ export function SchedulesPanel({
           renderExpandedRow={(schedule) => (
             <div className="gridDetailLine">
               <strong>{schedule.command_type}</strong>
-              <span className="monoCell">{schedule.selector_expression}</span>
+              <span>{fixedTargetIds(schedule).length} fixed targets</span>
+              <span className="monoCell">
+                audit: {schedule.selector_expression || "none"}
+              </span>
               <span>
                 last{" "}
                 {schedule.last_run_at
@@ -549,7 +776,12 @@ export function SchedulesPanel({
               <span>Defer until</span>
               <input
                 aria-label="Schedule defer until"
-                onChange={(event) => setDeferDraft({ ...deferDraft, deferredUntil: event.target.value })}
+                onChange={(event) =>
+                  setDeferDraft({
+                    ...deferDraft,
+                    deferredUntil: event.target.value,
+                  })
+                }
                 type="datetime-local"
                 value={deferDraft.deferredUntil}
               />
@@ -558,21 +790,33 @@ export function SchedulesPanel({
               <span>Reason</span>
               <input
                 aria-label="Schedule defer reason"
-                onChange={(event) => setDeferDraft({ ...deferDraft, reason: event.target.value })}
+                onChange={(event) =>
+                  setDeferDraft({ ...deferDraft, reason: event.target.value })
+                }
                 value={deferDraft.reason}
               />
             </label>
-            <button className="primaryAction" disabled={pending || !deferDraft.deferredUntil} type="submit">
+            <button
+              className="primaryAction"
+              disabled={pending || !deferDraft.deferredUntil}
+              type="submit"
+            >
               <Clock3 size={17} />
               Defer
             </button>
-            <button className="secondaryAction" onClick={() => setDeferDraft(null)} type="button">
+            <button
+              className="secondaryAction"
+              onClick={() => setDeferDraft(null)}
+              type="button"
+            >
               Cancel
             </button>
           </form>
         )}
         <ConfirmationPrompt
-          confirmLabel={scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Confirm"}
+          confirmLabel={
+            scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Confirm"
+          }
           detail={scheduleAction ? actionDetail(scheduleAction) : ""}
           items={scheduleAction ? actionConfirmationItems(scheduleAction) : []}
           onCancel={() => setScheduleAction(null)}
@@ -587,7 +831,11 @@ export function SchedulesPanel({
           }}
           open={scheduleAction !== null}
           pending={pending}
-          title={scheduleAction ? actionTitle(scheduleAction.type) : "Confirm schedule action"}
+          title={
+            scheduleAction
+              ? actionTitle(scheduleAction.type)
+              : "Confirm schedule action"
+          }
         />
       </section>
 
@@ -596,7 +844,7 @@ export function SchedulesPanel({
           defaultOpen={false}
           forceOpenKey={editingScheduleId}
           storageKey="vpsman.panel.schedules.create"
-          summary={`${selectedTargetCount} selected targets`}
+          summary={`${selectedTargetCount} fixed targets after confirmation`}
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
           <form className="dispatchForm" onSubmit={submitSchedule}>
@@ -630,7 +878,11 @@ export function SchedulesPanel({
                 disabled={selectedTemplate !== null}
                 onChange={(event) => setCommandText(event.target.value)}
                 rows={3}
-                value={selectedTemplate ? operationSummary(selectedTemplate.operation) : commandText}
+                value={
+                  selectedTemplate
+                    ? operationSummary(selectedTemplate.operation)
+                    : commandText
+                }
               />
             </label>
             <div className="dispatchControls">
@@ -709,8 +961,8 @@ export function SchedulesPanel({
             </div>
             <div className="targetSelector">
               <div className="targetSelectorHeader">
-                <strong>Targets</strong>
-                <span>{selectedTargetCount} matching VPSs</span>
+                <strong>Audit selector</strong>
+                <span>{selectedTargetCount} VPSs will be fixed on save</span>
               </div>
               <SearchExpressionInput
                 agents={agents}
@@ -720,13 +972,28 @@ export function SchedulesPanel({
                 placeholder="id:edge-sfo-01 || provider:hetzner && country:US"
                 showMatchCount
                 value={selectorExpression}
-                verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-                verificationMessage={selectorParse.error ?? (selectorExpression.trim() ? `${selectedTargetCount}/${agents.length}` : "no selector")}
+                verification={
+                  selectorParse.error
+                    ? "invalid"
+                    : selectorExpression.trim()
+                      ? "valid"
+                      : "neutral"
+                }
+                verificationMessage={
+                  selectorParse.error ??
+                  (selectorExpression.trim()
+                    ? `${selectedTargetCount}/${agents.length}`
+                    : "no selector")
+                }
               />
             </div>
             <div className="schedulePreview">
               <strong>Next runs</strong>
-              <span>{nextRuns.length ? "UTC schedule, displayed in browser timezone" : "Invalid or unsupported cron expression"}</span>
+              <span>
+                {nextRuns.length
+                  ? "UTC schedule, displayed in browser timezone"
+                  : "Invalid or unsupported cron expression"}
+              </span>
               <div className="targetChipList">
                 {nextRuns.map((run) => (
                   <span className="targetChip" key={run}>
@@ -735,7 +1002,10 @@ export function SchedulesPanel({
                 ))}
               </div>
               <small>
-                {selectedTargetCount} targets; {selectedTemplate ? selectedTemplate.name : operationSummary(scheduleOperation)}
+                {selectedTargetCount} fixed targets from current confirmation;{" "}
+                {selectedTemplate
+                  ? selectedTemplate.name
+                  : operationSummary(scheduleOperation)}
               </small>
             </div>
             {!confirmationOpen && (
@@ -749,14 +1019,20 @@ export function SchedulesPanel({
               </button>
             )}
             <ConfirmationPrompt
-              confirmLabel={editingScheduleId ? "Update schedule" : "Save schedule"}
-              detail={`Recurring ${selectedTemplate ? selectedTemplate.name : operationSummary(scheduleOperation)} on ${vpsCountLabel(selectedTargetCount)}.`}
+              confirmLabel={
+                editingScheduleId ? "Update schedule" : "Save schedule"
+              }
+              detail={`Recurring ${selectedTemplate ? selectedTemplate.name : operationSummary(scheduleOperation)} on ${vpsCountLabel(selectedTargetCount)}. The current target preview is saved as a fixed snapshot; the selector is retained for audit and future manual Target update.`}
               items={confirmationItems}
               onCancel={() => setConfirmationOpen(false)}
               onConfirm={() => void saveScheduleNow()}
               open={confirmationOpen}
               pending={pending}
-              title={editingScheduleId ? "Confirm schedule update" : "Confirm schedule"}
+              title={
+                editingScheduleId
+                  ? "Confirm schedule update"
+                  : "Confirm schedule"
+              }
             />
           </form>
         </ConsoleCollapsibleSection>
@@ -783,8 +1059,19 @@ type ScheduleAction =
   | { type: "enable"; schedule: ScheduleRecord }
   | { type: "disable"; schedule: ScheduleRecord }
   | { type: "applyNow"; schedule: ScheduleRecord }
+  | {
+      type: "targetUpdate";
+      schedule: ScheduleRecord;
+      selectorExpression: string;
+      targetClientIds: string[];
+    }
   | { type: "delete"; schedule: ScheduleRecord }
-  | { type: "defer"; schedule: ScheduleRecord; deferredUntil: string; reason: string };
+  | {
+      type: "defer";
+      schedule: ScheduleRecord;
+      deferredUntil: string;
+      reason: string;
+    };
 
 function actionName(action: ScheduleAction): string {
   switch (action.type) {
@@ -794,6 +1081,8 @@ function actionName(action: ScheduleAction): string {
       return "schedule.disable";
     case "delete":
       return "schedule.delete";
+    case "targetUpdate":
+      return "schedule.targets.update";
     case "defer":
       return "schedule.defer";
     case "applyNow":
@@ -811,6 +1100,8 @@ function actionTitle(type: ScheduleAction["type"]): string {
       return "Confirm schedule defer";
     case "applyNow":
       return "Confirm apply now";
+    case "targetUpdate":
+      return "Confirm target update";
     case "delete":
       return "Confirm schedule delete";
   }
@@ -826,35 +1117,28 @@ function actionConfirmLabel(type: ScheduleAction["type"]): string {
       return "Defer";
     case "applyNow":
       return "Apply now";
+    case "targetUpdate":
+      return "Update targets";
     case "delete":
       return "Delete";
   }
 }
 
-function actionDetail(action: ScheduleAction): string {
-  if (action.type === "applyNow") {
-    return "Dispatches a normal job from the saved schedule without changing the next scheduled run.";
-  }
-  if (action.type === "defer") {
-    return `Pauses automatic execution until ${formatCompactTime(action.deferredUntil)}.`;
-  }
-  return `${actionConfirmLabel(action.type)} ${action.schedule.name}.`;
+function fixedTargetIds(schedule: ScheduleRecord): string[] {
+  return Array.isArray(schedule.target_client_ids)
+    ? schedule.target_client_ids
+    : [];
 }
 
-function actionConfirmationItems(action: ScheduleAction) {
-  const items = [
-    { label: "Schedule", value: `${action.schedule.name} (${shortId(action.schedule.id)})` },
-    { label: "Operation", value: action.schedule.command_type },
-    { label: "Targets", value: action.schedule.selector_expression },
-    { label: "State", value: action.schedule.enabled ? "enabled" : "disabled" },
-  ];
-  if (action.type === "defer") {
-    items.push({ label: "Deferred until", value: action.deferredUntil });
-    if (action.reason.trim()) {
-      items.push({ label: "Reason", value: action.reason.trim() });
-    }
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
   }
-  return items;
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.every(
+    (value, index) => value === normalizedRight[index],
+  );
 }
 
 function operationToCommandText(operation: JobOperation): string {
@@ -920,10 +1204,17 @@ function previewNextCronRuns(expr: string, count: number): string[] {
     const hour = cursor.getUTCHours();
     const dom = cursor.getUTCDate();
     const dow = cursor.getUTCDay();
-    const dowMatches = dowAny || dowValues?.has(dow) || (dow === 0 && dowValues?.has(7));
+    const dowMatches =
+      dowAny || dowValues?.has(dow) || (dow === 0 && dowValues?.has(7));
     const domMatches = domAny || domValues?.has(dom);
-    const dayMatches = domAny || dowAny ? domMatches && dowMatches : domMatches || dowMatches;
-    if (months.has(month) && hours.has(hour) && minutes.has(minute) && dayMatches) {
+    const dayMatches =
+      domAny || dowAny ? domMatches && dowMatches : domMatches || dowMatches;
+    if (
+      months.has(month) &&
+      hours.has(hour) &&
+      minutes.has(minute) &&
+      dayMatches
+    ) {
       result.push(cursor.toISOString());
     }
     cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
@@ -931,7 +1222,11 @@ function previewNextCronRuns(expr: string, count: number): string[] {
   return result;
 }
 
-function parseCronField(expr: string, min: number, max: number): Set<number> | null {
+function parseCronField(
+  expr: string,
+  min: number,
+  max: number,
+): Set<number> | null {
   const values = new Set<number>();
   for (const part of expr.split(",")) {
     if (!part) {
@@ -955,7 +1250,13 @@ function parseCronField(expr: string, min: number, max: number): Set<number> | n
       start = Number(rangePart);
       end = start;
     }
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < min || end > max || start > end) {
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < min ||
+      end > max ||
+      start > end
+    ) {
       return null;
     }
     for (let value = start; value <= end; value += step) {
@@ -999,7 +1300,9 @@ function vpsCountLabel(count: number): string {
 
 function blurActiveElement() {
   if (document.activeElement instanceof HTMLElement) {
-    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+    document.activeElement.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+    );
     document.activeElement.blur();
   }
 }

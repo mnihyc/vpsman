@@ -5,6 +5,7 @@ CREATE TABLE schedules (
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     operation JSONB NOT NULL,
     selector_expression TEXT NOT NULL,
+    target_client_ids TEXT[] NOT NULL,
     cron_expr TEXT NOT NULL DEFAULT '0 * * * *',
     timezone TEXT NOT NULL DEFAULT 'UTC',
     next_run_at TIMESTAMPTZ NOT NULL,
@@ -31,7 +32,8 @@ CREATE TABLE schedules (
     CONSTRAINT schedules_failure_count_check
         CHECK (failure_count >= 0),
     CONSTRAINT schedules_timezone_utc CHECK (timezone = 'UTC'),
-    CONSTRAINT schedules_cron_expr_not_empty CHECK (length(trim(cron_expr)) > 0)
+    CONSTRAINT schedules_cron_expr_not_empty CHECK (length(trim(cron_expr)) > 0),
+    CONSTRAINT schedules_target_client_ids_nonempty CHECK (cardinality(target_client_ids) BETWEEN 1 AND 500)
 );
 
 CREATE INDEX schedules_due_idx
@@ -56,7 +58,8 @@ CREATE TABLE jobs (
     payload_hash TEXT NOT NULL,
     operation JSONB,
     source_schedule_id UUID REFERENCES schedules(id),
-    idempotency_key TEXT,
+    request_fingerprint TEXT NOT NULL,
+    timeout_secs BIGINT NOT NULL DEFAULT 30,
     reconnect_policy JSONB NOT NULL DEFAULT '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ
@@ -65,10 +68,6 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_scheduled_source_idx
     ON jobs (status, source_schedule_id)
     WHERE source_schedule_id IS NOT NULL;
-
-CREATE UNIQUE INDEX jobs_actor_idempotency_key_idx
-    ON jobs (actor_id, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
 
 ALTER TABLE jobs
   ADD CONSTRAINT jobs_status_common_check CHECK (status IN (
@@ -94,8 +93,16 @@ CREATE TABLE job_targets (
     exit_code INTEGER,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
+    dispatch_attempts INTEGER NOT NULL DEFAULT 0,
+    dispatch_lease_until TIMESTAMPTZ,
+    last_dispatch_error TEXT,
     PRIMARY KEY (job_id, client_id)
 );
+
+CREATE INDEX job_targets_dispatch_due_idx
+    ON job_targets (status, dispatch_lease_until, job_id, client_id)
+    WHERE completed_at IS NULL
+      AND status IN ('queued', 'dispatching');
 
 ALTER TABLE job_targets
   ADD CONSTRAINT job_targets_status_common_check CHECK (status IN (

@@ -4,7 +4,6 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::CommandEnvelope;
 
 use crate::{
     model::{
@@ -114,9 +113,7 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         note,
                         created_at::text AS created_at
                     FROM restore_plans
@@ -187,9 +184,7 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         note,
                         created_at::text AS created_at
                     FROM restore_plans
@@ -241,9 +236,7 @@ impl Repository {
                         include_config,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
@@ -266,11 +259,10 @@ impl Repository {
         request: &CreateRestorePlanRequest,
         source_backup: &BackupRequestView,
         payload_hash: &str,
-        envelope: &CommandEnvelope,
+        command_scope: &str,
         operator: &AuthContext,
         status: RestorePlanStatus,
     ) -> Result<RestorePlanView> {
-        let signed_command_expires_unix = None;
         let view = RestorePlanView {
             id: Uuid::new_v4(),
             actor_id: Some(operator.operator.id),
@@ -282,9 +274,7 @@ impl Repository {
             destination_root: request.destination_root.clone(),
             status: status.as_str().to_string(),
             payload_hash: payload_hash.to_string(),
-            signed_command_scope: envelope.scope.clone(),
-            signed_command_id: Some(envelope.command_id),
-            signed_command_expires_unix,
+            command_scope: command_scope.to_string(),
             note: request.note.clone(),
             created_at: unix_now().to_string(),
         };
@@ -313,12 +303,10 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         note
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -332,9 +320,7 @@ impl Repository {
                 .bind(&view.destination_root)
                 .bind(&view.status)
                 .bind(&view.payload_hash)
-                .bind(&view.signed_command_scope)
-                .bind(view.signed_command_id)
-                .bind(signed_command_expires_unix.map(|value| value as i64))
+                .bind(&view.command_scope)
                 .bind(&view.note)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -413,9 +399,6 @@ impl Repository {
 }
 
 fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> {
-    let signed_command_expires_unix = row
-        .try_get::<Option<i64>, _>("signed_command_expires_unix")?
-        .map(|value| value.max(0) as u64);
     let status: String = row.try_get("status")?;
     Ok(RestorePlanView {
         id: row.try_get("id")?,
@@ -430,9 +413,7 @@ fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> 
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
         payload_hash: row.try_get("payload_hash")?,
-        signed_command_scope: row.try_get("signed_command_scope")?,
-        signed_command_id: row.try_get("signed_command_id")?,
-        signed_command_expires_unix,
+        command_scope: row.try_get("command_scope")?,
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
@@ -469,9 +450,7 @@ fn restore_plan_metadata(
         "destination_root": &view.destination_root,
         "status": &view.status,
         "payload_hash": &view.payload_hash,
-        "signed_command_scope": &view.signed_command_scope,
-        "signed_command_id": view.signed_command_id,
-        "signed_command_expires_unix": view.signed_command_expires_unix,
+        "command_scope": &view.command_scope,
         "confirmed": confirmed,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,

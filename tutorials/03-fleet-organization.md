@@ -70,7 +70,10 @@ cargo run -p vpsctl -- fleet-alerts --client-id edge-01 --limit 20
 ```
 
 The evidence field includes the threshold that fired. Use this to adjust the
-policy deliberately instead of suppressing useful warnings.
+policy deliberately instead of suppressing useful warnings. In the panel, active
+VPS alerts are shown in a dense Fleet alerts table with search, pagination,
+selection, expandable evidence, and bulk acknowledge, mute, escalate, or clear
+actions for daily fleet triage.
 
 Triage an alert without changing the detection policy:
 
@@ -111,7 +114,10 @@ cargo run -p vpsctl -- fleet-alert-policies --scope-kind tag --scope-value edge
 ```
 
 Scoped policies cascade from global to provider, tag, and client matches.
-Higher-priority matching records override earlier values within their scope.
+Higher-priority matching records override earlier values within their scope. In
+the panel these are managed through the Alert policy CRUD table, so daily edits
+are searchable, paginated, selectable, and reversible through explicit row
+actions rather than scattered cards.
 
 Route alert notifications through scoped channel presets:
 
@@ -179,6 +185,9 @@ retry after the adapter is added.
 Use `audit_log` for immediate durable audit delivery. Other delivery kinds,
 such as `webhook` or a custom adapter name, create queued outbox records for an
 external adapter worker while preserving the same scope/filter/cooldown model.
+The panel uses CRUD tables for notification channels, expression webhook rules,
+and delivery histories so operators can search, select, edit, delete, dispatch,
+dry-run, and rotate retained records from one dense workflow.
 
 In the panel, use the left navigation for fleet, tags, jobs, topology, backups,
 and updates. The UI is meant for repeated operations: filter first, inspect

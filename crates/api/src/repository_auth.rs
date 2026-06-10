@@ -229,6 +229,55 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn operator_by_id(&self, id: Uuid) -> Result<Option<OperatorRecord>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .operators
+                .read()
+                .await
+                .iter()
+                .find(|operator| operator.id == id)
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        username,
+                        password_hash,
+                        role,
+                        scopes,
+                        preferences,
+                        totp_enabled,
+                        totp_secret_ciphertext_hex,
+                        totp_secret_nonce_hex,
+                        totp_secret_salt_hex
+                    FROM operators
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(|row| {
+                    Ok(OperatorRecord {
+                        id: row.try_get("id")?,
+                        username: row.try_get("username")?,
+                        password_hash: row.try_get("password_hash")?,
+                        role: row.try_get("role")?,
+                        scopes: parse_scopes(row.try_get("scopes")?),
+                        preferences: parse_operator_preferences(row.try_get("preferences")?),
+                        totp_enabled: row.try_get("totp_enabled")?,
+                        totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
+                        totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
+                        totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+                    })
+                })
+                .transpose()
+            }
+        }
+    }
+
     pub(crate) async fn operator_by_username(
         &self,
         username: &str,

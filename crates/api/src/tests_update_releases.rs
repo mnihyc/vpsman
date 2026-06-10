@@ -113,7 +113,9 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: "agent_update".to_string(),
@@ -123,7 +125,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
     let state = AppState {
@@ -131,7 +132,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(std::sync::Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -148,13 +148,11 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
 
     assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "rejected_authorization_required");
+    assert_eq!(response.status, "failed");
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs[0].payload_hash, command_hash);
     let audits = repo.list_audit_logs(10).await.unwrap();
-    assert!(audits
-        .iter()
-        .any(|audit| audit.action == "job.rejected_authorization_required"));
+    assert!(audits.iter().any(|audit| audit.action == "job.failed"));
 }
 
 #[tokio::test]
@@ -182,7 +180,6 @@ async fn uploaded_agent_update_artifact_is_hosted_and_sanitized() {
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
         update_artifact_public_base_url: None,
@@ -320,7 +317,6 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
         update_artifact_public_base_url: Some("https://updates.example".to_string()),
@@ -398,7 +394,6 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
         update_artifact_public_base_url: Some("https://updates.example".to_string()),
@@ -520,7 +515,6 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         events: tokio::sync::broadcast::channel(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -665,7 +659,6 @@ fn test_args() -> Args {
         migrations_dir: PathBuf::from("migrations"),
         internal_token: None,
         gateway_control_url: None,
-        server_signing_key_hex: None,
         backup_object_store_dir: None,
         update_object_store_dir: None,
         update_object_endpoint: None,

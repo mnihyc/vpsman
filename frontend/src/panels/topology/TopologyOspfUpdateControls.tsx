@@ -77,7 +77,7 @@ export function TopologyOspfUpdateControls({
     (visibleJobProgress
       ? `OSPF result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
-        ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.accepted_targets} pushed`
+        ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
       : privilegeMaterial
         ? "Ready"
         : "Locked");
@@ -154,6 +154,7 @@ export function TopologyOspfUpdateControls({
       const job = await onCreateJob({
         argv: [],
         selector_expression: selectorExpression,
+        target_client_ids: [endpointTarget],
         command: "network_ospf_cost_update",
         confirmed: true,
         destructive: true,
@@ -172,9 +173,9 @@ export function TopologyOspfUpdateControls({
   async function trackOspfProgress(job: CreateJobResponse, targets: AgentView[]) {
     setLastJobProgress(null);
     setJobProgress({
-      accepted: Math.min(job.accepted_targets, targets.length),
+      accepted: Math.min(job.target_count, targets.length),
       completed: 0,
-      doing: Math.min(job.accepted_targets, targets.length),
+      doing: Math.min(job.target_count, targets.length),
       expected: targets.length,
       failed: 0,
       jobId: job.job_id,
@@ -183,7 +184,7 @@ export function TopologyOspfUpdateControls({
     });
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        acceptedTargets: job.accepted_targets,
+        acceptedTargets: job.target_count,
         onProgress: setJobProgress,
         targets,
       });

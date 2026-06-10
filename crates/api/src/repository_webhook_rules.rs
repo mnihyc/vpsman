@@ -96,10 +96,17 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let mut rules = memory.webhook_rules.write().await;
+                anyhow::ensure!(
+                    !rules.iter().any(|stored| {
+                        stored.name == candidate.name && Some(stored.id) != request.id
+                    }),
+                    "webhook_rule_name_conflict"
+                );
                 let rule = if let Some(stored) = rules
                     .iter_mut()
-                    .find(|stored| stored.name == candidate.name)
+                    .find(|stored| request.id.is_some_and(|id| stored.id == id))
                 {
+                    stored.name = candidate.name.clone();
                     stored.enabled = candidate.enabled;
                     stored.expression = candidate.expression.clone();
                     stored.target = candidate.target.clone();
@@ -137,7 +144,8 @@ impl Repository {
                         actor_id
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (name) DO UPDATE SET
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
                         enabled = EXCLUDED.enabled,
                         expression = EXCLUDED.expression,
                         target = EXCLUDED.target,
@@ -175,6 +183,72 @@ impl Repository {
                 insert_webhook_rule_audit(&mut tx, &rule, operator).await?;
                 tx.commit().await?;
                 Ok(rule)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_webhook_rule(
+        &self,
+        rule_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rules = memory.webhook_rules.write().await;
+                let position = rules
+                    .iter()
+                    .position(|rule| rule.id == rule_id)
+                    .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
+                let rule = rules.remove(position);
+                drop(rules);
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(webhook_rule_audit_with_action(
+                        &rule,
+                        operator,
+                        unix_now().to_string(),
+                        "webhook_rule.deleted",
+                    ));
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    DELETE FROM webhook_rules
+                    WHERE id = $1
+                    RETURNING
+                        id,
+                        name,
+                        enabled,
+                        expression,
+                        target,
+                        body_template,
+                        cooldown_secs,
+                        notes,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(rule_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    anyhow::bail!("webhook_rule_not_found:{rule_id}");
+                };
+                let rule = webhook_rule_from_row(row)?;
+                insert_webhook_rule_audit_with_action(
+                    &mut tx,
+                    &rule,
+                    operator,
+                    "webhook_rule.deleted",
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(())
             }
         }
     }
@@ -661,7 +735,7 @@ pub(crate) fn webhook_rule_from_request(
         "webhook rule notes",
     )?;
     Ok(WebhookRuleView {
-        id: Uuid::new_v4(),
+        id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name.trim().to_string(),
         enabled: request.enabled,
         expression: request.expression.trim().to_string(),
@@ -830,6 +904,15 @@ async fn insert_webhook_rule_audit(
     rule: &WebhookRuleView,
     operator: &AuthContext,
 ) -> Result<()> {
+    insert_webhook_rule_audit_with_action(tx, rule, operator, "webhook.rule_upserted").await
+}
+
+async fn insert_webhook_rule_audit_with_action(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    rule: &WebhookRuleView,
+    operator: &AuthContext,
+    action: &str,
+) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -840,7 +923,7 @@ async fn insert_webhook_rule_audit(
     )
     .bind(Uuid::new_v4())
     .bind(operator.operator.id)
-    .bind("webhook.rule_upserted")
+    .bind(action)
     .bind(format!("webhook_rule:{}", rule.id))
     .bind(webhook_rule_metadata(rule, operator))
     .execute(&mut **tx)
@@ -885,10 +968,19 @@ fn webhook_rule_audit(
     operator: &AuthContext,
     created_at: String,
 ) -> AuditLogView {
+    webhook_rule_audit_with_action(rule, operator, created_at, "webhook.rule_upserted")
+}
+
+fn webhook_rule_audit_with_action(
+    rule: &WebhookRuleView,
+    operator: &AuthContext,
+    created_at: String,
+    action: &str,
+) -> AuditLogView {
     AuditLogView {
         id: Uuid::new_v4(),
         actor_id: Some(operator.operator.id),
-        action: "webhook.rule_upserted".to_string(),
+        action: action.to_string(),
         target: format!("webhook_rule:{}", rule.id),
         command_hash: None,
         metadata: webhook_rule_metadata(rule, operator),
@@ -1120,6 +1212,7 @@ mod tests {
     #[test]
     fn webhook_rule_request_validates_expression_and_target() {
         let mut request = CreateWebhookRuleRequest {
+            id: None,
             name: "stale edge".to_string(),
             enabled: true,
             expression: "status = stale && tag:edge".to_string(),

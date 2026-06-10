@@ -28,7 +28,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "pushed" }).filter({ hasText: "23/24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "queued" }).filter({ hasText: "23/24" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "doing" }).filter({ hasText: "0" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "22" })).toBeVisible();
 
@@ -222,7 +222,12 @@ async function installTwentyFourTargetFileMock(page: Page) {
             started_at: outputIds.has(agent.id) || agent.status === "stale" ? "2026-06-02T10:10:59Z" : null,
             status: outputIds.has(agent.id) ? "completed" : agent.status === "stale" ? "failed" : "dispatch_failed",
           }));
-          return jsonResponse({ accepted_targets: targets.filter((agent) => agent.status !== "offline").length, job_id: jobId, status: "accepted" });
+          return jsonResponse({
+            accepted_targets: targets.filter((agent) => agent.status !== "offline").length,
+            target_count: targets.length,
+            job_id: jobId,
+            status: "accepted",
+          });
         }
       }
       const targetMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/targets$/);

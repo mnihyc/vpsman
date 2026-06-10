@@ -253,6 +253,11 @@ export function App() {
                 onUpdateAgentAlias={dashboard.updateAgentAlias}
                 privilegeMaterial={privilegeMaterial}
                 scopeActive={hasFleetScope}
+                onDeleteFleetAlertNotificationChannel={
+                  dashboard.deleteFleetAlertNotificationChannel
+                }
+                onDeleteFleetAlertPolicy={dashboard.deleteFleetAlertPolicy}
+                onDeleteWebhookRule={dashboard.deleteWebhookRule}
                 onDispatchFleetAlertNotifications={
                   dashboard.dispatchFleetAlertNotifications
                 }
@@ -333,6 +338,7 @@ export function App() {
                 onBulkMutateTags={dashboard.bulkMutateTags}
                 onDeleteTag={dashboard.deleteTag}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
+                onOpenSchedules={() => selectView("Schedules")}
                 onRefresh={dashboard.loadTagInventory}
                 onResolveBulk={dashboard.resolveBulkPreview}
                 privilegeMaterial={privilegeMaterial}
@@ -403,6 +409,7 @@ export function App() {
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadSchedules}
                 onUpdateSchedule={dashboard.updateSchedule}
+                onUpdateScheduleTargets={dashboard.updateScheduleTargets}
                 privilegeMaterial={privilegeMaterial}
                 schedules={dashboard.schedules}
               />

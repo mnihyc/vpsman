@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
@@ -90,7 +89,9 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
     plan.recommended_ospf_cost = recommended_ospf_cost;
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:right-b".to_string(),
+        target_client_ids: vec!["right-b".to_string()],
         destructive: true,
         confirmed: true,
         command: "network_ospf_cost_update".to_string(),
@@ -106,16 +107,11 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_apply_target_mismatch");
@@ -143,14 +139,13 @@ fn test_plan() -> TunnelPlan {
     .unwrap()
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

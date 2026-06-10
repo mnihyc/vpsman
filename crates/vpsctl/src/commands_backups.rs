@@ -16,7 +16,7 @@ use crate::{
         decrypt_backup_artifact, validate_artifact_metadata, validate_artifact_object_key,
         MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
-    commands_schedules::selector_expression_from_targets,
+    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::{http_get, http_post_json},
     jobs::resolve_target_ids,
     privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
@@ -153,6 +153,7 @@ pub(crate) fn backup_policy_upsert(
     );
     anyhow::ensure!(confirmed, "backup-policy-upsert requires --confirmed");
     let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
     println!(
         "{}",
         http_post_json(
@@ -165,6 +166,7 @@ pub(crate) fn backup_policy_upsert(
                 "include_config": include_config,
                 "recipient_public_key_hex": recipient_public_key_hex,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "cron_expr": cron_expr,
                 "timezone": "UTC",
                 "enabled": enabled,
@@ -449,9 +451,11 @@ pub(crate) fn backup_run(
             "/api/v1/jobs",
             token,
             &serde_json::json!({
+                "job_id": Uuid::new_v4(),
                 "command": "backup",
                 "argv": [],
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
@@ -741,9 +745,11 @@ pub(crate) fn restore_run_with_credentials(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": "restore",
             "argv": [],
             "selector_expression": selector_expression,
+            "target_client_ids": target_ids,
             "privileged": true,
             "destructive": true,
             "confirmed": confirmed,
@@ -796,9 +802,11 @@ pub(crate) fn restore_rollback(
             "/api/v1/jobs",
             token,
             &serde_json::json!({
+                "job_id": Uuid::new_v4(),
                 "command": "restore_rollback",
                 "argv": [],
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": true,
                 "confirmed": confirmed,

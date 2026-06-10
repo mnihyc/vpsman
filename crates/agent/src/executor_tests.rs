@@ -1,86 +1,16 @@
 mod tests {
     use crate::executor::{
-        authorize_job, execute_job_command, execute_job_command_with_config_and_output_sink,
+        execute_job_command, execute_job_command_with_config_and_output_sink,
         execute_job_command_with_output_sink,
     };
-    use crate::telemetry::unix_now;
-    use ed25519_dalek::SigningKey;
     use std::{io::Cursor, os::unix::fs::PermissionsExt};
     use tokio::sync::mpsc;
     use vpsman_common::{
-        encode_json, payload_hash, sign_command_envelope, AgentAuthConfig, AgentConfig,
-        AgentExecutionConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
-        AgentExecutionPtyPolicy, AgentProcessInventorySource, AgentUserSessionsSource,
-        CommandEnvelope, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk, JobCommand,
-        JobRequest, OutputStream, PrivilegeReplayCache, RuntimeTunnelCommand,
+        payload_hash, AgentConfig, AgentExecutionConfig, AgentExecutionEnvironmentPolicy,
+        AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy, AgentProcessInventorySource,
+        AgentUserSessionsSource, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk,
+        JobCommand, OutputStream, RuntimeTunnelCommand,
     };
-
-    fn test_config(signing_key: &SigningKey) -> AgentConfig {
-        AgentConfig {
-            client_id: "client-a".to_string(),
-            display_name: "client-a".to_string(),
-            auth: AgentAuthConfig {
-                server_ed25519_public_key_hex: Some(hex_encode(
-                    signing_key.verifying_key().as_bytes(),
-                )),
-                command_timeout_secs: 5,
-                ..AgentAuthConfig::default()
-            },
-            ..AgentConfig::default()
-        }
-    }
-
-    fn signed_job(signing_key: &SigningKey) -> JobRequest {
-        let command = JobCommand::Shell {
-            argv: vec!["/bin/echo".to_string(), "hello".to_string()],
-            pty: false,
-        };
-        let command_payload = encode_json(&command).unwrap();
-        let payload_hash_hex = payload_hash(&command_payload);
-        let command_id = uuid::Uuid::new_v4();
-        let signed_unix = unix_now();
-        let mut envelope = CommandEnvelope {
-            command_id,
-            scope: "client:client-a".to_string(),
-            payload_hash_hex,
-            signed_unix,
-            expires_unix: signed_unix + 60,
-            server_signature: Vec::new(),
-        };
-        envelope.server_signature = sign_command_envelope(signing_key, &envelope);
-        JobRequest {
-            job_id: uuid::Uuid::new_v4(),
-            command_version: 1,
-            command,
-            envelope,
-            timeout_secs: 5,
-        }
-    }
-
-    #[test]
-    fn command_authorization_accepts_once_and_rejects_replay() {
-        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
-        let config = test_config(&signing_key);
-        let request = signed_job(&signing_key);
-        let mut replay_cache = PrivilegeReplayCache::default();
-
-        assert!(authorize_job(&config, &request, &mut replay_cache).is_ok());
-        assert!(authorize_job(&config, &request, &mut replay_cache)
-            .unwrap_err()
-            .contains("command id was already used"));
-    }
-
-    #[test]
-    fn command_authorization_rejects_missing_agent_auth_config() {
-        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
-        let request = signed_job(&signing_key);
-        let mut replay_cache = PrivilegeReplayCache::default();
-
-        assert_eq!(
-            authorize_job(&AgentConfig::default(), &request, &mut replay_cache).unwrap_err(),
-            "missing server signing public key"
-        );
-    }
 
     #[tokio::test]
     async fn execute_argv_command_captures_output_and_status() {
@@ -1526,16 +1456,6 @@ mod tests {
         assert_eq!(snapshot["truncated"], true);
         assert_eq!(status["source"], "custom_command");
         std::fs::remove_dir_all(root).ok();
-    }
-
-    fn hex_encode(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            out.push(HEX[(byte >> 4) as usize] as char);
-            out.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        out
     }
 
     fn make_executable(path: &std::path::Path) {

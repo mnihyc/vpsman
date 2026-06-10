@@ -424,7 +424,6 @@ pub(crate) struct KeyLifecycleClientView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct KeyLifecycleReportView {
-    pub(crate) server_ed25519_public_key_configured: bool,
     pub(crate) direct_identity_client_count: usize,
     pub(crate) current_key_revoked_count: usize,
     pub(crate) revocation_count: usize,
@@ -528,6 +527,7 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) operation: JobCommand,
     #[serde(default)]
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     #[serde(default = "default_schedule_timezone")]
     pub(crate) timezone: String,
@@ -552,6 +552,7 @@ pub(crate) struct UpdateScheduleRequest {
     pub(crate) operation: JobCommand,
     #[serde(default)]
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     #[serde(default = "default_schedule_timezone")]
     pub(crate) timezone: String,
@@ -586,6 +587,16 @@ pub(crate) struct SchedulePrivilegeMutationRequest {
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateScheduleTargetsRequest {
+    #[serde(default)]
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ScheduleView {
     pub(crate) id: Uuid,
@@ -594,6 +605,7 @@ pub(crate) struct ScheduleView {
     pub(crate) command_type: String,
     pub(crate) operation: JobCommand,
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) cron_expr: String,
     pub(crate) timezone: String,
     pub(crate) next_runs: Vec<String>,
@@ -784,7 +796,10 @@ pub(crate) enum WsEvent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateJobRequest {
     #[serde(default)]
+    pub(crate) job_id: Option<Uuid>,
+    #[serde(default)]
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) destructive: bool,
     #[serde(default)]
@@ -802,14 +817,13 @@ pub(crate) struct CreateJobRequest {
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
     #[serde(default)]
-    pub(crate) idempotency_key: Option<String>,
-    #[serde(default)]
     pub(crate) reconnect_policy: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CreateJobResponse {
     pub(crate) job_id: Uuid,
+    pub(crate) target_count: usize,
     pub(crate) accepted_targets: usize,
     pub(crate) status: String,
 }

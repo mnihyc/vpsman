@@ -240,9 +240,7 @@ impl Repository {
                         destination_root,
                         status,
                         payload_hash,
-                        signed_command_scope,
-                        signed_command_id,
-                        signed_command_expires_unix,
+                        command_scope,
                         note,
                         created_at::text AS created_at
                     FROM restore_plans
@@ -356,9 +354,6 @@ impl Repository {
 }
 
 fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> {
-    let signed_command_expires_unix = row
-        .try_get::<Option<i64>, _>("signed_command_expires_unix")?
-        .map(|value| value.max(0) as u64);
     let status: String = row.try_get("status")?;
     Ok(RestorePlanView {
         id: row.try_get("id")?,
@@ -373,9 +368,7 @@ fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> 
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
         payload_hash: row.try_get("payload_hash")?,
-        signed_command_scope: row.try_get("signed_command_scope")?,
-        signed_command_id: row.try_get("signed_command_id")?,
-        signed_command_expires_unix,
+        command_scope: row.try_get("command_scope")?,
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
@@ -426,7 +419,7 @@ fn migration_link_metadata(
 ) -> serde_json::Value {
     let mut metadata = migration_link_metadata_from_view(view, confirmed, operator);
     metadata["restore_plan_payload_hash"] = json!(restore_plan.payload_hash);
-    metadata["restore_plan_signed_command_scope"] = json!(restore_plan.signed_command_scope);
+    metadata["restore_plan_command_scope"] = json!(restore_plan.command_scope);
     metadata
 }
 

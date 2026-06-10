@@ -25,9 +25,6 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
@@ -58,7 +55,8 @@ chunked_payload_size="$(stat -c '%s' "$chunked_source_file")"
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
 VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
 RUST_LOG="vpsman_api=warn" \
   target/debug/vpsman-api >"$api_log" 2>&1 &
@@ -79,16 +77,18 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "file-push-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+  --ttl-secs 600 \
+  --default-tags file-push-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write client_id for live file-push smoke"
+fi
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 RUST_LOG="vpsman_agent=warn" \
@@ -125,6 +125,7 @@ reject_body="$(jq -nc \
       data_base64: $data
     },
     selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
     privileged: true,
     confirmed: true,
     timeout_secs: 30
@@ -151,7 +152,8 @@ push_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --super-salt-hex "$super_salt_hex" \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$push_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$push_json" >/dev/null
+smoke_assert_job_create_queued "$push_json" 1
+smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
 cmp -s "$source_file" "$destination_file"
 [[ "$(sha256sum "$destination_file" | awk '{print $1}')" == "$payload_sha" ]]
@@ -191,7 +193,8 @@ chunked_push_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --super-salt-hex "$super_salt_hex" \
     --confirmed)"
 chunked_job_id="$(jq -r '.job_id' <<<"$chunked_push_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$chunked_push_json" >/dev/null
+smoke_assert_job_create_queued "$chunked_push_json" 1
+smoke_wait_api_job_status "$api_url" "$chunked_job_id" completed 45 >/dev/null
 
 cmp -s "$chunked_source_file" "$chunked_destination_file"
 [[ "$(sha256sum "$chunked_destination_file" | awk '{print $1}')" == "$chunked_payload_sha" ]]

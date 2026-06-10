@@ -431,7 +431,7 @@ mod tests {
         tokio::fs::write(&selected_path, b"selected secret contents")
             .await
             .unwrap();
-        tokio::fs::write(&config_path, b"server_ed25519_public_key_hex = \"secret\"")
+        tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
             .await
             .unwrap();
         let recipient_secret = StaticSecret::from([7_u8; 32]);
@@ -502,7 +502,7 @@ mod tests {
         tokio::fs::write(&selected_path, &selected_data)
             .await
             .unwrap();
-        tokio::fs::write(&config_path, b"server_ed25519_public_key_hex = \"secret\"")
+        tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
             .await
             .unwrap();
         let recipient_secret = StaticSecret::from([11_u8; 32]);

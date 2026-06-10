@@ -32,9 +32,6 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-signing_keys="$(target/debug/vpsctl signing-keygen)"
-server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
-server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_pid=""
 api_log=""
@@ -169,7 +166,8 @@ start_api() {
     VPSMAN_POSTGRES_URL="$postgres_url" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-    VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
+    VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+    VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
     RUST_LOG="${VPSMAN_SMOKE_API_RUST_LOG:-vpsman_api=warn}" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -329,16 +327,19 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "agent-update-smoke" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags agent-update-smoke)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write client_id for live agent-update smoke"
+fi
 if grep -q '^trusted_artifact_signing_key_hex = ' "$agent_config"; then
   sed -i "s/^trusted_artifact_signing_key_hex = .*/trusted_artifact_signing_key_hex = \"$artifact_signing_key_hex\"/" "$agent_config"
 elif grep -q '^\[update\]' "$agent_config"; then
@@ -366,6 +367,7 @@ reject_body="$(jq -nc \
       sha256_hex: $sha
     },
     selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
     privileged: true,
     confirmed: true,
     timeout_secs: 30

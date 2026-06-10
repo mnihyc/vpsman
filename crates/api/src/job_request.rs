@@ -1,22 +1,19 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
-use ed25519_dalek::SigningKey;
 use vpsman_common::{
     backend_config_signature_payload,
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
     job_command_protocol_version as common_job_command_protocol_version, payload_hash,
-    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, sign_command_envelope,
+    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config,
     validate_agent_config_shape, validate_data_source_config_patch_section,
     validate_runtime_topology_intent, validate_runtime_tunnel_control,
-    verify_update_artifact_signature, AgentConfig, CommandEnvelope, JobCommand,
-    ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend,
-    MAX_AGENT_HOT_CONFIG_BYTES, MAX_COMMAND_SIGNATURE_AGE_SECS, MAX_SHELL_SCRIPT_BYTES,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    verify_update_artifact_signature, AgentConfig, JobCommand, ProcessResourceLimits,
+    ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend, MAX_AGENT_HOT_CONFIG_BYTES,
+    MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -26,7 +23,7 @@ use crate::{
         validate_terminal_poll, validate_terminal_resize, TerminalOpenValidation,
     },
     model::{BulkResolveRequest, CreateJobRequest},
-    unix_now, ApiError,
+    ApiError,
 };
 
 pub(crate) use crate::job_files::validate_file_path;
@@ -36,10 +33,12 @@ const MAX_RESTORE_PATHS: usize = 64;
 const MAX_RESTORE_ROLLBACK_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl CreateJobRequest {
-    pub(crate) fn target_selection(&self) -> BulkResolveRequest {
-        BulkResolveRequest {
-            selector_expression: self.selector_expression.trim().to_string(),
-        }
+    pub(crate) fn fixed_target_ids(&self) -> Result<Vec<String>, ApiError> {
+        normalized_target_client_ids(&self.target_client_ids)
+    }
+
+    pub(crate) fn target_selection(&self) -> Result<BulkResolveRequest, ApiError> {
+        fixed_target_selection(&self.target_client_ids)
     }
 
     pub(crate) fn job_command(&self) -> Result<JobCommand, ApiError> {
@@ -69,42 +68,40 @@ impl CreateJobRequest {
             None => "shell_argv",
         }
     }
-
-    pub(crate) fn signed_envelopes_for_targets(
-        &self,
-        targets: &[String],
-        command_hash: &str,
-        signing_key: &SigningKey,
-    ) -> Result<HashMap<String, CommandEnvelope>> {
-        Ok(signed_envelopes_for_targets(
-            targets,
-            command_hash,
-            signing_key,
-        ))
-    }
 }
 
-fn signed_envelopes_for_targets(
-    targets: &[String],
-    command_hash: &str,
-    signing_key: &SigningKey,
-) -> HashMap<String, CommandEnvelope> {
-    let now = unix_now();
-    let expires_unix = now.saturating_add(MAX_COMMAND_SIGNATURE_AGE_SECS);
-    let mut signed = HashMap::new();
-    for client_id in targets {
-        let mut envelope = CommandEnvelope {
-            command_id: uuid::Uuid::new_v4(),
-            scope: format!("client:{client_id}"),
-            payload_hash_hex: command_hash.to_string(),
-            signed_unix: now,
-            expires_unix,
-            server_signature: Vec::new(),
-        };
-        envelope.server_signature = sign_command_envelope(signing_key, &envelope);
-        signed.insert(client_id.clone(), envelope);
+pub(crate) fn normalized_target_client_ids(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut ids = Vec::new();
+    for value in raw {
+        let id = value.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if id.len() > 200 || id.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+            return Err(ApiError::bad_request("target_client_id_invalid"));
+        }
+        if !ids.iter().any(|stored| stored == id) {
+            ids.push(id.to_string());
+        }
     }
-    signed
+    if ids.is_empty() {
+        return Err(ApiError::bad_request("fixed_targets_required"));
+    }
+    if ids.len() > 500 {
+        return Err(ApiError::bad_request("too_many_fixed_targets"));
+    }
+    Ok(ids)
+}
+
+pub(crate) fn fixed_target_selection(raw: &[String]) -> Result<BulkResolveRequest, ApiError> {
+    let ids = normalized_target_client_ids(raw)?;
+    Ok(BulkResolveRequest {
+        selector_expression: ids
+            .iter()
+            .map(|id| vpsman_common::id_selector_expression(id))
+            .collect::<Vec<_>>()
+            .join(" || "),
+    })
 }
 
 pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {

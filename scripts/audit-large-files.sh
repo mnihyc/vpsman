@@ -2,10 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT_DIR/scripts/lib-smoke.sh"
-
-smoke_enter_root
-smoke_require_tools find grep wc
+cd "$ROOT_DIR"
 
 notes_file="docs/large-file-split-notes.md"
 if [[ ! -f "$notes_file" ]]; then
@@ -13,57 +10,77 @@ if [[ ! -f "$notes_file" ]]; then
   exit 1
 fi
 
-is_scanned_file() {
-  case "$1" in
-    ./.git/*|./target/*|./frontend/node_modules/*|./frontend/dist/*|./frontend/test-results/*|./frontend/playwright-report/*|./.tmp/*)
-      return 1
-      ;;
-  esac
-  grep -Iq . "$1" || [[ ! -s "$1" ]]
+python3 - "$notes_file" <<'PY'
+from pathlib import Path
+import os
+import re
+import sys
+
+notes_path = Path(sys.argv[1])
+notes = notes_path.read_text(encoding='utf-8')
+documented = set(re.findall(r'`(\./[^`]+)`', notes))
+ignored_dirs = {
+    '.git', 'target', '.tmp',
+    'frontend/node_modules', 'frontend/dist',
+    'frontend/test-results', 'frontend/playwright-report',
 }
+line_suffixes = {'.rs', '.ts', '.tsx', '.css', '.sh'}
+source_roots = ('crates/', 'frontend/src/', 'frontend/tests/', 'scripts/')
 
-is_line_counted_source() {
-  case "$1" in
-    ./crates/*.rs|./crates/**/*.rs|./frontend/src/*.ts|./frontend/src/**/*.ts|./frontend/src/*.tsx|./frontend/src/**/*.tsx|./frontend/src/*.css|./frontend/src/**/*.css|./frontend/tests/*.ts|./frontend/tests/**/*.ts|./scripts/*.sh)
-      return 0
-      ;;
-  esac
-  return 1
-}
 
-failures=0
-large_files=0
-while IFS= read -r -d '' file; do
-  is_scanned_file "$file" || continue
-  is_line_counted_source "$file" || continue
-  line_count="$(wc -l <"$file")"
-  if (( line_count <= 1000 )); then
-    continue
-  fi
-  large_files=$((large_files + 1))
-  if ! grep -Fq "\`$file\`" "$notes_file"; then
-    echo "large-file audit violation: $file ($line_count lines) is missing from $notes_file" >&2
-    failures=$((failures + 1))
-  fi
-done < <(find . -type f -print0)
+def is_ignored_dir(rel: str) -> bool:
+    return any(rel == item or rel.startswith(item + '/') for item in ignored_dirs)
 
-while IFS= read -r documented; do
-  [[ -n "$documented" ]] || continue
-  if [[ ! -f "$documented" ]]; then
-    echo "large-file audit violation: documented file does not exist: $documented" >&2
-    failures=$((failures + 1))
-    continue
-  fi
-  line_count="$(wc -l <"$documented")"
-  if (( line_count <= 1000 )); then
-    echo "large-file audit violation: documented file is no longer above 1000 lines and should be removed from notes: $documented" >&2
-    failures=$((failures + 1))
-  fi
-done < <(grep -oE '`./[^`]+`' "$notes_file" | tr -d '`' | sort -u)
 
-if (( failures > 0 )); then
-  echo "large_file_audit=failed failures=$failures large_files=$large_files" >&2
-  exit 1
-fi
+def is_source(rel: str, path: Path) -> bool:
+    return rel.startswith(source_roots) and path.suffix in line_suffixes
 
-echo "large_file_audit=ok large_files=$large_files notes=$notes_file"
+failures = 0
+large_files = []
+for dirpath, dirnames, filenames in os.walk('.'):
+    rel_dir = dirpath[2:] if dirpath.startswith('./') else dirpath
+    dirnames[:] = [
+        dirname for dirname in dirnames
+        if not is_ignored_dir((Path(rel_dir) / dirname).as_posix().lstrip('./'))
+    ]
+    for filename in filenames:
+        path = Path(dirpath) / filename
+        rel_no_dot = path.as_posix()[2:] if path.as_posix().startswith('./') else path.as_posix()
+        if not is_source(rel_no_dot, path):
+            continue
+        try:
+            line_count = sum(1 for _ in path.open('rb'))
+        except OSError as exc:
+            print(f"large-file audit failed reading ./{rel_no_dot}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        if line_count <= 1000:
+            continue
+        rel = f"./{rel_no_dot}"
+        large_files.append(rel)
+        if rel not in documented:
+            print(
+                f"large-file audit violation: {rel} ({line_count} lines) is missing from {notes_path}",
+                file=sys.stderr,
+            )
+            failures += 1
+
+for rel in sorted(documented):
+    path = Path(rel[2:])
+    if not path.is_file():
+        print(f"large-file audit violation: documented file does not exist: {rel}", file=sys.stderr)
+        failures += 1
+        continue
+    line_count = sum(1 for _ in path.open('rb'))
+    if line_count <= 1000:
+        print(
+            f"large-file audit violation: documented file is no longer above 1000 lines and should be removed from notes: {rel}",
+            file=sys.stderr,
+        )
+        failures += 1
+
+if failures:
+    print(f"large_file_audit=failed failures={failures} large_files={len(large_files)}", file=sys.stderr)
+    sys.exit(1)
+print(f"large_file_audit=ok large_files={len(large_files)} notes={notes_path}")
+PY

@@ -47,148 +47,6 @@ smoke_agent_config_client_id() {
   sed -n 's/^client_id = "\(.*\)"$/\1/p' "$config_path" | head -n 1
 }
 
-smoke_toml_quote() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  printf '"%s"' "$value"
-}
-
-smoke_write_direct_agent_config() {
-  local output_file="$1"
-  local client_id="$2"
-  local display_name="$3"
-  local client_private_key_hex="$4"
-  local gateway_public_key_hex="$5"
-  local gateway_addr="$6"
-  local server_signing_public_key_hex="$7"
-  local command_timeout_secs="${8:-30}"
-  local telemetry_light_secs="${9:-15}"
-  local telemetry_full_secs="${10:-60}"
-
-  cat >"$output_file" <<EOF
-client_id = $(smoke_toml_quote "$client_id")
-display_name = $(smoke_toml_quote "$display_name")
-telemetry_light_secs = $telemetry_light_secs
-telemetry_full_secs = $telemetry_full_secs
-tags = []
-
-[noise]
-mode = "enrolled_ik"
-client_private_key_hex = $(smoke_toml_quote "$client_private_key_hex")
-server_public_key_hex = $(smoke_toml_quote "$gateway_public_key_hex")
-
-[auth]
-server_ed25519_public_key_hex = $(smoke_toml_quote "$server_signing_public_key_hex")
-command_timeout_secs = $command_timeout_secs
-gateway_retry_secs = 1
-gateway_connect_timeout_secs = 5
-
-[[tcp_endpoints]]
-label = "primary"
-tcp_addr = $(smoke_toml_quote "$gateway_addr")
-priority = 10
-EOF
-}
-
-smoke_register_direct_agent_config() {
-  local api_url="$1"
-  local access_token="$2"
-  local output_file="$3"
-  local client_id="$4"
-  local display_name="$5"
-  local tags_csv="$6"
-  local gateway_addr="$7"
-  local gateway_public_key_hex="$8"
-  local server_signing_public_key_hex="$9"
-  local command_timeout_secs="${10:-30}"
-  local telemetry_light_secs="${11:-15}"
-  local telemetry_full_secs="${12:-60}"
-
-  local agent_keys agent_private_hex agent_public_hex
-  agent_keys="$(target/debug/vpsctl noise-keygen)"
-  agent_private_hex="$(jq -r '.private_key_hex' <<<"$agent_keys")"
-  agent_public_hex="$(jq -r '.public_key_hex' <<<"$agent_keys")"
-
-  if [[ -n "$access_token" ]]; then
-    VPSMAN_API_TOKEN="$access_token" \
-      target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
-        --client-id "$client_id" \
-        --client-public-key-hex "$agent_public_hex" \
-        --display-name "$display_name" \
-        --tags "$tags_csv" \
-        --confirmed >/dev/null
-  else
-    target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
-      --client-id "$client_id" \
-      --client-public-key-hex "$agent_public_hex" \
-      --display-name "$display_name" \
-      --tags "$tags_csv" \
-      --confirmed >/dev/null
-  fi
-
-  smoke_write_direct_agent_config \
-    "$output_file" \
-    "$client_id" \
-    "$display_name" \
-    "$agent_private_hex" \
-    "$gateway_public_key_hex" \
-    "$gateway_addr" \
-    "$server_signing_public_key_hex" \
-    "$command_timeout_secs" \
-    "$telemetry_light_secs" \
-    "$telemetry_full_secs"
-}
-
-smoke_register_direct_agent_config_from_private_key() {
-  local api_url="$1"
-  local access_token="$2"
-  local output_file="$3"
-  local client_id="$4"
-  local display_name="$5"
-  local tags_csv="$6"
-  local gateway_addr="$7"
-  local gateway_public_key_hex="$8"
-  local server_signing_public_key_hex="$9"
-  local agent_private_hex="${10}"
-  local agent_public_hex="${11}"
-  local command_timeout_secs="${12:-30}"
-  local telemetry_light_secs="${13:-15}"
-  local telemetry_full_secs="${14:-60}"
-
-  if [[ -n "$access_token" ]]; then
-    VPSMAN_API_TOKEN="$access_token" \
-      target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
-        --client-id "$client_id" \
-        --client-public-key-hex "$agent_public_hex" \
-        --display-name "$display_name" \
-        --tags "$tags_csv" \
-        --replace-existing-key \
-        --confirmed >/dev/null
-  else
-    target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
-      --client-id "$client_id" \
-      --client-public-key-hex "$agent_public_hex" \
-      --display-name "$display_name" \
-      --tags "$tags_csv" \
-      --replace-existing-key \
-      --confirmed >/dev/null
-  fi
-
-  smoke_write_direct_agent_config \
-    "$output_file" \
-    "$client_id" \
-    "$display_name" \
-    "$agent_private_hex" \
-    "$gateway_public_key_hex" \
-    "$gateway_addr" \
-    "$server_signing_public_key_hex" \
-    "$command_timeout_secs" \
-    "$telemetry_light_secs" \
-    "$telemetry_full_secs"
-}
-
 smoke_build_binaries() {
   if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
     cargo build -p vpsman-api -p vpsman-gateway -p vpsman-agent -p vpsctl
@@ -288,4 +146,50 @@ smoke_dump_logs() {
     echo "--- $log ---" >&2
     cat "$log" >&2 || true
   done
+}
+
+smoke_wait_api_job_status() {
+  local api_url="$1"
+  local job_id="$2"
+  local expected_status="$3"
+  local timeout_secs="${4:-45}"
+  local deadline=$((SECONDS + timeout_secs))
+  local job_json status
+  until job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id" 2>/dev/null)"; do
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for job $job_id to become $expected_status" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  while true; do
+    status="$(jq -r '.status // empty' <<<"$job_json")"
+    if [[ "$expected_status" == "terminal" ]]; then
+      case "$status" in
+        queued|dispatching|running|accepted) ;;
+        *) printf '%s\n' "$job_json"; return 0 ;;
+      esac
+    elif [[ "$status" == "$expected_status" ]]; then
+      printf '%s\n' "$job_json"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for job $job_id to become $expected_status; last status=$status" >&2
+      printf '%s\n' "$job_json" >&2
+      return 1
+    fi
+    sleep 0.1
+    job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id")"
+  done
+}
+
+smoke_assert_job_create_queued() {
+  local create_json="$1"
+  local expected_targets="$2"
+  jq -e --argjson expected_targets "$expected_targets" '
+    (.job_id | length == 36)
+    and .target_count == $expected_targets
+    and (.accepted_targets == 0 or .accepted_targets <= .target_count)
+    and (.status == "dispatching" or .status == "queued" or .status == "completed" or .status == "timed_out" or .status == "failed" or .status == "degraded_unprivileged")
+  ' <<<"$create_json" >/dev/null
 }

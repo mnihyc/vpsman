@@ -371,14 +371,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_keys::noise_keygen()?;
             Ok(None)
         }
-        Command::SigningKeygen => {
-            commands_keys::signing_keygen()?;
-            Ok(None)
-        }
-        Command::PrivilegeVerifier(command) => {
-            commands_keys::privilege_verifier(command)?;
-            Ok(None)
-        }
         Command::Vty => {
             run_vty(api_url)?;
             Ok(None)

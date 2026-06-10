@@ -22,27 +22,33 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$agent_config" \
-  "$client_id" \
-  "$client_id" \
-  "postgres-live-job" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags postgres-live-job)"
+enrollment_token="$(jq -r '.token' <<<"$token_json")"
 
-smoke_register_direct_agent_config \
-  "$api_url" \
-  "$access_token" \
-  "$peer_agent_config" \
-  "$peer_client_id" \
-  "$peer_client_id" \
-  "postgres-live-job" \
-  "$gateway_addr" \
-  "$gateway_public_hex" \
-  "$server_signing_public_hex"
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$enrollment_token" \
+  --output-file "$agent_config"
+client_id="$(smoke_agent_config_client_id "$agent_config")"
+if [[ -z "$client_id" ]]; then
+  smoke_fail "enroll-config did not write primary client_id for postgres live job smoke"
+fi
+
+peer_token_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
+    --ttl-secs 600 \
+    --default-tags postgres-live-job)"
+peer_enrollment_token="$(jq -r '.token' <<<"$peer_token_json")"
+
+target/debug/vpsctl --api-url "$api_url" enroll-config \
+  --token "$peer_enrollment_token" \
+  --output-file "$peer_agent_config"
+peer_client_id="$(smoke_agent_config_client_id "$peer_agent_config")"
+if [[ -z "$peer_client_id" ]]; then
+  smoke_fail "enroll-config did not write peer client_id for postgres live job smoke"
+fi
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 VPSMAN_SUPERVISOR_DIR="$agent_supervisor_dir" \
@@ -96,7 +102,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 shell_job_id="$(jq -r '.job_id' <<<"$shell_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$shell_json" >/dev/null
+smoke_assert_job_create_queued "$shell_json" 1
+smoke_wait_api_job_status "$api_url" "$shell_job_id" completed 45 >/dev/null
 assert_shell_job_output
 
 shell_pty_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -110,7 +117,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 shell_pty_job_id="$(jq -r '.job_id' <<<"$shell_pty_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$shell_pty_json" >/dev/null
+smoke_assert_job_create_queued "$shell_pty_json" 1
+smoke_wait_api_job_status "$api_url" "$shell_pty_job_id" completed 45 >/dev/null
 assert_shell_pty_job_output
 
 shell_script_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -122,7 +130,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 shell_script_job_id="$(jq -r '.job_id' <<<"$shell_script_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$shell_script_json" >/dev/null
+smoke_assert_job_create_queued "$shell_script_json" 1
+smoke_wait_api_job_status "$api_url" "$shell_script_job_id" completed 45 >/dev/null
 assert_shell_script_job_output
 assert_job_follow_output
 
@@ -140,15 +149,13 @@ live_stream_job_id=""
 deadline=$((SECONDS + 15))
 until [[ -n "$live_stream_job_id" ]]; do
   if (( SECONDS >= deadline )); then
-    smoke_dump_logs "live streaming job was not recorded as dispatching" \
+    smoke_dump_logs "live streaming job creation response was not written" \
       "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
     exit 1
   fi
-  live_stream_job_id="$(api_get "/api/v1/jobs?limit=20" | jq -r '
-    map(select(.command_type == "shell_script" and .status == "dispatching"))
-    | first
-    | .id // empty
-  ')"
+  if [[ -s "$live_stream_output" ]]; then
+    live_stream_job_id="$(jq -r '.job_id // empty' "$live_stream_output" 2>/dev/null || true)"
+  fi
   sleep 0.2
 done
 deadline=$((SECONDS + 4))
@@ -167,8 +174,9 @@ done
 api_get "/api/v1/jobs/$live_stream_job_id" | jq -e '.status == "dispatching"' >/dev/null
 wait "$live_stream_pid"
 jq -e --arg job_id "$live_stream_job_id" '
-  .job_id == $job_id and .accepted_targets == 1 and .status == "completed"
+  .job_id == $job_id and .target_count == 1
 ' "$live_stream_output" >/dev/null
+smoke_wait_api_job_status "$api_url" "$live_stream_job_id" completed 45 >/dev/null
 assert_live_streaming_job_output
 
 large_output_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -180,7 +188,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 large_output_job_id="$(jq -r '.job_id' <<<"$large_output_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$large_output_json" >/dev/null
+smoke_assert_job_create_queued "$large_output_json" 1
+smoke_wait_api_job_status "$api_url" "$large_output_job_id" completed 45 >/dev/null
 assert_large_output_artifact
 
 timeout_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -193,7 +202,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 1 \
     --confirmed)"
 timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
-jq -e '.accepted_targets == 1 and .status == "timed_out"' <<<"$timeout_json" >/dev/null
+smoke_assert_job_create_queued "$timeout_json" 1
+smoke_wait_api_job_status "$api_url" "$timeout_job_id" timed_out 45 >/dev/null
 assert_timed_out_shell_job
 
 printf '%s' "$file_pull_payload" >"$shell_marker"
@@ -206,7 +216,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 file_pull_job_id="$(jq -r '.job_id' <<<"$file_pull_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$file_pull_json" >/dev/null
+smoke_assert_job_create_queued "$file_pull_json" 1
+smoke_wait_api_job_status "$api_url" "$file_pull_job_id" completed 45 >/dev/null
 assert_file_pull_output
 
 terminal_open_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -225,9 +236,9 @@ terminal_session_id="$(jq -r '.terminal_session_id' <<<"$terminal_open_json")"
 terminal_open_job_id="$(jq -r '.job.job_id' <<<"$terminal_open_json")"
 jq -e '
   (.terminal_session_id | length == 36)
-  and .job.accepted_targets == 1
-  and .job.status == "completed"
+  and .job.target_count == 1
 ' <<<"$terminal_open_json" >/dev/null
+smoke_wait_api_job_status "$api_url" "$terminal_open_job_id" completed 45 >/dev/null
 
 terminal_resize_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -240,7 +251,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 terminal_resize_job_id="$(jq -r '.job_id' <<<"$terminal_resize_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$terminal_resize_json" >/dev/null
+smoke_assert_job_create_queued "$terminal_resize_json" 1
+smoke_wait_api_job_status "$api_url" "$terminal_resize_job_id" completed 45 >/dev/null
 
 terminal_input_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -253,7 +265,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 terminal_input_job_id="$(jq -r '.job_id' <<<"$terminal_input_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$terminal_input_json" >/dev/null
+smoke_assert_job_create_queued "$terminal_input_json" 1
+smoke_wait_api_job_status "$api_url" "$terminal_input_job_id" completed 45 >/dev/null
 
 terminal_attach_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -272,9 +285,9 @@ VPSMAN_API_TOKEN="$access_token" \
 terminal_attach_job_id="$(jq -r '.job.job_id' <<<"$terminal_attach_json")"
 jq -e '
   .terminal_session_id == "'"$terminal_session_id"'"
-  and .job.accepted_targets == 1
-  and .job.status == "completed"
+  and .job.target_count == 1
 ' <<<"$terminal_attach_json" >/dev/null
+smoke_wait_api_job_status "$api_url" "$terminal_attach_job_id" completed 45 >/dev/null
 
 terminal_poll_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -286,7 +299,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 terminal_poll_job_id="$(jq -r '.job_id' <<<"$terminal_poll_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$terminal_poll_json" >/dev/null
+smoke_assert_job_create_queued "$terminal_poll_json" 1
+smoke_wait_api_job_status "$api_url" "$terminal_poll_job_id" completed 45 >/dev/null
 
 terminal_close_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -298,7 +312,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 terminal_close_job_id="$(jq -r '.job_id' <<<"$terminal_close_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$terminal_close_json" >/dev/null
+smoke_assert_job_create_queued "$terminal_close_json" 1
+smoke_wait_api_job_status "$api_url" "$terminal_close_job_id" completed 45 >/dev/null
 assert_terminal_session_workflow
 
 VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -348,7 +363,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 user_sessions_job_id="$(jq -r '.job_id' <<<"$user_sessions_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$user_sessions_json" >/dev/null
+smoke_assert_job_create_queued "$user_sessions_json" 1
+smoke_wait_api_job_status "$api_url" "$user_sessions_job_id" completed 45 >/dev/null
 assert_user_sessions_output
 
 process_start_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -363,7 +379,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 process_start_job_id="$(jq -r '.job_id' <<<"$process_start_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$process_start_json" >/dev/null
+smoke_assert_job_create_queued "$process_start_json" 1
+smoke_wait_api_job_status "$api_url" "$process_start_job_id" completed 45 >/dev/null
 assert_supervisor_status_job "$process_start_job_id" "process_start" "process_start" "running"
 wait_for_supervisor_log
 
@@ -376,7 +393,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 process_status_job_id="$(jq -r '.job_id' <<<"$process_status_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$process_status_json" >/dev/null
+smoke_assert_job_create_queued "$process_status_json" 1
+smoke_wait_api_job_status "$api_url" "$process_status_job_id" completed 45 >/dev/null
 assert_supervisor_snapshot_job "$process_status_job_id"
 
 process_logs_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -389,7 +407,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 process_logs_job_id="$(jq -r '.job_id' <<<"$process_logs_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$process_logs_json" >/dev/null
+smoke_assert_job_create_queued "$process_logs_json" 1
+smoke_wait_api_job_status "$api_url" "$process_logs_job_id" completed 45 >/dev/null
 assert_supervisor_logs_job "$process_logs_job_id"
 
 process_restart_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -401,7 +420,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 process_restart_job_id="$(jq -r '.job_id' <<<"$process_restart_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$process_restart_json" >/dev/null
+smoke_assert_job_create_queued "$process_restart_json" 1
+smoke_wait_api_job_status "$api_url" "$process_restart_job_id" completed 45 >/dev/null
 assert_supervisor_status_job "$process_restart_job_id" "process_restart" "process_restart" "running"
 wait_for_supervisor_log
 
@@ -414,7 +434,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --timeout-secs 10 \
     --confirmed)"
 process_stop_job_id="$(jq -r '.job_id' <<<"$process_stop_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$process_stop_json" >/dev/null
+smoke_assert_job_create_queued "$process_stop_json" 1
+smoke_wait_api_job_status "$api_url" "$process_stop_job_id" completed 45 >/dev/null
 assert_supervisor_status_job "$process_stop_job_id" "process_stop" "process_stop" "stopped_or_requested"
 assert_supervisor_inventory "$process_stop_job_id" "process_stop" "stopped_or_requested"
 assert_no_supervisor_process_leaked
@@ -429,7 +450,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --super-salt-hex "$super_salt_hex" \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$push_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$push_json" >/dev/null
+smoke_assert_job_create_queued "$push_json" 1
+smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
 cmp -s "$source_file" "$destination_file"
 [[ "$(sha256sum "$destination_file" | awk '{print $1}')" == "$payload_sha" ]]
@@ -445,7 +467,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 10)"
 network_status_job_id="$(jq -r '.job_id' <<<"$network_status_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$network_status_json" >/dev/null
+smoke_assert_job_create_queued "$network_status_json" 1
+smoke_wait_api_job_status "$api_url" "$network_status_job_id" completed 45 >/dev/null
 assert_status_observation
 
 network_probe_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -458,7 +481,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 10)"
 network_probe_job_id="$(jq -r '.job_id' <<<"$network_probe_json")"
-jq -e '.accepted_targets == 1 and .status == "completed"' <<<"$network_probe_json" >/dev/null
+smoke_assert_job_create_queued "$network_probe_json" 1
+smoke_wait_api_job_status "$api_url" "$network_probe_job_id" completed 45 >/dev/null
 assert_probe_observation
 
 network_speed_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -474,7 +498,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 10)"
 network_speed_job_id="$(jq -r '.job_id' <<<"$network_speed_json")"
-jq -e '.accepted_targets == 2 and .status == "completed"' <<<"$network_speed_json" >/dev/null
+smoke_assert_job_create_queued "$network_speed_json" 2
+smoke_wait_api_job_status "$api_url" "$network_speed_job_id" completed 45 >/dev/null
 assert_speed_observations
 assert_network_trends
 assert_ospf_recommendations
@@ -579,5 +604,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "direct_identity_registration", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
   }'

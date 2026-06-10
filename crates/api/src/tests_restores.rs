@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use axum::{extract::State, http::HeaderMap, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use ed25519_dalek::SigningKey;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
@@ -217,9 +214,7 @@ async fn restore_plan_records_metadata_and_audit_after_privilege_unlock() {
     assert!(view.include_config);
     assert_eq!(view.destination_root.as_deref(), Some("/restore"));
     assert_eq!(view.status, "planned_metadata_only");
-    assert_eq!(view.signed_command_scope, "client:client-b");
-    assert!(view.signed_command_id.is_some());
-    assert!(view.signed_command_expires_unix.is_none());
+    assert_eq!(view.command_scope, "client:client-b");
     assert_eq!(restore_plans.len(), 1);
     assert_eq!(restore_plans[0].id, view.id);
     assert!(audits
@@ -289,7 +284,9 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         }],
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-b".to_string(),
+        target_client_ids: vec!["client-b".to_string()],
         destructive: true,
         confirmed: true,
         command: "restore_rollback".to_string(),
@@ -299,12 +296,11 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
     let (status, Json(response)) = create_job(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state_with_privilege_auto_approve(repo.clone())),
         HeaderMap::new(),
         Json(request),
     )
@@ -375,7 +371,6 @@ fn test_state(repo: Repository) -> AppState {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -393,14 +388,13 @@ fn test_state_without_privilege(repo: Repository) -> AppState {
     }
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[23_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,

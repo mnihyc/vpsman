@@ -5,8 +5,6 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::SigningKey;
-use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -14,7 +12,7 @@ use tokio::{
 };
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, payload_hash, AgentHello, CommandEnvelope, CommandOutput, GatewayCommandDispatch,
+    encode_json, payload_hash, AgentHello, CommandOutput, GatewayCommandDispatch,
     GatewayCommandDispatchResult, JobCommand, OutputStream,
 };
 
@@ -104,6 +102,7 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
     let mut request = CreateBackupPolicyRequest {
         name: "nightly".to_string(),
         selector_expression: "tag:edge".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         recipient_public_key_hex: Some("a".repeat(64)),
@@ -246,7 +245,9 @@ fn backup_job_command_validates_executable_scope() {
 #[tokio::test]
 async fn backup_job_dispatch_requires_confirmation() {
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: false,
         command: "backup".to_string(),
@@ -260,7 +261,6 @@ async fn backup_job_dispatch_requires_confirmation() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -292,14 +292,15 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
     state.gateway =
         GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
             .with_test_privilege_auto_approve();
-    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[31_u8; 32])));
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         recipient_public_key_hex: None,
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: "backup".to_string(),
@@ -309,7 +310,6 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -391,9 +391,10 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     state.gateway =
         GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
             .with_test_privilege_auto_approve();
-    state.server_signing_key = Some(Arc::new(SigningKey::from_bytes(&[33_u8; 32])));
     let job_request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
         destructive: false,
         confirmed: true,
         command: "backup".to_string(),
@@ -403,7 +404,6 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
 
@@ -461,9 +461,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
     assert_eq!(view.status, "requested_metadata_only");
-    assert_eq!(view.signed_command_scope, "client:client-a");
-    assert!(view.signed_command_id.is_some());
-    assert!(view.signed_command_expires_unix.is_none());
+    assert_eq!(view.command_scope, "client:client-a");
     assert!(view.artifact_id.is_none());
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].id, view.id);
@@ -483,6 +481,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
         selector_expression: "id:client-a || tag:edge".to_string(),
+        target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         recipient_public_key_hex: Some(recipient_public_key_hex.clone()),
@@ -512,6 +511,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(view.name, "nightly-edge");
     assert_eq!(view.selector_expression, "id:client-a || tag:edge");
+    assert_eq!(view.target_client_ids, vec!["client-a", "client-b"]);
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
     assert_eq!(
@@ -556,6 +556,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
         Json(CreateBackupPolicyRequest {
             name: "nightly-prune".to_string(),
             selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
             recipient_public_key_hex: None,
@@ -1324,7 +1325,6 @@ fn test_state(repo: Repository) -> AppState {
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        server_signing_key: None,
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -1415,20 +1415,12 @@ async fn seed_policy_backup_artifact(
             .map(|value| value.to_ascii_lowercase()),
     };
     let command_hash = payload_hash(&encode_json(&command).unwrap());
-    let now = unix_now();
-    let envelope = CommandEnvelope {
-        command_id: Uuid::new_v4(),
-        scope: format!("client:{}", request.client_id),
-        payload_hash_hex: command_hash.clone(),
-        signed_unix: now,
-        expires_unix: now.saturating_add(300),
-        server_signature: Vec::new(),
-    };
+    let command_scope = format!("client:{}", request.client_id);
     let backup = repo
         .record_backup_request_with_source(
             &request,
             &command_hash,
-            &envelope,
+            &command_scope,
             &operator,
             BackupRequestStatus::RequestedMetadataOnly,
             BackupRequestSourceLink {

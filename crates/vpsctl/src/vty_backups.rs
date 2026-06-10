@@ -8,7 +8,7 @@ use crate::{
     commands_backups::{
         restore_artifact_bytes, restore_rollback_operation_from_api, restore_run_operation,
     },
-    commands_schedules::selector_expression_from_targets,
+    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
     privilege::build_privilege_for_job_command,
     vty_jobs::{
@@ -811,6 +811,9 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     token: Option<&str>,
     request: VtyBackupPolicyUpsert,
 ) -> Result<String> {
+    let selector_expression =
+        selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
+    let target_client_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
     http_post_json(
         api_url,
         "/api/v1/backup-policies",
@@ -820,7 +823,8 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "paths": request.paths,
             "include_config": request.include_config,
             "recipient_public_key_hex": request.recipient_public_key_hex,
-            "selector_expression": selector_expression_from_targets(&request.selection.clients, &request.selection.tags),
+            "selector_expression": selector_expression,
+            "target_client_ids": target_client_ids,
             "cron_expr": request.cron_expr,
             "timezone": "UTC",
             "enabled": request.enabled,

@@ -5,55 +5,20 @@ assumes a local development control plane and one test VPS or VM.
 
 ## 1. Start The Control Plane
 
-Use local disk object storage first and generate the required local secrets and
-public keys. The internal token must be at least 32 characters. The examples
-use `python3` and `jq`. The API receives the server signing private key, the
-gateway receives the Noise private key and privilege verifier, and agents
-receive only the matching public keys.
+Use local disk object storage first:
 
 ```sh
-mkdir -p .tmp/objects/backups .tmp/objects/updates
-
 export VPSMAN_API_BIND=127.0.0.1:8080
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN="$(python3 - <<'PY'
-import secrets
-print(secrets.token_urlsafe(48))
-PY
-)"
+export VPSMAN_INTERNAL_TOKEN=dev-internal-token
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
 
-cargo run -p vpsctl -- signing-keygen > .tmp/server-signing.json
-export VPSMAN_SERVER_SIGNING_KEY_HEX="$(jq -r .private_key_hex .tmp/server-signing.json)"
-export VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX="$(jq -r .public_key_hex .tmp/server-signing.json)"
-
-cargo run -p vpsctl -- noise-keygen > .tmp/gateway-noise.json
-export VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$(jq -r .private_key_hex .tmp/gateway-noise.json)"
-export VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$(jq -r .public_key_hex .tmp/gateway-noise.json)"
-
-export VPSMAN_SUPER_PASSWORD=<local_super_password>
-cargo run -p vpsctl -- privilege-verifier --generate-salt
-export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
-export VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX=<privilege_verifier_key_hex_from_output>
-```
-
-Start each backend in a separate shell or terminal pane:
-
-```sh
-# API shell. Do not pass VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX to the public API.
-env -u VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX cargo run -p vpsman-api
-
-# Gateway shell.
+cargo run -p vpsman-api
 cargo run -p vpsman-gateway
-
-# Worker shell.
-VPSMAN_WORKER_GATEWAY_CONTROL_URL="$VPSMAN_GATEWAY_CONTROL_URL" \
-VPSMAN_WORKER_INTERNAL_TOKEN="$VPSMAN_INTERNAL_TOKEN" \
-VPSMAN_WORKER_SERVER_SIGNING_KEY_HEX="$VPSMAN_SERVER_SIGNING_KEY_HEX" \
-  cargo run -p vpsman-worker
+cargo run -p vpsman-worker
 ```
 
 Run the panel in another shell:
@@ -75,9 +40,12 @@ cargo run -p vpsctl -- login --username admin --password-env VPSMAN_OPERATOR_PAS
 export VPSMAN_API_TOKEN=<operator_token>
 ```
 
-Keep privilege unlock material local. Reuse the same `VPSMAN_SUPER_PASSWORD` and
-`VPSMAN_SUPER_SALT_HEX` used to derive the gateway verifier above, or export
-them now before dispatching privileged work.
+Keep privilege unlock material local:
+
+```sh
+export VPSMAN_SUPER_PASSWORD=<local_super_password>
+export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+```
 
 The API token authenticates the operator. The super password and salt are used
 locally to build request-bound privilege assertions. The API forwards those
@@ -127,7 +95,7 @@ cargo run -p vpsctl -- bulk-resolve --tags edge,provider:provider-a,region:sfo
 ```sh
 cargo run -p vpsctl -- job-create --command uptime --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- jobs --limit 10
-cargo run -p vpsctl -- job-follow --job-id <job_uuid> --max-polls 60
+cargo run -p vpsctl -- job-follow <job_uuid> --max-polls 60
 ```
 
 For interactive work:

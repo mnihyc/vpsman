@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ed25519_dalek::SigningKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use vpsman_common::{
     sign_update_artifact_hash, validate_agent_config_shape, verify_update_artifact_signature,
     AgentConfig, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
@@ -134,10 +135,12 @@ pub(crate) fn agent_update(
             "/api/v1/jobs",
             token,
             &serde_json::json!({
+                "job_id": Uuid::new_v4(),
                 "command": "agent_update",
                 "argv": [],
                 "operation": operation,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
@@ -207,10 +210,12 @@ pub(crate) fn agent_update_check(
             "/api/v1/jobs",
             token,
             &serde_json::json!({
+                "job_id": Uuid::new_v4(),
                 "command": "agent_update_check",
                 "argv": [],
                 "operation": operation,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,

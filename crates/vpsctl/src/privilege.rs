@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use rand::RngCore;
 use vpsman_common::{
     derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_assertion,
     JobCommand, PrivilegeAssertion,
@@ -314,19 +313,6 @@ fn normalize_sha256_hex(value: &str) -> Result<String> {
     Ok(normalized)
 }
 
-pub(crate) const GENERATED_SUPER_SALT_BYTES: usize = 32;
-
-pub(crate) fn random_super_salt_hex() -> String {
-    let mut salt = [0_u8; GENERATED_SUPER_SALT_BYTES];
-    rand::thread_rng().fill_bytes(&mut salt);
-    hex::encode(salt)
-}
-
-pub(crate) fn derive_privilege_verifier_key_hex(password: &str, salt_hex: &str) -> Result<String> {
-    let salt = decode_super_salt(salt_hex)?;
-    Ok(hex::encode(derive_super_key(password, &salt)))
-}
-
 pub(crate) fn decode_super_salt(salt_hex: &str) -> Result<Vec<u8>> {
     let salt = hex::decode(salt_hex.trim()).context("super-password salt is not valid hex")?;
     anyhow::ensure!(
@@ -360,24 +346,6 @@ pub(crate) fn load_super_salt_hex(explicit_salt_hex: Option<&str>) -> Result<Str
 mod tests {
     use super::*;
     use vpsman_common::{verify_privilege_assertion, PrivilegeAssertionReplayCache};
-
-    #[test]
-    fn derives_gateway_verifier_key_from_password_and_salt() {
-        let derived = derive_privilege_verifier_key_hex("correct horse", "01020304").unwrap();
-        let expected = hex::encode(derive_super_key("correct horse", &[1, 2, 3, 4]));
-        assert_eq!(derived, expected);
-        assert_eq!(derived.len(), 64);
-    }
-
-    #[test]
-    fn generates_32_byte_super_salt_hex() {
-        let salt_hex = random_super_salt_hex();
-        assert_eq!(salt_hex.len(), GENERATED_SUPER_SALT_BYTES * 2);
-        assert_eq!(
-            decode_super_salt(&salt_hex).unwrap().len(),
-            GENERATED_SUPER_SALT_BYTES
-        );
-    }
 
     #[test]
     fn builds_job_privilege_assertion_without_command_envelopes() {

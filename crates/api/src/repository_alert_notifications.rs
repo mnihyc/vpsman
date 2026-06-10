@@ -120,10 +120,17 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let mut channels = memory.fleet_alert_notification_channels.write().await;
+                anyhow::ensure!(
+                    !channels.iter().any(|stored| {
+                        stored.name == candidate.name && Some(stored.id) != request.id
+                    }),
+                    "fleet_alert_notification_channel_name_conflict"
+                );
                 let channel = if let Some(stored) = channels
                     .iter_mut()
-                    .find(|stored| stored.name == candidate.name)
+                    .find(|stored| request.id.is_some_and(|id| stored.id == id))
                 {
+                    stored.name = candidate.name.clone();
                     stored.scope_kind = candidate.scope_kind.clone();
                     stored.scope_value = candidate.scope_value.clone();
                     stored.min_severity = candidate.min_severity.clone();
@@ -169,7 +176,8 @@ impl Repository {
                         actor_id
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                    ON CONFLICT (name) DO UPDATE SET
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
                         scope_kind = EXCLUDED.scope_kind,
                         scope_value = EXCLUDED.scope_value,
                         min_severity = EXCLUDED.min_severity,
@@ -233,6 +241,77 @@ impl Repository {
                 .await?;
                 tx.commit().await?;
                 Ok(channel)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_fleet_alert_notification_channel(
+        &self,
+        channel_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut channels = memory.fleet_alert_notification_channels.write().await;
+                let index = channels
+                    .iter()
+                    .position(|channel| channel.id == channel_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("fleet_alert_notification_channel_not_found:{channel_id}")
+                    })?;
+                let channel = channels.remove(index);
+                drop(channels);
+                let mut audit =
+                    notification_channel_audit(&channel, operator, unix_now().to_string());
+                audit.action = "fleet.alert_notification_channel_deleted".to_string();
+                memory.audits.write().await.push(audit);
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    DELETE FROM fleet_alert_notification_channels
+                    WHERE id = $1
+                    RETURNING
+                        id,
+                        name,
+                        scope_kind,
+                        scope_value,
+                        min_severity,
+                        categories,
+                        operator_states,
+                        delivery_kind,
+                        target,
+                        cooldown_secs,
+                        enabled,
+                        notes,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(channel_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let channel = channel_from_row(row)?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("fleet.alert_notification_channel_deleted")
+                .bind(format!("fleet_alert_notification_channel:{}", channel.id))
+                .bind(notification_channel_metadata(&channel, operator))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(())
             }
         }
     }
@@ -599,7 +678,7 @@ fn channel_from_request(
         "fleet alert notification cooldown is invalid"
     );
     Ok(FleetAlertNotificationChannelView {
-        id: Uuid::new_v4(),
+        id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name.trim().to_string(),
         scope_kind,
         scope_value,

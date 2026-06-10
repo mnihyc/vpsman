@@ -74,7 +74,7 @@ export function BackupPolicyForm({
       <div className="sectionHeader compact">
         <h2>Backup policy</h2>
         <span>
-          {targetCount} matching VPS{targetCount === 1 ? "" : "s"}
+          {targetCount} fixed VPS target{targetCount === 1 ? "" : "s"} after confirmation
         </span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
@@ -88,7 +88,7 @@ export function BackupPolicyForm({
         </label>
         <div className="targetSelector">
           <div className="targetSelectorHeader">
-            <strong>Targets</strong>
+            <strong>Audit selector</strong>
             <span>{targetExpressionMessage}</span>
           </div>
           <SearchExpressionInput
@@ -102,6 +102,9 @@ export function BackupPolicyForm({
             verification={targetExpressionValid ? "valid" : "invalid"}
             verificationMessage={targetExpressionMessage}
           />
+          <small className="formHint">
+            The confirmation saves the resolved VPS list as fixed targets; the selector remains for audit and future manual target updates.
+          </small>
         </div>
         <label>
           <span>Selected paths</span>

@@ -5,6 +5,7 @@ use vpsman_common::{
 };
 
 use super::*;
+use crate::repository_jobs::aggregate_job_status_from_statuses;
 
 #[test]
 fn gateway_timeout_output_maps_to_timed_out_target_status() {
@@ -31,7 +32,10 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
     assert_eq!(outcome.status, "timed_out");
     assert_eq!(outcome.exit_code, Some(124));
     assert!(outcome.accepted);
-    assert_eq!(aggregate_job_status(&[outcome.status], 1), "timed_out");
+    assert_eq!(
+        aggregate_job_status_from_statuses(&[outcome.status], 1),
+        "timed_out"
+    );
 }
 
 #[test]
@@ -158,27 +162,27 @@ fn stale_target_message_keeps_failure_reason_explicit() {
 #[test]
 fn aggregate_job_status_uses_terminal_target_states() {
     assert_eq!(
-        aggregate_job_status(&["completed".to_string(), "completed".to_string()], 2),
+        aggregate_job_status_from_statuses(&["completed".to_string(), "completed".to_string()], 2),
         "completed"
     );
     assert_eq!(
-        aggregate_job_status(&["completed".to_string(), "failed".to_string()], 2),
+        aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2),
         "partially_completed"
     );
     assert_eq!(
-        aggregate_job_status(&["failed".to_string(), "failed".to_string()], 2),
+        aggregate_job_status_from_statuses(&["failed".to_string(), "failed".to_string()], 2),
         "failed"
     );
     assert_eq!(
-        aggregate_job_status(&["dispatch_failed".to_string()], 1),
+        aggregate_job_status_from_statuses(&["dispatch_failed".to_string()], 1),
         "dispatch_failed"
     );
     assert_eq!(
-        aggregate_job_status(&["degraded_unprivileged".to_string()], 1),
+        aggregate_job_status_from_statuses(&["degraded_unprivileged".to_string()], 1),
         "degraded_unprivileged"
     );
     assert_eq!(
-        aggregate_job_status(
+        aggregate_job_status_from_statuses(
             &["completed".to_string(), "degraded_unprivileged".to_string()],
             2,
         ),

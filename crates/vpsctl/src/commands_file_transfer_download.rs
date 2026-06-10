@@ -246,7 +246,7 @@ fn execute_file_transfer_download_for_target(input: DownloadTargetInput<'_>) -> 
         start.job_id,
         input.session_id,
         "file_transfer_download_start",
-        start.accepted_targets,
+        start.target_count,
         input.plan.poll_interval_ms,
         input.plan.max_polls,
     )?;

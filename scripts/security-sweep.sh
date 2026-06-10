@@ -43,10 +43,11 @@ require_no_match \
   'privilege_assertion|superPassword|super_password' \
   crates/api/src/repository*.rs migrations
 
-require_match \
-  "privilege assertion replay cache and replay error are implemented" \
-  'PrivilegeReplayCache|AuthorizationError::Replay' \
-  crates/common/src/auth.rs
+obsolete_dispatch_auth_pattern='Command''Envelope|sign_command_''envelope|verify_command_''envelope|Privilege''ReplayCache|VPSMAN_SERVER_''SIGNING'
+require_no_match \
+  "obsolete dispatch authentication layer must not be present" \
+  "$obsolete_dispatch_auth_pattern" \
+  crates/common/src crates/api/src crates/agent/src crates/gateway/src migrations
 
 require_match \
   "object key traversal tests are present" \
@@ -64,5 +65,5 @@ cargo test -p vpsman-api tests_object_store
 
 printf '{\n'
 printf '  "security_sweep": "ok",\n'
-printf '  "checks": ["no_server_plaintext_super_password", "no_repository_privilege_material_persistence", "privilege_replay_cache", "object_key_safety", "operator_password_hashing"]\n'
+printf '  "checks": ["no_server_plaintext_super_password", "no_repository_privilege_material_persistence", "no_dispatch_envelope_layer", "object_key_safety", "operator_password_hashing"]\n'
 printf '}\n'

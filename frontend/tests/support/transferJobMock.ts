@@ -596,7 +596,12 @@ export async function installTransferJobApiMock(page: Page) {
           createDynamicJob(jobId, operationType, selectedClientIds.length, status);
           await createFileBrowserOutputs(jobId, body);
           createDynamicJobTargets(jobId, selectedClientIds, outputClientIds);
-          return jsonResponse({ accepted_targets: dispatchableClientIds(selectedClientIds).length, job_id: jobId, status: "accepted" });
+          return jsonResponse({
+            accepted_targets: dispatchableClientIds(selectedClientIds).length,
+            target_count: selectedClientIds.length,
+            job_id: jobId,
+            status: "accepted",
+          });
         }
         if (operationType?.startsWith("file_transfer_")) {
           const requests = (window as unknown as { __vpsmanTestRequests?: { jobs: unknown[] } }).__vpsmanTestRequests;
@@ -607,7 +612,12 @@ export async function installTransferJobApiMock(page: Page) {
           ).length;
           createDynamicJob(jobId, operationType, targetCount);
           await createTransferOutputs(jobId, body);
-          return jsonResponse({ accepted_targets: targetCount, job_id: jobId, status: "accepted" });
+          return jsonResponse({
+            accepted_targets: targetCount,
+            target_count: targetCount,
+            job_id: jobId,
+            status: "accepted",
+          });
         }
       }
       return previousFetch(input, init);

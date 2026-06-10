@@ -74,9 +74,7 @@ pub(crate) struct BackupRequestView {
     pub(crate) include_config: bool,
     pub(crate) status: String,
     pub(crate) payload_hash: String,
-    pub(crate) signed_command_scope: String,
-    pub(crate) signed_command_id: Option<Uuid>,
-    pub(crate) signed_command_expires_unix: Option<u64>,
+    pub(crate) command_scope: String,
     pub(crate) artifact_id: Option<Uuid>,
     pub(crate) source_job_id: Option<Uuid>,
     pub(crate) source_schedule_id: Option<Uuid>,
@@ -117,6 +115,7 @@ pub(crate) struct BackupPolicyView {
     pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) recipient_public_key_hex: Option<String>,
@@ -153,6 +152,8 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) selector_expression: String,
+    #[serde(default)]
+    pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) paths: Vec<String>,
     #[serde(default)]
@@ -313,9 +314,7 @@ pub(crate) struct RestorePlanView {
     pub(crate) destination_root: Option<String>,
     pub(crate) status: String,
     pub(crate) payload_hash: String,
-    pub(crate) signed_command_scope: String,
-    pub(crate) signed_command_id: Option<Uuid>,
-    pub(crate) signed_command_expires_unix: Option<u64>,
+    pub(crate) command_scope: String,
     pub(crate) note: Option<String>,
     pub(crate) created_at: String,
 }

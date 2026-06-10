@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
@@ -88,7 +87,7 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
     };
 
     let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
-        State(test_state_with_signing_key(repo.clone())),
+        State(test_state(repo.clone())),
         HeaderMap::new(),
         Json(CreateTunnelPlanRequest { input }),
     )
@@ -120,7 +119,7 @@ async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager
     input.kind = TunnelKind::Custom;
 
     let error = crate::routes_network::create_tunnel_plan(
-        State(test_state_with_signing_key(repo)),
+        State(test_state(repo)),
         HeaderMap::new(),
         Json(CreateTunnelPlanRequest { input }),
     )
@@ -575,7 +574,9 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
     let plan = test_plan();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:right-b".to_string(),
+        target_client_ids: vec!["right-b".to_string()],
         destructive: true,
         confirmed: true,
         command: "network_apply".to_string(),
@@ -592,16 +593,11 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_apply_target_mismatch");
@@ -642,7 +638,9 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:left-a".to_string(),
+        target_client_ids: vec!["left-a".to_string()],
         destructive: true,
         confirmed: true,
         command: "network_apply".to_string(),
@@ -652,13 +650,10 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
     let (status, response) = create_job(
-        State(test_state_with_signing_key_and_privilege_auto_approve(
-            repo.clone(),
-        )),
+        State(test_state_with_privilege_auto_approve(repo.clone())),
         HeaderMap::new(),
         Json(request),
     )
@@ -693,7 +688,9 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:right-b".to_string(),
+        target_client_ids: vec!["right-b".to_string()],
         destructive: true,
         confirmed: true,
         command: "network_rollback".to_string(),
@@ -706,16 +703,11 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_apply_target_mismatch");
@@ -741,7 +733,9 @@ async fn network_status_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:right-b".to_string(),
+        target_client_ids: vec!["right-b".to_string()],
         destructive: false,
         confirmed: false,
         command: "network_status".to_string(),
@@ -754,16 +748,11 @@ async fn network_status_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_apply_target_mismatch");
@@ -789,7 +778,9 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:right-b".to_string(),
+        target_client_ids: vec!["right-b".to_string()],
         destructive: false,
         confirmed: false,
         command: "network_probe".to_string(),
@@ -804,16 +795,11 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_apply_target_mismatch");
@@ -839,7 +825,9 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
     }
 
     let request = CreateJobRequest {
+        job_id: None,
         selector_expression: "id:left-a".to_string(),
+        target_client_ids: vec!["left-a".to_string()],
         destructive: false,
         confirmed: false,
         command: "network_speed_test".to_string(),
@@ -857,16 +845,11 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        idempotency_key: None,
         reconnect_policy: None,
     };
-    let error = create_job(
-        State(test_state_with_signing_key(repo)),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_speed_test_target_mismatch");
@@ -897,14 +880,13 @@ fn test_plan_input() -> TunnelPlanInput {
     }
 }
 
-fn test_state_with_signing_key(repo: Repository) -> AppState {
+fn test_state(repo: Repository) -> AppState {
     let (events, _) = broadcast::channel(1);
     AppState {
         repo,
         events,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
-        server_signing_key: Some(Arc::new(SigningKey::from_bytes(&[7_u8; 32]))),
         backup_object_store: None,
         update_object_store: None,
         update_artifact_public_base_url: None,
@@ -915,9 +897,9 @@ fn test_state_with_signing_key(repo: Repository) -> AppState {
     }
 }
 
-fn test_state_with_signing_key_and_privilege_auto_approve(repo: Repository) -> AppState {
+fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
     AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
-        ..test_state_with_signing_key(repo)
+        ..test_state(repo)
     }
 }

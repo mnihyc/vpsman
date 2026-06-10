@@ -15,6 +15,7 @@ struct ScheduleRecord {
     command_type: String,
     operation: JobCommand,
     selector_expression: String,
+    target_client_ids: Vec<String>,
     cron_expr: String,
     catch_up_policy: String,
     catch_up_limit: i32,
@@ -98,6 +99,7 @@ pub(crate) fn schedule_create(
                 "name": name,
                 "operation": operation,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "cron_expr": cron_expr,
                 "timezone": "UTC",
                 "enabled": !disabled,
@@ -149,6 +151,7 @@ pub(crate) fn schedule_update(
         },
         pty,
     };
+    let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
     let privilege_assertion = schedule_privilege_assertion(
         api_url,
         token,
@@ -158,6 +161,7 @@ pub(crate) fn schedule_update(
         &operation,
         if pty { "shell_pty" } else { "shell_argv" },
         &selector_expression,
+        &target_ids,
         &cron_expr,
         !disabled,
         &catch_up_policy,
@@ -177,6 +181,7 @@ pub(crate) fn schedule_update(
                 "name": name,
                 "operation": operation,
                 "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
                 "cron_expr": cron_expr,
                 "timezone": "UTC",
                 "enabled": !disabled,
@@ -360,6 +365,7 @@ fn schedule_privilege_for_record(
         &schedule.operation,
         &schedule.command_type,
         &schedule.selector_expression,
+        &schedule.target_client_ids,
         &schedule.cron_expr,
         enabled,
         &schedule.catch_up_policy,
@@ -373,14 +379,15 @@ fn schedule_privilege_for_record(
 
 #[allow(clippy::too_many_arguments)]
 fn schedule_privilege_assertion(
-    api_url: &str,
-    token: Option<&str>,
+    _api_url: &str,
+    _token: Option<&str>,
     action: &str,
     schedule_id: Option<&str>,
     name: &str,
     operation: &JobCommand,
     command_type: &str,
     selector_expression: &str,
+    target_ids: &[String],
     cron_expr: &str,
     enabled: bool,
     catch_up_policy: &str,
@@ -392,7 +399,6 @@ fn schedule_privilege_assertion(
 ) -> Result<vpsman_common::PrivilegeAssertion> {
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
-    let target_ids = resolve_schedule_target_ids(api_url, token, selector_expression)?;
     build_privilege_for_schedule(
         action,
         schedule_id,
@@ -400,7 +406,7 @@ fn schedule_privilege_assertion(
         operation,
         command_type,
         selector_expression,
-        &target_ids,
+        target_ids,
         cron_expr,
         "UTC",
         enabled,

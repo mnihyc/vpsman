@@ -109,9 +109,6 @@ fn redact_preserved_fields(config: &mut AgentConfig) {
     if config.noise.server_public_key_hex.is_some() {
         config.noise.server_public_key_hex = Some(REDACTED_PRESERVE.to_string());
     }
-    if config.auth.server_ed25519_public_key_hex.is_some() {
-        config.auth.server_ed25519_public_key_hex = Some(REDACTED_PRESERVE.to_string());
-    }
     if config.update.trusted_artifact_signing_key_hex.is_some() {
         config.update.trusted_artifact_signing_key_hex = Some(REDACTED_PRESERVE.to_string());
     }
@@ -127,10 +124,6 @@ fn preserve_redacted_fields(current: &AgentConfig, updated: &mut AgentConfig) {
     if updated.noise.server_public_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
         updated.noise.server_public_key_hex = current.noise.server_public_key_hex.clone();
     }
-    if updated.auth.server_ed25519_public_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
-        updated.auth.server_ed25519_public_key_hex =
-            current.auth.server_ed25519_public_key_hex.clone();
-    }
     if updated.update.trusted_artifact_signing_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
         updated.update.trusted_artifact_signing_key_hex =
             current.update.trusted_artifact_signing_key_hex.clone();
@@ -142,7 +135,6 @@ fn redacted_config_fields() -> Vec<&'static str> {
         "client_id",
         "noise.client_private_key_hex",
         "noise.server_public_key_hex",
-        "auth.server_ed25519_public_key_hex",
         "update.trusted_artifact_signing_key_hex",
     ]
 }

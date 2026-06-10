@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use uuid::Uuid;
 use vpsman_common::{render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan};
 
 use crate::{
@@ -172,9 +173,11 @@ pub(crate) fn submit_vty_tunnel_probe(
         "/api/v1/jobs",
         token,
         &serde_json::json!({
+            "job_id": Uuid::new_v4(),
             "command": "network_probe",
             "argv": [],
             "selector_expression": selector_expression,
+            "target_client_ids": target_clients,
             "privileged": true,
             "destructive": false,
             "confirmed": false,

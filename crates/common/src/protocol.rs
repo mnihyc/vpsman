@@ -4,8 +4,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AgentMetrics, CommandEnvelope, FilePushChunk, PrivilegeAssertion, ProtocolError,
-    TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
+    AgentMetrics, FilePushChunk, PrivilegeAssertion, ProtocolError, TunnelConfigBackend,
+    TunnelEndpointSide, TunnelPlan,
 };
 
 pub const NETWORK_SPEED_TEST_MIN_DURATION_SECS: u8 = 1;
@@ -296,7 +296,6 @@ pub struct JobRequest {
     #[serde(default = "default_command_protocol_version")]
     pub command_version: u16,
     pub command: JobCommand,
-    pub envelope: CommandEnvelope,
     pub timeout_secs: u64,
 }
 

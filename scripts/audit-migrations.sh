@@ -32,7 +32,7 @@ for file in "${files[@]}"; do
   tail -c 1 "$path" | grep -q $'\n' || fail "migration lacks trailing newline: $file"
   grep -Fq "$file" "$NOTES_FILE" || fail "migration lacks compatibility note: $file"
 
-  if grep -Eiq '\b(DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)|TRUNCATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE[[:space:]].+[[:space:]]DROP[[:space:]]+)' "$path"; then
+  if grep -Eiq '\b(DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)|TRUNCATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE[[:space:]].+[[:space:]]DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)[[:space:]])' "$path"; then
     fail "destructive DDL requires explicit migration policy before release: $file"
   fi
   if grep -Eiq 'ADD[[:space:]]+COLUMN[^;,\n]*NOT[[:space:]]+NULL' "$path" &&

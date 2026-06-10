@@ -106,10 +106,17 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let mut policies = memory.fleet_alert_policies.write().await;
+                anyhow::ensure!(
+                    !policies.iter().any(|stored| {
+                        stored.name == candidate.name && Some(stored.id) != request.id
+                    }),
+                    "fleet_alert_policy_name_conflict"
+                );
                 let policy = if let Some(stored) = policies
                     .iter_mut()
-                    .find(|stored| stored.name == candidate.name)
+                    .find(|stored| request.id.is_some_and(|id| stored.id == id))
                 {
+                    stored.name = candidate.name.clone();
                     stored.scope_kind = candidate.scope_kind.clone();
                     stored.scope_value = candidate.scope_value.clone();
                     stored.memory_available_warning_ratio =
@@ -159,7 +166,8 @@ impl Repository {
                         actor_id
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                    ON CONFLICT (name) DO UPDATE SET
+                    ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
                         scope_kind = EXCLUDED.scope_kind,
                         scope_value = EXCLUDED.scope_value,
                         memory_available_warning_ratio = EXCLUDED.memory_available_warning_ratio,
@@ -229,6 +237,75 @@ impl Repository {
             }
         }
     }
+
+    pub(crate) async fn delete_fleet_alert_policy(
+        &self,
+        policy_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut policies = memory.fleet_alert_policies.write().await;
+                let index = policies
+                    .iter()
+                    .position(|policy| policy.id == policy_id)
+                    .ok_or_else(|| anyhow::anyhow!("fleet_alert_policy_not_found:{policy_id}"))?;
+                let policy = policies.remove(index);
+                drop(policies);
+                let mut audit = alert_policy_audit(&policy, operator, unix_now().to_string());
+                audit.action = "fleet.alert_policy_deleted".to_string();
+                memory.audits.write().await.push(audit);
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    DELETE FROM fleet_alert_policies
+                    WHERE id = $1
+                    RETURNING
+                        id,
+                        name,
+                        scope_kind,
+                        scope_value,
+                        memory_available_warning_ratio,
+                        memory_available_critical_ratio,
+                        disk_available_warning_ratio,
+                        disk_available_critical_ratio,
+                        cpu_load_warning,
+                        cpu_load_critical,
+                        priority,
+                        enabled,
+                        notes,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(policy_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let policy = alert_policy_from_row(row)?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("fleet.alert_policy_deleted")
+                .bind(format!("fleet_alert_policy:{}", policy.id))
+                .bind(alert_policy_metadata(&policy, operator))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
 }
 
 fn alert_policy_from_request(
@@ -244,7 +321,7 @@ fn alert_policy_from_request(
     let scope_value = normalize_scope_value(&scope_kind, request.scope_value.as_deref())?;
     validate_optional_notes(request.notes.as_deref())?;
     let policy = FleetAlertPolicyOverrideView {
-        id: Uuid::new_v4(),
+        id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name.trim().to_string(),
         scope_kind,
         scope_value,
