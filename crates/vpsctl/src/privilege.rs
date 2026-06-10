@@ -373,7 +373,10 @@ mod tests {
     fn generates_32_byte_super_salt_hex() {
         let salt_hex = random_super_salt_hex();
         assert_eq!(salt_hex.len(), GENERATED_SUPER_SALT_BYTES * 2);
-        assert_eq!(decode_super_salt(&salt_hex).unwrap().len(), GENERATED_SUPER_SALT_BYTES);
+        assert_eq!(
+            decode_super_salt(&salt_hex).unwrap().len(),
+            GENERATED_SUPER_SALT_BYTES
+        );
     }
 
     #[test]
