@@ -21,6 +21,7 @@ use crate::cli_access::{
 use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
 };
+use crate::commands_keys::PrivilegeVerifierCommand;
 use crate::commands_network::{
     TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand, TunnelProbeCommand,
     TunnelPromoteAdapterCommand, TunnelRollbackCommand, TunnelSpeedTestCommand,
@@ -996,6 +997,7 @@ pub(crate) enum Command {
     TunnelSpeedTest(TunnelSpeedTestCommand),
     NoiseKeygen,
     SigningKeygen,
+    PrivilegeVerifier(PrivilegeVerifierCommand),
     Vty,
 }
 

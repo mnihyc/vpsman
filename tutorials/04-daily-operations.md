@@ -12,7 +12,8 @@ recomputes the operation intent and asks the private gateway to verify it:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+# Generate once with: cargo run -p vpsctl -- privilege-verifier --generate-salt
+export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
 
 cargo run -p vpsctl -- job-create --command uptime --tags edge
 cargo run -p vpsctl -- job-create --command /bin/sh --argv '/bin/sh,-lc,uname -a' --clients edge-01
@@ -49,10 +50,12 @@ cargo run -p vpsctl -- job-output-artifact \
   --output-file ./stdout.bin
 ```
 
-Timeout, cancel, terminal close, and process-stop status output includes a
-`cleanup` object when the agent had to terminate a process group. Inspect it
-for the signal path, fallback use, and final running state during incident
-review.
+Timeout, terminal close, and process-stop status output includes a
+`cleanup` object when the agent had to terminate a process group. Dispatched
+jobs are intentionally not cancelable after handoff; inspect job output and run
+a compensating follow-up operation when recovery is needed. Inspect cleanup
+objects for the signal path, fallback use, and final running state during
+incident review.
 
 ## Use Record Tables In The Panel
 
@@ -246,7 +249,7 @@ cargo run -p vpsctl -- schedule-create \
   --name hourly-uptime \
   --command /usr/bin/uptime \
   --tags edge \
-  --interval-secs 3600 \
+  --cron-expr '0 * * * *' \
   --catch-up-policy run_once \
   --retry-delay-secs 300 \
   --max-failures 5

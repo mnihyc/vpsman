@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools bash cargo mktemp
+smoke_require_tools bash cargo mktemp python3
 
 fail() {
   echo "$1" >&2
@@ -79,6 +79,18 @@ require_regex "$noise_out" '"public_key_hex":"[0-9a-f]{64}"' "noise-keygen"
 require_regex "$signing_out" '"private_key_hex":"[0-9a-f]{64}"' "signing-keygen"
 require_regex "$signing_out" '"public_key_hex":"[0-9a-f]{64}"' "signing-keygen"
 
+export VPSMAN_SUPER_PASSWORD="correct horse battery staple"
+privilege_salt_hex="01020304"
+expected_privilege_verifier="$(smoke_privilege_verifier_key_hex "$VPSMAN_SUPER_PASSWORD" "$privilege_salt_hex")"
+privilege_out="$("$bin" privilege-verifier --super-salt-hex "$privilege_salt_hex")"
+require_contains "$privilege_out" "\"super_salt_hex\":\"$privilege_salt_hex\"" "privilege-verifier"
+require_contains "$privilege_out" "\"privilege_verifier_key_hex\":\"$expected_privilege_verifier\"" "privilege-verifier"
+require_contains "$privilege_out" "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX" "privilege-verifier gateway env"
+require_not_contains "$privilege_out" "$VPSMAN_SUPER_PASSWORD" "privilege-verifier"
+generated_privilege_out="$("$bin" privilege-verifier --generate-salt)"
+require_regex "$generated_privilege_out" '"super_salt_hex":"[0-9a-f]{64}"' "privilege-verifier generated salt"
+require_regex "$generated_privilege_out" '"privilege_verifier_key_hex":"[0-9a-f]{64}"' "privilege-verifier generated verifier"
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-cli-semantics.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 artifact_file="$tmp_dir/vpsman-agent"
@@ -114,7 +126,7 @@ printf '{\n'
 printf '  "vpsctl_cli_semantics_smoke": "ok",\n'
 printf '  "checks": [\n'
 printf '    "local_tunnel_plan_all_kinds",\n'
-printf '    "noise_and_signing_keygen_shape",\n'
+printf '    "noise_signing_and_privilege_keygen_shape",\n'
 printf '    "agent_update_signature_json",\n'
 printf '    "network_probe_bounds_rejected",\n'
 printf '    "network_speed_bounds_rejected"\n'

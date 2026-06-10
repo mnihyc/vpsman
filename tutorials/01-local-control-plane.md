@@ -41,14 +41,21 @@ Docker-managed named volumes.
 
 ## Start Processes Manually
 
-Manual startup is useful while iterating:
+Manual startup is useful while iterating. Generate current startup material once
+per local environment. The examples use `python3` and `jq`:
 
 ```sh
+mkdir -p .tmp/objects/backups .tmp/objects/updates
+
 export VPSMAN_API_BIND=127.0.0.1:8080
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN=dev-internal-token
+export VPSMAN_INTERNAL_TOKEN="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+)"
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
 export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
@@ -58,9 +65,45 @@ export VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO=0.10
 export VPSMAN_ALERT_CPU_LOAD_WARNING=2.0
 export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
 
-cargo run -p vpsman-api
+cargo run -p vpsctl -- signing-keygen > .tmp/server-signing.json
+export VPSMAN_SERVER_SIGNING_KEY_HEX="$(jq -r .private_key_hex .tmp/server-signing.json)"
+export VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX="$(jq -r .public_key_hex .tmp/server-signing.json)"
+
+cargo run -p vpsctl -- noise-keygen > .tmp/gateway-noise.json
+export VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$(jq -r .private_key_hex .tmp/gateway-noise.json)"
+export VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$(jq -r .public_key_hex .tmp/gateway-noise.json)"
+
+export VPSMAN_SUPER_PASSWORD=<local_super_password>
+export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+export VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$(python3 - <<'PY'
+import hashlib, os
+password = os.environ['VPSMAN_SUPER_PASSWORD']
+salt = bytes.fromhex(os.environ['VPSMAN_SUPER_SALT_HEX'])
+h = hashlib.sha256()
+h.update(b'vpsman-super-key-v1')
+h.update(len(salt).to_bytes(8, 'big'))
+h.update(salt)
+h.update(password.encode())
+print(h.hexdigest())
+PY
+)"
+```
+
+Start each backend in a separate shell or terminal pane. Keep verifier material
+out of the public API process:
+
+```sh
+# API shell
+env -u VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX cargo run -p vpsman-api
+
+# Gateway shell
 cargo run -p vpsman-gateway
-cargo run -p vpsman-worker
+
+# Worker shell
+VPSMAN_WORKER_GATEWAY_CONTROL_URL="$VPSMAN_GATEWAY_CONTROL_URL" \
+VPSMAN_WORKER_INTERNAL_TOKEN="$VPSMAN_INTERNAL_TOKEN" \
+VPSMAN_WORKER_SERVER_SIGNING_KEY_HEX="$VPSMAN_SERVER_SIGNING_KEY_HEX" \
+  cargo run -p vpsman-worker
 ```
 
 In another shell:
@@ -76,7 +119,8 @@ Check API health and CLI wiring:
 
 ```sh
 cargo run -p vpsctl -- --api-url http://127.0.0.1:8080 health
-cargo run -p vpsctl -- --api-url http://127.0.0.1:8080 bootstrap
+export VPSMAN_OPERATOR_PASSWORD=<admin_password>
+cargo run -p vpsctl -- --api-url http://127.0.0.1:8080 bootstrap --username admin --password-env VPSMAN_OPERATOR_PASSWORD
 ```
 
 After creating or obtaining an operator token, export it:

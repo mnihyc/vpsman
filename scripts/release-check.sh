@@ -150,7 +150,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-agent-install-distro-matrix "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-agent-resource-budget "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-agent-reconnect-churn "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-signed-discovery-failover "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-direct-identity-gateway-failover "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-file-push "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-backup "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-backup-chunked-upload "VPSMAN_RELEASE_SKIP_SMOKES=1"
@@ -188,8 +188,8 @@ else
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-postgres-persistence.sh
   run_step smoke-postgres-live-job-output \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-postgres-live-job-output.sh
-  run_step smoke-signed-discovery-failover \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-signed-discovery-failover.sh
+  run_step smoke-direct-identity-gateway-failover \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-direct-identity-gateway-failover.sh
   run_step smoke-live-file-push \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-file-push.sh
   run_step smoke-live-backup \

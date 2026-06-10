@@ -22,33 +22,27 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags postgres-live-job)"
-enrollment_token="$(jq -r '.token' <<<"$token_json")"
+smoke_register_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$agent_config" \
+  "$client_id" \
+  "$client_id" \
+  "postgres-live-job" \
+  "$gateway_addr" \
+  "$gateway_public_hex" \
+  "$server_signing_public_hex"
 
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$enrollment_token" \
-  --output-file "$agent_config"
-client_id="$(smoke_agent_config_client_id "$agent_config")"
-if [[ -z "$client_id" ]]; then
-  smoke_fail "enroll-config did not write primary client_id for postgres live job smoke"
-fi
-
-peer_token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags postgres-live-job)"
-peer_enrollment_token="$(jq -r '.token' <<<"$peer_token_json")"
-
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$peer_enrollment_token" \
-  --output-file "$peer_agent_config"
-peer_client_id="$(smoke_agent_config_client_id "$peer_agent_config")"
-if [[ -z "$peer_client_id" ]]; then
-  smoke_fail "enroll-config did not write peer client_id for postgres live job smoke"
-fi
+smoke_register_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$peer_agent_config" \
+  "$peer_client_id" \
+  "$peer_client_id" \
+  "postgres-live-job" \
+  "$gateway_addr" \
+  "$gateway_public_hex" \
+  "$server_signing_public_hex"
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 VPSMAN_SUPERVISOR_DIR="$agent_supervisor_dir" \
@@ -585,5 +579,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "direct_identity_registration", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
   }'

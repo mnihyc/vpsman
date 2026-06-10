@@ -332,12 +332,26 @@ if [[ "$scoped_job_status" != "403" ]]; then
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_job_body" >/dev/null
 
-token_json="$(vpsctl_auth enrollment-token-create --ttl-secs 600 --default-tags edge,bgp)"
-jq -e '.token and ((.default_tags | sort) == ["bgp", "edge"]) and (.expires_at | tonumber) > 0' \
-  <<<"$token_json" >/dev/null
-tokens_json="$(vpsctl_auth enrollment-tokens)"
-jq -e 'length == 1 and ((.[0].default_tags | sort) == ["bgp", "edge"])' \
-  <<<"$tokens_json" >/dev/null
+agent_a_keys="$(vpsctl_auth noise-keygen)"
+agent_a_public_hex="$(jq -r '.public_key_hex' <<<"$agent_a_keys")"
+agent_b_keys="$(vpsctl_auth noise-keygen)"
+agent_b_public_hex="$(jq -r '.public_key_hex' <<<"$agent_b_keys")"
+agent_identity_json="$(vpsctl_auth agent-identity-upsert \
+  --client-id cli-agent-a \
+  --client-public-key-hex "$agent_a_public_hex" \
+  --display-name cli-edge-a \
+  --tags edge,bgp \
+  --confirmed)"
+jq -e '.client_id == "cli-agent-a" and .display_name == "cli-edge-a" and ((.tags | sort) == ["bgp", "edge"])' \
+  <<<"$agent_identity_json" >/dev/null
+agent_identity_b_json="$(vpsctl_auth agent-identity-upsert \
+  --client-id cli-agent-b \
+  --client-public-key-hex "$agent_b_public_hex" \
+  --display-name cli-edge-b \
+  --tags edge,bird2 \
+  --confirmed)"
+jq -e '.client_id == "cli-agent-b" and .display_name == "cli-edge-b" and ((.tags | sort) == ["bird2", "edge"])' \
+  <<<"$agent_identity_b_json" >/dev/null
 
 root_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"vpsctl smoke agent is running without root"}'
@@ -743,7 +757,7 @@ jq -n \
       "fleet_alert_states",
       "fleet_alert_policies",
       "fleet_alert_notifications",
-      "enrollment_tokens",
+      "agent_identity_upsert",
       "agents_summary",
       "data_source_status",
       "data_source_object_store_readiness",

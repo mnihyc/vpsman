@@ -65,6 +65,20 @@ verify_sha256() {
   info "$label sha256 verified"
 }
 
+require_hex64_env() {
+  local name="$1"
+  local value="${!name:-}"
+  [[ "$value" =~ ^[0-9A-Fa-f]{64}$ ]] || fail "$name must be exactly 64 hex characters"
+}
+
+toml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '"%s"' "$value"
+}
+
 root_path() {
   local path="$1"
   if [[ "$install_root" == "/" ]]; then
@@ -332,6 +346,55 @@ priority = 10
 EOF
 }
 
+render_direct_identity_config() {
+  : "${VPSMAN_AGENT_CLIENT_ID:?set VPSMAN_AGENT_CLIENT_ID for direct registered-agent config}"
+  : "${VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX:?set VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX for direct registered-agent config}"
+  : "${VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX:?set VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX for direct registered-agent config}"
+  : "${VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX:?set VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX for server-signed jobs}"
+  : "${VPSMAN_GATEWAY_ENDPOINTS:?set VPSMAN_GATEWAY_ENDPOINTS as label=host:port=priority entries}"
+  require_hex64_env VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX
+  require_hex64_env VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
+  require_hex64_env VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX
+
+  {
+    printf 'client_id = %s\n' "$(toml_quote "$VPSMAN_AGENT_CLIENT_ID")"
+    printf 'display_name = %s\n' "$(toml_quote "${VPSMAN_AGENT_DISPLAY_NAME:-$VPSMAN_AGENT_CLIENT_ID}")"
+    printf 'telemetry_light_secs = %s\n' "${VPSMAN_TELEMETRY_LIGHT_SECS:-15}"
+    printf 'telemetry_full_secs = %s\n' "${VPSMAN_TELEMETRY_FULL_SECS:-60}"
+    if [[ -n "${VPSMAN_AGENT_TAGS:-}" ]]; then
+      printf 'tags = [%s]\n' "$(printf '%s' "$VPSMAN_AGENT_TAGS" | awk -F, '{for (i=1; i<=NF; i++) {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") printf "%s\"%s\"", sep, $i; sep=", "}}')"
+    else
+      printf 'tags = []\n'
+    fi
+    printf '\n[noise]\n'
+    printf 'mode = "enrolled_ik"\n'
+    printf 'client_private_key_hex = %s\n' "$(toml_quote "$VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX")"
+    printf 'server_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX")"
+    printf '\n[auth]\n'
+    printf 'server_ed25519_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX")"
+    printf 'command_timeout_secs = %s\n' "${VPSMAN_COMMAND_TIMEOUT_SECS:-30}"
+    printf 'gateway_retry_secs = %s\n' "${VPSMAN_GATEWAY_RETRY_SECS:-60}"
+    printf 'gateway_connect_timeout_secs = %s\n' "${VPSMAN_GATEWAY_CONNECT_TIMEOUT_SECS:-10}"
+  }
+
+  local first=1 endpoint label tcp_addr priority extra
+  IFS=$'\n,' read -r -d '' -a endpoints < <(printf '%s\0' "$VPSMAN_GATEWAY_ENDPOINTS") || true
+  for endpoint in "${endpoints[@]}"; do
+    endpoint="${endpoint//[$'\r\n']/}"
+    [[ -n "${endpoint// /}" ]] || continue
+    IFS='=' read -r label tcp_addr priority extra <<<"$endpoint"
+    [[ -z "${extra:-}" && -n "${label:-}" && -n "${tcp_addr:-}" && -n "${priority:-}" ]] \
+      || fail "endpoint must be label=host:port=priority: $endpoint"
+    [[ "$priority" =~ ^[0-9]+$ ]] || fail "endpoint priority must be an integer: $endpoint"
+    printf '\n[[tcp_endpoints]]\n'
+    printf 'label = %s\n' "$(toml_quote "$label")"
+    printf 'tcp_addr = %s\n' "$(toml_quote "$tcp_addr")"
+    printf 'priority = %s\n' "$priority"
+    first=0
+  done
+  [[ "$first" -eq 0 ]] || fail "VPSMAN_GATEWAY_ENDPOINTS did not contain any endpoints"
+}
+
 write_requested_config() {
   local tmp_config="$1"
   if [[ -n "${VPSMAN_AGENT_CONFIG_B64:-}" ]]; then
@@ -342,44 +405,13 @@ write_requested_config() {
   elif [[ -n "${VPSMAN_AGENT_CONFIG_URL:-}" ]]; then
     require_tool curl
     curl -fsSL "$VPSMAN_AGENT_CONFIG_URL" -o "$tmp_config"
-  elif [[ -n "${VPSMAN_ENROLLMENT_TOKEN:-}" ]]; then
-    render_enrolled_config "$tmp_config"
+  elif [[ -n "${VPSMAN_AGENT_CLIENT_ID:-}" || -n "${VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX:-}" || -n "${VPSMAN_GATEWAY_ENDPOINTS:-}" ]]; then
+    render_direct_identity_config >"$tmp_config"
   elif is_true "${VPSMAN_ALLOW_DEV_CONFIG:-0}"; then
     render_dev_config >"$tmp_config"
   else
-    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, VPSMAN_AGENT_CONFIG_URL, or VPSMAN_ENROLLMENT_TOKEN; set VPSMAN_ALLOW_DEV_CONFIG=1 only for dev_xx local testing"
+    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, VPSMAN_AGENT_CONFIG_URL, or direct identity variables (VPSMAN_AGENT_CLIENT_ID, VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX, VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX, VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX, VPSMAN_GATEWAY_ENDPOINTS); set VPSMAN_ALLOW_DEV_CONFIG=1 only for dev_xx local testing"
   fi
-}
-
-render_enrolled_config() {
-  local tmp_config="$1"
-  : "${VPSMAN_API_URL:?set VPSMAN_API_URL for target-side enrollment}"
-  local command_timeout_secs="${VPSMAN_COMMAND_TIMEOUT_SECS:-30}"
-  local helper
-  helper="$(mktemp "$stage_install_dir/vpsctl.XXXXXX")"
-  if [[ -n "${VPSMAN_VPSCTL_BINARY:-}" ]]; then
-    cp "$VPSMAN_VPSCTL_BINARY" "$helper"
-  else
-    : "${VPSMAN_VPSCTL_URL:?set VPSMAN_VPSCTL_URL or VPSMAN_VPSCTL_BINARY for target-side enrollment}"
-    : "${VPSMAN_VPSCTL_SHA256_HEX:?set VPSMAN_VPSCTL_SHA256_HEX when downloading vpsctl helper}"
-    require_tool curl
-    curl -fsSL "$VPSMAN_VPSCTL_URL" -o "$helper"
-  fi
-  verify_sha256 "$helper" "${VPSMAN_VPSCTL_SHA256_HEX:-}" "vpsctl helper"
-  chmod 0755 "$helper"
-
-  local args=(
-    --api-url "$VPSMAN_API_URL"
-    enroll-config
-    --command-timeout-secs "$command_timeout_secs"
-    --output-file "$tmp_config"
-  )
-
-  if ! VPSMAN_ENROLLMENT_TOKEN="$VPSMAN_ENROLLMENT_TOKEN" "$helper" "${args[@]}"; then
-    rm -f "$helper"
-    return 1
-  fi
-  rm -f "$helper"
 }
 
 install_mode="${VPSMAN_INSTALL_MODE:-root}"

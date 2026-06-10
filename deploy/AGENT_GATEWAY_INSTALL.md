@@ -12,6 +12,7 @@ Generate or obtain these values before running the installer on a VPS:
 - `VPSMAN_AGENT_CLIENT_ID`: stable client id, such as `agent-nrt-04`.
 - `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: agent Noise private key hex.
 - `VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX`: gateway Noise public key hex.
+- `VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX`: server Ed25519 public key for signed jobs and hot config.
 - `VPSMAN_GATEWAY_ENDPOINTS`: comma or newline separated endpoint list in
   `label=host:port=priority` format. DNS names are supported; lower priority
   numbers are tried first.
@@ -19,8 +20,6 @@ Generate or obtain these values before running the installer on a VPS:
 Optional values:
 
 - `VPSMAN_AGENT_DISPLAY_NAME`: friendly name stored in `agent.toml`.
-- `VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX`: signing public key for server-signed
-  hot config.
 - `VPSMAN_AGENT_BINARY_URL`: release artifact URL to download before installing.
 - `VPSMAN_AGENT_BINARY_SHA256`: expected SHA256 for the downloaded binary.
 
@@ -54,6 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_DISPLAY_NAME=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
+  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
   bash
 ```
@@ -66,6 +66,7 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
+  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
   bash
 ```

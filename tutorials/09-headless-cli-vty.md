@@ -16,7 +16,8 @@ Set local privilege unlock material only when dispatching privileged work:
 
 ```sh
 export VPSMAN_SUPER_PASSWORD=<local_super_password>
-export VPSMAN_SUPER_SALT_HEX=<64_hex_salt>
+# Generate once with: cargo run -p vpsctl -- privilege-verifier --generate-salt
+export VPSMAN_SUPER_SALT_HEX=<super_salt_hex_from_output>
 ```
 
 Check available commands:

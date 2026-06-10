@@ -31,12 +31,11 @@ esac
 require_env VPSMAN_AGENT_CLIENT_ID
 require_env VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX
 require_env VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
+require_env VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX
 require_env VPSMAN_GATEWAY_ENDPOINTS
 require_hex32 VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX
 require_hex32 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
-if [[ -n "${VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX:-}" ]]; then
-  require_hex32 VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX
-fi
+require_hex32 VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX
 
 if [[ "$install_mode" == "root" ]]; then
   [[ "$(id -u)" -eq 0 ]] || die "root install mode must run as root"
@@ -90,9 +89,7 @@ config_file="$config_dir/agent.toml"
   printf 'client_private_key_hex = %s\n' "$(toml_quote "$VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX")"
   printf 'server_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX")"
   printf '\n[auth]\n'
-  if [[ -n "${VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX:-}" ]]; then
-    printf 'server_ed25519_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX")"
-  fi
+  printf 'server_ed25519_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX")"
   printf 'command_timeout_secs = %s\n' "${VPSMAN_COMMAND_TIMEOUT_SECS:-30}"
   printf 'gateway_retry_secs = %s\n' "${VPSMAN_GATEWAY_RETRY_SECS:-60}"
   printf 'gateway_connect_timeout_secs = %s\n' "${VPSMAN_GATEWAY_CONNECT_TIMEOUT_SECS:-10}"
@@ -139,7 +136,7 @@ UNIT
     printf 'User=%s\n' "$run_user"
   fi
   cat <<UNIT
-ExecStart=$agent_bin --config $config_file
+ExecStart=$agent_bin --config $config_file run
 Restart=always
 RestartSec=5
 

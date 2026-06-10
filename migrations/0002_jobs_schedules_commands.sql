@@ -70,6 +70,22 @@ CREATE UNIQUE INDEX jobs_actor_idempotency_key_idx
     ON jobs (actor_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
+ALTER TABLE jobs
+  ADD CONSTRAINT jobs_status_common_check CHECK (status IN (
+    'queued',
+    'running',
+    'dispatching',
+    'completed',
+    'partially_completed',
+    'failed',
+    'timed_out',
+    'dispatch_failed',
+    'degraded_unprivileged',
+    'accepted',
+    'rejected_authorization_required',
+    'schedule_no_targets'
+  ));
+
 CREATE TABLE job_targets (
     job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -80,6 +96,20 @@ CREATE TABLE job_targets (
     completed_at TIMESTAMPTZ,
     PRIMARY KEY (job_id, client_id)
 );
+
+ALTER TABLE job_targets
+  ADD CONSTRAINT job_targets_status_common_check CHECK (status IN (
+    'queued',
+    'dispatching',
+    'accepted',
+    'completed',
+    'failed',
+    'timed_out',
+    'dispatch_failed',
+    'degraded_unprivileged',
+    'rejected_by_agent',
+    'rejected_authorization_required'
+  ));
 
 CREATE TABLE job_outputs (
     job_id UUID NOT NULL,

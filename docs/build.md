@@ -38,11 +38,18 @@ them. Only local builds advance the counters.
 `.cargo/config.toml` uses `rust-lld` for musl targets so static agent builds do
 not require system cross linkers.
 
-Generate development Noise keypairs with:
+Generate development Noise keypairs and gateway privilege verifiers with:
 
 ```sh
 cargo run -p vpsctl -- noise-keygen
+cargo run -p vpsctl -- signing-keygen
+VPSMAN_SUPER_PASSWORD='<operator-super-password>' \
+  cargo run -p vpsctl -- privilege-verifier --generate-salt
 ```
+
+`privilege-verifier` prints `super_salt_hex` for operator-side panel/CLI unlock
+material and `privilege_verifier_key_hex` for the gateway-only
+`VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX` deployment variable.
 
 ## Frontend
 

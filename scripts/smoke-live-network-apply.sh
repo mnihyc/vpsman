@@ -31,6 +31,7 @@ gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
 signing_keys="$(target/debug/vpsctl signing-keygen)"
 server_signing_private_hex="$(jq -r '.private_key_hex' <<<"$signing_keys")"
+server_signing_public_hex="$(jq -r '.public_key_hex' <<<"$signing_keys")"
 
 api_pid=""
 api_log=""
@@ -123,8 +124,6 @@ start_api() {
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_SERVER_SIGNING_KEY_HEX="$server_signing_private_hex" \
-    VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
-    VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -502,32 +501,27 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags bgp,network-apply-smoke)"
-enrollment_token="$(jq -r '.token' <<<"$token_json")"
-peer_token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags bgp,network-apply-smoke)"
-peer_enrollment_token="$(jq -r '.token' <<<"$peer_token_json")"
+smoke_register_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$agent_config" \
+  "$client_id" \
+  "$client_id" \
+  "bgp,network-apply-smoke" \
+  "$gateway_addr" \
+  "$gateway_public_hex" \
+  "$server_signing_public_hex"
 
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$enrollment_token" \
-  --output-file "$agent_config"
-client_id="$(smoke_agent_config_client_id "$agent_config")"
-if [[ -z "$client_id" ]]; then
-  smoke_fail "enroll-config did not write primary client_id for live network apply smoke"
-fi
-
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$peer_enrollment_token" \
-  --output-file "$peer_agent_config" >/dev/null
-peer_client_id="$(smoke_agent_config_client_id "$peer_agent_config")"
-if [[ -z "$peer_client_id" ]]; then
-  smoke_fail "enroll-config did not write peer client_id for live network apply smoke"
-fi
+smoke_register_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$peer_agent_config" \
+  "$peer_client_id" \
+  "$peer_client_id" \
+  "bgp,network-apply-smoke" \
+  "$gateway_addr" \
+  "$gateway_public_hex" \
+  "$server_signing_public_hex"
 
 sed -i \
   -e 's/^apply_enabled = .*/apply_enabled = true/' \

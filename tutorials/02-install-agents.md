@@ -44,6 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_DISPLAY_NAME=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
+  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
   bash
 ```
@@ -56,6 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   VPSMAN_AGENT_CLIENT_ID=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
+  VPSMAN_SERVER_ED25519_PUBLIC_KEY_HEX=<server_ed25519_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10' \
   bash
 ```

@@ -31,6 +31,7 @@ gateway_control_url="http://127.0.0.1:$gateway_control_port"
 minio_url="http://127.0.0.1:$minio_port"
 bucket="vpsman-artifacts"
 internal_token="minio-backup-internal-token-00000000"
+client_id="minio-smoke-$(date +%s)"
 access_key="vpsman"
 secret_key="vpsman-password"
 region="us-east-1"
@@ -91,20 +92,14 @@ if ! smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
   exit 1
 fi
 
-token_json="$(target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-  --ttl-secs 600 \
-  --default-tags minio-smoke)"
-enrollment_token="$(jq -r '.token' <<<"$token_json")"
-client_id="$(jq -r '.assigned_client_id' <<<"$token_json")"
-[[ -n "$client_id" && "$client_id" != "null" ]] || {
-  echo "enrollment token did not return assigned_client_id" >&2
-  exit 1
-}
 client_keys="$(target/debug/vpsctl noise-keygen)"
 client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
-target/debug/vpsctl --api-url "$api_url" enroll-claim \
-  --token "$enrollment_token" \
-  --client-public-key-hex "$client_public_hex" >/dev/null
+target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
+  --client-id "$client_id" \
+  --client-public-key-hex "$client_public_hex" \
+  --display-name "$client_id" \
+  --tags minio-smoke \
+  --confirmed >/dev/null
 
 backup_request_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" backup-request \
