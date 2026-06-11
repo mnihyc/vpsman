@@ -17,19 +17,52 @@ api_port="$(smoke_free_port)"
 pg_port="$(smoke_free_port)"
 frontend_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
-postgres_url="$(smoke_start_postgres "vpsman-frontend-api-postgres" "$pg_port")"
+smoke_start_postgres "vpsman-frontend-api-postgres" "$pg_port" >/dev/null
+postgres_url="$SMOKE_POSTGRES_URL"
 api_log="$SMOKE_TMPDIR/api.log"
+api_pid=""
 internal_token="frontend-live-api-internal-token-123456"
 operator_username="frontend-live-admin"
 operator_password="frontend-live-password"
 
-VPSMAN_API_BIND="127.0.0.1:$api_port" \
-VPSMAN_POSTGRES_URL="$postgres_url" \
-VPSMAN_INTERNAL_TOKEN="$internal_token" \
-RUST_LOG="vpsman_api=warn" \
-  target/debug/vpsman-api >"$api_log" 2>&1 &
-smoke_track_pid "$!"
-smoke_wait_http "$api_url/health"
+start_api() {
+  local attempt=0
+  local deadline=$((SECONDS + 90))
+  while ((SECONDS < deadline)); do
+    attempt=$((attempt + 1))
+    api_log="$SMOKE_TMPDIR/api-$attempt.log"
+    VPSMAN_API_BIND="127.0.0.1:$api_port" \
+    VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_INTERNAL_TOKEN="$internal_token" \
+    RUST_LOG="vpsman_api=warn" \
+      target/debug/vpsman-api >"$api_log" 2>&1 &
+    api_pid="$!"
+    smoke_track_pid "$api_pid"
+    local http_deadline=$((SECONDS + 8))
+    until curl -fsS "$api_url/health" >/dev/null 2>&1; do
+      if ! kill -0 "$api_pid" >/dev/null 2>&1; then
+        wait "$api_pid" >/dev/null 2>&1 || true
+        api_pid=""
+        break
+      fi
+      if ((SECONDS >= http_deadline)); then
+        kill "$api_pid" >/dev/null 2>&1 || true
+        wait "$api_pid" >/dev/null 2>&1 || true
+        api_pid=""
+        break
+      fi
+      sleep 0.1
+    done
+    if curl -fsS "$api_url/health" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.5
+  done
+  smoke_dump_logs "frontend live API did not become healthy" "$api_log"
+  exit 1
+}
+
+start_api
 
 seed_agent() {
   local client_id="$1"

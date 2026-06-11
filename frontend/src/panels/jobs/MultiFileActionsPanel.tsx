@@ -5,6 +5,7 @@ import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
+  acceptedDispatchTargetCount,
   bulkOutcomeSummary,
   type BulkFailureReason,
   targetPreflightUnavailable,
@@ -1142,9 +1143,10 @@ function buildBulkProgress({
     }
   }
   const retrieved = Array.from(statusByClient.keys()).filter((clientId) => targets.some((target) => target.id === clientId)).length;
-  const doing = Math.max(0, acceptedTargets - retrieved - failed);
+  const accepted = acceptedDispatchTargetCount(acceptedTargets, targets);
+  const doing = Math.max(0, accepted - retrieved - failed);
   return {
-    accepted: Math.min(acceptedTargets, targets.length),
+    accepted,
     completed,
     doing,
     expected: targets.length,

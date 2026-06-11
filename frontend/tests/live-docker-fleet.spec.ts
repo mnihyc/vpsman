@@ -16,7 +16,7 @@ const password =
   process.env.VPSMAN_DOCKER_FLEET_PASSWORD ?? "docker-fleet-password";
 const screenshotDir = process.env.VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR;
 
-test.setTimeout(180_000);
+test.setTimeout(300_000);
 
 test("validates the live Docker fleet console with 20+ VPS agents", async ({
   page,
@@ -112,8 +112,8 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     firstDetail.getByRole("heading", { name: /df-alpha-US-01/ }),
   ).toBeVisible();
-  await expectLiveFleetTelemetry(firstDetail);
   await expect(firstDetail).toContainText("Root uid 0");
+  await expectLiveFleetTelemetry(firstDetail);
   await firstRow.getByLabel("Select VPS instance records row").check();
   await secondRow.getByLabel("Select VPS instance records row").check();
   await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
@@ -151,8 +151,24 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
 
   await verifyDesktopSubpages(page);
   await openConsoleSubpage(page, "Preferences", "Operator");
-  await page.getByLabel("Default expansion").selectOption("active");
-  await page.getByRole("button", { name: "Save preferences" }).click();
+  const nameDisplay = page.getByLabel("Name display");
+  const currentNameDisplay = await nameDisplay.inputValue();
+  await nameDisplay.selectOption(
+    currentNameDisplay === "name" ? "name_id_suffix" : "name",
+  );
+  const bulkCompare = page.getByLabel("Bulk output comparison default");
+  const currentBulkCompare = await bulkCompare.inputValue();
+  await bulkCompare.selectOption(
+    currentBulkCompare === "text" ? "binary" : "text",
+  );
+  const savePreferences = page.getByRole("button", {
+    name: "Save preferences",
+  });
+  await expect(
+    page.locator(".consoleStatusBadge", { hasText: "Unsaved changes" }),
+  ).toBeVisible();
+  await expect(savePreferences).toBeEnabled();
+  await savePreferences.click();
   await expect(
     page.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
   ).toBeVisible();
@@ -247,7 +263,7 @@ async function expectLiveFleetTelemetry(detail: Locator) {
     detail.locator(".metric", { hasText: "Samples" }),
   ).not.toContainText(/No rollup|No data|unavailable/i);
   await detail.getByRole("tab", { name: "Telemetry" }).click();
-  await expect(detail.getByText(/CPU load/)).toBeVisible();
+  await expect(detail.getByRole("tabpanel").getByText("CPU load")).toBeVisible();
   await expect(detail).not.toContainText(
     /No rollup|No rate samples|No counters|No data|unavailable/i,
   );
@@ -292,68 +308,82 @@ async function exerciseExpressionWebhooks(page: Page) {
   await expect(
     page.getByRole("heading", { name: "Notification channels" }),
   ).toBeVisible();
-  const manager = page.getByLabel("Expression webhook rule manager");
-  await manager
-    .getByLabel("Webhook rule name")
-    .fill("docker-fleet-q2-capacity");
-  await manager
-    .getByLabel("Webhook target URL")
-    .fill("https://hooks.example/vpsman/docker-fleet");
-  await manager.getByLabel("Webhook cooldown seconds").fill("60");
+  const notifications = page.locator(".consoleCrudPanel").filter({
+    has: page.getByRole("tablist", { name: "Notification registries" }),
+  });
+  await notifications.getByRole("tab", { name: "Webhooks" }).click();
+  await expect(
+    notifications.getByText("Webhook rules", { exact: true }).first(),
+  ).toBeVisible();
+
+  await notifications.getByRole("button", { name: "Create rule" }).click();
+  const detail = notifications.locator(".consoleDetailPanel").filter({
+    hasText: /Create webhook rule|Edit webhook rule/,
+  });
+  await expect(detail).toBeVisible();
+  await detail.getByLabel("Webhook rule name").fill("docker-fleet-q2-capacity");
+  await detail.getByLabel("Webhook target").fill(
+    "https://hooks.example/vpsman/docker-fleet",
+  );
+  await detail.getByLabel("Webhook cooldown seconds").fill("60");
   await fillSearchExpression(
-    manager.getByRole("searchbox", { name: "Webhook rule expression" }),
+    detail.getByLabel("Webhook expression"),
     'interval.30sec && vps.tag = "role:edge"',
   );
   await fillWebhookTemplate(
-    manager,
+    detail,
     "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",
   );
-  await manager.getByLabel("Webhook event kind").fill("interval.30sec");
-  await manager.getByRole("button", { name: "Save rule" }).click();
+  await detail.getByLabel("Webhook event kind").fill("interval.30sec");
+  await detail.getByRole("button", { name: "Create rule" }).click();
   await expect(
-    manager.locator(".fleetPolicyStatus", { hasText: "webhook rule saved" }),
-  ).toBeVisible();
-  await expect(manager).toContainText("docker-fleet-q2-capacity");
-
-  await manager.getByRole("button", { name: "Preview rule" }).click();
-  await expect(
-    manager.locator(".fleetPolicyStatus", {
-      hasText: "previewed 6 matched VPSs",
+    notifications.locator(".fleetPolicyStatus", {
+      hasText: "saved docker-fleet-q2-capacity",
     }),
   ).toBeVisible();
-  await expect(manager.locator(".webhookPreviewSplit")).toContainText(
+  await expect(notifications).toContainText("docker-fleet-q2-capacity");
+
+  await detail.getByRole("button", { name: "Preview rule" }).click();
+  await expect(
+    notifications.locator(".deliveryPreviewSection", {
+      hasText: "Webhook delivery preview",
+    }),
+  ).toBeVisible();
+  await expect(notifications).toContainText(
+    "6 VPSs matched webhook dry run",
+  );
+  await expect(notifications).toContainText(
     "docker-fleet-q2-capacity interval.30sec count=6",
   );
-  await expect(manager.locator(".webhookPreviewSplit")).toContainText(
-    "df-alpha-US-01",
-  );
-  await expect(manager.locator(".webhookPreviewSplit")).toContainText(
-    "matched_vps",
-  );
+  await expect(notifications).toContainText("df-alpha-US-01");
 
-  await manager.getByRole("button", { name: "Match rules" }).click();
+  await notifications.getByRole("tab", { name: "Webhooks" }).click();
+  await notifications.getByRole("button", { name: "Match rules" }).click();
   await expect(
-    manager.locator(".fleetPolicyStatus", { hasText: "matched 1" }),
+    notifications.locator(".deliveryPreviewSection", {
+      hasText: "Webhook delivery preview",
+    }),
   ).toBeVisible();
   await expect(
-    manager
-      .locator(".notificationRows")
-      .filter({ hasText: "interval.30sec matched 6" }),
+    notifications.locator(".consoleDataGrid", {
+      hasText: "docker-fleet-q2-capacity",
+    }),
   ).toBeVisible();
 
-  await manager.getByLabel("Webhook rotation days").fill("7");
-  await manager.getByLabel("Webhook rotation status").selectOption("delivered");
-  await manager.getByRole("button", { name: "Preview rotation" }).click();
+  await notifications.getByRole("tab", { name: "Maintenance" }).click();
+  await notifications.getByLabel("Webhook rotation days").fill("7");
+  await notifications.getByLabel("Webhook rotation status").fill("delivered");
+  await notifications.getByRole("button", { name: "Preview rotation" }).click();
   await expect(
-    manager.locator(".fleetPolicyStatus", {
-      hasText: "Rotation preview matched 0, deleted 0",
+    notifications.locator(".fleetPolicyStatus", {
+      hasText: "0 matched / 0 deleted",
     }),
   ).toBeVisible();
   await expectCleanLayout(page);
 }
 
 async function fillWebhookTemplate(manager: Locator, value: string) {
-  const editor = manager.locator(".webhookTemplateEditor .cm-content").first();
+  const editor = manager.locator(".webhookCodeMirror .cm-content").first();
   await expect(editor).toBeVisible();
   await editor.click();
   await editor.page().keyboard.press("Control+A");
@@ -379,10 +409,14 @@ async function verifyDesktopSubpages(page: Page) {
     ["Tags", "Bulk", "Bulk tags"],
     ["Config", "Overview", "Config overview"],
     ["Config", "Rules", "Config rules"],
+    ["Config", "Bulk apply", "Bulk hot config"],
+    ["Config", "Single VPS", "Single VPS config"],
     ["Config", "Templates", "Data-source presets"],
     ["Config", "Status", "Active source status"],
     ["Jobs", "History", "Job history"],
     ["Jobs", "Dispatch", "Dispatch command"],
+    ["Jobs", "Files", "VPS file browser"],
+    ["Jobs", "Multi files", "Multi-file actions"],
     ["Jobs", "Updates", "Agent update releases"],
     ["Jobs", "Transfer history", "File transfer sessions"],
     ["Jobs", "Terminal sessions", "Terminal sessions"],

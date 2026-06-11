@@ -16,7 +16,8 @@ gateway_control_port="$(smoke_free_port)"
 dead_port="$(smoke_free_port)"
 
 api_url="http://127.0.0.1:$api_port"
-postgres_url="$(smoke_start_postgres "vpsman-endpoint-failover-postgres" "$pg_port")"
+smoke_start_postgres "vpsman-endpoint-failover-postgres" "$pg_port" >/dev/null
+postgres_url="$SMOKE_POSTGRES_URL"
 gateway_addr="127.0.0.1:$gateway_port"
 dead_addr="127.0.0.1:$dead_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"

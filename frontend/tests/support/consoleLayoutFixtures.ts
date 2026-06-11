@@ -3260,7 +3260,7 @@ export async function installConsoleApiMock(page: Page) {
           createdJobTargets.set(jobId, targetRecords);
           return jsonResponse({
             accepted_targets: acceptedTargets.length,
-            target_count: clientIds.length,
+            target_count: targets.length,
             job_id: jobId,
             status: "accepted",
           });

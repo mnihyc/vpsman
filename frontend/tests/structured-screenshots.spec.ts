@@ -51,7 +51,7 @@ const allViews: ScreenshotEntry[] = [
   {
     view: "Config",
     subpage: "Single VPS",
-    heading: "Single VPS",
+    heading: "Single VPS config",
     id: "09-config-single",
   },
   {

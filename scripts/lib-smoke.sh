@@ -5,6 +5,7 @@ SMOKE_TMPDIR=""
 SMOKE_PIDS=()
 SMOKE_RESERVED_PORTS=()
 SMOKE_CONTAINERS=()
+SMOKE_POSTGRES_URL=""
 
 smoke_fail() {
   echo "$*" >&2
@@ -182,6 +183,7 @@ smoke_init_tmpdir() {
   SMOKE_PIDS=()
   SMOKE_RESERVED_PORTS=()
   SMOKE_CONTAINERS=()
+  SMOKE_POSTGRES_URL=""
   trap smoke_cleanup EXIT
 }
 
@@ -276,7 +278,8 @@ smoke_start_postgres() {
     sleep 0.25
   done
   smoke_wait_tcp 127.0.0.1 "$port"
-  printf 'postgres://vpsman:vpsman@127.0.0.1:%s/vpsman\n' "$port"
+  SMOKE_POSTGRES_URL="postgres://vpsman:vpsman@127.0.0.1:${port}/vpsman"
+  printf '%s\n' "$SMOKE_POSTGRES_URL"
 }
 
 smoke_wait_tcp() {

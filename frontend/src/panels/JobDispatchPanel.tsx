@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
+  acceptedDispatchTargetCount,
   formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -778,11 +779,12 @@ export function JobDispatchPanel({
   }
 
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[]) {
+    const accepted = acceptedDispatchTargetCount(job.target_count, targets);
     setLastDispatchProgress(null);
     setDispatchProgress({
-      accepted: Math.min(job.target_count, targets.length),
+      accepted,
       completed: 0,
-      doing: Math.min(job.target_count, targets.length),
+      doing: accepted,
       expected: targets.length,
       failed: 0,
       jobId: job.job_id,

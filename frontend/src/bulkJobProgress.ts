@@ -61,9 +61,10 @@ export function buildBulkJobProgress({
     }
   }
 
-  const doing = Math.max(0, Math.min(acceptedTargets, targets.length) - completed - failed);
+  const accepted = acceptedDispatchTargetCount(acceptedTargets, targets);
+  const doing = Math.max(0, accepted - completed - failed);
   return {
-    accepted: Math.min(acceptedTargets, targets.length),
+    accepted,
     completed,
     doing,
     expected: targets.length,
@@ -73,6 +74,11 @@ export function buildBulkJobProgress({
     retrieved,
     unavailable,
   };
+}
+
+export function acceptedDispatchTargetCount(acceptedTargets: number, targets: AgentView[]): number {
+  const dispatchableTargets = targets.filter((target) => !targetPreflightUnavailable(target)).length;
+  return Math.min(acceptedTargets, dispatchableTargets);
 }
 
 export async function waitForBulkJobTargets(

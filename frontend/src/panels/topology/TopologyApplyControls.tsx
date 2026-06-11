@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
 import {
+  acceptedDispatchTargetCount,
   formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -224,11 +225,12 @@ export function TopologyApplyControls({
   }
 
   async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[]) {
+    const accepted = acceptedDispatchTargetCount(job.target_count, targets);
     setLastJobProgress(null);
     setJobProgress({
-      accepted: Math.min(job.target_count, targets.length),
+      accepted,
       completed: 0,
-      doing: Math.min(job.target_count, targets.length),
+      doing: accepted,
       expected: targets.length,
       failed: 0,
       jobId: job.job_id,
