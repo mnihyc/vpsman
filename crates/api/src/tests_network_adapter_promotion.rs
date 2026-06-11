@@ -13,10 +13,12 @@ use crate::gateway_client::GatewayDispatchClient;
 async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
     let repo = Repository::Memory(MemoryState::default());
     let observed = create_observed_plan(&repo, "observed-wg", "wg42", TunnelKind::Wireguard).await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
 
     let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
             runtime_control: RuntimeTunnelControl {
@@ -82,10 +84,12 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
     let repo = Repository::Memory(MemoryState::default());
     let observed =
         create_observed_plan(&repo, "observed-openvpn", "ovpn42", TunnelKind::Openvpn).await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
 
     let error = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
             runtime_control: startup_only_adapter_control(),
@@ -98,9 +102,11 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
     .unwrap_err();
     assert_eq!(error.code, "adapter_promotion_requires_confirmation");
 
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let error = crate::routes_network::promote_tunnel_plan_to_adapter(
-        State(test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(PromoteTunnelPlanToAdapterRequest {
             plan_id: observed.id,
             runtime_control: startup_only_adapter_control(),
@@ -130,9 +136,11 @@ async fn create_observed_plan(
         desired_interfaces: vec![interface_name.to_string()],
         ..RuntimeTunnelTopologyIntent::default()
     };
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let (status, Json(observed)) = crate::routes_network::create_tunnel_plan(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(CreateTunnelPlanRequest { input }),
     )
     .await

@@ -1,4 +1,4 @@
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -189,6 +189,7 @@ async fn restore_plan_records_metadata_and_audit_after_privilege_unlock() {
     let repo = seeded_restore_repo().await;
     let source_backup_id = create_source_backup(&repo).await;
     let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let request = CreateRestorePlanRequest {
         source_backup_request_id: source_backup_id,
         target_client_id: "client-b".to_string(),
@@ -200,7 +201,7 @@ async fn restore_plan_records_metadata_and_audit_after_privilege_unlock() {
         privilege_assertion: None,
     };
 
-    let (status, Json(view)) = create_restore_plan(State(state), HeaderMap::new(), Json(request))
+    let (status, Json(view)) = create_restore_plan(State(state), headers, Json(request))
         .await
         .unwrap();
     let restore_plans = repo.list_restore_plans(10).await.unwrap();
@@ -237,13 +238,11 @@ async fn restore_plan_requires_privilege_gateway_verification() {
         note: None,
         privilege_assertion: None,
     };
-    let missing_error = create_restore_plan(
-        State(test_state_without_privilege(repo)),
-        HeaderMap::new(),
-        Json(missing),
-    )
-    .await
-    .unwrap_err();
+    let state = test_state_without_privilege(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let missing_error = create_restore_plan(State(state), headers, Json(missing))
+        .await
+        .unwrap_err();
     assert_eq!(missing_error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(missing_error.code, "gateway_control_url_missing");
 }
@@ -299,13 +298,11 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         reconnect_policy: None,
     };
 
-    let (status, Json(response)) = create_job(
-        State(test_state_with_privilege_auto_approve(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
     wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
@@ -354,13 +351,11 @@ async fn create_source_backup(repo: &crate::repository::Repository) -> Uuid {
         note: Some("source".to_string()),
         privilege_assertion: None,
     };
-    let (_, Json(view)) = create_backup_request(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(view)) = create_backup_request(State(state), headers, Json(request))
+        .await
+        .unwrap();
     view.id
 }
 

@@ -5,16 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools curl grep jq shuf timeout
+smoke_require_tools curl docker grep jq shuf timeout
 smoke_build_binaries
 smoke_init_tmpdir "vpsman-agent-endpoint-failover"
 
 api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 dead_port="$(smoke_free_port)"
 
 api_url="http://127.0.0.1:$api_port"
+postgres_url="$(smoke_start_postgres "vpsman-endpoint-failover-postgres" "$pg_port")"
 gateway_addr="127.0.0.1:$gateway_port"
 dead_addr="127.0.0.1:$dead_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
@@ -38,11 +40,11 @@ api_pid=""
 start_api() {
   local log_file="$1"
   VPSMAN_API_BIND="127.0.0.1:$api_port" \
+  VPSMAN_POSTGRES_URL="$postgres_url" \
   VPSMAN_INTERNAL_TOKEN="$internal_token" \
   VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
   VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
-  VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
   RUST_LOG="vpsman_api=warn" \
     target/debug/vpsman-api >"$log_file" 2>&1 &
   api_pid="$!"
@@ -60,7 +62,6 @@ access_token="$(jq -r '.access_token' <<<"$auth_json")"
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE="enrolled_ik" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
@@ -103,7 +104,7 @@ until [[ "$status" == "online" ]]; do
       "$api_log" "$api_restart_log" "$gateway_log" "$agent_log"
     exit 1
   fi
-  agents_json="$(curl -fsS "$api_url/api/v1/agents" || printf '[]')"
+  agents_json="$(curl -fsS -H "Authorization: Bearer $access_token" "$api_url/api/v1/agents" || printf '[]')"
   status="$(jq -r --arg id "$client_id" '.[] | select(.id == $id) | .status // empty' <<<"$agents_json")"
   sleep 0.25
 done

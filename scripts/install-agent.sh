@@ -309,29 +309,6 @@ default_user_systemd_dir() {
   printf '%s\n' "$service_home/.config/systemd/user"
 }
 
-render_dev_config() {
-  : "${VPSMAN_GATEWAY_ADDR:?set VPSMAN_GATEWAY_ADDR for development config}"
-  : "${VPSMAN_DEV_CLIENT_ID:?set VPSMAN_DEV_CLIENT_ID for development config}"
-  cat <<EOF
-client_id = "$VPSMAN_DEV_CLIENT_ID"
-display_name = "$VPSMAN_DEV_CLIENT_ID"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-tags = []
-
-[noise]
-mode = "dev_xx"
-
-[auth]
-command_timeout_secs = 30
-
-[[tcp_endpoints]]
-label = "primary"
-tcp_addr = "$VPSMAN_GATEWAY_ADDR"
-priority = 10
-EOF
-}
-
 write_requested_config() {
   local tmp_config="$1"
   if [[ -n "${VPSMAN_AGENT_CONFIG_B64:-}" ]]; then
@@ -342,10 +319,8 @@ write_requested_config() {
   elif [[ -n "${VPSMAN_AGENT_CONFIG_URL:-}" ]]; then
     require_tool curl
     curl -fsSL "$VPSMAN_AGENT_CONFIG_URL" -o "$tmp_config"
-  elif is_true "${VPSMAN_ALLOW_DEV_CONFIG:-0}"; then
-    render_dev_config >"$tmp_config"
   else
-    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, or VPSMAN_AGENT_CONFIG_URL; set VPSMAN_ALLOW_DEV_CONFIG=1 only for dev_xx local testing"
+    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, or VPSMAN_AGENT_CONFIG_URL"
   fi
 }
 

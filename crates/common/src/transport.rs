@@ -7,7 +7,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{Frame, ProtocolError};
 
-pub const NOISE_XX_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 pub const NOISE_IK_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 pub const MAX_NOISE_MESSAGE_LEN: usize = 65_535;
 pub const MAX_NOISE_PLAINTEXT_CHUNK: usize = 16 * 1024;
@@ -54,7 +53,7 @@ impl NoiseKeypair {
 }
 
 pub fn noise_builder() -> Result<Builder<'static>, SnowError> {
-    noise_builder_for(NOISE_XX_PATTERN)
+    noise_builder_for(NOISE_IK_PATTERN)
 }
 
 pub fn noise_builder_for(pattern: &str) -> Result<Builder<'static>, SnowError> {
@@ -81,22 +80,6 @@ pub fn decode_noise_key_hex(value: &str) -> Result<Vec<u8>, TransportError> {
     Ok(key)
 }
 
-pub fn client_handshake() -> Result<HandshakeState, SnowError> {
-    let builder = noise_builder()?;
-    let keypair = builder.generate_keypair()?;
-    noise_builder()?
-        .local_private_key(&keypair.private)
-        .build_initiator()
-}
-
-pub fn server_handshake() -> Result<HandshakeState, SnowError> {
-    let builder = noise_builder()?;
-    let keypair = builder.generate_keypair()?;
-    noise_builder()?
-        .local_private_key(&keypair.private)
-        .build_responder()
-}
-
 pub fn enrolled_client_handshake(
     client_private_key: &[u8],
     server_public_key: &[u8],
@@ -113,25 +96,6 @@ pub fn enrolled_server_handshake(server_private_key: &[u8]) -> Result<HandshakeS
         .build_responder()
 }
 
-pub fn complete_handshake(
-    mut client: HandshakeState,
-    mut server: HandshakeState,
-) -> Result<(TransportState, TransportState), SnowError> {
-    let mut msg1 = [0_u8; 1024];
-    let msg1_len = client.write_message(&[], &mut msg1)?;
-
-    let mut msg2 = [0_u8; 1024];
-    server.read_message(&msg1[..msg1_len], &mut [])?;
-    let msg2_len = server.write_message(&[], &mut msg2)?;
-
-    let mut msg3 = [0_u8; 1024];
-    client.read_message(&msg2[..msg2_len], &mut [])?;
-    let msg3_len = client.write_message(&[], &mut msg3)?;
-
-    server.read_message(&msg3[..msg3_len], &mut [])?;
-    Ok((client.into_transport_mode()?, server.into_transport_mode()?))
-}
-
 pub struct NoiseFrameStream<S> {
     io: S,
     transport: TransportState,
@@ -146,16 +110,6 @@ impl<S> NoiseFrameStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub async fn client(io: S) -> Result<Self, TransportError> {
-        let handshake = client_handshake()?;
-        Self::handshake_xx(io, handshake, true).await
-    }
-
-    pub async fn server(io: S) -> Result<Self, TransportError> {
-        let handshake = server_handshake()?;
-        Self::handshake_xx(io, handshake, false).await
-    }
-
     pub async fn client_enrolled(
         io: S,
         client_private_key: &[u8],
@@ -172,38 +126,6 @@ where
     ) -> Result<Self, TransportError> {
         let handshake = enrolled_server_handshake(server_private_key)?;
         Self::handshake_ik_server(io, handshake, expected_client_public_key).await
-    }
-
-    async fn handshake_xx(
-        mut io: S,
-        mut handshake: HandshakeState,
-        initiator: bool,
-    ) -> Result<Self, TransportError> {
-        let mut msg = vec![0_u8; MAX_NOISE_MESSAGE_LEN];
-        let mut payload = vec![0_u8; MAX_NOISE_MESSAGE_LEN];
-
-        if initiator {
-            let len = handshake.write_message(&[], &mut msg)?;
-            write_noise_message(&mut io, &msg[..len]).await?;
-
-            let incoming = read_noise_message(&mut io).await?;
-            handshake.read_message(&incoming, &mut payload)?;
-
-            let len = handshake.write_message(&[], &mut msg)?;
-            write_noise_message(&mut io, &msg[..len]).await?;
-        } else {
-            let incoming = read_noise_message(&mut io).await?;
-            handshake.read_message(&incoming, &mut payload)?;
-
-            let len = handshake.write_message(&[], &mut msg)?;
-            write_noise_message(&mut io, &msg[..len]).await?;
-
-            let incoming = read_noise_message(&mut io).await?;
-            handshake.read_message(&incoming, &mut payload)?;
-        }
-
-        let remote_static = handshake.get_remote_static().map(ToOwned::to_owned);
-        Self::from_handshake(io, handshake, remote_static)
     }
 
     async fn handshake_ik_client(
@@ -408,33 +330,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn noise_xx_handshake_reaches_transport_mode() {
-        const TEST_TRANSPORT_PING_PAYLOAD: &[u8] = b"ping";
-
-        let client = client_handshake().unwrap();
-        let server = server_handshake().unwrap();
-        let (mut client_transport, mut server_transport) =
-            complete_handshake(client, server).unwrap();
-
-        let mut ciphertext = [0_u8; 128];
-        let len = client_transport
-            .write_message(TEST_TRANSPORT_PING_PAYLOAD, &mut ciphertext)
-            .unwrap();
-        let mut plaintext = [0_u8; 128];
-        let plaintext_len = server_transport
-            .read_message(&ciphertext[..len], &mut plaintext)
-            .unwrap();
-
-        assert_eq!(&plaintext[..plaintext_len], TEST_TRANSPORT_PING_PAYLOAD);
-    }
-
     #[tokio::test]
     async fn noise_frame_stream_round_trips_tlv_frames() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let client = NoiseFrameStream::client(client_io);
-        let server = NoiseFrameStream::server(server_io);
-        let (mut client, mut server) = tokio::try_join!(client, server).unwrap();
+        let (mut client, mut server) = enrolled_stream_pair(client_io, server_io).await;
 
         let frame = Frame::new(
             crate::MessageKind::Telemetry,
@@ -456,9 +355,7 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let client_writes = Arc::new(Mutex::new(Vec::new()));
         let client_io = RecordingIo::new(client_io, Arc::clone(&client_writes));
-        let client = NoiseFrameStream::client(client_io);
-        let server = NoiseFrameStream::server(server_io);
-        let (mut client, mut server) = tokio::try_join!(client, server).unwrap();
+        let (mut client, mut server) = enrolled_stream_pair(client_io, server_io).await;
 
         let secret_payload = b"secret telemetry payload that must stay encrypted".to_vec();
         client
@@ -487,9 +384,7 @@ mod tests {
     #[tokio::test]
     async fn noise_frame_stream_rejects_stale_sequence_per_stream() {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let client = NoiseFrameStream::client(client_io);
-        let server = NoiseFrameStream::server(server_io);
-        let (mut client, mut server) = tokio::try_join!(client, server).unwrap();
+        let (mut client, mut server) = enrolled_stream_pair(client_io, server_io).await;
 
         client
             .write_frame(&Frame::new(
@@ -581,5 +476,25 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|window| window == needle)
+    }
+
+    async fn enrolled_stream_pair<C, S>(
+        client_io: C,
+        server_io: S,
+    ) -> (NoiseFrameStream<C>, NoiseFrameStream<S>)
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let server_key = generate_noise_keypair().unwrap();
+        let client_key = generate_noise_keypair().unwrap();
+        let client =
+            NoiseFrameStream::client_enrolled(client_io, &client_key.private, &server_key.public);
+        let server = NoiseFrameStream::server_enrolled(
+            server_io,
+            &server_key.private,
+            Some(&client_key.public),
+        );
+        tokio::try_join!(client, server).unwrap()
     }
 }

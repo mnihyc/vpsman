@@ -185,7 +185,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -279,9 +279,11 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     .await
     .unwrap();
 
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let Json(graph) = crate::routes_network::get_topology_graph(
-        State(test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Query(HistoryQuery { limit: Some(10) }),
     )
     .await
@@ -352,7 +354,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -442,7 +444,7 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -547,7 +549,7 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),

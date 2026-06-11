@@ -2,7 +2,6 @@ use anyhow::Result;
 use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 use crate::{
     error::ApiError,
@@ -11,14 +10,12 @@ use crate::{
     model::{
         AgentUpdateReleaseView, AuthContext, BackupArtifactView, BackupRequestView,
         MigrationLinkView, NetworkObservationTrendView, NetworkOspfRecommendationView,
-        OperatorView, RestorePlanView, TunnelPlanView, WsEvent,
+        RestorePlanView, TunnelPlanView, WsEvent,
     },
     model_data_sources::DataSourceStatusView,
     object_store::BackupObjectStore,
     repository::Repository,
-    security::{
-        bearer_token, constant_time_eq, default_operator_scopes, operator_has_scope, role_allows,
-    },
+    security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
 };
 
 #[derive(Clone)]
@@ -210,20 +207,6 @@ impl AppState {
         &self,
         headers: &HeaderMap,
     ) -> Result<AuthContext, ApiError> {
-        if !self.repo.auth_required() {
-            return Ok(AuthContext {
-                operator: OperatorView {
-                    id: Uuid::nil(),
-                    username: "memory-dev".to_string(),
-                    role: "admin".to_string(),
-                    scopes: default_operator_scopes("admin"),
-                    preferences: crate::model::OperatorPreferences::default(),
-                    totp_enabled: false,
-                },
-                session_id: Uuid::nil(),
-            });
-        }
-
         let token =
             bearer_token(headers).ok_or_else(|| ApiError::unauthorized("missing_bearer_token"))?;
         self.repo

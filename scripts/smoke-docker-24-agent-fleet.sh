@@ -155,7 +155,6 @@ docker run -d \
   --label "$label_key=$run_id" \
   -e VPSMAN_GATEWAY_BIND="$gateway_addr" \
   -e VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-  -e VPSMAN_GATEWAY_NOISE_MODE=enrolled_ik \
   -e VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
   -e VPSMAN_API_URL="$api_url" \
   -e VPSMAN_INTERNAL_TOKEN="$internal_token" \

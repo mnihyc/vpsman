@@ -1,7 +1,6 @@
 use axum::{
     body::to_bytes,
     extract::{Path, State},
-    http::HeaderMap,
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -264,13 +263,11 @@ async fn backup_job_dispatch_requires_confirmation() {
         reconnect_policy: None,
     };
 
-    let error = create_job(
-        State(test_state(Repository::Memory(MemoryState::default()))),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let state = test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code, "backup_confirmation_required");
 }
@@ -313,7 +310,8 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         reconnect_policy: None,
     };
 
-    let (status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(request))
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
@@ -367,6 +365,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent(&repo).await;
     let request_state = test_state(repo.clone());
+    let request_headers = crate::test_auth_headers(&request_state).await;
     let manual_request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
@@ -377,7 +376,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         privilege_assertion: None,
     };
     let (_, Json(manual_backup)) =
-        create_backup_request(State(request_state), HeaderMap::new(), Json(manual_request))
+        create_backup_request(State(request_state), request_headers, Json(manual_request))
             .await
             .unwrap();
     let operation = JobCommand::Backup {
@@ -391,6 +390,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     state.gateway =
         GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
             .with_test_privilege_auto_approve();
+    let headers = crate::test_auth_headers(&state).await;
     let job_request = CreateJobRequest {
         job_id: None,
         selector_expression: "id:client-a".to_string(),
@@ -407,7 +407,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         reconnect_policy: None,
     };
 
-    let (_status, Json(response)) = create_job(State(state), HeaderMap::new(), Json(job_request))
+    let (_status, Json(response)) = create_job(State(state), headers, Json(job_request))
         .await
         .unwrap();
     assert_eq!(response.status, "dispatching");
@@ -440,6 +440,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
         .await;
     }
     let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
@@ -450,7 +451,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
         privilege_assertion: None,
     };
 
-    let (status, Json(view)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
+    let (status, Json(view)) = create_backup_request(State(state), headers, Json(request))
         .await
         .unwrap();
     let backups = repo.list_backup_requests(10).await.unwrap();
@@ -477,6 +478,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
 async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let repo = Repository::Memory(MemoryState::default());
     let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let recipient_public_key_hex = "b".repeat(64);
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
@@ -498,12 +500,11 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         confirmed: true,
     };
 
-    let (status, Json(view)) = create_backup_policy(State(state), HeaderMap::new(), Json(request))
-        .await
-        .unwrap();
-    let Json(policies) = list_backup_policies(State(test_state(repo.clone())), HeaderMap::new())
-        .await
-        .unwrap();
+    let (status, Json(view)) =
+        create_backup_policy(State(state.clone()), headers.clone(), Json(request))
+            .await
+            .unwrap();
+    let Json(policies) = list_backup_policies(State(state), headers).await.unwrap();
     let schedules = repo.list_schedules().await.unwrap();
     let audits = repo.list_audit_logs(10).await.unwrap();
     let audit_json = serde_json::to_string(&audits).unwrap();
@@ -550,9 +551,10 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
         repo.clone(),
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
+    let headers = crate::test_auth_headers(&state).await;
     let (_, Json(policy)) = create_backup_policy(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(CreateBackupPolicyRequest {
             name: "nightly-prune".to_string(),
             selector_expression: "id:client-a".to_string(),
@@ -602,7 +604,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 
     let Json(dry_run) = prune_backup_policies(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(BackupPolicyPruneRequest {
             schedule_id: Some(policy.schedule_id),
             dry_run: true,
@@ -619,7 +621,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 
     let Json(pruned) = prune_backup_policies(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Json(BackupPolicyPruneRequest {
             schedule_id: Some(policy.schedule_id),
             dry_run: false,
@@ -679,6 +681,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         .await;
     }
     let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
@@ -689,7 +692,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         privilege_assertion: None,
     };
     let (_, Json(backup)) =
-        create_backup_request(State(state.clone()), HeaderMap::new(), Json(request))
+        create_backup_request(State(state.clone()), headers.clone(), Json(request))
             .await
             .unwrap();
 
@@ -702,7 +705,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
     };
     let (status, Json(artifact)) = record_backup_artifact_metadata(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(artifact_request),
     )
@@ -737,14 +740,10 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         size_bytes: 4096,
         confirmed: true,
     };
-    let error = record_backup_artifact_metadata(
-        State(state),
-        HeaderMap::new(),
-        Path(backup.id),
-        Json(duplicate),
-    )
-    .await
-    .unwrap_err();
+    let error =
+        record_backup_artifact_metadata(State(state), headers, Path(backup.id), Json(duplicate))
+            .await
+            .unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code, "backup_artifact_already_recorded");
 }
@@ -762,10 +761,11 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
     let backup = create_test_backup_request(&repo, state.clone()).await;
     let artifact_bytes = encrypted_artifact_bytes("client-a");
     let object_key = format!("backups/{}/{}.json", backup.client_id, backup.id);
+    let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(artifact)) = upload_backup_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
             object_key: object_key.clone(),
@@ -788,10 +788,9 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
     assert_eq!(artifact.size_bytes, artifact_bytes.len() as i64);
     assert!(artifact.encrypted);
     assert_eq!(tokio::fs::read(stored_path).await.unwrap(), artifact_bytes);
-    let download =
-        download_backup_artifact(State(state.clone()), HeaderMap::new(), Path(backup.id))
-            .await
-            .unwrap();
+    let download = download_backup_artifact(State(state.clone()), headers.clone(), Path(backup.id))
+        .await
+        .unwrap();
     assert_eq!(
         download
             .headers()
@@ -813,7 +812,7 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
 
     let duplicate = upload_backup_artifact(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
             object_key: format!("backups/{}/{}-duplicate.json", backup.client_id, backup.id),
@@ -845,10 +844,11 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
     let artifact_bytes = encrypted_artifact_bytes("client-a");
     let artifact_sha = payload_hash(&artifact_bytes);
     let object_key = format!("backups/{}/{}-chunked.json", backup.client_id, backup.id);
+    let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(session)) = create_backup_artifact_upload_session(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(BackupArtifactUploadSessionCreateRequest {
             object_key: object_key.clone(),
@@ -867,7 +867,7 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
     let first_len = artifact_bytes.len() / 2;
     let first = upload_backup_artifact_session_chunk(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadChunkRequest {
             offset_bytes: 0,
@@ -882,7 +882,7 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
 
     let retry = upload_backup_artifact_session_chunk(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadChunkRequest {
             offset_bytes: 0,
@@ -897,7 +897,7 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
 
     let second = upload_backup_artifact_session_chunk(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadChunkRequest {
             offset_bytes: first_len as i64,
@@ -912,7 +912,7 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
 
     let (status, Json(artifact)) = commit_backup_artifact_upload_session(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadCommitRequest { confirmed: true }),
     )
@@ -954,10 +954,11 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
     let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let headers = crate::test_auth_headers(&state).await;
 
     let (_, Json(session)) = create_backup_artifact_upload_session(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(BackupArtifactUploadSessionCreateRequest {
             object_key: format!("backups/{}/{}-abort.json", backup.client_id, backup.id),
@@ -971,7 +972,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
 
     let offset_error = upload_backup_artifact_session_chunk(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadChunkRequest {
             offset_bytes: 4,
@@ -985,7 +986,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
 
     let abort = abort_backup_artifact_upload_session(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadCommitRequest { confirmed: true }),
     )
@@ -996,7 +997,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
 
     let missing = upload_backup_artifact_session_chunk(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path((backup.id, session.upload_id)),
         Json(BackupArtifactUploadChunkRequest {
             offset_bytes: 0,
@@ -1024,10 +1025,11 @@ async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
+    let headers = crate::test_auth_headers(&state).await;
 
     let unconfirmed = upload_backup_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
             object_key: format!("backups/{}/unconfirmed.json", backup.client_id),
@@ -1044,7 +1046,7 @@ async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
 
     let wrong_client = upload_backup_artifact(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
             object_key: format!("backups/{}/wrong-client.json", backup.client_id),
@@ -1114,9 +1116,10 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
         });
     }
 
+    let headers = crate::test_auth_headers(&state).await;
     let (status, Json(handoff)) = create_backup_artifact_handoff(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Path(backup.id),
         Json(BackupArtifactHandoffRequest {
             confirmed: true,
@@ -1205,9 +1208,10 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
         });
     }
 
+    let headers = crate::test_auth_headers(&state).await;
     let (status, Json(handoff)) = create_backup_artifact_handoff(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Path(backup.id),
         Json(BackupArtifactHandoffRequest {
             confirmed: true,
@@ -1244,10 +1248,11 @@ async fn backup_artifact_handoff_requires_confirmation_and_source() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
+    let headers = crate::test_auth_headers(&state).await;
 
     let unconfirmed = create_backup_artifact_handoff(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path(backup.id),
         Json(BackupArtifactHandoffRequest {
             confirmed: false,
@@ -1263,7 +1268,7 @@ async fn backup_artifact_handoff_requires_confirmation_and_source() {
 
     let missing_source = create_backup_artifact_handoff(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(backup.id),
         Json(BackupArtifactHandoffRequest {
             confirmed: true,
@@ -1307,13 +1312,11 @@ async fn backup_request_requires_privilege_gateway_verification() {
         note: None,
         privilege_assertion: None,
     };
-    let missing_error = create_backup_request(
-        State(test_state_without_privilege(repo)),
-        HeaderMap::new(),
-        Json(missing),
-    )
-    .await
-    .unwrap_err();
+    let state = test_state_without_privilege(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let missing_error = create_backup_request(State(state), headers, Json(missing))
+        .await
+        .unwrap_err();
     assert_eq!(missing_error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(missing_error.code, "gateway_control_url_missing");
 }
@@ -1382,7 +1385,8 @@ async fn create_test_backup_request(
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
     };
-    let (_, Json(backup)) = create_backup_request(State(state), HeaderMap::new(), Json(request))
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(backup)) = create_backup_request(State(state), headers, Json(request))
         .await
         .unwrap();
     assert_eq!(repo.list_backup_requests(10).await.unwrap().len(), 1);

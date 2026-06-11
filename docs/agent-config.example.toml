@@ -7,9 +7,8 @@ telemetry_full_secs = 60
 tags = ["bgp", "edge"]
 
 [noise]
-# Use "dev_xx" only for local development. Production agents use
-# "enrolled_ik" with locally provisioned client private keys and pinned gateway
-# public keys.
+# Agents use enrolled IK with locally provisioned client private keys and pinned
+# gateway public keys.
 mode = "enrolled_ik"
 client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"

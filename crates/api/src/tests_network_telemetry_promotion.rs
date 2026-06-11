@@ -1,10 +1,6 @@
 use super::*;
 
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
     AgentMetrics, BandwidthTier, GatewayTelemetryIngest, RuntimeTunnelManager, RuntimeTunnelStat,
@@ -35,10 +31,12 @@ async fn promote_telemetry_tunnel_creates_external_observed_plan_and_audit() {
         },
     )
     .await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(view)) = crate::routes_network::promote_telemetry_tunnel_plan(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(PromoteTelemetryTunnelRequest {
             client_id: "left-a".to_string(),
             interface: "wg42".to_string(),
@@ -114,10 +112,12 @@ async fn promote_telemetry_tunnel_rejects_non_import_candidate() {
         },
     )
     .await;
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
 
     let error = crate::routes_network::promote_telemetry_tunnel_plan(
-        State(test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(PromoteTelemetryTunnelRequest {
             client_id: "left-a".to_string(),
             interface: "wg42".to_string(),

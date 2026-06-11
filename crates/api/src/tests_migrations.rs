@@ -1,4 +1,4 @@
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{extract::State, Json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::AgentHello;
@@ -52,13 +52,11 @@ async fn migration_link_records_restore_plan_identity_and_audit() {
         note: Some("rebuilt node ready".to_string()),
     };
 
-    let (status, Json(view)) = create_migration_link(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(view)) = create_migration_link(State(state), headers, Json(request))
+        .await
+        .unwrap();
     let links = repo.list_migration_links(10).await.unwrap();
     let audits = repo.list_audit_logs(10).await.unwrap();
 
@@ -86,7 +84,9 @@ async fn migration_link_rejects_missing_restore_plan() {
         confirmed: true,
         note: None,
     };
-    let error = create_migration_link(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_migration_link(State(state), headers, Json(request))
         .await
         .unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
@@ -125,13 +125,11 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
     };
-    let (_, Json(view)) = create_backup_request(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(view)) = create_backup_request(State(state), headers, Json(request))
+        .await
+        .unwrap();
     view.id
 }
 
@@ -146,13 +144,11 @@ async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -
         note: Some("restore to rebuilt node".to_string()),
         privilege_assertion: None,
     };
-    let (_, Json(view)) = create_restore_plan(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(view)) = create_restore_plan(State(state), headers, Json(request))
+        .await
+        .unwrap();
     view.id
 }
 

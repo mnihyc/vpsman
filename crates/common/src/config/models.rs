@@ -468,9 +468,9 @@ impl Default for AgentAuthConfig {
 impl Default for AgentNoiseConfig {
     fn default() -> Self {
         Self {
-            mode: AgentNoiseMode::DevXx,
-            client_private_key_hex: None,
-            server_public_key_hex: None,
+            mode: AgentNoiseMode::EnrolledIk,
+            client_private_key_hex: Some("11".repeat(32)),
+            server_public_key_hex: Some("22".repeat(32)),
         }
     }
 }
@@ -478,7 +478,6 @@ impl Default for AgentNoiseConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNoiseMode {
-    DevXx,
     EnrolledIk,
 }
 

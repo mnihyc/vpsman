@@ -359,7 +359,7 @@ fn operator_context() -> AuthContext {
     AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),

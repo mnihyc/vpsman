@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
@@ -20,6 +20,13 @@ use crate::{
 // broad test churn without reducing runtime allocation pressure in production.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Repository {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "memory repository is retained for unit tests and is not runtime-selectable"
+        )
+    )]
     Memory(MemoryState),
     Postgres(PgPool),
 }
@@ -76,18 +83,9 @@ impl Repository {
     pub(crate) async fn connect(
         postgres_url: Option<&str>,
         migrations_dir: &std::path::Path,
-        allow_memory_repository: bool,
     ) -> Result<Self> {
         let Some(postgres_url) = postgres_url else {
-            if !allow_memory_repository {
-                anyhow::bail!(
-                    "VPSMAN_POSTGRES_URL is required. The in-memory repository is disabled by default; set VPSMAN_DEBUG_INTERNAL_TEST_MODE=true only for dangerous internal tests."
-                );
-            }
-            warn!(
-                "DANGEROUS INTERNAL TEST MODE: api using unauthenticated in-memory repository; do not expose this process"
-            );
-            return Ok(Self::Memory(MemoryState::default()));
+            anyhow::bail!("VPSMAN_POSTGRES_URL is required");
         };
 
         let pool = PgPoolOptions::new()
@@ -109,9 +107,5 @@ impl Repository {
             .context("failed to run PostgreSQL migrations")?;
         info!("api using PostgreSQL repository");
         Ok(Self::Postgres(pool))
-    }
-
-    pub(crate) fn auth_required(&self) -> bool {
-        matches!(self, Self::Postgres(_))
     }
 }

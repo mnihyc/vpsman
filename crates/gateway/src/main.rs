@@ -6,7 +6,7 @@ mod state;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
@@ -36,15 +36,6 @@ pub(crate) struct Args {
         default_value = "127.0.0.1:9444"
     )]
     control_bind: String,
-    #[arg(
-        long,
-        env = "VPSMAN_GATEWAY_NOISE_MODE",
-        value_enum,
-        default_value = "enrolled_ik"
-    )]
-    noise_mode: GatewayNoiseMode,
-    #[arg(long, env = "VPSMAN_DEBUG_INTERNAL_TEST_MODE", default_value_t = false)]
-    debug_internal_test_mode: bool,
     #[arg(long, env = "VPSMAN_GATEWAY_PRIVATE_KEY_HEX")]
     private_key_hex: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX")]
@@ -63,13 +54,6 @@ pub(crate) struct Args {
         default_value_t = 60
     )]
     reconnect_grace_secs: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub(crate) enum GatewayNoiseMode {
-    DevXx,
-    EnrolledIk,
 }
 
 #[tokio::main]
@@ -127,15 +111,26 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
 }
 
 fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
+    let private_key = args
+        .private_key_hex
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("VPSMAN_GATEWAY_PRIVATE_KEY_HEX is required")?;
+    let private_key_bytes =
+        hex::decode(private_key).context("VPSMAN_GATEWAY_PRIVATE_KEY_HEX must be hex")?;
+    anyhow::ensure!(
+        private_key_bytes.len() == 32,
+        "VPSMAN_GATEWAY_PRIVATE_KEY_HEX must be a 32-byte hex key"
+    );
+
     let verifier_key = args
         .privilege_verifier_key_hex
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if verifier_key.is_none() && !args.debug_internal_test_mode {
-        anyhow::bail!(
-            "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX is required. Missing privilege verifier material is allowed only with VPSMAN_DEBUG_INTERNAL_TEST_MODE=true for internal tests."
-        );
+    if verifier_key.is_none() {
+        anyhow::bail!("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX is required");
     }
     if let Some(verifier_key) = verifier_key {
         let bytes =
@@ -143,16 +138,6 @@ fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
         anyhow::ensure!(
             bytes.len() == 32,
             "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX must be a 32-byte hex key"
-        );
-    }
-    if args.noise_mode == GatewayNoiseMode::DevXx {
-        if !args.debug_internal_test_mode {
-            anyhow::bail!(
-                "VPSMAN_GATEWAY_NOISE_MODE=dev_xx is disabled by default. Set VPSMAN_DEBUG_INTERNAL_TEST_MODE=true only for dangerous internal tests."
-            );
-        }
-        warn!(
-            "DANGEROUS INTERNAL TEST MODE: gateway dev_xx identity mode is enabled; do not expose this gateway"
         );
     }
     Ok(())
@@ -447,37 +432,25 @@ async fn accept_noise_stream(
     stream: TcpStream,
     args: &Args,
 ) -> Result<NoiseFrameStream<TcpStream>> {
-    match args.noise_mode {
-        GatewayNoiseMode::DevXx => NoiseFrameStream::server(stream).await.map_err(Into::into),
-        GatewayNoiseMode::EnrolledIk => {
-            let private_key = args
-                .private_key_hex
-                .as_deref()
-                .context("noise enrolled_ik requires --private-key-hex")?;
-            let private_key = decode_noise_key_hex(private_key)?;
-            let expected_client_public_key = args
-                .expect_client_public_key_hex
-                .as_deref()
-                .map(decode_noise_key_hex)
-                .transpose()?;
-            NoiseFrameStream::server_enrolled(
-                stream,
-                &private_key,
-                expected_client_public_key.as_deref(),
-            )
-            .await
-            .map_err(Into::into)
-        }
-    }
+    let private_key = args
+        .private_key_hex
+        .as_deref()
+        .context("gateway requires --private-key-hex")?;
+    let private_key = decode_noise_key_hex(private_key)?;
+    let expected_client_public_key = args
+        .expect_client_public_key_hex
+        .as_deref()
+        .map(decode_noise_key_hex)
+        .transpose()?;
+    NoiseFrameStream::server_enrolled(stream, &private_key, expected_client_public_key.as_deref())
+        .await
+        .map_err(Into::into)
 }
 
 async fn validate_runtime_identity(
     hello: &AgentHello,
     context: &AgentFrameContext<'_>,
 ) -> Result<()> {
-    if context.args.noise_mode != GatewayNoiseMode::EnrolledIk {
-        return Ok(());
-    }
     let public_key_hex = context
         .noise_public_key_hex
         .as_deref()
@@ -562,5 +535,40 @@ mod tests {
             required_internal_token(Some("replace-with-random-token-at-least-32-chars")).is_err()
         );
         assert!(required_internal_token(Some("real-internal-token-value-32-plus-chars")).is_ok());
+    }
+
+    #[test]
+    fn runtime_mode_requires_identity_key_and_privilege_verifier() {
+        let mut args = test_args();
+
+        args.private_key_hex = None;
+        assert!(validate_gateway_runtime_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("VPSMAN_GATEWAY_PRIVATE_KEY_HEX is required"));
+
+        args.private_key_hex = Some("11".repeat(32));
+        args.privilege_verifier_key_hex = None;
+        assert!(validate_gateway_runtime_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX is required"));
+
+        args.privilege_verifier_key_hex = Some("11".repeat(32));
+        validate_gateway_runtime_mode(&args).unwrap();
+    }
+
+    fn test_args() -> Args {
+        Args {
+            bind: "127.0.0.1:0".to_string(),
+            control_bind: "127.0.0.1:0".to_string(),
+            private_key_hex: Some("11".repeat(32)),
+            expect_client_public_key_hex: None,
+            api_url: None,
+            internal_token: Some("real-internal-token-value-32-plus-chars".to_string()),
+            privilege_verifier_key_hex: Some("11".repeat(32)),
+            gateway_id: "test-gateway".to_string(),
+            reconnect_grace_secs: 60,
+        }
     }
 }

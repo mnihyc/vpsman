@@ -27,7 +27,7 @@ async fn tunnel_plan_records_non_mutating_plan_and_audit() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -86,9 +86,11 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
         ..RuntimeTunnelTopologyIntent::default()
     };
 
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
-        State(test_state(repo.clone())),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(CreateTunnelPlanRequest { input }),
     )
     .await
@@ -118,9 +120,11 @@ async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager
     input.interface_name = "cust42".to_string();
     input.kind = TunnelKind::Custom;
 
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let error = crate::routes_network::create_tunnel_plan(
-        State(test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Json(CreateTunnelPlanRequest { input }),
     )
     .await
@@ -595,7 +599,9 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 
@@ -652,13 +658,11 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let (status, response) = create_job(
-        State(test_state_with_privilege_auto_approve(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, response) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
     wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
 
@@ -705,7 +709,9 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 
@@ -750,7 +756,9 @@ async fn network_status_create_job_rejects_wrong_side_target() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 
@@ -797,7 +805,9 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 
@@ -847,7 +857,9 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 

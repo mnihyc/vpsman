@@ -23,8 +23,10 @@ smoke_minio_cleanup() {
 trap smoke_minio_cleanup EXIT
 
 api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 minio_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
+postgres_url="$(smoke_start_postgres "vpsman-minio-update-postgres" "$pg_port")"
 minio_url="http://127.0.0.1:$minio_port"
 bucket="vpsman-updates"
 internal_token="minio-update-internal-token-00000000"
@@ -52,7 +54,7 @@ done
 
 api_log="$SMOKE_TMPDIR/api.log"
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
+VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_UPDATE_OBJECT_ENDPOINT="$minio_url" \
 VPSMAN_UPDATE_OBJECT_BUCKET="$bucket" \
@@ -67,6 +69,17 @@ if ! smoke_wait_http "$api_url/health"; then
   smoke_dump_logs "API did not become healthy for MinIO update artifact smoke" "$api_log"
   exit 1
 fi
+
+auth_json="$(curl -fsS \
+  -H "Content-Type: application/json" \
+  -d '{"username":"minio-update-smoke","password":"minio-update-smoke-password"}' \
+  "$api_url/api/v1/auth/bootstrap")"
+access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
+
+api_auth_get() {
+  curl -fsS -H "Authorization: Bearer $access_token" "$api_url$1"
+}
 
 artifact_file="$SMOKE_TMPDIR/vpsman-agent-smoke.bin"
 printf 'synthetic vpsman agent update bytes for MinIO smoke %s\n' "$(date +%s%N)" >"$artifact_file"
@@ -113,7 +126,7 @@ jq -e --arg sha "$artifact_sha" --arg object_key "$object_key" '
   .[] | select(.artifact_sha256_hex == $sha and .artifact_object_key == $object_key and .status == "artifact_hosted")
 ' <<<"$releases_json" >/dev/null
 
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=50")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=50")"
 jq -e '[.[].action] | index("agent_update.artifact_uploaded")' <<<"$audits_json" >/dev/null
 
 duplicate_log="$SMOKE_TMPDIR/duplicate.log"

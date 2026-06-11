@@ -1,6 +1,6 @@
 use super::models::{
     AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig, AgentNetworkConfig,
-    AgentNetworkPreset, AgentNoiseConfig, AgentNoiseMode, AgentProcessInventorySource,
+    AgentNetworkPreset, AgentNoiseConfig, AgentProcessInventorySource,
     AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, AgentTelemetryConfig,
     AgentTelemetrySource, AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint,
 };
@@ -106,28 +106,14 @@ fn validate_endpoints(endpoints: &[ServerEndpoint]) -> Result<(), String> {
 }
 
 fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
-    match config.mode {
-        AgentNoiseMode::DevXx => {
-            validate_optional_hex32(
-                config.client_private_key_hex.as_deref(),
-                "client_private_key_hex",
-            )?;
-            validate_optional_hex32(
-                config.server_public_key_hex.as_deref(),
-                "server_public_key_hex",
-            )?;
-        }
-        AgentNoiseMode::EnrolledIk => {
-            validate_required_hex32(
-                config.client_private_key_hex.as_deref(),
-                "client_private_key_hex",
-            )?;
-            validate_required_hex32(
-                config.server_public_key_hex.as_deref(),
-                "server_public_key_hex",
-            )?;
-        }
-    }
+    validate_required_hex32(
+        config.client_private_key_hex.as_deref(),
+        "client_private_key_hex",
+    )?;
+    validate_required_hex32(
+        config.server_public_key_hex.as_deref(),
+        "server_public_key_hex",
+    )?;
     Ok(())
 }
 

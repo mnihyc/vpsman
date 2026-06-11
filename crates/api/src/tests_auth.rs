@@ -211,25 +211,11 @@ async fn operator_preferences_route_rejects_invalid_values() {
 #[tokio::test]
 async fn operator_preferences_route_persists_valid_payload() {
     let state = memory_test_state();
-    let operator = OperatorRecord {
-        id: Uuid::nil(),
-        username: "memory-dev".to_string(),
-        password_hash: "not-used-in-debug-memory-mode".to_string(),
-        role: "admin".to_string(),
-        scopes: vec!["*".to_string()],
-        preferences: OperatorPreferences::default(),
-        totp_enabled: false,
-        totp_secret_ciphertext_hex: None,
-        totp_secret_nonce_hex: None,
-        totp_secret_salt_hex: None,
-    };
-    if let Repository::Memory(memory) = &state.repo {
-        memory.operators.write().await.push(operator);
-    }
+    let headers = crate::test_auth_headers(&state).await;
 
     let response = routes_auth::update_operator_preferences(
         axum::extract::State(state),
-        HeaderMap::new(),
+        headers,
         axum::Json(OperatorPreferences {
             language: "en".to_string(),
             sidebar_subpanel_default: "all".to_string(),
@@ -247,6 +233,99 @@ async fn operator_preferences_route_persists_valid_payload() {
         Some("America/Los_Angeles")
     );
     assert_eq!(response.0.preferences.sidebar_subpanel_default, "all");
+}
+
+#[tokio::test]
+async fn memory_repository_routes_require_bearer_tokens() {
+    let state = memory_test_state();
+    let missing_headers = HeaderMap::new();
+
+    assert_missing_bearer(state.require_operator(&missing_headers).await.unwrap_err());
+    assert_missing_bearer(
+        state
+            .require_operator_scope(&missing_headers, "fleet:read")
+            .await
+            .unwrap_err(),
+    );
+    assert_missing_bearer(
+        state
+            .require_operator_role_and_scope(&missing_headers, "operator", "jobs:write")
+            .await
+            .unwrap_err(),
+    );
+    assert_missing_bearer(
+        routes_auth::current_operator(axum::extract::State(state.clone()), HeaderMap::new())
+            .await
+            .unwrap_err(),
+    );
+    assert_missing_bearer(
+        routes_inventory::list_agents(axum::extract::State(state.clone()), HeaderMap::new())
+            .await
+            .unwrap_err(),
+    );
+    assert_missing_bearer(
+        routes_alerts::list_fleet_alerts(
+            axum::extract::State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Query(FleetAlertQuery {
+                limit: None,
+                client_id: None,
+                severity: None,
+                category: None,
+                operator_state: None,
+                include_muted: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert_missing_bearer(
+        routes_jobs::create_job(
+            axum::extract::State(state.clone()),
+            HeaderMap::new(),
+            axum::Json(CreateJobRequest {
+                job_id: None,
+                selector_expression: "id:client-a".to_string(),
+                target_client_ids: vec!["client-a".to_string()],
+                destructive: false,
+                confirmed: true,
+                command: "uptime".to_string(),
+                argv: Vec::new(),
+                operation: None,
+                timeout_secs: None,
+                force_unprivileged: false,
+                privileged: false,
+                privilege_assertion: None,
+                reconnect_policy: None,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert_missing_bearer(
+        routes_webhook_rules::upsert_webhook_rule(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::Json(crate::model_webhook_rules::CreateWebhookRuleRequest {
+                id: None,
+                name: "route auth regression".to_string(),
+                enabled: true,
+                expression: "status = online".to_string(),
+                target: "https://hooks.example/vpsman".to_string(),
+                body_template: String::new(),
+                cooldown_secs: Some(60),
+                notes: None,
+                confirmed: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    );
+}
+
+fn assert_missing_bearer(error: ApiError) {
+    assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.code, "missing_bearer_token");
 }
 
 #[test]
@@ -429,7 +508,7 @@ fn api_startup_rejects_gateway_verifier_env() {
 }
 
 #[test]
-fn internal_gateway_token_is_mandatory_even_for_memory_dev() {
+fn internal_gateway_token_is_mandatory_for_memory_repository() {
     let (events, _) = broadcast::channel(1);
     let state = AppState {
         repo: Repository::Memory(MemoryState::default()),

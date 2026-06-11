@@ -1,4 +1,4 @@
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 
@@ -213,13 +213,11 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         reconnect_policy: None,
     };
 
-    let (status, Json(response)) = create_job(
-        State(test_state_with_privilege_auto_approve(repo.clone())),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap();
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
     wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();

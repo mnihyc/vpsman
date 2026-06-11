@@ -5,15 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools awk base64 cmp curl jq python3 sha256sum shuf stat timeout
+smoke_require_tools awk base64 cmp curl docker jq python3 sha256sum shuf stat timeout
 smoke_build_binaries
 smoke_init_tmpdir "vpsman-live-file-push"
 
 api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 
 api_url="http://127.0.0.1:$api_port"
+postgres_url="$(smoke_start_postgres "vpsman-file-push-postgres" "$pg_port")"
 gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
 internal_token="smoke-internal-$(date +%s%N)"
@@ -53,11 +55,11 @@ chunked_payload_sha="$(sha256sum "$chunked_source_file" | awk '{print $1}')"
 chunked_payload_size="$(stat -c '%s' "$chunked_source_file")"
 
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
+VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
 RUST_LOG="vpsman_api=warn" \
   target/debug/vpsman-api >"$api_log" 2>&1 &
 smoke_track_pid "$!"
@@ -68,10 +70,14 @@ auth_json="$(curl -fsS \
   -d '{"username":"file-push-smoke","password":"file-push-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
+
+api_auth_get() {
+  curl -fsS -H "Authorization: Bearer $access_token" "$api_url$1"
+}
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE="enrolled_ik" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
@@ -106,7 +112,7 @@ until [[ "$status" == "online" ]]; do
       "$api_log" "$gateway_log" "$agent_log"
     exit 1
   fi
-  agents_json="$(curl -fsS "$api_url/api/v1/agents" || printf '[]')"
+  agents_json="$(api_auth_get "/api/v1/agents" || printf '[]')"
   status="$(jq -r --arg id "$client_id" '.[] | select(.id == $id) | .status // empty' <<<"$agents_json")"
   sleep 0.25
 done
@@ -135,6 +141,7 @@ reject_body="$(jq -nc \
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
+  -H "Authorization: Bearer $access_token" \
   -H 'content-type: application/json' \
   -d "$reject_body" \
   "$api_url/api/v1/jobs")"
@@ -162,10 +169,10 @@ cmp -s "$source_file" "$destination_file"
 [[ "$(sha256sum "$destination_file" | awk '{print $1}')" == "$payload_sha" ]]
 [[ "$(stat -c '%a' "$destination_file")" == "600" ]]
 
-job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id")"
-targets_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id/targets")"
-outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id/outputs")"
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=20")"
+job_json="$(api_auth_get "/api/v1/jobs/$job_id")"
+targets_json="$(api_auth_get "/api/v1/jobs/$job_id/targets")"
+outputs_json="$(api_auth_get "/api/v1/jobs/$job_id/outputs")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 
 jq -e '.status == "completed" and .command_type == "file_push"' <<<"$job_json" >/dev/null
 jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
@@ -203,8 +210,8 @@ cmp -s "$chunked_source_file" "$chunked_destination_file"
 [[ "$(sha256sum "$chunked_destination_file" | awk '{print $1}')" == "$chunked_payload_sha" ]]
 [[ "$(stat -c '%a' "$chunked_destination_file")" == "640" ]]
 
-chunked_job_json="$(curl -fsS "$api_url/api/v1/jobs/$chunked_job_id")"
-chunked_outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$chunked_job_id/outputs")"
+chunked_job_json="$(api_auth_get "/api/v1/jobs/$chunked_job_id")"
+chunked_outputs_json="$(api_auth_get "/api/v1/jobs/$chunked_job_id/outputs")"
 jq -e '.status == "completed" and .command_type == "file_push_chunked"' <<<"$chunked_job_json" >/dev/null
 jq -e --arg path "$chunked_destination_file" --arg sha "$chunked_payload_sha" --argjson size "$chunked_payload_size" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)

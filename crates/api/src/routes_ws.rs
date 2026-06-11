@@ -30,7 +30,7 @@ pub(crate) async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgra
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    if state.repo.auth_required() && !authenticate_socket(&mut receiver, &state).await {
+    if !authenticate_socket(&mut receiver, &state).await {
         let _ = sender.send(Message::Close(None)).await;
         return;
     }

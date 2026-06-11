@@ -26,7 +26,9 @@ telemetry_full_secs = 60
 tags = ["install-distro"]
 
 [noise]
-mode = "dev_xx"
+mode = "enrolled_ik"
+client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
+server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
 command_timeout_secs = 30

@@ -294,7 +294,7 @@ async fn rejected_job_records_frozen_target_results() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -368,7 +368,7 @@ async fn rejected_job_freezes_tag_targets() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -701,7 +701,7 @@ async fn dispatching_job_records_and_updates_target_results() {
     let operator = AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -1030,7 +1030,7 @@ fn test_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),

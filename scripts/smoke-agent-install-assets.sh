@@ -15,7 +15,7 @@ stage_root="$SMOKE_TMPDIR/root"
 unprivileged_root="$SMOKE_TMPDIR/unprivileged-root"
 download_root="$SMOKE_TMPDIR/download-root"
 bad_agent_root="$SMOKE_TMPDIR/bad-agent-root"
-dev_root="$SMOKE_TMPDIR/dev-root"
+missing_config_root="$SMOKE_TMPDIR/missing-config-root"
 unsafe_path_root="$SMOKE_TMPDIR/unsafe-path-root"
 
 cat >"$fake_agent" <<'SH'
@@ -247,18 +247,6 @@ test ! -e "$unprivileged_state_dir/state.marker"
 test ! -e "$unprivileged_log_dir/install.log"
 grep -q 'agent config, state, and logs purged' "$SMOKE_TMPDIR/unprivileged-uninstall-purge.log"
 
-if VPSMAN_INSTALL_ROOT="$dev_root" \
-  VPSMAN_AGENT_BINARY="$fake_agent" \
-  VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_GATEWAY_ADDR="127.0.0.1:9443" \
-  VPSMAN_DEV_CLIENT_ID="dev-client" \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/dev-rejected.log" 2>&1; then
-  echo "expected installer to reject dev config unless explicitly enabled" >&2
-  exit 1
-fi
-grep -q 'VPSMAN_ALLOW_DEV_CONFIG=1' "$SMOKE_TMPDIR/dev-rejected.log"
-
 if VPSMAN_INSTALL_ROOT="$download_root" \
   VPSMAN_AGENT_URL="file://$fake_agent" \
   VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
@@ -293,15 +281,16 @@ if VPSMAN_INSTALL_ROOT="$unsafe_path_root" \
 fi
 grep -q 'VPSMAN_INSTALL_DIR must not be the filesystem root' "$SMOKE_TMPDIR/unsafe-install-dir.log"
 
-VPSMAN_INSTALL_ROOT="$dev_root" \
+if VPSMAN_INSTALL_ROOT="$missing_config_root" \
   VPSMAN_AGENT_BINARY="$fake_agent" \
   VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_GATEWAY_ADDR="127.0.0.1:9443" \
-  VPSMAN_DEV_CLIENT_ID="dev-client" \
-  VPSMAN_ALLOW_DEV_CONFIG=1 \
   VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/dev-allowed.log"
-grep -q 'mode = "dev_xx"' "$dev_root/etc/vpsman/agent.toml"
+  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/missing-config.log" 2>&1; then
+  echo "expected installer to reject missing agent config" >&2
+  exit 1
+fi
+grep -q 'provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, or VPSMAN_AGENT_CONFIG_URL' \
+  "$SMOKE_TMPDIR/missing-config.log"
 
 jq -n \
   --arg stage_root "$stage_root" \
@@ -326,6 +315,6 @@ jq -n \
       "url_hash_required",
       "hash_mismatch_rejected",
       "filesystem_root_paths_rejected",
-      "dev_config_opt_in"
+      "explicit_config_required"
     ]
   }'

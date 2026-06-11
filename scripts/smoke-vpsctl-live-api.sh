@@ -56,6 +56,8 @@ scoped_password="vpsctl-live-api-scoped-password"
 super_password="vpsctl-live-api-super-password"
 super_salt_hex="1111111111111111111111111111111111111111111111111111111111111111"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
+gateway_keys="$(target/debug/vpsctl noise-keygen)"
+gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 
 cleanup_vpsctl_live_api() {
   smoke_cleanup
@@ -91,7 +93,6 @@ start_api() {
     VPSMAN_POSTGRES_URL="$postgres_url" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
-    VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -122,11 +123,10 @@ start_api() {
 start_gateway() {
   VPSMAN_GATEWAY_BIND="127.0.0.1:$gateway_port" \
   VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-  VPSMAN_GATEWAY_NOISE_MODE=dev_xx \
+  VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
   VPSMAN_API_URL="$api_url" \
   VPSMAN_INTERNAL_TOKEN="$internal_token" \
   VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-  VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
   RUST_LOG="vpsman_gateway=warn" \
     target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
   gateway_pid="$!"

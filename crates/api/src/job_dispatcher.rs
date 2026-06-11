@@ -265,18 +265,8 @@ async fn auth_context_for_claim(
     let Some(actor_id) = claimed.actor_id else {
         return Ok(None);
     };
-    if actor_id == Uuid::nil() {
-        return Ok(Some(AuthContext {
-            operator: crate::model::OperatorView {
-                id: Uuid::nil(),
-                username: "memory-dev".to_string(),
-                role: "admin".to_string(),
-                scopes: crate::security::default_operator_scopes("admin"),
-                preferences: crate::model::OperatorPreferences::default(),
-                totp_enabled: false,
-            },
-            session_id: Uuid::nil(),
-        }));
+    if actor_id.is_nil() {
+        return Ok(None);
     }
     let Some(operator) = state.repo.operator_by_id(actor_id).await? else {
         return Ok(None);

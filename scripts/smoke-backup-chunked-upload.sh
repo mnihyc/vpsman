@@ -5,25 +5,29 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools base64 cmp curl grep jq sha256sum shuf timeout
+smoke_require_tools base64 cmp curl docker grep jq sha256sum shuf timeout
 smoke_build_binaries
 smoke_init_tmpdir "vpsman-backup-chunked-upload"
 
 api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
+postgres_url="$(smoke_start_postgres "vpsman-chunked-backup-postgres" "$pg_port")"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
 internal_token="chunked-upload-internal-token-000000"
 super_password="smoke-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
+gateway_keys="$(target/debug/vpsctl noise-keygen)"
+gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 object_store_dir="$SMOKE_TMPDIR/object-store"
 api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
+VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
@@ -40,14 +44,18 @@ auth_json="$(curl -fsS \
   -d '{"username":"chunked-backup-smoke","password":"chunked-backup-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
+
+api_auth_get() {
+  curl -fsS -H "Authorization: Bearer $access_token" "$api_url$1"
+}
 
 VPSMAN_GATEWAY_BIND="127.0.0.1:$gateway_port" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE=dev_xx \
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
 RUST_LOG="vpsman_gateway=warn" \
   target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"
@@ -123,7 +131,7 @@ jq -e \
 stored_object="$object_store_dir/$object_key"
 cmp -s "$artifact_file" "$stored_object"
 api_downloaded="$SMOKE_TMPDIR/api-downloaded-artifact.json"
-curl -fsS "$api_url/api/v1/backups/$backup_request_id/artifact" -o "$api_downloaded"
+api_auth_get "/api/v1/backups/$backup_request_id/artifact" >"$api_downloaded"
 cmp -s "$artifact_file" "$api_downloaded"
 
 second_backup_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -146,9 +154,9 @@ if target/debug/vpsctl --api-url "$api_url" backup-artifact-upload-chunked \
 fi
 grep -q "backup_artifact_object_exists" "$duplicate_log"
 
-backups_json="$(curl -fsS "$api_url/api/v1/backups?limit=20")"
-artifacts_json="$(curl -fsS "$api_url/api/v1/backup-artifacts?limit=20")"
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=50")"
+backups_json="$(api_auth_get "/api/v1/backups?limit=20")"
+artifacts_json="$(api_auth_get "/api/v1/backup-artifacts?limit=20")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=50")"
 artifact_id="$(jq -r '.id' <<<"$upload_json")"
 jq -e --arg id "$backup_request_id" --arg artifact_id "$artifact_id" '
   .[] | select(.id == $id and .status == "artifact_metadata_recorded" and .artifact_id == $artifact_id)

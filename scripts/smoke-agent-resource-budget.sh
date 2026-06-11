@@ -9,17 +9,21 @@ smoke_require_tools awk docker file grep jq shuf stat timeout
 
 agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
 gateway_bin="target/debug/vpsman-gateway"
+vpsctl_bin="target/debug/vpsctl"
 rss_limit_kib="${VPSMAN_AGENT_RSS_LIMIT_KIB:-15360}"
 cpu_limit_percent="${VPSMAN_AGENT_CPU_LIMIT_PERCENT:-2.0}"
 threads_limit="${VPSMAN_AGENT_THREADS_LIMIT:-16}"
 binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-10485760}"
 
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build -p vpsman-gateway
+  cargo build -p vpsman-gateway -p vpsctl
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 if [[ ! -x "$gateway_bin" ]]; then
   cargo build -p vpsman-gateway
+fi
+if [[ ! -x "$vpsctl_bin" ]]; then
+  cargo build -p vpsctl
 fi
 if [[ ! -x "$agent_bin" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
@@ -38,6 +42,13 @@ gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 gateway_addr="127.0.0.1:$gateway_port"
 internal_token="agent-resource-internal-token-$(date +%s%N)"
+privilege_verifier_key_hex="1111111111111111111111111111111111111111111111111111111111111111"
+gateway_keys="$("$vpsctl_bin" noise-keygen)"
+gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
+gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
+client_keys="$("$vpsctl_bin" noise-keygen)"
+client_private_hex="$(jq -r '.private_key_hex' <<<"$client_keys")"
+client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
 network_root="$SMOKE_TMPDIR/network-root"
@@ -50,33 +61,25 @@ cleanup_agent_resource_smoke() {
 }
 trap cleanup_agent_resource_smoke EXIT
 
-cat >"$agent_config" <<EOF
-client_id = "resource-smoke"
-display_name = "resource-smoke"
-telemetry_light_secs = 5
-telemetry_full_secs = 60
-tags = ["resource-smoke"]
-
-[noise]
-mode = "dev_xx"
-
-[auth]
-command_timeout_secs = 30
-
-[network]
-root_dir = "$network_root"
-
-[[tcp_endpoints]]
-label = "local"
-tcp_addr = "$gateway_addr"
-priority = 10
-EOF
+smoke_write_enrolled_agent_config \
+  "$agent_config" \
+  "resource-smoke" \
+  "resource-smoke" \
+  "resource-smoke" \
+  "$client_private_hex" \
+  "$gateway_public_hex" \
+  "local=$gateway_addr=10" \
+  30 \
+  "$network_root" \
+  5 \
+  60
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE="dev_xx" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
+VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX="$client_public_hex" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
 RUST_LOG="vpsman_gateway=warn" \
   "$gateway_bin" >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"

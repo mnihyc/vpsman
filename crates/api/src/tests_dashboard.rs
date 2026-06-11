@@ -1,18 +1,18 @@
 use super::*;
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
 #[tokio::test]
 async fn dashboard_overview_rejects_invalid_window() {
+    let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
     let error = routes_dashboard::dashboard_overview(
-        State(dashboard_test_state(Repository::Memory(
-            MemoryState::default(),
-        ))),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Query(routes_dashboard::DashboardOverviewQuery {
             chart_points: None,
             window: Some("90d".to_string()),
@@ -109,9 +109,11 @@ async fn dashboard_overview_aggregates_memory_state() {
         ]);
     }
 
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let Json(view) = routes_dashboard::dashboard_overview(
-        State(dashboard_test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Query(routes_dashboard::DashboardOverviewQuery {
             window: Some("7d".to_string()),
             ..dashboard_query_default()
@@ -225,9 +227,11 @@ async fn dashboard_overview_supports_scope_and_group_by() {
         ]);
     }
 
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let Json(view) = routes_dashboard::dashboard_overview(
-        State(dashboard_test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Query(routes_dashboard::DashboardOverviewQuery {
             group_by: Some("countries".to_string()),
             scope_kind: Some("provider".to_string()),
@@ -294,9 +298,11 @@ async fn dashboard_overview_supports_all_window_with_available_data_start() {
         ]);
     }
 
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
     let Json(view) = routes_dashboard::dashboard_overview(
-        State(dashboard_test_state(repo)),
-        HeaderMap::new(),
+        State(state),
+        headers,
         Query(routes_dashboard::DashboardOverviewQuery {
             window: Some("all".to_string()),
             ..dashboard_query_default()

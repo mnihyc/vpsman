@@ -14,9 +14,9 @@ use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
-    AgentConfig, AgentHello, AgentNoiseMode, AgentPrivilegeMode, CommandOutput, Frame, JobAck,
-    JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream, ServerEndpoint,
-    ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput, Frame, JobAck, JobCommand,
+    JobRequest, MessageKind, NoiseFrameStream, OutputStream, ServerEndpoint, ServerHello,
+    TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
@@ -455,26 +455,21 @@ async fn connect_noise_stream(
     tcp: TcpStream,
     config: &AgentConfig,
 ) -> Result<NoiseFrameStream<TcpStream>> {
-    match config.noise.mode {
-        AgentNoiseMode::DevXx => NoiseFrameStream::client(tcp).await.map_err(Into::into),
-        AgentNoiseMode::EnrolledIk => {
-            let client_private = config
-                .noise
-                .client_private_key_hex
-                .as_deref()
-                .context("noise enrolled_ik requires client_private_key_hex")?;
-            let server_public = config
-                .noise
-                .server_public_key_hex
-                .as_deref()
-                .context("noise enrolled_ik requires server_public_key_hex")?;
-            let client_private = decode_noise_key_hex(client_private)?;
-            let server_public = decode_noise_key_hex(server_public)?;
-            NoiseFrameStream::client_enrolled(tcp, &client_private, &server_public)
-                .await
-                .map_err(Into::into)
-        }
-    }
+    let client_private = config
+        .noise
+        .client_private_key_hex
+        .as_deref()
+        .context("noise enrolled_ik requires client_private_key_hex")?;
+    let server_public = config
+        .noise
+        .server_public_key_hex
+        .as_deref()
+        .context("noise enrolled_ik requires server_public_key_hex")?;
+    let client_private = decode_noise_key_hex(client_private)?;
+    let server_public = decode_noise_key_hex(server_public)?;
+    NoiseFrameStream::client_enrolled(tcp, &client_private, &server_public)
+        .await
+        .map_err(Into::into)
 }
 
 async fn send_json_frame<T: serde::Serialize>(

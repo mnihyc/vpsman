@@ -1,7 +1,7 @@
 use axum::{
     body::to_bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -581,6 +581,7 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
     ));
     let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
     let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let client_id = "edge-a";
     let session_id = uuid::Uuid::new_v4();
     let first = b"hello ".to_vec();
@@ -636,7 +637,7 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
 
     let Json(handoff) = create_file_transfer_handoff(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Path((client_id.to_string(), session_id)),
         Json(FileTransferHandoffRequest { confirmed: true }),
     )
@@ -652,7 +653,7 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
 
     let response = download_file_transfer_handoff(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path((client_id.to_string(), session_id)),
     )
     .await
@@ -693,6 +694,7 @@ async fn file_download_bundle_route_returns_tar_archive_from_target_outputs() {
         repo.clone(),
         BackupObjectStore::filesystem(store_root.clone()).unwrap(),
     );
+    let headers = crate::test_auth_headers(&state).await;
     let job_id = uuid::Uuid::new_v4();
 
     repo.record_job_outputs(
@@ -712,7 +714,7 @@ async fn file_download_bundle_route_returns_tar_archive_from_target_outputs() {
 
     let response = download_file_download_bundle(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(job_id),
         Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
     )
@@ -773,6 +775,7 @@ async fn file_download_bundle_route_handles_more_than_twenty_target_outputs() {
         repo.clone(),
         BackupObjectStore::filesystem(store_root.clone()).unwrap(),
     );
+    let headers = crate::test_auth_headers(&state).await;
     let job_id = uuid::Uuid::new_v4();
 
     for index in 0..24 {
@@ -789,7 +792,7 @@ async fn file_download_bundle_route_handles_more_than_twenty_target_outputs() {
 
     let response = download_file_download_bundle(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(job_id),
         Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
     )
@@ -830,6 +833,7 @@ async fn file_download_bundle_route_rejects_output_integrity_mismatch() {
         repo.clone(),
         BackupObjectStore::filesystem(store_root.clone()).unwrap(),
     );
+    let headers = crate::test_auth_headers(&state).await;
     let job_id = uuid::Uuid::new_v4();
 
     repo.record_job_outputs(
@@ -848,7 +852,7 @@ async fn file_download_bundle_route_rejects_output_integrity_mismatch() {
 
     let result = download_file_download_bundle(
         State(state),
-        HeaderMap::new(),
+        headers,
         Path(job_id),
         Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
     )
@@ -869,12 +873,13 @@ async fn file_transfer_source_artifact_upload_records_and_serves_verified_object
     ));
     let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
     let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
     let payload = b"source artifact bytes for repeated upload".to_vec();
     let sha256_hex = payload_hash(&payload);
 
     let (status, Json(artifact)) = upload_file_transfer_source_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(UploadFileTransferSourceArtifactRequest {
             name: Some("../source.bin".to_string()),
             source_base64: BASE64.encode(&payload),
@@ -896,7 +901,7 @@ async fn file_transfer_source_artifact_upload_records_and_serves_verified_object
 
     let Json(artifacts) = list_file_transfer_source_artifacts(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Query(HistoryQuery { limit: Some(10) }),
     )
     .await
@@ -904,10 +909,9 @@ async fn file_transfer_source_artifact_upload_records_and_serves_verified_object
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].id, artifact.id);
 
-    let response =
-        download_file_transfer_source_artifact(State(state), HeaderMap::new(), Path(artifact.id))
-            .await
-            .unwrap();
+    let response = download_file_transfer_source_artifact(State(state), headers, Path(artifact.id))
+        .await
+        .unwrap();
     assert_eq!(
         response
             .headers()
@@ -942,12 +946,13 @@ async fn file_transfer_source_artifact_upload_rejects_unconfirmed_or_mismatched_
         repo,
         BackupObjectStore::filesystem(store_root.clone()).unwrap(),
     );
+    let headers = crate::test_auth_headers(&state).await;
     let payload = b"source artifact bytes".to_vec();
     let sha256_hex = payload_hash(&payload);
 
     let unconfirmed = upload_file_transfer_source_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(UploadFileTransferSourceArtifactRequest {
             name: None,
             source_base64: BASE64.encode(&payload),
@@ -965,7 +970,7 @@ async fn file_transfer_source_artifact_upload_rejects_unconfirmed_or_mismatched_
 
     let wrong_hash = upload_file_transfer_source_artifact(
         State(state),
-        HeaderMap::new(),
+        headers,
         Json(UploadFileTransferSourceArtifactRequest {
             name: None,
             source_base64: BASE64.encode(&payload),

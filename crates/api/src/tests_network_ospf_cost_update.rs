@@ -109,7 +109,9 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
         privilege_assertion: None,
         reconnect_policy: None,
     };
-    let error = create_job(State(test_state(repo)), HeaderMap::new(), Json(request))
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
         .await
         .unwrap_err();
 

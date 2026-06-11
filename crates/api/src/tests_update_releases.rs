@@ -5,7 +5,6 @@ use crate::*;
 use axum::{
     body::{to_bytes, Body},
     extract::{Path, Query, State},
-    http::HeaderMap,
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -140,11 +139,11 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: true,
     };
+    let headers = crate::test_auth_headers(&state).await;
 
-    let (status, Json(response)) =
-        routes_jobs::create_job(State(state), HeaderMap::new(), Json(request))
-            .await
-            .unwrap();
+    let (status, Json(response)) = routes_jobs::create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
 
     assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
     assert_eq!(response.accepted_targets, 0);
@@ -188,10 +187,11 @@ async fn uploaded_agent_update_artifact_is_hosted_and_sanitized() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
     };
+    let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(release)) = routes_update_releases::upload_agent_update_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Json(request),
     )
     .await
@@ -325,10 +325,11 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
     };
+    let headers = crate::test_auth_headers(&state).await;
 
     let (_status, Json(release)) = routes_update_releases::upload_agent_update_artifact(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(request),
     )
     .await
@@ -357,7 +358,7 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
     );
     let latest = routes_update_releases::latest_agent_update_release(
         State(state.clone()),
-        HeaderMap::new(),
+        headers,
         Query(routes_update_releases::LatestReleaseQuery {
             name: "vpsman-agent".to_string(),
             channel: "stable".to_string(),
@@ -410,7 +411,7 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
     ));
     let rollback_signing_key_hex = hex::encode(rollback_key.verifying_key().to_bytes());
 
-    let mut headers = HeaderMap::new();
+    let mut headers = crate::test_auth_headers(&state).await;
     headers.insert(
         "x-vpsman-artifact-signature-hex",
         signature_hex.parse().unwrap(),
@@ -432,7 +433,7 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
     assert_eq!(streamed.size_bytes, artifact.len() as i64);
     assert!(streamed.artifact_download_url.is_some());
 
-    let mut rollback_headers = HeaderMap::new();
+    let mut rollback_headers = crate::test_auth_headers(&state).await;
     rollback_headers.insert(
         "x-vpsman-artifact-signature-hex",
         rollback_signature_hex.parse().unwrap(),
@@ -453,7 +454,7 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
 
     let (status, Json(release)) = routes_update_releases::create_hosted_agent_update_release(
         State(state.clone()),
-        HeaderMap::new(),
+        crate::test_auth_headers(&state).await,
         Json(CreateHostedAgentUpdateReleaseRequest {
             name: "vpsman-agent".to_string(),
             version: "2.3.0".to_string(),
@@ -527,6 +528,7 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
     };
+    let headers = crate::test_auth_headers(&state).await;
     let mut request = signed_release_request("vpsman-agent", "2.4.0", "nightly");
     request.artifact_signing_key_hex = hex::encode(trusted_key.verifying_key().to_bytes());
     request.artifact_signature_hex = hex::encode(sign_update_artifact_hash(
@@ -535,7 +537,7 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
     ));
     let error = routes_update_releases::create_agent_update_release(
         State(state.clone()),
-        HeaderMap::new(),
+        headers.clone(),
         Json(request),
     )
     .await
@@ -549,13 +551,10 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         &untrusted_key,
         &request.artifact_sha256_hex,
     ));
-    let error = routes_update_releases::create_agent_update_release(
-        State(state),
-        HeaderMap::new(),
-        Json(request),
-    )
-    .await
-    .unwrap_err();
+    let error =
+        routes_update_releases::create_agent_update_release(State(state), headers, Json(request))
+            .await
+            .unwrap_err();
     assert_eq!(error.code, "agent_update_release_signing_key_untrusted");
 }
 
@@ -615,7 +614,7 @@ fn test_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -655,7 +654,6 @@ fn test_args() -> Args {
     Args {
         bind: "127.0.0.1:0".parse().unwrap(),
         postgres_url: None,
-        debug_internal_test_mode: false,
         migrations_dir: PathBuf::from("migrations"),
         internal_token: None,
         gateway_control_url: None,

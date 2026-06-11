@@ -298,7 +298,6 @@ jq -e '.operator.username == "data-source-patch-smoke" and .token_type == "Beare
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE="enrolled_ik" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \

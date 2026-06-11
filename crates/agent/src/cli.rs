@@ -28,7 +28,7 @@ pub(crate) enum Command {
 
 pub(crate) fn load_config(path: &Path) -> Result<AgentConfig> {
     if !path.exists() {
-        return Ok(AgentConfig::default());
+        anyhow::bail!("agent config {} is required", path.display());
     }
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read agent config {}", path.display()))?;

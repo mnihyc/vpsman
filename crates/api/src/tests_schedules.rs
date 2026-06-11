@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use tokio::sync::broadcast;
@@ -16,7 +16,7 @@ fn schedule_test_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {
             id: Uuid::nil(),
-            username: "memory-dev".to_string(),
+            username: "test-operator".to_string(),
             role: "admin".to_string(),
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
@@ -232,13 +232,11 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
     let schedule = repo.create_schedule(request, &operator).await.unwrap();
     let next_run_before = schedule.next_run_at.clone();
 
-    let (status, Json(response)) = apply_schedule_now(
-        State(schedule_test_state(repo.clone())),
-        HeaderMap::new(),
-        Path(schedule.id),
-    )
-    .await
-    .unwrap();
+    let state = schedule_test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = apply_schedule_now(State(state), headers, Path(schedule.id))
+        .await
+        .unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);

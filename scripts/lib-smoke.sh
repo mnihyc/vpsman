@@ -4,6 +4,7 @@ SMOKE_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE_TMPDIR=""
 SMOKE_PIDS=()
 SMOKE_RESERVED_PORTS=()
+SMOKE_CONTAINERS=()
 
 smoke_fail() {
   echo "$*" >&2
@@ -73,6 +74,59 @@ smoke_csv_to_toml_string_array() {
   done
 }
 
+smoke_write_enrolled_agent_config() {
+  local config_path="$1"
+  local client_id="$2"
+  local display_name="$3"
+  local tags_csv="$4"
+  local client_private_hex="$5"
+  local gateway_public_hex="$6"
+  local endpoints_csv="$7"
+  local command_timeout_secs="${8:-30}"
+  local network_root="${9:-}"
+  local telemetry_light_secs="${10:-15}"
+  local telemetry_full_secs="${11:-60}"
+
+  mkdir -p "$(dirname "$config_path")"
+  {
+    printf 'client_id = %s\n' "$(smoke_toml_quote "$client_id")"
+    printf 'display_name = %s\n' "$(smoke_toml_quote "${display_name:-$client_id}")"
+    printf 'telemetry_light_secs = %s\n' "$telemetry_light_secs"
+    printf 'telemetry_full_secs = %s\n' "$telemetry_full_secs"
+    printf 'tags = [%s]\n' "$(smoke_csv_to_toml_string_array "$tags_csv")"
+    printf '\n[noise]\n'
+    printf 'mode = "enrolled_ik"\n'
+    printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$client_private_hex")"
+    printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
+    printf '\n[auth]\n'
+    printf 'command_timeout_secs = %s\n' "$command_timeout_secs"
+    printf 'gateway_retry_secs = 1\n'
+    printf 'gateway_connect_timeout_secs = 1\n'
+    if [[ -n "$network_root" ]]; then
+      printf '\n[network]\n'
+      printf 'root_dir = %s\n' "$(smoke_toml_quote "$network_root")"
+    fi
+  } >"$config_path"
+
+  local endpoint
+  local -a endpoints=()
+  IFS=',' read -r -a endpoints <<<"$endpoints_csv"
+  for endpoint in "${endpoints[@]}"; do
+    endpoint="${endpoint//[$'\r\n']/}"
+    [[ -n "${endpoint// /}" ]] || continue
+    local label tcp_addr priority extra
+    IFS='=' read -r label tcp_addr priority extra <<<"$endpoint"
+    [[ -z "${extra:-}" && -n "${label:-}" && -n "${tcp_addr:-}" && -n "${priority:-}" ]] \
+      || smoke_fail "invalid direct agent endpoint spec: $endpoint"
+    {
+      printf '\n[[tcp_endpoints]]\n'
+      printf 'label = %s\n' "$(smoke_toml_quote "$label")"
+      printf 'tcp_addr = %s\n' "$(smoke_toml_quote "$tcp_addr")"
+      printf 'priority = %s\n' "$priority"
+    } >>"$config_path"
+  done
+}
+
 smoke_create_direct_agent_config() {
   local api_url="$1"
   local access_token="$2"
@@ -104,40 +158,15 @@ smoke_create_direct_agent_config() {
   fi
   VPSMAN_API_TOKEN="$access_token" target/debug/vpsctl "${upsert_args[@]}" >/dev/null
 
-  mkdir -p "$(dirname "$config_path")"
-  {
-    printf 'client_id = %s\n' "$(smoke_toml_quote "$client_id")"
-    printf 'display_name = %s\n' "$(smoke_toml_quote "${display_name:-$client_id}")"
-    printf 'telemetry_light_secs = 15\n'
-    printf 'telemetry_full_secs = 60\n'
-    printf 'tags = [%s]\n' "$(smoke_csv_to_toml_string_array "$tags_csv")"
-    printf '\n[noise]\n'
-    printf 'mode = "enrolled_ik"\n'
-    printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$private_hex")"
-    printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
-    printf '\n[auth]\n'
-    printf 'command_timeout_secs = %s\n' "$command_timeout_secs"
-    printf 'gateway_retry_secs = 1\n'
-    printf 'gateway_connect_timeout_secs = 1\n'
-  } >"$config_path"
-
-  local endpoint
-  local -a endpoints=()
-  IFS=',' read -r -a endpoints <<<"$endpoints_csv"
-  for endpoint in "${endpoints[@]}"; do
-    endpoint="${endpoint//[$'\r\n']/}"
-    [[ -n "${endpoint// /}" ]] || continue
-    local label tcp_addr priority extra
-    IFS='=' read -r label tcp_addr priority extra <<<"$endpoint"
-    [[ -z "${extra:-}" && -n "${label:-}" && -n "${tcp_addr:-}" && -n "${priority:-}" ]] \
-      || smoke_fail "invalid direct agent endpoint spec: $endpoint"
-    {
-      printf '\n[[tcp_endpoints]]\n'
-      printf 'label = %s\n' "$(smoke_toml_quote "$label")"
-      printf 'tcp_addr = %s\n' "$(smoke_toml_quote "$tcp_addr")"
-      printf 'priority = %s\n' "$priority"
-    } >>"$config_path"
-  done
+  smoke_write_enrolled_agent_config \
+    "$config_path" \
+    "$client_id" \
+    "$display_name" \
+    "$tags_csv" \
+    "$private_hex" \
+    "$gateway_public_hex" \
+    "$endpoints_csv" \
+    "$command_timeout_secs"
 }
 
 smoke_build_binaries() {
@@ -152,6 +181,7 @@ smoke_init_tmpdir() {
   SMOKE_TMPDIR="$(mktemp -d "$SMOKE_ROOT_DIR/.tmp/${name}.XXXXXX")"
   SMOKE_PIDS=()
   SMOKE_RESERVED_PORTS=()
+  SMOKE_CONTAINERS=()
   trap smoke_cleanup EXIT
 }
 
@@ -162,6 +192,10 @@ smoke_cleanup() {
   done
   for pid in "${SMOKE_PIDS[@]:-}"; do
     wait "$pid" >/dev/null 2>&1 || true
+  done
+  local container
+  for container in "${SMOKE_CONTAINERS[@]:-}"; do
+    docker rm -f "$container" >/dev/null 2>&1 || true
   done
   if [[ -n "${SMOKE_TMPDIR:-}" ]]; then
     if [[ "${VPSMAN_SMOKE_KEEP_TMP:-0}" == "1" ]]; then
@@ -174,6 +208,10 @@ smoke_cleanup() {
 
 smoke_track_pid() {
   SMOKE_PIDS+=("$1")
+}
+
+smoke_track_container() {
+  SMOKE_CONTAINERS+=("$1")
 }
 
 smoke_free_port() {
@@ -216,6 +254,31 @@ smoke_wait_http() {
   done
 }
 
+smoke_start_postgres() {
+  local label="$1"
+  local port="$2"
+  local container_name="${label}-$(date +%s%N)"
+  docker run --rm -d \
+    --name "$container_name" \
+    -e POSTGRES_DB=vpsman \
+    -e POSTGRES_PASSWORD=vpsman \
+    -e POSTGRES_USER=vpsman \
+    -p "127.0.0.1:$port:5432" \
+    postgres:16-alpine >/dev/null
+  smoke_track_container "$container_name"
+
+  local deadline=$((SECONDS + 45))
+  until docker exec "$container_name" pg_isready -U vpsman -d vpsman >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      docker logs "$container_name" >&2 || true
+      smoke_fail "timed out waiting for Postgres container"
+    fi
+    sleep 0.25
+  done
+  smoke_wait_tcp 127.0.0.1 "$port"
+  printf 'postgres://vpsman:vpsman@127.0.0.1:%s/vpsman\n' "$port"
+}
+
 smoke_wait_tcp() {
   local host="$1"
   local port="$2"
@@ -246,9 +309,14 @@ smoke_wait_api_job_status() {
   local job_id="$2"
   local expected_status="$3"
   local timeout_secs="${4:-45}"
+  local token="${5:-${VPSMAN_API_TOKEN:-}}"
   local deadline=$((SECONDS + timeout_secs))
   local job_json status
-  until job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id" 2>/dev/null)"; do
+  local -a curl_args=(-fsS)
+  if [[ -n "$token" ]]; then
+    curl_args+=(-H "Authorization: Bearer $token")
+  fi
+  until job_json="$(curl "${curl_args[@]}" "$api_url/api/v1/jobs/$job_id" 2>/dev/null)"; do
     if (( SECONDS >= deadline )); then
       echo "timed out waiting for job $job_id to become $expected_status" >&2
       return 1
@@ -272,7 +340,7 @@ smoke_wait_api_job_status() {
       return 1
     fi
     sleep 0.1
-    job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id")"
+    job_json="$(curl "${curl_args[@]}" "$api_url/api/v1/jobs/$job_id")"
   done
 }
 

@@ -5,15 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools base64 curl grep jq python3 sha256sum shuf timeout
+smoke_require_tools base64 curl docker grep jq python3 sha256sum shuf timeout
 smoke_build_binaries
 smoke_init_tmpdir "vpsman-live-backup"
 
 api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 
 api_url="http://127.0.0.1:$api_port"
+postgres_url="$(smoke_start_postgres "vpsman-live-backup-postgres" "$pg_port")"
 gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
 internal_token="backup-smoke-internal-$(date +%s%N)"
@@ -43,12 +45,12 @@ printf '%s\n' "$selected_payload" >"$selected_file"
 selected_sha="$(sha256sum "$selected_file" | awk '{print $1}')"
 
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
+VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
 VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
 RUST_LOG="vpsman_api=warn" \
   target/debug/vpsman-api >"$api_log" 2>&1 &
 smoke_track_pid "$!"
@@ -62,10 +64,14 @@ auth_json="$(curl -fsS \
   -d '{"username":"backup-smoke","password":"backup-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
+
+api_auth_get() {
+  curl -fsS -H "Authorization: Bearer $access_token" "$api_url$1"
+}
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_NOISE_MODE="enrolled_ik" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
@@ -119,7 +125,7 @@ until [[ "$status" == "online" ]]; do
       "$api_log" "$gateway_log" "$agent_log"
     exit 1
   fi
-  agents_json="$(curl -fsS "$api_url/api/v1/agents" || printf '[]')"
+  agents_json="$(api_auth_get "/api/v1/agents" || printf '[]')"
   status="$(jq -r --arg id "$client_id" '.[] | select(.id == $id) | .status // empty' <<<"$agents_json")"
   sleep 0.25
 done
@@ -142,6 +148,7 @@ reject_body="$(jq -nc \
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
+  -H "Authorization: Bearer $access_token" \
   -H 'content-type: application/json' \
   -d "$reject_body" \
   "$api_url/api/v1/jobs")"
@@ -176,10 +183,10 @@ job_id="$(jq -r '.job_id' <<<"$backup_json")"
 smoke_assert_job_create_queued "$backup_json" 1
 smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
-job_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id")"
-targets_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id/targets")"
-outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$job_id/outputs")"
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=20")"
+job_json="$(api_auth_get "/api/v1/jobs/$job_id")"
+targets_json="$(api_auth_get "/api/v1/jobs/$job_id/targets")"
+outputs_json="$(api_auth_get "/api/v1/jobs/$job_id/outputs")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 
 jq -e '.status == "completed" and .command_type == "backup"' <<<"$job_json" >/dev/null
 jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
@@ -213,9 +220,9 @@ if grep -Fq "$selected_payload" <<<"$artifact_json"; then
 fi
 jq -e --arg sha "$selected_sha" '.ciphertext_sha256_hex != $sha' <<<"$artifact_json" >/dev/null
 
-backups_json="$(curl -fsS "$api_url/api/v1/backups?limit=20")"
-artifacts_json="$(curl -fsS "$api_url/api/v1/backup-artifacts?limit=20")"
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=50")"
+backups_json="$(api_auth_get "/api/v1/backups?limit=20")"
+artifacts_json="$(api_auth_get "/api/v1/backup-artifacts?limit=20")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=50")"
 artifact_id="$(jq -r --arg id "$backup_request_id" '.[] | select(.id == $id) | .artifact_id' <<<"$backups_json")"
 object_key="$(jq -r --arg artifact_id "$artifact_id" '.[] | select(.id == $artifact_id) | .object_key' <<<"$artifacts_json")"
 jq -e --arg id "$backup_request_id" --arg artifact_id "$artifact_id" '
@@ -255,7 +262,7 @@ smoke_assert_job_create_queued "$restore_json" 1
 smoke_wait_api_job_status "$api_url" "$restore_job_id" completed 45 >/dev/null
 cmp -s "$selected_file" "$restored_selected"
 test -s "$restored_config"
-restore_outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$restore_job_id/outputs")"
+restore_outputs_json="$(api_auth_get "/api/v1/jobs/$restore_job_id/outputs")"
 jq -e --arg path "$restored_selected" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
@@ -281,14 +288,14 @@ if [[ -e "$restored_config" ]]; then
   echo "restore rollback did not remove newly restored config file" >&2
   exit 1
 fi
-rollback_outputs_json="$(curl -fsS "$api_url/api/v1/jobs/$rollback_job_id/outputs")"
+rollback_outputs_json="$(api_auth_get "/api/v1/jobs/$rollback_job_id/outputs")"
 jq -e --arg restore_job_id "$restore_job_id" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
   | .type == "restore_rollback" and .source_restore_job_id == $restore_job_id and .rolled_back_count == 2
   and ([.rolled_back_files[].action] | index("restored_snapshot") and index("removed_restored_file"))
 ' <<<"$rollback_outputs_json" >/dev/null
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=80")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=80")"
 jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' \
   <<<"$audits_json" >/dev/null
 
@@ -344,7 +351,7 @@ jq -e --arg plan "$migration_restore_plan_id" --arg target "$client_id" '
 smoke_wait_api_job_status "$api_url" "$migration_job_id" completed 45 >/dev/null
 migration_restored_selected="$migration_restore_root${selected_file}"
 cmp -s "$selected_file" "$migration_restored_selected"
-audits_json="$(curl -fsS "$api_url/api/v1/audit?limit=120")"
+audits_json="$(api_auth_get "/api/v1/audit?limit=120")"
 jq -e --arg migration_link_id "$migration_link_id" '
   .[] | select(.action == "migration.linked_metadata_only" and .target == ("migration_link:" + $migration_link_id))
 ' <<<"$audits_json" >/dev/null

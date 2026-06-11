@@ -9,17 +9,21 @@ smoke_require_tools awk docker file grep jq python3 shuf stat timeout
 
 agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
 gateway_bin="target/debug/vpsman-gateway"
+vpsctl_bin="target/debug/vpsctl"
 latency_ms="${VPSMAN_AGENT_RECONNECT_LATENCY_MS:-150}"
 drop_first_connections="${VPSMAN_AGENT_RECONNECT_DROP_FIRST_CONNECTIONS:-1}"
 deadline_secs="${VPSMAN_AGENT_RECONNECT_DEADLINE_SECS:-60}"
 binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-10485760}"
 
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build -p vpsman-gateway
+  cargo build -p vpsman-gateway -p vpsctl
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 if [[ ! -x "$gateway_bin" ]]; then
   cargo build -p vpsman-gateway
+fi
+if [[ ! -x "$vpsctl_bin" ]]; then
+  cargo build -p vpsctl
 fi
 if [[ ! -x "$agent_bin" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
@@ -41,6 +45,13 @@ gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_addr="127.0.0.1:$gateway_control_port"
 proxy_addr="127.0.0.1:$proxy_port"
 internal_token="agent-reconnect-internal-token-$(date +%s%N)"
+privilege_verifier_key_hex="1111111111111111111111111111111111111111111111111111111111111111"
+gateway_keys="$("$vpsctl_bin" noise-keygen)"
+gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
+gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
+client_keys="$("$vpsctl_bin" noise-keygen)"
+client_private_hex="$(jq -r '.private_key_hex' <<<"$client_keys")"
+client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 proxy_log="$SMOKE_TMPDIR/proxy.log"
 proxy_stats="$SMOKE_TMPDIR/proxy-stats.json"
@@ -150,33 +161,25 @@ while True:
 PY
 chmod 0755 "$proxy_script"
 
-cat >"$agent_config" <<EOF
-client_id = "reconnect-smoke"
-display_name = "reconnect-smoke"
-telemetry_light_secs = 5
-telemetry_full_secs = 60
-tags = ["reconnect-smoke"]
-
-[noise]
-mode = "dev_xx"
-
-[auth]
-command_timeout_secs = 30
-
-[network]
-root_dir = "$network_root"
-
-[[tcp_endpoints]]
-label = "latency-drop-proxy"
-tcp_addr = "$proxy_addr"
-priority = 10
-EOF
+smoke_write_enrolled_agent_config \
+  "$agent_config" \
+  "reconnect-smoke" \
+  "reconnect-smoke" \
+  "reconnect-smoke" \
+  "$client_private_hex" \
+  "$gateway_public_hex" \
+  "latency-drop-proxy=$proxy_addr=10" \
+  30 \
+  "$network_root" \
+  5 \
+  60
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="$gateway_control_addr" \
-VPSMAN_GATEWAY_NOISE_MODE="dev_xx" \
-VPSMAN_DEBUG_INTERNAL_TEST_MODE=true \
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
+VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX="$client_public_hex" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
 RUST_LOG="vpsman_gateway=warn" \
   "$gateway_bin" >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"

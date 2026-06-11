@@ -116,7 +116,52 @@ pub(crate) use security::{
 pub(crate) use util::{output_stream_name, unix_now};
 
 #[cfg(test)]
-use axum::http::HeaderMap;
+pub(crate) async fn test_auth_context_and_headers(state: &AppState) -> (AuthContext, HeaderMap) {
+    let operator = OperatorRecord {
+        id: Uuid::new_v4(),
+        username: format!("test-admin-{}", Uuid::new_v4()),
+        password_hash: "test-only-session-issued-directly".to_string(),
+        role: "admin".to_string(),
+        scopes: vec!["*".to_string()],
+        preferences: OperatorPreferences::default(),
+        totp_enabled: false,
+        totp_secret_ciphertext_hex: None,
+        totp_secret_nonce_hex: None,
+        totp_secret_salt_hex: None,
+    };
+    if let Repository::Memory(memory) = &state.repo {
+        memory.operators.write().await.push(operator.clone());
+    } else {
+        panic!("test_auth_context_and_headers currently supports the memory repository");
+    }
+    let auth = state
+        .repo
+        .issue_session(operator.view())
+        .await
+        .expect("test operator session");
+    let context = state
+        .repo
+        .authenticate_access_token(&auth.access_token)
+        .await
+        .expect("test access token auth")
+        .expect("test access token context");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {}", auth.access_token)
+            .parse()
+            .expect("test bearer header"),
+    );
+    (context, headers)
+}
+
+#[cfg(test)]
+pub(crate) async fn test_auth_headers(state: &AppState) -> HeaderMap {
+    test_auth_context_and_headers(state).await.1
+}
+
+#[cfg(test)]
+use axum::http::{header::AUTHORIZATION, HeaderMap};
 #[cfg(test)]
 use model::*;
 #[cfg(test)]
@@ -144,8 +189,6 @@ struct Args {
     bind: SocketAddr,
     #[arg(long, env = "VPSMAN_POSTGRES_URL")]
     postgres_url: Option<String>,
-    #[arg(long, env = "VPSMAN_DEBUG_INTERNAL_TEST_MODE", default_value_t = false)]
-    debug_internal_test_mode: bool,
     #[arg(long, env = "VPSMAN_MIGRATIONS_DIR", default_value = "migrations")]
     migrations_dir: PathBuf,
     #[arg(long, env = "VPSMAN_INTERNAL_TOKEN")]
@@ -256,12 +299,7 @@ async fn main() -> Result<()> {
         "api build metadata"
     );
     reject_api_privilege_verifier_env()?;
-    let repo = Repository::connect(
-        args.postgres_url.as_deref(),
-        &args.migrations_dir,
-        args.debug_internal_test_mode,
-    )
-    .await?;
+    let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
     let (events, _) = broadcast::channel(256);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
     let gateway = GatewayDispatchClient::new(
@@ -330,7 +368,6 @@ async fn main() -> Result<()> {
                     "version": env!("CARGO_PKG_VERSION"),
                     "server_build_number": build_info::server_build_number(),
                     "bind": args.bind.to_string(),
-                    "debug_internal_test_mode": args.debug_internal_test_mode,
                 },
             }),
             actor_id: None,
