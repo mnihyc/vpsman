@@ -92,7 +92,7 @@ export function RestoreRollbackForm({
             type="button"
           >
             <RotateCcw size={17} />
-            Rollback restore
+            Review rollback
           </button>
         )}
       </form>

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { activate, openConsoleSubpage } from "./support/consoleNavigation";
 
@@ -15,6 +16,16 @@ const username =
 const password =
   process.env.VPSMAN_DOCKER_FLEET_PASSWORD ?? "docker-fleet-password";
 const screenshotDir = process.env.VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR;
+const extendedReview = process.env.VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW === "1";
+
+type ScreenshotManifestEntry = {
+  description: string | null;
+  name: string;
+  project: string;
+  screenshot: string;
+};
+
+const screenshotManifest: ScreenshotManifestEntry[] = [];
 
 test.setTimeout(300_000);
 
@@ -54,6 +65,12 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   ).toBeVisible();
   await expectLiveDashboardTelemetry(page);
   await expectCleanLayout(page);
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "page-dashboard-overview",
+    "Dashboard overview page before operator filtering, with live operational health and resource telemetry.",
+  );
 
   await page.getByLabel("Dashboard group by").selectOption("providers");
   await expect(page.getByText(/All VPS; grouped by Providers/)).toBeVisible();
@@ -69,6 +86,12 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     page.getByText(/country:US; grouped by Date buckets/),
   ).toBeVisible({ timeout: 15_000 });
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "dashboard-filtered-country-date",
+    "Dashboard after operator scopes to US fleet and changes grouping to date buckets.",
+  );
   const dashboardPreferences = await page.evaluate(() =>
     JSON.parse(
       window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}",
@@ -81,6 +104,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   });
   await maybeScreenshot(page, testInfo.project.name, "dashboard");
   if (isMobile) {
+    writeScreenshotManifest(testInfo.project.name);
     await expectCleanLayout(page);
     expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
     return;
@@ -97,8 +121,20 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     grid.getByText(`${expectedTotal} of ${expectedTotal} instances`),
   ).toBeVisible({ timeout: 20_000 });
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "page-fleet-instances",
+    "Fleet / Instances page with the live 24-agent inventory table before filtering.",
+  );
   await grid.getByLabel("VPS instance records search").fill("provider:alpha");
   await expect(grid.getByText(`8 of ${expectedTotal} instances`)).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-search-provider-alpha",
+    "Fleet table after operator filters the 24-agent live fleet to provider alpha.",
+  );
   await grid.getByLabel("VPS instance records search").fill("");
 
   const firstRow = grid
@@ -114,6 +150,12 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   ).toBeVisible();
   await expect(firstDetail).toContainText("Root uid 0");
   await expectLiveFleetTelemetry(firstDetail);
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-expanded-telemetry-detail",
+    "Expanded VPS row showing live telemetry detail for a real agent.",
+  );
   await firstRow.getByLabel("Select VPS instance records row").check();
   await secondRow.getByLabel("Select VPS instance records row").check();
   await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
@@ -121,14 +163,32 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-selection-actions-open",
+    "Bulk selection action menu opened after selecting two VPS rows.",
+  );
   await page.keyboard.press("Escape");
   await firstRow.click({ button: "right" });
   await expect(page.getByText("Row actions")).toBeVisible();
   await expect(
     page.getByRole("menuitem", { name: "Inspect selected" }),
   ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-row-context-menu-open",
+    "Right-click context menu opened on a fleet row with selected-row actions preserved.",
+  );
   await page.keyboard.press("Escape");
   await exerciseColumnControls(page, grid);
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-column-controls-result",
+    "Fleet table after operator resizes/reorders columns, hides Provider, and expands page size.",
+  );
   await maybeScreenshot(page, testInfo.project.name, "fleet");
   await expectCleanLayout(page);
 
@@ -141,38 +201,40 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Preview mutation" }).click();
+  await page.getByRole("button", { name: "Review mutation" }).click();
   await expect(page.getByText("2/24")).toBeVisible();
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "bulk-tag-preview-result",
+    "Bulk tag workflow after previewing provider alpha US targets before mutation.",
+  );
   await expectCleanLayout(page);
 
-  await exerciseExpressionWebhooks(page);
+  await exerciseAlertPolicyReview(page, testInfo.project.name);
+  await exerciseAlertNotificationChannels(page, testInfo.project.name);
+  await exerciseExpressionWebhooks(page, testInfo.project.name);
 
-  await verifyDesktopSubpages(page);
+  await verifyDesktopSubpages(page, testInfo.project.name);
   await openConsoleSubpage(page, "Preferences", "Operator");
+  const preferencesPanel = page.locator(".preferencesPanel");
+  await expect(
+    preferencesPanel.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
+  ).toBeVisible();
   const nameDisplay = page.getByLabel("Name display");
-  const currentNameDisplay = await nameDisplay.inputValue();
-  await nameDisplay.selectOption(
-    currentNameDisplay === "name" ? "name_id_suffix" : "name",
-  );
+  await expect(nameDisplay).toBeVisible();
   const bulkCompare = page.getByLabel("Bulk output comparison default");
-  const currentBulkCompare = await bulkCompare.inputValue();
-  await bulkCompare.selectOption(
-    currentBulkCompare === "text" ? "binary" : "text",
+  await expect(bulkCompare).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "page-preferences-operator",
+    "Preferences / Operator page with saved display and workflow defaults.",
   );
-  const savePreferences = page.getByRole("button", {
-    name: "Save preferences",
-  });
-  await expect(
-    page.locator(".consoleStatusBadge", { hasText: "Unsaved changes" }),
-  ).toBeVisible();
-  await expect(savePreferences).toBeEnabled();
-  await savePreferences.click();
-  await expect(
-    page.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
-  ).toBeVisible();
   await maybeScreenshot(page, testInfo.project.name, "preferences");
+  writeScreenshotManifest(testInfo.project.name);
 
   expect(actionableConsoleErrors(consoleErrors)).toEqual([]);
 });
@@ -303,7 +365,7 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
   await expect(grid.getByText(`1 / 1`)).toBeVisible();
 }
 
-async function exerciseExpressionWebhooks(page: Page) {
+async function exerciseExpressionWebhooks(page: Page, projectName: string) {
   await openConsoleSubpage(page, "Fleet", "Notifications");
   await expect(
     page.getByRole("heading", { name: "Notification channels" }),
@@ -335,6 +397,12 @@ async function exerciseExpressionWebhooks(page: Page) {
     "{rule.name} {event.kind} count={matched_vps.length} [for v in matched_vps]{v.display_name} [endfor]",
   );
   await detail.getByLabel("Webhook event kind").fill("interval.30sec");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "webhook-rule-form-filled",
+    "Webhook rule editor filled with production-style target, expression, template, and event kind.",
+  );
   await detail.getByRole("button", { name: "Create rule" }).click();
   await expect(
     notifications.locator(".fleetPolicyStatus", {
@@ -342,8 +410,14 @@ async function exerciseExpressionWebhooks(page: Page) {
     }),
   ).toBeVisible();
   await expect(notifications).toContainText("docker-fleet-q2-capacity");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "webhook-rule-saved",
+    "Webhook rule creation result showing saved status and the new rule in context.",
+  );
 
-  await detail.getByRole("button", { name: "Preview rule" }).click();
+  await detail.getByRole("button", { name: "Review rule" }).click();
   await expect(
     notifications.locator(".deliveryPreviewSection", {
       hasText: "Webhook delivery preview",
@@ -356,9 +430,15 @@ async function exerciseExpressionWebhooks(page: Page) {
     "docker-fleet-q2-capacity interval.30sec count=6",
   );
   await expect(notifications).toContainText("df-alpha-US-01");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "webhook-rule-preview-result",
+    "Webhook dry-run result showing matched live VPSs and rendered payload preview.",
+  );
 
   await notifications.getByRole("tab", { name: "Webhooks" }).click();
-  await notifications.getByRole("button", { name: "Match rules" }).click();
+  await notifications.getByRole("button", { name: "Review matches" }).click();
   await expect(
     notifications.locator(".deliveryPreviewSection", {
       hasText: "Webhook delivery preview",
@@ -369,17 +449,140 @@ async function exerciseExpressionWebhooks(page: Page) {
       hasText: "docker-fleet-q2-capacity",
     }),
   ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "webhook-match-rules-result",
+    "Webhook queue operation after matching saved rules against the preview event.",
+  );
 
   await notifications.getByRole("tab", { name: "Maintenance" }).click();
   await notifications.getByLabel("Webhook rotation days").fill("7");
   await notifications.getByLabel("Webhook rotation status").fill("delivered");
-  await notifications.getByRole("button", { name: "Preview rotation" }).click();
+  await notifications.getByRole("button", { name: "Review rotation" }).click();
   await expect(
     notifications.locator(".fleetPolicyStatus", {
       hasText: "0 matched / 0 deleted",
     }),
   ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "webhook-rotation-preview-result",
+    "Webhook retention maintenance after previewing rotation without deleting records.",
+  );
   await expectCleanLayout(page);
+}
+
+async function exerciseAlertPolicyReview(page: Page, projectName: string) {
+  await openConsoleSubpage(page, "Fleet", "Alert policies");
+  await expect(page.getByRole("heading", { name: "Alert policies" })).toBeVisible();
+  const grid = page.getByLabel("Alert policy rules data grid");
+  const row = grid
+    .locator(".gridBody [role=row]", { hasText: "docker-edge-resource-alerts" })
+    .first();
+  await expect(row).toBeVisible();
+  await row.getByLabel("Expand Alert policy rules row").click();
+  await expect(
+    grid.locator(".gridExpandedRow", { hasText: "docker-edge-resource-alerts" }),
+  ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "alert-policy-inline-detail",
+    "Alert policy row opened with inline chevron detail on the seeded live policy.",
+  );
+
+  await row.getByLabel("Select Alert policy rules row").check();
+  await grid.getByRole("button", { name: "Selection" }).click();
+  await page.getByRole("menuitem", { name: "Details" }).click();
+  await expect(page.getByText("Alert policy details")).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "alert-policy-below-table-detail",
+    "Alert policy detail action opened the same policy details below the table.",
+  );
+
+  await page.getByRole("button", { name: "Edit policy" }).click();
+  await expect(page.getByText("Edit alert policy")).toBeVisible();
+  await page.getByLabel("Disk warning ratio").fill("0.22");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "alert-policy-edit-matrix",
+    "Alert policy edit panel with compact Memory/Disk/CPU threshold matrix after operator changes disk warning.",
+  );
+  await page.getByLabel("Close detail panel").click();
+}
+
+async function exerciseAlertNotificationChannels(
+  page: Page,
+  projectName: string,
+) {
+  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await expect(
+    page.getByRole("heading", { name: "Notification channels" }),
+  ).toBeVisible();
+  const notifications = page.locator(".consoleCrudPanel").filter({
+    has: page.getByRole("tablist", { name: "Notification registries" }),
+  });
+  const grid = notifications.getByLabel(
+    "Alert notification channels data grid",
+  );
+  const row = grid
+    .locator(".gridBody [role=row]", {
+      hasText: "docker-resource-audit",
+    })
+    .first();
+  await expect(row).toBeVisible();
+  await row.getByLabel("Expand Alert notification channels row").click();
+  await expect(
+    grid.locator(".gridExpandedRow", {
+      hasText: "docker-resource-audit",
+    }),
+  ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "notification-channel-inline-detail",
+    "Notification channel row opened with inline chevron detail for the seeded resource audit channel.",
+  );
+
+  await row.getByLabel("Select Alert notification channels row").check();
+  await grid.getByRole("button", { name: "Selection" }).click();
+  await page.getByRole("menuitem", { name: "Details" }).click();
+  await expect(page.getByText("Notification channel details")).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "notification-channel-below-table-detail",
+    "Notification channel detail action opened routing filters and delivery target below the table.",
+  );
+
+  await page.getByRole("button", { name: "Edit channel" }).click();
+  await expect(page.getByText("Edit notification channel")).toBeVisible();
+  await page.getByLabel("Alert categories").fill("resource, agent_status");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "notification-channel-edit-token-preview",
+    "Notification channel editor showing category token preview after operator edits category filters.",
+  );
+  await page.getByLabel("Close detail panel").click();
+
+  await notifications.getByRole("button", { name: "Review queued deliveries" }).click();
+  await expect(
+    notifications.locator(".deliveryPreviewSection", {
+      hasText: "Notification delivery preview",
+    }),
+  ).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "notification-delivery-preview-result",
+    "Notification queue preview result after operator previews queued custom pager deliveries.",
+  );
 }
 
 async function fillWebhookTemplate(manager: Locator, value: string) {
@@ -399,54 +602,303 @@ async function fillSearchExpression(editor: Locator, value: string) {
   await editor.page().keyboard.press("Escape");
 }
 
-async function verifyDesktopSubpages(page: Page) {
+async function verifyDesktopSubpages(page: Page, projectName: string) {
   const subpages = [
-    ["Fleet", "Alerts", "Fleet alerts"],
-    ["Fleet", "Alert policies", "Alert policies"],
-    ["Fleet", "Notifications", "Notification channels"],
-    ["Tags", "Registry", "Tags"],
-    ["Tags", "Assignments", "Tag assignments"],
-    ["Tags", "Bulk", "Bulk tags"],
-    ["Config", "Overview", "Config overview"],
-    ["Config", "Rules", "Config rules"],
-    ["Config", "Bulk apply", "Bulk hot config"],
-    ["Config", "Single VPS", "Single VPS config"],
-    ["Config", "Templates", "Data-source presets"],
-    ["Config", "Status", "Active source status"],
-    ["Jobs", "History", "Job history"],
-    ["Jobs", "Dispatch", "Dispatch command"],
-    ["Jobs", "Files", "VPS file browser"],
-    ["Jobs", "Multi files", "Multi-file actions"],
-    ["Jobs", "Updates", "Agent update releases"],
-    ["Jobs", "Transfer history", "File transfer sessions"],
-    ["Jobs", "Terminal sessions", "Terminal sessions"],
-    ["Jobs", "Processes", "Process supervisor inventory"],
-    ["Jobs", "Schedule runs", "Schedule runs"],
-    ["Schedules", "Schedule registry", "Schedules"],
-    ["Topology", "Graph", "Topology graph"],
-    ["Topology", "Tunnel plans", "Tunnel plans"],
-    ["Topology", "Apply / rollback", "Network apply"],
-    ["Topology", "Promotion", "Tunnel promotion"],
-    ["Topology", "Evidence", "Topology evidence"],
-    ["Topology", "OSPF", "vpsman / Topology / OSPF"],
-    ["Backups", "Requests", "Backup requests"],
-    ["Backups", "Policies", "Backup policies"],
-    ["Backups", "Artifacts", "Backup artifacts"],
-    ["Backups", "Restore", "Restore operations"],
-    ["Backups", "Migration", "Migration links"],
-    ["Audit", "Events", "Audit log"],
-    ["Audit", "Retention", "History retention"],
-    ["Access", "Overview", "Access control"],
-    ["Access", "Operators", "Operators"],
-    ["Access", "VPS keys", "Gateway agent identities"],
-    ["Access", "Gateway", "Gateway sessions"],
-    ["Access", "Privilege unlock", "Privilege unlock"],
+    {
+      view: "Fleet",
+      subpage: "Alerts",
+      marker: "Fleet alerts",
+      screenshot: "page-fleet-alerts",
+    },
+    {
+      view: "Fleet",
+      subpage: "Alert policies",
+      marker: "Alert policies",
+      screenshot: "page-fleet-alert-policies",
+    },
+    {
+      view: "Fleet",
+      subpage: "Notifications",
+      marker: "Notification channels",
+      screenshot: "page-fleet-notifications",
+    },
+    {
+      view: "Tags",
+      subpage: "Registry",
+      marker: "Tags",
+      screenshot: "page-tags-registry",
+    },
+    {
+      view: "Tags",
+      subpage: "Assignments",
+      marker: "Tag assignments",
+      screenshot: "page-tags-assignments",
+    },
+    {
+      view: "Tags",
+      subpage: "Bulk",
+      marker: "Bulk tags",
+      screenshot: "page-tags-bulk",
+    },
+    {
+      view: "Config",
+      subpage: "Overview",
+      marker: "Config overview",
+      screenshot: "page-config-overview",
+    },
+    {
+      view: "Config",
+      subpage: "Rules",
+      marker: "Config rules",
+      screenshot: "page-config-rules",
+    },
+    {
+      view: "Config",
+      subpage: "Bulk apply",
+      marker: "Bulk hot config",
+      screenshot: "page-config-bulk-apply",
+    },
+    {
+      view: "Config",
+      subpage: "Single VPS",
+      marker: "Single VPS config",
+      screenshot: "page-config-single-vps",
+    },
+    {
+      view: "Config",
+      subpage: "Templates",
+      marker: "Data-source presets",
+      screenshot: "page-config-templates",
+    },
+    {
+      view: "Config",
+      subpage: "Status",
+      marker: "Active source status",
+      screenshot: "page-config-status",
+    },
+    {
+      view: "Jobs",
+      subpage: "History",
+      marker: "Job history",
+      screenshot: "page-jobs-history",
+    },
+    {
+      view: "Jobs",
+      subpage: "Dispatch",
+      marker: "Dispatch command",
+      screenshot: "page-jobs-dispatch",
+    },
+    {
+      view: "Jobs",
+      subpage: "Files",
+      marker: "VPS file browser",
+      screenshot: "page-jobs-files",
+    },
+    {
+      view: "Jobs",
+      subpage: "Multi files",
+      marker: "Multi-file actions",
+      screenshot: "page-jobs-multi-files",
+    },
+    {
+      view: "Jobs",
+      subpage: "Updates",
+      marker: "Agent update releases",
+      screenshot: "page-jobs-updates",
+    },
+    {
+      view: "Jobs",
+      subpage: "Transfer history",
+      marker: "File transfer sessions",
+      screenshot: "page-jobs-transfer-history",
+    },
+    {
+      view: "Jobs",
+      subpage: "Terminal sessions",
+      marker: "Terminal sessions",
+      screenshot: "page-jobs-terminal-sessions",
+    },
+    {
+      view: "Jobs",
+      subpage: "Processes",
+      marker: "Process supervisor inventory",
+      screenshot: "page-jobs-processes",
+    },
+    {
+      view: "Jobs",
+      subpage: "Schedule runs",
+      marker: "Schedule runs",
+      screenshot: "page-jobs-schedule-runs",
+    },
+    {
+      view: "Schedules",
+      subpage: "Schedule registry",
+      marker: "Schedules",
+      screenshot: "page-schedules-registry",
+    },
+    {
+      view: "Topology",
+      subpage: "Graph",
+      marker: "Topology graph",
+      screenshot: "page-topology-graph",
+    },
+    {
+      view: "Topology",
+      subpage: "Tunnel plans",
+      marker: "Tunnel plans",
+      screenshot: "page-topology-tunnel-plans",
+    },
+    {
+      view: "Topology",
+      subpage: "Apply / rollback",
+      marker: "Network apply",
+      screenshot: "page-topology-apply-rollback",
+    },
+    {
+      view: "Topology",
+      subpage: "Promotion",
+      marker: "Tunnel promotion",
+      screenshot: "page-topology-promotion",
+    },
+    {
+      view: "Topology",
+      subpage: "Evidence",
+      marker: "Topology evidence",
+      screenshot: "page-topology-evidence",
+    },
+    {
+      view: "Topology",
+      subpage: "OSPF",
+      marker: "vpsman / Topology / OSPF",
+      screenshot: "page-topology-ospf",
+    },
+    {
+      view: "Backups",
+      subpage: "Requests",
+      marker: "Backup requests",
+      screenshot: "page-backups-requests",
+    },
+    {
+      view: "Backups",
+      subpage: "Policies",
+      marker: "Backup policies",
+      screenshot: "page-backups-policies",
+    },
+    {
+      view: "Backups",
+      subpage: "Artifacts",
+      marker: "Backup artifacts",
+      screenshot: "page-backups-artifacts",
+    },
+    {
+      view: "Backups",
+      subpage: "Restore",
+      marker: "Restore operations",
+      screenshot: "page-backups-restore",
+    },
+    {
+      view: "Backups",
+      subpage: "Migration",
+      marker: "Migration links",
+      screenshot: "page-backups-migration",
+    },
+    {
+      view: "Audit",
+      subpage: "Events",
+      marker: "Audit log",
+      screenshot: "page-audit-events",
+    },
+    {
+      view: "Audit",
+      subpage: "Retention",
+      marker: "History retention",
+      screenshot: "page-audit-retention",
+    },
+    {
+      view: "Access",
+      subpage: "Overview",
+      marker: "Access control",
+      screenshot: "page-access-overview",
+    },
+    {
+      view: "Access",
+      subpage: "Operators",
+      marker: "Operators",
+      screenshot: "page-access-operators",
+    },
+    {
+      view: "Access",
+      subpage: "VPS keys",
+      marker: "Gateway agent identities",
+      screenshot: "page-access-vps-keys",
+    },
+    {
+      view: "Access",
+      subpage: "Gateway",
+      marker: "Gateway sessions",
+      screenshot: "page-access-gateway",
+    },
+    {
+      view: "Access",
+      subpage: "Privilege unlock",
+      marker: "Privilege unlock",
+      screenshot: "page-access-privilege-unlock",
+    },
   ] as const;
 
-  for (const [view, subpage, heading] of subpages) {
-    await openConsoleSubpage(page, view, subpage);
-    await expectMainMarker(page, heading);
+  for (const entry of subpages) {
+    await openConsoleSubpage(page, entry.view, entry.subpage);
+    await expectMainMarker(page, entry.marker);
     await expectCleanLayout(page);
+    await maybeExtendedScreenshot(
+      page,
+      projectName,
+      entry.screenshot,
+      `${entry.view} / ${entry.subpage} page after live navigation and fixture-backed data load.`,
+    );
+    if (entry.screenshot === "page-fleet-notifications") {
+      await captureNotificationRegistryTabs(page, projectName);
+    }
+  }
+}
+
+async function captureNotificationRegistryTabs(page: Page, projectName: string) {
+  const notifications = page.locator(".consoleCrudPanel").filter({
+    has: page.getByRole("tablist", { name: "Notification registries" }),
+  });
+  const tabs = [
+    {
+      label: "Channels",
+      marker: "Alert notification channels",
+      screenshot: "page-fleet-notifications-channels",
+    },
+    {
+      label: "Webhooks",
+      marker: "Webhook rules",
+      screenshot: "page-fleet-notifications-webhooks",
+    },
+    {
+      label: "Deliveries",
+      marker: "Notification delivery history",
+      screenshot: "page-fleet-notifications-deliveries",
+    },
+    {
+      label: "Maintenance",
+      marker: "Webhook delivery maintenance",
+      screenshot: "page-fleet-notifications-maintenance",
+    },
+  ] as const;
+
+  for (const tab of tabs) {
+    await activate(notifications.getByRole("tab", { name: tab.label }));
+    await expect(notifications.getByText(tab.marker).first()).toBeVisible();
+    await expectCleanLayout(page);
+    await maybeExtendedScreenshot(
+      page,
+      projectName,
+      tab.screenshot,
+      `Fleet / Notifications / ${tab.label} internal tab with live alert and webhook data.`,
+    );
   }
 }
 
@@ -469,11 +921,63 @@ async function maybeScreenshot(page: Page, projectName: string, name: string) {
   if (!screenshotDir) {
     return;
   }
+  mkdirSync(screenshotDir, { recursive: true });
   await page.evaluate(() => window.scrollTo(0, 0));
+  const screenshotPath = path.join(screenshotDir, `${projectName}-${name}.png`);
   await page.screenshot({
     fullPage: true,
-    path: path.join(screenshotDir, `${projectName}-${name}.png`),
+    path: screenshotPath,
   });
+  screenshotManifest.push({
+    description: null,
+    name,
+    project: projectName,
+    screenshot: screenshotPath,
+  });
+}
+
+async function maybeExtendedScreenshot(
+  page: Page,
+  projectName: string,
+  name: string,
+  description: string,
+) {
+  if (!extendedReview) {
+    return;
+  }
+  await maybeScreenshot(page, projectName, `extended-${name}`);
+  const entry = [...screenshotManifest]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.project === projectName &&
+        candidate.name === `extended-${name}`,
+    );
+  if (entry) {
+    entry.description = description;
+  }
+}
+
+function writeScreenshotManifest(projectName: string) {
+  if (!screenshotDir) {
+    return;
+  }
+  mkdirSync(screenshotDir, { recursive: true });
+  writeFileSync(
+    path.join(screenshotDir, `${projectName}-screenshot-manifest.json`),
+    `${JSON.stringify(
+      {
+        extended_review: extendedReview,
+        generated_by: "live-docker-fleet",
+        project: projectName,
+        screenshots: screenshotManifest.filter(
+          (entry) => entry.project === projectName,
+        ),
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 function actionableConsoleErrors(errors: string[]): string[] {

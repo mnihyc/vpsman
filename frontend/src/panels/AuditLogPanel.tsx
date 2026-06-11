@@ -1,5 +1,6 @@
 import { ClipboardList, Download, Scissors, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import type {
   AuditLogRecord,
@@ -46,6 +47,7 @@ export function AuditLogPanel({
   const [pruneLimit, setPruneLimit] = useState("1000");
   const [metadataOnly, setMetadataOnly] = useState(false);
   const [exportEnabled, setExportEnabled] = useState(true);
+  const [pruneConfirmationOpen, setPruneConfirmationOpen] = useState(false);
 
   useEffect(() => {
     if (!selectedPolicy) {
@@ -136,12 +138,19 @@ export function AuditLogPanel({
   };
 
   const prune = (dryRun: boolean) => {
+    if (!dryRun && !pruneConfirmationOpen) {
+      setPruneConfirmationOpen(true);
+      return;
+    }
     void onPruneHistoryRetention({
       domain: selectedPolicy?.domain ?? selectedDomain,
       dry_run: dryRun,
       metadata_only: metadataOnly,
       confirmed: !dryRun,
     });
+    if (!dryRun) {
+      setPruneConfirmationOpen(false);
+    }
   };
 
   return (
@@ -238,14 +247,29 @@ export function AuditLogPanel({
               Save
             </button>
             <button className="secondaryAction" onClick={() => prune(true)} type="button">
-              Dry run
+              Review prune
             </button>
             <button className="dangerAction" onClick={() => prune(false)} type="button">
               <Scissors size={16} />
-              Prune
+              Review prune
             </button>
           </div>
         </div>
+        <ConfirmationPrompt
+          confirmLabel="Prune history"
+          detail="Deletes history rows that match the selected domain, retention days, and prune limit."
+          items={[
+            { label: "Domain", value: selectedPolicy?.domain ?? selectedDomain },
+            { label: "Retention days", value: retentionDays },
+            { label: "Limit", value: pruneLimit },
+            { label: "Metadata only", value: metadataOnly ? "yes" : "no" },
+          ]}
+          onCancel={() => setPruneConfirmationOpen(false)}
+          onConfirm={() => prune(false)}
+          open={pruneConfirmationOpen}
+          title="Confirm history prune"
+          tone="danger"
+        />
         {historyPruneResult && (
           <div className="retentionResult">
             {historyPruneResult.domains.slice(0, 4).map((domain) => (

@@ -78,7 +78,7 @@ export function BackupPolicyPruneForm({
         {!confirmationOpen && (
           <button className={dryRun ? "secondaryAction" : "dangerAction"} disabled={pending} type="submit">
             {dryRun ? <SearchCheck size={17} /> : <Scissors size={17} />}
-            {dryRun ? "Preview prune" : "Prune artifacts"}
+            {dryRun ? "Review prune" : "Review prune"}
           </button>
         )}
       </form>

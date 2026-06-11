@@ -191,7 +191,6 @@ export function App() {
         onLockPrivilege={lockPrivilege}
         onOpenAccessControls={openPrivilegeUnlock}
         onSaveFleetView={fleetViews.saveFleetView}
-        onSelectSubpage={selectSubpage}
         onSelectView={selectView}
         onSavedFleetViewNameChange={fleetViews.setDraftSavedViewName}
         operatorPreferencesReady={dashboard.operator !== null}

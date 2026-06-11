@@ -87,7 +87,7 @@ export function ArtifactUploadForm({
         {!artifactConfirmationOpen && (
           <button className="primaryAction" disabled={pending || !artifactBackupId || !artifactFile} type="submit">
             <Upload size={17} />
-            Upload artifact
+            Review upload
           </button>
         )}
       </form>
@@ -104,7 +104,7 @@ export function ArtifactUploadForm({
         {!handoffConfirmationOpen && (
           <button className="secondaryAction" disabled={pending || !artifactBackupId} onClick={onHandoffSubmit} type="button">
             <Upload size={17} />
-            Promote retained output
+            Review promotion
           </button>
         )}
       </div>

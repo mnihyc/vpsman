@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { LockKeyhole, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { ConfirmationPrompt } from "./ConfirmationPrompt";
 import { normalizeHex, type PrivilegeMaterial } from "../privilege";
 import { clearPrivilegeVault, hasPrivilegeVault, loadPrivilegeVault, savePrivilegeVault } from "../vault";
 import { runPanelAction, shortHash } from "../utils";
@@ -39,6 +40,7 @@ export function PrivilegeVaultBox({
   const [vaultAvailable, setVaultAvailable] = useState(() => hasPrivilegeVault());
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [clearVaultPromptOpen, setClearVaultPromptOpen] = useState(false);
   const privilegeStatus = vaultAvailable ? "Encrypted vault locked" : "Locked";
   const label = (value: string) => {
     if (!labelPrefix) {
@@ -84,6 +86,7 @@ export function PrivilegeVaultBox({
   }
 
   function removeVault() {
+    setClearVaultPromptOpen(false);
     clearPrivilegeVault();
     setVaultAvailable(false);
     onVaultAvailabilityChange?.(false);
@@ -186,10 +189,22 @@ export function PrivilegeVaultBox({
       </div>
 
       {vaultAvailable && (
-        <button className="secondaryAction dangerAction" disabled={pending} onClick={removeVault} type="button">
-          <Trash2 size={17} />
-          {clearVaultLabel}
-        </button>
+        <>
+          <button className="secondaryAction dangerAction" disabled={pending} onClick={() => setClearVaultPromptOpen(true)} type="button">
+            <Trash2 size={17} />
+            Review vault clear
+          </button>
+          <ConfirmationPrompt
+            confirmLabel={clearVaultLabel}
+            detail="This removes the encrypted local privilege vault from this browser and locks locally cached privilege material."
+            onCancel={() => setClearVaultPromptOpen(false)}
+            onConfirm={removeVault}
+            open={clearVaultPromptOpen}
+            pending={pending}
+            title="Confirm privilege vault clear"
+            tone="danger"
+          />
+        </>
       )}
     </div>
   );

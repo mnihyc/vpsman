@@ -1,4 +1,5 @@
 import { ShieldAlert, ShieldCheck, ShieldQuestion } from "lucide-react";
+import { useState } from "react";
 import { targetPreflightUnavailable } from "../bulkJobProgress";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type { AgentView } from "../types";
@@ -12,13 +13,22 @@ export type TargetImpactMode =
   | "root_network_mutation";
 
 type TargetImpactGroup = {
-  key: "ready" | "stale" | "degraded" | "forced" | "observation_only" | "unavailable" | "unsupported";
+  key: "ready" | "needs_review" | "unavailable";
   label: string;
   agents: AgentView[];
 };
 
+type TargetImpactClassification =
+  | "ready"
+  | "stale"
+  | "degraded"
+  | "forced"
+  | "observation_only"
+  | "unavailable"
+  | "unsupported";
+
 export function TargetImpactPreview({
-  emptyText = "Preview or select targets to classify capability impact",
+  emptyText = "Review or select targets to classify capability impact",
   forceUnprivileged = false,
   mode,
   targets,
@@ -31,7 +41,7 @@ export function TargetImpactPreview({
   title?: string;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const groups = buildTargetImpactGroups(targets, mode, forceUnprivileged);
+  const groups = buildTargetImpactGroups(targets, mode);
   const attentionCount = groups
     .filter((group) => group.key !== "ready")
     .reduce((count, group) => count + group.agents.length, 0);
@@ -94,37 +104,33 @@ export function resolveAgentsById(agents: AgentView[], clientIds: string[]): Age
 function buildTargetImpactGroups(
   targets: AgentView[],
   mode: TargetImpactMode,
-  forceUnprivileged: boolean,
 ): TargetImpactGroup[] {
   const groups: Record<TargetImpactGroup["key"], AgentView[]> = {
-    degraded: [],
-    forced: [],
-    observation_only: [],
+    needs_review: [],
     ready: [],
-    stale: [],
     unavailable: [],
-    unsupported: [],
   };
   for (const target of targets) {
     const capability = classifyTarget(target, mode);
-    if (capability === "degraded" && forceUnprivileged) {
-      groups.forced.push(target);
+    if (capability === "ready") {
+      groups.ready.push(target);
+    } else if (capability === "unavailable" || capability === "unsupported") {
+      groups.unavailable.push(target);
     } else {
-      groups[capability].push(target);
+      groups.needs_review.push(target);
     }
   }
   return [
     { key: "ready", label: "Ready", agents: groups.ready },
-    { key: "stale", label: "Stale", agents: groups.stale },
+    { key: "needs_review", label: "Needs review", agents: groups.needs_review },
     { key: "unavailable", label: "Unavailable", agents: groups.unavailable },
-    { key: "degraded", label: "Degrades", agents: groups.degraded },
-    { key: "forced", label: "Best effort", agents: groups.forced },
-    { key: "observation_only", label: "Observed only", agents: groups.observation_only },
-    { key: "unsupported", label: "Unsupported", agents: groups.unsupported },
   ];
 }
 
-function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpactGroup["key"] {
+function classifyTarget(
+  target: AgentView,
+  mode: TargetImpactMode,
+): TargetImpactClassification {
   if (targetPreflightUnavailable(target)) {
     return "unavailable";
   }
@@ -159,10 +165,11 @@ function classifyTarget(target: AgentView, mode: TargetImpactMode): TargetImpact
 }
 
 function TargetImpactChips({ agents, mode }: { agents: AgentView[]; mode: VpsNameDisplayMode }) {
+  const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) {
     return <small>No targets</small>;
   }
-  const visible = agents.slice(0, 4);
+  const visible = expanded ? agents : agents.slice(0, 20);
   const remaining = agents.length - visible.length;
   return (
     <div className="targetChipList impactTargetChips">
@@ -172,9 +179,17 @@ function TargetImpactChips({ agents, mode }: { agents: AgentView[]; mode: VpsNam
         </span>
       ))}
       {remaining > 0 && (
-        <span className="targetChip mutedChip" title={agents.slice(visible.length).map((agent) => agent.id).join("\n")}>
-          +{remaining} more
-        </span>
+        <button
+          className="targetChip mutedChip showMoreChip"
+          onClick={() => setExpanded(true)}
+          title={agents
+            .slice(visible.length)
+            .map((agent) => agent.id)
+            .join("\n")}
+          type="button"
+        >
+          Show {remaining} more
+        </button>
       )}
     </div>
   );
@@ -184,7 +199,7 @@ function impactIcon(key: TargetImpactGroup["key"]) {
   if (key === "ready") {
     return <ShieldCheck size={16} />;
   }
-  if (key === "observation_only" || key === "unavailable") {
+  if (key === "unavailable") {
     return <ShieldQuestion size={16} />;
   }
   return <ShieldAlert size={16} />;

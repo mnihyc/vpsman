@@ -114,7 +114,7 @@ export function BackupRequestForm({
             type="submit"
           >
             <Play size={17} />
-            Request backup
+            Review backup
           </button>
         )}
       </form>

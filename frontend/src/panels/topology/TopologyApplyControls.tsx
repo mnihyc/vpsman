@@ -449,7 +449,7 @@ export function TopologyApplyControls({
             type="submit"
           >
             <Play size={17} />
-            Apply side
+            Review apply
           </button>
           <button
             className="secondaryAction"
@@ -458,7 +458,7 @@ export function TopologyApplyControls({
             type="button"
           >
             <RotateCcw size={17} />
-            Rollback side
+            Review rollback
           </button>
           <button
             className="secondaryAction"
@@ -467,7 +467,7 @@ export function TopologyApplyControls({
             type="button"
           >
             <Search size={17} />
-            Inspect side
+            Review inspect
           </button>
           <button
             className="secondaryAction"
@@ -476,7 +476,7 @@ export function TopologyApplyControls({
             type="button"
           >
             <Activity size={17} />
-            Probe latency
+            Review probe
           </button>
           <button
             className="secondaryAction"
@@ -485,7 +485,7 @@ export function TopologyApplyControls({
             type="button"
           >
             <Activity size={17} />
-            Test speed
+            Review speed test
           </button>
         </div>
       </form>

@@ -35,6 +35,7 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 object_store_dir="$SMOKE_TMPDIR/object-store"
 screenshot_dir="$ROOT_DIR/tmp/docker-24-agent-fleet-$run_id"
 runtime_image="${VPSMAN_DOCKER_FLEET_RUNTIME_IMAGE:-ubuntu:24.04}"
+extended_review="${VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW:-1}"
 mkdir -p "$object_store_dir" "$screenshot_dir"
 
 pg_container="vpsman-$run_id-postgres"
@@ -317,6 +318,89 @@ api_get "/api/v1/dashboard/overview?window=1h&scope_kind=country&scope_value=US&
     any(.label_clusters[]; .label == "provider:alpha" and .total == 2)
   ' >/dev/null
 
+alert_policy_json="$(vpsctl_json fleet-alert-policy-upsert \
+  --name docker-edge-resource-alerts \
+  --scope-kind tag \
+  --scope-value role:edge \
+  --memory-available-warning-ratio 0.99 \
+  --memory-available-critical-ratio 0.98 \
+  --disk-available-warning-ratio 0.99 \
+  --disk-available-critical-ratio 0.98 \
+  --cpu-load-warning 0.5 \
+  --cpu-load-critical 0.9 \
+  --priority 25 \
+  --notes docker-fleet-live-review \
+  --confirmed)"
+jq -e '
+  .name == "docker-edge-resource-alerts" and
+  .scope_kind == "tag" and
+  .scope_value == "role:edge" and
+  .memory_available_warning_ratio == 0.99 and
+  .disk_available_warning_ratio == 0.99 and
+  .cpu_load_warning == 0.5 and
+  .priority == 25 and
+  .enabled == true
+' <<<"$alert_policy_json" >/dev/null
+
+alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
+  --name docker-resource-audit \
+  --scope-kind global \
+  --min-severity warning \
+  --categories resource \
+  --operator-states open \
+  --delivery-kind audit_log \
+  --target audit:fleet \
+  --cooldown-secs 600 \
+  --notes docker-fleet-live-review \
+  --confirmed)"
+alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
+jq -e '
+  .name == "docker-resource-audit" and
+  .scope_kind == "global" and
+  .min_severity == "warning" and
+  .categories == ["resource"] and
+  .operator_states == ["open"] and
+  .delivery_kind == "audit_log" and
+  .enabled == true
+' <<<"$alert_notification_channel_json" >/dev/null
+
+alert_notification_custom_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
+  --name docker-resource-pager \
+  --scope-kind global \
+  --min-severity warning \
+  --categories resource \
+  --operator-states open \
+  --delivery-kind custom_pager \
+  --target adapter:docker-pager \
+  --cooldown-secs 600 \
+  --notes docker-fleet-live-review-custom \
+  --confirmed)"
+jq -e '
+  .name == "docker-resource-pager" and
+  .delivery_kind == "custom_pager" and
+  .enabled == true
+' <<<"$alert_notification_custom_channel_json" >/dev/null
+
+alert_notification_dry_run_json="$(vpsctl_json fleet-alert-notification-dispatch \
+  --category resource \
+  --include-muted \
+  --dry-run \
+  --limit 50)"
+jq -e '
+  length >= 1 and
+  any(.[]; .channel_name == "docker-resource-audit" and .status == "matched_dry_run")
+' <<<"$alert_notification_dry_run_json" >/dev/null
+
+alert_notification_dispatch_json="$(vpsctl_json fleet-alert-notification-dispatch \
+  --category resource \
+  --include-muted \
+  --confirmed \
+  --limit 50)"
+jq -e --arg channel_id "$alert_notification_channel_id" '
+  length >= 1 and
+  any(.[]; .channel_id == $channel_id and .status == "delivered")
+' <<<"$alert_notification_dispatch_json" >/dev/null
+
 schedule_json="$(vpsctl_json schedule-create \
   --name docker-provider-alpha-hourly \
   --command /bin/true \
@@ -398,6 +482,7 @@ if ! env \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
+  VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW="$extended_review" \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
   VPSMAN_DOCKER_FLEET_PASSWORD="$operator_password" \
   VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR="$screenshot_dir" \
@@ -410,6 +495,7 @@ jq -n \
   --arg api_url "$api_url" \
   --arg runtime_image "$runtime_image" \
   --arg screenshot_dir "$screenshot_dir" \
+  --arg extended_review "$extended_review" \
   --argjson agent_count "$agent_count" \
   --argjson telemetry_rollups "$telemetry_rollup_count" \
   --arg job_id "$job_id" \
@@ -421,6 +507,7 @@ jq -n \
     telemetry_rollups: $telemetry_rollups,
     bulk_job_id: $job_id,
     screenshot_dir: $screenshot_dir,
+    extended_review_screenshots: ($extended_review == "1"),
     checks: [
       "docker_postgres_api_gateway",
       "twenty_plus_docker_agents_online",
@@ -435,6 +522,7 @@ jq -n \
       "gateway_session_inventory",
       "audit_visibility",
       "desktop_mobile_live_ui_layout",
+      "live_extended_review_action_screenshots",
       "grid_multiselect_expand_context_column_controls",
       "sidebar_preferences_and_dashboard_customization"
     ]

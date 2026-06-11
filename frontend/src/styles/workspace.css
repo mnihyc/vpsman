@@ -486,17 +486,18 @@
 }
 
 .dashboardTopClients {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   align-content: start;
   gap: 8px;
   min-width: 0;
 }
 
 .dashboardSideRailHeader {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
+  flex: 1 0 100%;
   justify-content: space-between;
   gap: 10px;
   min-height: 32px;
@@ -512,10 +513,13 @@
 .dashboardClientRow {
   display: flex;
   align-items: center;
+  flex: 0 1 auto;
   justify-content: space-between;
   gap: 12px;
-  min-width: 0;
+  max-width: 100%;
+  min-width: min(100%, 156px);
   padding: 11px 12px;
+  width: fit-content;
 }
 
 .dashboardClientRow span,
@@ -525,22 +529,19 @@
 
 .dashboardClientRow strong {
   display: block;
-  overflow: hidden;
   font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .dashboardClientRow small {
   display: block;
-  overflow: hidden;
   color: #5f6368;
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .dashboardClientRow b {
+  align-self: flex-start;
   flex: 0 0 auto;
   font-size: 12px;
 }
@@ -623,8 +624,9 @@
 }
 
 .dashboardClusterGrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(210px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 12px;
   padding: 16px;
 }
@@ -632,12 +634,15 @@
 .dashboardClusterCard {
   position: relative;
   display: grid;
+  flex: 0 1 auto;
   grid-template-columns: 38px minmax(0, 1fr);
   gap: 11px;
   align-items: start;
-  min-width: 0;
+  max-width: 100%;
+  min-width: min(100%, 210px);
   min-height: 118px;
   padding: 13px;
+  width: fit-content;
 }
 
 .dashboardClusterCard > span:not(.dashboardMetricIcon) {
@@ -945,6 +950,7 @@
 .compactForm select,
 .compactForm textarea,
 .aliasEditor input,
+.fleetInlineTagForm input,
 .sideForm input,
 .sideForm select,
 .sideForm textarea,
@@ -965,6 +971,7 @@
 .compactForm select:focus,
 .compactForm textarea:focus,
 .aliasEditor input:focus,
+.fleetInlineTagForm input:focus,
 .sideForm input:focus,
 .sideForm select:focus,
 .sideForm textarea:focus,
@@ -991,12 +998,14 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
+  align-items: end;
   padding: 0 18px 14px;
 }
 
 .aliasEditor label {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .aliasEditor label span {
@@ -1011,35 +1020,63 @@
   color: #b3261e;
 }
 
-.deleteVpsControls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-top: 1px solid #eef1f6;
-  border-bottom: 1px solid #eef1f6;
-  padding: 12px 18px;
+.fleetInlineTagForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
 }
 
-.deleteVpsControls div {
+.fleetInlineTagForm label {
   display: grid;
-  gap: 3px;
+  gap: 6px;
   min-width: 0;
 }
 
-.deleteVpsControls strong {
-  color: #202124;
-  font-size: 13px;
-}
-
-.deleteVpsControls span {
+.fleetInlineTagForm label span {
   color: #5f6368;
   font-size: 12px;
-  line-height: 1.35;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
-.deleteVpsControls .dangerAction {
+.fleetInlineTagChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tagEditChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 28px;
+  gap: 5px;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px 3px 10px;
+}
+
+.tagEditChip:hover:not(:disabled) {
+  border-color: #c8d7f0;
+  background: #f8fafd;
+  color: #174ea6;
+}
+
+.tagEditChip span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tagEditChip svg {
   flex: 0 0 auto;
+  color: #5f6368;
 }
 
 .authVaultUnlock {
@@ -1209,20 +1246,16 @@
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(280px, 0.9fr);
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .fleetNodeDetailControls .aliasEditor,
-.compactDeleteControls {
+.fleetNodeDetailControls .fleetInlineTagForm {
   margin: 0;
   border: 1px solid #eef1f6;
   border-radius: 8px;
   background: #f8fafd;
   padding: 10px;
-}
-
-.compactDeleteControls {
-  min-height: 100%;
 }
 
 .panelErrorText {

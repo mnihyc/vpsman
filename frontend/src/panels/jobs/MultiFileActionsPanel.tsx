@@ -305,7 +305,7 @@ export function MultiFileActionsPanel({
         </div>
         <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
           <RefreshCw size={14} />
-          <span>Preview</span>
+          <span>Review targets</span>
         </button>
       </div>
 
@@ -1210,25 +1210,25 @@ function runBulkActionClass(action: MultiFileAction): string {
 function runBulkActionLabel(action: MultiFileAction): string {
   switch (action) {
     case "download_files":
-      return "Run download";
+      return "Review download";
     case "upload_file":
-      return "Run upload";
+      return "Review upload";
     case "copy":
-      return "Run copy";
+      return "Review copy";
     case "rename":
-      return "Run move";
+      return "Review move";
     case "delete":
-      return "Run delete";
+      return "Review delete";
     case "chmod":
-      return "Run chmod";
+      return "Review chmod";
     case "chown":
-      return "Run chown";
+      return "Review chown";
     case "mkdir":
-      return "Run create";
+      return "Review create";
     case "write_text":
-      return "Run write";
+      return "Review write";
     default:
-      return "Run action";
+      return "Review action";
   }
 }
 

@@ -625,7 +625,7 @@ export function JobDispatchPanel({
       }
       const resolved = preview;
       if (!resolved?.targets.length) {
-        throw new Error("Confirmed target snapshot is missing; preview the targets again");
+        throw new Error("Confirmed target snapshot is missing; review the targets again");
       }
       if (mode === "file_transfer_upload") {
         const clientIds = resolved.targets.map((target) => target.id);
@@ -1052,7 +1052,7 @@ export function JobDispatchPanel({
               type="button"
             >
               <CheckCircle2 size={17} />
-              Preview
+              Review targets
             </button>
             <button
               className="primaryAction"
@@ -1060,7 +1060,7 @@ export function JobDispatchPanel({
               type="submit"
             >
               <Play size={17} />
-              Dispatch
+              Review dispatch
             </button>
           </div>
         )}

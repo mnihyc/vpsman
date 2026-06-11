@@ -237,7 +237,7 @@ function TagRegistry({
                 <span>
                   <button className="secondaryAction compactAction dangerAction" disabled={pending} onClick={() => void previewDelete(tag)} type="button">
                     <Trash2 size={13} />
-                    <span>Delete</span>
+                    <span>Review deletion</span>
                   </button>
                 </span>
               </div>
@@ -545,13 +545,13 @@ function BulkTagPanel({
               verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
             />
             <button className="secondaryAction" disabled={pending || !tag.trim() || !selectorExpression.trim()} onClick={previewTargets} type="button">
-              Preview mutation
+              Review mutation
             </button>
           </>
         )}
         {action === "delete" && (
           <button className="secondaryAction" disabled={pending || !tag.trim()} onClick={previewTargets} type="button">
-            Preview mutation
+            Review mutation
           </button>
         )}
         <div className="privilegeGateBox">
@@ -570,14 +570,14 @@ function BulkTagPanel({
           type="button"
         >
           <Tag size={16} />
-          Apply mutation
+          Review mutation
         </button>
       </div>
       <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
         <div className="bulkTagPreviewHeader">
           <div>
             <strong>Target preview</strong>
-            <span>{preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Preview before mutation"}</span>
+            <span>{preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Review before mutation"}</span>
           </div>
         </div>
         {previewAgents.length > 0 ? (
@@ -591,7 +591,7 @@ function BulkTagPanel({
         ) : (
           <div className="bulkTagPreviewEmpty">
             <ShieldCheck size={18} />
-            <span>{preview ? "No VPSs would change for this mutation." : "Run preview to show selected VPSs and schedule target-update notices."}</span>
+            <span>{preview ? "No VPSs would change for this mutation." : "Review targets to show selected VPSs and schedule target-update notices."}</span>
           </div>
         )}
       </section>

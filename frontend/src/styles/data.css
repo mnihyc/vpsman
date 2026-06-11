@@ -1131,8 +1131,8 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 150px;
-  height: 24px;
+  max-width: 100%;
+  min-height: 24px;
   padding: 0 7px;
   border: 1px solid #dfe3eb;
   border-radius: 999px;
@@ -1141,9 +1141,8 @@
 }
 
 .tagRemoveChip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .inlineTagAdd {
@@ -2014,10 +2013,8 @@
 }
 
 .tokenChip {
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid #dfe3eb;
   border-radius: 999px;
   background: #f8fafd;

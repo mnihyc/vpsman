@@ -275,6 +275,9 @@ export function FleetWorkspace({
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectionStatsMode, setSelectionStatsMode] =
     useState<FleetSelectionStatsMode>("telemetry");
+  const [deleteTarget, setDeleteTarget] = useState<AgentView | null>(null);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const latestRollups = useMemo(
     () => latestTelemetryRollupsByClient(telemetryRollups),
     [telemetryRollups],
@@ -466,6 +469,28 @@ export function FleetWorkspace({
     onNavigatePanel?.("Jobs", "files");
   }
 
+  function requestDeleteAgent(rows: AgentView[]) {
+    if (rows.length !== 1) {
+      return;
+    }
+    setDeleteError(null);
+    setDeleteTarget(rows[0]);
+  }
+
+  async function confirmDeleteAgent() {
+    if (!deleteTarget) {
+      return;
+    }
+    await runPanelAction(setDeletePending, setDeleteError, async () => {
+      await onDeleteAgent(deleteTarget.id, {
+        confirmed: true,
+        reason: "Deleted from fleet inventory selection action",
+      });
+      setDeleteTarget(null);
+      onSelectAgent(null);
+    });
+  }
+
   return (
     <section
       className={
@@ -577,6 +602,17 @@ export function FleetWorkspace({
                       .join(" "),
                   ),
               },
+              {
+                label: "Review VPS deletion",
+                description: (rows) =>
+                  rows.length === 1
+                    ? `Delete ${formatVpsName(rows[0], vpsNameDisplayMode)}`
+                    : "Select exactly one VPS to delete.",
+                disabled: (rows) => rows.length !== 1,
+                icon: <Trash2 size={15} />,
+                onSelect: requestDeleteAgent,
+                tone: "danger",
+              },
             ]}
             columns={fleetColumns}
             defaultColumnVisibility={{ last_ip: false, registration_ip: false }}
@@ -614,13 +650,11 @@ export function FleetWorkspace({
                 latestTunnels={latestTunnels.get(agent.id) ?? []}
                 mutateTagsForAgents={mutateTagsForAgents}
                 onCreateJob={onCreateJob}
-                onDeleteAgent={onDeleteAgent}
                 onLoadJobOutputs={onLoadJobOutputs}
                 onLoadJobTargets={onLoadJobTargets}
                 onOpenJobDetails={onOpenJobDetails}
                 onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
                 onRenderDataSourceHotConfig={onRenderDataSourceHotConfig}
-                onSelectAgent={onSelectAgent}
                 onUpdateAgentAlias={onUpdateAgentAlias}
                 privilegeMaterial={privilegeMaterial}
                 showCountryFlags={preferences.show_country_flags}
@@ -653,6 +687,32 @@ export function FleetWorkspace({
             singleExpandedRow
             storageKey="vpsman.grid.fleet.instances.v2"
             title="VPS instance records"
+          />
+          <ConfirmationPrompt
+            confirmLabel="Delete VPS"
+            detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
+            error={deleteError}
+            items={
+              deleteTarget
+                ? [
+                    {
+                      label: "VPS",
+                      value: formatVpsName(deleteTarget, vpsNameDisplayMode),
+                    },
+                    { label: "Client ID", value: deleteTarget.id },
+                    { label: "Status", value: deleteTarget.status },
+                  ]
+                : []
+            }
+            onCancel={() => {
+              setDeleteError(null);
+              setDeleteTarget(null);
+            }}
+            onConfirm={() => void confirmDeleteAgent()}
+            open={Boolean(deleteTarget)}
+            pending={deletePending}
+            title="Delete VPS from panel"
+            tone="danger"
           />
         </div>
       )}
@@ -744,13 +804,11 @@ function FleetInstanceDetail({
   latestTunnels,
   mutateTagsForAgents,
   onCreateJob,
-  onDeleteAgent,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onRenderDataSourceHotConfig,
-  onSelectAgent,
   onUpdateAgentAlias,
   privilegeMaterial,
   showCountryFlags,
@@ -773,10 +831,6 @@ function FleetInstanceDetail({
     tag: string,
   ) => Promise<TagMutationResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onDeleteAgent: (
-    clientId: string,
-    request: DeleteAgentRequest,
-  ) => Promise<DeleteAgentResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
@@ -784,7 +838,6 @@ function FleetInstanceDetail({
   onRenderDataSourceHotConfig: (
     clientId: string,
   ) => Promise<DataSourceHotConfigResponse>;
-  onSelectAgent: (agentId: string | null) => void;
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
@@ -802,9 +855,6 @@ function FleetInstanceDetail({
   const [aliasDraft, setAliasDraft] = useState(agent.display_name ?? "");
   const [aliasPending, setAliasPending] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
-  const [deletePromptOpen, setDeletePromptOpen] = useState(false);
-  const [deletePending, setDeletePending] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState("");
   const [tagPending, setTagPending] = useState(false);
   const [tagStatus, setTagStatus] = useState<string | null>(null);
@@ -837,8 +887,6 @@ function FleetInstanceDetail({
   useEffect(() => {
     setAliasDraft(agent.display_name ?? "");
     setAliasError(null);
-    setDeleteError(null);
-    setDeletePromptOpen(false);
     setTagDraft("");
     setTagError(null);
     setTagStatus(null);
@@ -869,17 +917,6 @@ function FleetInstanceDetail({
     } finally {
       setAliasPending(false);
     }
-  }
-
-  async function deleteAgent() {
-    await runPanelAction(setDeletePending, setDeleteError, async () => {
-      await onDeleteAgent(agent.id, {
-        confirmed: true,
-        reason: "Deleted from expanded fleet inventory details",
-      });
-      setDeletePromptOpen(false);
-      onSelectAgent(null);
-    });
   }
 
   async function refreshInterfaces() {
@@ -1012,21 +1049,6 @@ function FleetInstanceDetail({
             Add
           </button>
         </form>
-        <div className="deleteVpsControls compactDeleteControls">
-          <div>
-            <strong>Delete VPS</strong>
-            <span>Deactivate access and remove from normal workflows.</span>
-          </div>
-          <button
-            className="secondaryAction dangerAction"
-            disabled={deletePending}
-            onClick={() => setDeletePromptOpen(true)}
-            type="button"
-          >
-            <Trash2 size={16} />
-            Delete VPS
-          </button>
-        </div>
       </div>
       <div className="fleetInlineTagChips">
         {agent.tags.length === 0 ? (
@@ -1056,24 +1078,6 @@ function FleetInstanceDetail({
         >
           {tagError ?? tagStatus}
         </small>
-      )}
-      <ConfirmationPrompt
-        confirmLabel="Delete VPS"
-        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
-        items={[
-          { label: "VPS", value: agentLabel },
-          { label: "Client ID", value: agent.id },
-          { label: "Status", value: agent.status },
-        ]}
-        onCancel={() => setDeletePromptOpen(false)}
-        onConfirm={() => void deleteAgent()}
-        open={deletePromptOpen}
-        pending={deletePending}
-        title="Delete VPS from panel"
-        tone="danger"
-      />
-      {deleteError && (
-        <small className="errorText panelErrorText">{deleteError}</small>
       )}
       <div
         className="detailTabs"
@@ -2832,7 +2836,7 @@ function FleetAlertPolicyManager({
         ),
     },
     {
-      label: "Delete",
+      label: "Review deletion",
       description: (rows) =>
         `Delete ${rows.length} selected alert policy records. Existing alert states are not changed.`,
       disabled: (rows) => rows.length === 0,
@@ -3327,6 +3331,10 @@ function FleetAlertNotificationManager({
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [queueConfirmation, setQueueConfirmation] = useState<
+    "dispatch" | "process" | null
+  >(null);
+  const [queuePending, setQueuePending] = useState(false);
 
   const categoryTokens = useMemo(() => csvValues(categories), [categories]);
   const operatorStateTokens = useMemo(
@@ -3584,6 +3592,9 @@ function FleetAlertNotificationManager({
 
   async function dispatch(dryRun: boolean) {
     setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
+    if (!dryRun) {
+      setQueuePending(true);
+    }
     try {
       const rows = await onDispatch({
         limit: 50,
@@ -3599,6 +3610,10 @@ function FleetAlertNotificationManager({
       setStatus(
         error instanceof Error ? error.message : "notification dispatch failed",
       );
+    } finally {
+      if (!dryRun) {
+        setQueuePending(false);
+      }
     }
   }
 
@@ -3606,6 +3621,9 @@ function FleetAlertNotificationManager({
     setStatus(
       dryRun ? "previewing notification queue" : "delivering notifications",
     );
+    if (!dryRun) {
+      setQueuePending(true);
+    }
     try {
       const rows = await onProcess({
         limit: 50,
@@ -3624,7 +3642,24 @@ function FleetAlertNotificationManager({
           ? error.message
           : "notification processing failed",
       );
+    } finally {
+      if (!dryRun) {
+        setQueuePending(false);
+      }
     }
+  }
+
+  async function confirmQueueAction() {
+    const action = queueConfirmation;
+    if (!action || queuePending) {
+      return;
+    }
+    if (action === "dispatch") {
+      await dispatch(false);
+    } else {
+      await process(false);
+    }
+    setQueueConfirmation(null);
   }
 
   const channelActions: ConsoleDataGridAction<FleetAlertNotificationChannelRecord>[] =
@@ -3682,7 +3717,7 @@ function FleetAlertNotificationManager({
           ),
       },
       {
-        label: "Delete",
+        label: "Review deletion",
         description: (rows) =>
           `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
         disabled: (rows) => rows.length === 0,
@@ -3906,41 +3941,73 @@ function FleetAlertNotificationManager({
         <span>
           <strong>Alert delivery queue</strong>
           <small>
-            Preview matching or process queued deliveries without leaving the
+            Review matching or process queued deliveries without leaving the
             registry.
           </small>
         </span>
         <div className="consoleOperationsActions">
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
             onClick={() => void dispatch(true)}
           >
-            Match alerts
+            Review matches
           </button>
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
-            onClick={() => void dispatch(false)}
+            onClick={() => setQueueConfirmation("dispatch")}
           >
-            Queue dispatch
+            Review queue dispatch
           </button>
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
             onClick={() => void process(true)}
           >
-            Preview queue
+            Review queued deliveries
           </button>
           <button
             className="primaryAction"
+            disabled={queuePending}
             type="button"
-            onClick={() => void process(false)}
+            onClick={() => setQueueConfirmation("process")}
           >
-            Deliver queued
+            Review delivery
           </button>
         </div>
       </div>
+      <ConfirmationPrompt
+        confirmLabel={
+          queueConfirmation === "dispatch"
+            ? "Queue dispatch"
+            : "Deliver queued"
+        }
+        detail={
+          queueConfirmation === "dispatch"
+            ? "Queues notification delivery records for matching active alerts."
+            : "Processes queued notification delivery records and may contact configured delivery targets."
+        }
+        items={[
+          {
+            label: "Limit",
+            value: "50 queued records",
+          },
+        ]}
+        onCancel={() => setQueueConfirmation(null)}
+        onConfirm={() => void confirmQueueAction()}
+        open={queueConfirmation !== null}
+        pending={queuePending}
+        title={
+          queueConfirmation === "dispatch"
+            ? "Confirm notification queue dispatch"
+            : "Confirm notification delivery"
+        }
+        tone={queueConfirmation === "process" ? "danger" : "normal"}
+      />
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <ConfirmationPrompt
         confirmLabel="Delete"
@@ -4008,7 +4075,7 @@ function NotificationDeliveryHistoryGrid({
         cell: (delivery) => (
           <span className="historyPrimary">
             <ConsoleStatusBadge tone={deliveryStatusTone(delivery.status)}>
-              {delivery.status}
+              {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
               <small className="deliveryErrorText" title={delivery.error}>
@@ -4085,7 +4152,7 @@ function NotificationDeliveryHistoryGrid({
       renderExpandedRow={(delivery) => (
         <div className="gridDetailLine">
           <strong>{delivery.channel_name}</strong>
-          <span>{delivery.status}</span>
+          <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.delivery_kind}</span>
           <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
@@ -4157,6 +4224,10 @@ function WebhookRuleManager({
   const [eventKind, setEventKind] = useState("interval.30sec");
   const [eventId, setEventId] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [queueConfirmation, setQueueConfirmation] = useState<
+    "dispatch" | "process" | null
+  >(null);
+  const [queuePending, setQueuePending] = useState(false);
 
   const selectedPreviewNames = useMemo(() => {
     return agents
@@ -4403,6 +4474,9 @@ function WebhookRuleManager({
 
   async function dispatch(dryRunMode: boolean) {
     setStatus(dryRunMode ? "matching webhook rules" : "queueing webhooks");
+    if (!dryRunMode) {
+      setQueuePending(true);
+    }
     try {
       const rows = await onDispatch({
         event_kind: eventKind.trim(),
@@ -4420,11 +4494,18 @@ function WebhookRuleManager({
       setStatus(
         error instanceof Error ? error.message : "webhook dispatch failed",
       );
+    } finally {
+      if (!dryRunMode) {
+        setQueuePending(false);
+      }
     }
   }
 
   async function process(dryRunMode: boolean) {
     setStatus(dryRunMode ? "previewing webhook queue" : "delivering webhooks");
+    if (!dryRunMode) {
+      setQueuePending(true);
+    }
     try {
       const rows = await onProcess({
         limit: 50,
@@ -4441,7 +4522,24 @@ function WebhookRuleManager({
       setStatus(
         error instanceof Error ? error.message : "webhook processing failed",
       );
+    } finally {
+      if (!dryRunMode) {
+        setQueuePending(false);
+      }
     }
+  }
+
+  async function confirmQueueAction() {
+    const action = queueConfirmation;
+    if (!action || queuePending) {
+      return;
+    }
+    if (action === "dispatch") {
+      await dispatch(false);
+    } else {
+      await process(false);
+    }
+    setQueueConfirmation(null);
   }
 
   const ruleActions: ConsoleDataGridAction<WebhookRuleRecord>[] = [
@@ -4472,10 +4570,10 @@ function WebhookRuleManager({
       onSelect: (rows) => rows[0] && editRule(rows[0]),
     },
     {
-      label: "Preview",
+      label: "Review rule",
       description: (rows) =>
         actionTargetDescription(
-          "Preview",
+          "Review",
           "webhook rule",
           rows[0]?.name,
           "Runs a dry-run with the current preview event.",
@@ -4509,7 +4607,7 @@ function WebhookRuleManager({
         ),
     },
     {
-      label: "Delete",
+      label: "Review deletion",
       description: (rows) =>
         `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
       disabled: (rows) => rows.length === 0,
@@ -4562,7 +4660,7 @@ function WebhookRuleManager({
                     }
                   }}
                 >
-                  Preview rule
+                  Review rule
                 </button>
                 <button
                   className="secondaryAction"
@@ -4605,7 +4703,7 @@ function WebhookRuleManager({
                   type="button"
                   onClick={() => void dryRun()}
                 >
-                  Preview rule
+                  Review rule
                 </button>
                 <button
                   className="primaryAction"
@@ -4712,7 +4810,7 @@ function WebhookRuleManager({
         <span>
           <strong>Webhook queue</strong>
           <small>
-            Use preview first; retained deliveries stay in the Deliveries tab.
+            Review first; retained deliveries stay in the Deliveries tab.
           </small>
         </span>
         <div className="consoleOperationsActions">
@@ -4735,34 +4833,70 @@ function WebhookRuleManager({
           </label>
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
             onClick={() => void dispatch(true)}
           >
-            Match rules
+            Review matches
           </button>
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
-            onClick={() => void dispatch(false)}
+            onClick={() => setQueueConfirmation("dispatch")}
           >
-            Queue dispatch
+            Review queue dispatch
           </button>
           <button
             className="secondaryAction"
+            disabled={queuePending}
             type="button"
             onClick={() => void process(true)}
           >
-            Preview queue
+            Review queued deliveries
           </button>
           <button
             className="primaryAction"
+            disabled={queuePending}
             type="button"
-            onClick={() => void process(false)}
+            onClick={() => setQueueConfirmation("process")}
           >
-            Deliver queued
+            Review delivery
           </button>
         </div>
       </div>
+      <ConfirmationPrompt
+        confirmLabel={
+          queueConfirmation === "dispatch"
+            ? "Queue dispatch"
+            : "Deliver queued"
+        }
+        detail={
+          queueConfirmation === "dispatch"
+            ? "Queues webhook delivery records for matching rules and the selected event."
+            : "Processes queued webhook delivery records and may call external webhook endpoints."
+        }
+        items={[
+          {
+            label: "Event",
+            value: `${eventKind.trim() || "event"}${eventId.trim() ? ` / ${eventId.trim()}` : ""}`,
+          },
+          {
+            label: "Limit",
+            value: "50 queued records",
+          },
+        ]}
+        onCancel={() => setQueueConfirmation(null)}
+        onConfirm={() => void confirmQueueAction()}
+        open={queueConfirmation !== null}
+        pending={queuePending}
+        title={
+          queueConfirmation === "dispatch"
+            ? "Confirm webhook queue dispatch"
+            : "Confirm webhook delivery"
+        }
+        tone={queueConfirmation === "process" ? "danger" : "normal"}
+      />
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <ConfirmationPrompt
         confirmLabel="Delete"
@@ -4854,7 +4988,7 @@ function WebhookDeliveryHistoryGrid({
         cell: (delivery) => (
           <span className="historyPrimary">
             <ConsoleStatusBadge tone={deliveryStatusTone(delivery.status)}>
-              {delivery.status}
+              {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
               <small className="deliveryErrorText" title={delivery.error}>
@@ -4934,7 +5068,7 @@ function WebhookDeliveryHistoryGrid({
       renderExpandedRow={(delivery) => (
         <div className="gridDetailLine">
           <strong>{delivery.rule_name}</strong>
-          <span>{delivery.status}</span>
+          <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.event_kind}</span>
           <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
@@ -5013,10 +5147,10 @@ function WebhookDeliveryMaintenancePanel({
               type="button"
               onClick={() => void rotate(false)}
             >
-              Preview rotation
+              Review rotation
             </button>
             <button
-              className="dangerAction"
+              className="secondaryAction"
               disabled={
                 rotationPending ||
                 !rotationPreview ||
@@ -5028,11 +5162,11 @@ function WebhookDeliveryMaintenancePanel({
                 setConfirmDelete(true);
               }}
             >
-              Delete previewed rows
+              Review cleanup
             </button>
           </>
         }
-        description="Rotation is a deliberate maintenance operation: preview first, then confirm deletion."
+        description="Rotation is a deliberate maintenance operation: review first, then confirm deletion."
         title="Webhook delivery maintenance"
       >
         <div className="consoleFormGrid">
@@ -5069,7 +5203,7 @@ function WebhookDeliveryMaintenancePanel({
             <span className="monoValue">
               {rotationPreview
                 ? `${rotationPreview.matched_count} matched / ${rotationPreview.deleted_count} deleted`
-                : "not previewed"}
+                : "not reviewed"}
             </span>
           </ConsoleField>
         </div>
@@ -5116,6 +5250,13 @@ function deliveryStatusTone(
     return "warning";
   }
   return "info";
+}
+
+function deliveryStatusLabel(status: string): string {
+  if (status === "delivery_dry_run" || status === "matched_dry_run") {
+    return "dry run";
+  }
+  return status.replace(/_/g, " ");
 }
 
 function WebhookTemplateEditor({

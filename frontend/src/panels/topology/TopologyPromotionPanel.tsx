@@ -459,7 +459,7 @@ export function TopologyPromotionPanel({
           {!adapterConfirmationOpen && (
             <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
               <ShieldCheck size={17} />
-              Promote adapter
+              Review promotion
             </button>
           )}
         </form>

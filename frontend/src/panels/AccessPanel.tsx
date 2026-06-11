@@ -50,7 +50,13 @@ const accessSubpages = [
 ] as const;
 
 type AccessSubpage = (typeof accessSubpages)[number];
-type AccessConfirmationAction = "agent-identity" | "key-revoke";
+type AccessConfirmationAction =
+  | "agent-identity"
+  | "key-revoke"
+  | "operator-session-revoke"
+  | "session-clear"
+  | "totp-disable"
+  | "vault-clear";
 
 type AccessPanelProps = {
   activeSubpage: string;
@@ -167,6 +173,9 @@ export function AccessPanel({
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [operatorSessionRevokeId, setOperatorSessionRevokeId] = useState<
+    string | null
+  >(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AccessConfirmationAction | null>(null);
 
@@ -216,6 +225,15 @@ export function AccessPanel({
     clearPrivilegeVault();
     setVaultAvailable(false);
     setPrivilegeMaterial(null);
+  }
+
+  function confirmLocalAccessAction() {
+    if (pendingConfirmation === "session-clear") {
+      onClearSession();
+    } else if (pendingConfirmation === "vault-clear") {
+      clearVault();
+    }
+    setPendingConfirmation(null);
   }
 
   async function createOperator(event: FormEvent<HTMLFormElement>) {
@@ -299,6 +317,7 @@ export function AccessPanel({
       setTotpPassword("");
       setTotpCode("");
       setTotpSetup(null);
+      setPendingConfirmation(null);
     } catch (actionError) {
       setTotpError(
         actionError instanceof Error
@@ -308,6 +327,20 @@ export function AccessPanel({
     } finally {
       setTotpPending(false);
     }
+  }
+
+  function requestOperatorSessionRevoke(sessionId: string) {
+    setOperatorSessionRevokeId(sessionId);
+    setPendingConfirmation("operator-session-revoke");
+  }
+
+  async function confirmOperatorSessionRevoke() {
+    if (!operatorSessionRevokeId) {
+      return;
+    }
+    await onRevokeOperatorSession(operatorSessionRevokeId);
+    setOperatorSessionRevokeId(null);
+    setPendingConfirmation(null);
   }
 
   async function handleGenerateKeypair() {
@@ -634,12 +667,12 @@ export function AccessPanel({
                                 session.revoked
                               }
                               onClick={() =>
-                                void onRevokeOperatorSession(session.id)
+                                requestOperatorSessionRevoke(session.id)
                               }
                               type="button"
                             >
                               <UserX size={14} />
-                              Revoke
+                              Review revoke
                             </button>
                           </td>
                         </tr>
@@ -723,11 +756,11 @@ export function AccessPanel({
                   <button
                     className="secondaryAction dangerAction"
                     disabled={totpPending || !totpPassword || !totpCode}
-                    onClick={() => void disableTotp()}
+                    onClick={() => setPendingConfirmation("totp-disable")}
                     type="button"
                   >
                     <Trash2 size={17} />
-                    Disable
+                    Review disable
                   </button>
                 </div>
               </div>
@@ -1222,20 +1255,20 @@ export function AccessPanel({
         <div className="sideForm" hidden={activeSubpage !== "Operators"}>
           <button
             className="secondaryAction"
-            onClick={onClearSession}
+            onClick={() => setPendingConfirmation("session-clear")}
             type="button"
           >
             <KeyRound size={17} />
-            Clear bearer session
+            Review session clear
           </button>
           <button
             className="secondaryAction dangerAction"
             disabled={!vaultAvailable}
-            onClick={clearVault}
+            onClick={() => setPendingConfirmation("vault-clear")}
             type="button"
           >
             <Trash2 size={17} />
-            Clear privilege vault
+            Review vault clear
           </button>
         </div>
 
@@ -1290,6 +1323,55 @@ export function AccessPanel({
         open={pendingConfirmation === "key-revoke"}
         pending={revokePending}
         title="Confirm current key revocation"
+        tone="danger"
+      />
+      <ConfirmationPrompt
+        confirmLabel="Revoke session"
+        detail="This revokes the selected operator bearer session."
+        items={[
+          { label: "Session", value: operatorSessionRevokeId ?? "-" },
+        ]}
+        onCancel={() => {
+          setOperatorSessionRevokeId(null);
+          setPendingConfirmation(null);
+        }}
+        onConfirm={() => void confirmOperatorSessionRevoke()}
+        open={pendingConfirmation === "operator-session-revoke"}
+        title="Confirm operator session revocation"
+        tone="danger"
+      />
+      <ConfirmationPrompt
+        confirmLabel="Disable TOTP"
+        detail="This disables TOTP for the current operator after validating the supplied password and authenticator code."
+        onCancel={() => setPendingConfirmation(null)}
+        onConfirm={() => void disableTotp()}
+        open={pendingConfirmation === "totp-disable"}
+        pending={totpPending}
+        title="Confirm TOTP disable"
+        tone="danger"
+      />
+      <ConfirmationPrompt
+        confirmLabel={
+          pendingConfirmation === "session-clear"
+            ? "Clear bearer session"
+            : "Clear privilege vault"
+        }
+        detail={
+          pendingConfirmation === "session-clear"
+            ? "This clears the current bearer token from the local panel session."
+            : "This removes the encrypted local privilege vault and locks local privilege material."
+        }
+        onCancel={() => setPendingConfirmation(null)}
+        onConfirm={confirmLocalAccessAction}
+        open={
+          pendingConfirmation === "session-clear" ||
+          pendingConfirmation === "vault-clear"
+        }
+        title={
+          pendingConfirmation === "session-clear"
+            ? "Confirm bearer session clear"
+            : "Confirm privilege vault clear"
+        }
         tone="danger"
       />
     </div>

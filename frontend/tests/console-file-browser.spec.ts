@@ -33,7 +33,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await editor.click();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
   await page.keyboard.type("listen=8443\n");
-  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await activate(page.getByRole("button", { name: "Review save", exact: true }));
   await expect(page.getByText("Save file")).toBeVisible();
   await activate(page.getByRole("button", { name: "Confirm" }));
 
@@ -44,7 +44,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
     mimeType: "text/plain",
     buffer: Buffer.from("listen=9443\n"),
   });
-  await activate(page.getByRole("button", { name: "Upload file", exact: true }));
+  await activate(page.getByRole("button", { name: "Review upload", exact: true }));
   await expect(page.locator(".confirmationPrompt")).toContainText("Upload /upload.conf on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Existing file");
   await expect(page.locator(".confirmationPrompt")).toContainText("skip");
@@ -53,9 +53,9 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await activate(page.getByTitle("Create file or folder"));
   await page.locator(".fileCommandPopover").getByLabel("Name").fill("new.conf");
   await expect(page.locator(".fileCommandPopover").getByLabel("Type")).toHaveValue("file");
-  await expect(page.locator(".fileCommandPopover").getByRole("button", { name: "Write text" })).toBeVisible();
+  await expect(page.locator(".fileCommandPopover").getByRole("button", { name: "Review write" })).toBeVisible();
   await page.getByLabel("New file text content").fill("listen=9443\n");
-  await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Write text" }));
+  await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Review write" }));
   await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
   await expect(page.locator(".confirmationPrompt")).toContainText("Write text /new.conf on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Policy");
@@ -66,7 +66,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(page.locator(".fileCommandPopover").getByLabel("Mode")).toHaveValue("0755");
   await expect(page.getByLabel("New file text content")).toHaveCount(0);
   await page.locator(".fileCommandPopover").getByLabel("Create parents").check();
-  await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Create folder" }));
+  await activate(page.locator(".fileCommandPopover").getByRole("button", { name: "Review create" }));
   await expect(page.locator(".confirmationPrompt").getByText("Create folder", { exact: true })).toBeVisible();
   await expect(page.locator(".confirmationPrompt")).toContainText("Create folder /conf.d on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Recursive");
@@ -98,10 +98,10 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
   await unlockPrivilege(page, "Multi files");
 
-  await activate(page.getByRole("button", { name: "Preview" }));
+  await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
-  await activate(page.getByRole("button", { name: "Run download" }));
+  await activate(page.getByRole("button", { name: "Review download" }));
   await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Run bulk action" }));
 
@@ -118,7 +118,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
     buffer: Buffer.from("listen=9443\n"),
   });
   await page.getByLabel("Existing file").selectOption("skip");
-  await activate(page.getByRole("button", { name: "Run upload" }));
+  await activate(page.getByRole("button", { name: "Review upload" }));
   await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Run bulk action" }));
 
@@ -152,12 +152,12 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await advancedAction.selectOption("copy");
   await expect(page.getByLabel("Destination path")).toBeVisible();
   await expect(page.getByLabel("Policy")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run copy" })).toHaveClass(/secondaryAction/);
+  await expect(page.getByRole("button", { name: "Review copy" })).toHaveClass(/secondaryAction/);
 
   await advancedAction.selectOption("delete");
   await page.getByLabel("Recursive").check();
-  await expect(page.getByRole("button", { name: "Run delete" })).toHaveClass(/dangerAction/);
-  await activate(page.getByRole("button", { name: "Run delete" }));
+  await expect(page.getByRole("button", { name: "Review delete" })).toHaveClass(/dangerAction/);
+  await activate(page.getByRole("button", { name: "Review delete" }));
   const confirmation = page.locator(".confirmationPrompt.danger");
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("Delete /etc/app.conf on 3 VPSs. Policy: fail.");

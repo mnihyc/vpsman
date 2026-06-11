@@ -381,7 +381,7 @@ function RuleTemplateWorkspace({
             type="button"
           >
             <Trash2 size={15} />
-            Delete custom
+            Review deletion
           </button>
         </div>
         <ConfirmationPrompt
@@ -569,7 +569,7 @@ function BulkConfigApply({
           verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
         />
         <button className="secondaryAction" disabled={pending || !selectorExpression.trim()} onClick={previewTargets} type="button">
-          Preview targets
+          Review targets
         </button>
         <div className="targetChipList">
           {(preview?.targets ?? []).slice(0, 24).map((agent) => (
@@ -592,7 +592,7 @@ function BulkConfigApply({
         />
         <button className="primaryAction" disabled={pending || !ready} onClick={() => setConfirmOpen(true)} type="button">
           <FileSliders size={16} />
-          Apply patch
+          Review apply
         </button>
       </div>
       {progress && (
@@ -824,7 +824,7 @@ function SingleVpsConfig({
         <textarea aria-label="Single VPS redacted config TOML" onChange={(event) => setRedactedToml(event.target.value)} rows={22} value={redactedToml} />
         <button className="primaryAction" disabled={pending || !singleTarget || !privilegeMaterial || !baseHash || !redactedToml} onClick={() => setConfirmApplyOpen(true)} type="button">
           <Save size={16} />
-          Apply preserved config
+          Review apply
         </button>
       </div>
       <ConfirmationPrompt

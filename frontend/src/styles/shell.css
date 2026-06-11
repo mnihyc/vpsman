@@ -377,7 +377,6 @@ nav {
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
-  max-width: 150px;
   height: 22px;
   margin: 0 2px;
   border: 1px solid #d2e3fc;
@@ -406,8 +405,6 @@ nav {
 
 .searchExpressionChip span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   text-transform: none;
   white-space: nowrap;
 }

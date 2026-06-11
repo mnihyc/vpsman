@@ -272,11 +272,14 @@ export function FileBrowserPanel({
         path: editorPath,
         policy: "fail",
       });
-      if (!force && editorSha256Hex) {
-        confirmOperation(operation, "Save file", `Save changes to ${editorPath}. If the file changed on the VPS, the save will be rejected.`, parentPath(editorPath));
-        return;
-      }
-      await executeConfirmedOperation(operation, parentPath(editorPath));
+      confirmOperation(
+        operation,
+        "Save file",
+        force || !editorSha256Hex
+          ? `Save changes to ${editorPath}. No base hash is available, so this writes without optimistic conflict protection.`
+          : `Save changes to ${editorPath}. If the file changed on the VPS, the save will be rejected.`,
+        parentPath(editorPath),
+      );
     } catch (error) {
       reportActionError(error);
     }
@@ -664,7 +667,7 @@ export function FileBrowserPanel({
               </label>
               <button className="primaryAction" disabled={!editorPath || !editorDirty || pending || !privilegeMaterial} onClick={() => void saveEditor()} type="button">
                 <Save size={14} />
-                <span>Save</span>
+                <span>Review save</span>
               </button>
             </div>
           </div>
@@ -708,7 +711,7 @@ export function FileBrowserPanel({
               <button aria-label="Chown selected" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Chown selected" type="button">
                 <UserRound size={15} />
               </button>
-              <button aria-label="Delete selected" className="iconButton dangerIconButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Delete selected" type="button">
+              <button aria-label="Review delete selected" className="iconButton dangerIconButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
                 <Trash2 size={15} />
               </button>
             </div>
@@ -760,7 +763,7 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <button className="secondaryAction" disabled={pending || !uploadFile || !privilegeMaterial} onClick={() => void uploadSelectedFile()} type="button">
                     <Upload size={14} />
-                    <span>Upload file</span>
+                    <span>Review upload</span>
                   </button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
@@ -817,7 +820,7 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={() => void submitCreate()} type="button">
                     {createType === "file" ? <FilePlus2 size={14} /> : <FolderPlus size={14} />}
-                    <span>{createType === "file" ? "Write text" : "Create folder"}</span>
+                    <span>{createType === "file" ? "Review write" : "Review create"}</span>
                   </button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
@@ -841,7 +844,7 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <button className="secondaryAction" disabled={pending || !selectedPath || !privilegeMaterial} onClick={renameSelected} type="button">
                     <Scissors size={14} />
-                    <span>Move path</span>
+                    <span>Review move</span>
                   </button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
@@ -863,7 +866,7 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Apply chmod</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Review chmod</button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
               </section>
@@ -890,7 +893,7 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Apply chown</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Review chown</button>
                   <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
                 </div>
               </section>
@@ -1025,7 +1028,7 @@ function TreeNode({
             Move file/folder
           </ContextMenu.Item>
           <ContextMenu.Item className="contextMenuItem" onSelect={() => onPaste(path)}>
-            Paste here
+            Review paste here
           </ContextMenu.Item>
           <ContextMenu.Item className="contextMenuItem" onSelect={() => onRename(path)}>
             Rename
@@ -1037,7 +1040,7 @@ function TreeNode({
             Chown
           </ContextMenu.Item>
           <ContextMenu.Item className="contextMenuItem danger" onSelect={() => onDelete(path)}>
-            Delete
+            Review delete
           </ContextMenu.Item>
         </ContextMenu.Content>
       </ContextMenu.Root>

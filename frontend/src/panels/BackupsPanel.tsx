@@ -1075,13 +1075,33 @@ export function BackupsPanel({
 
   const backupConfirmationTitle =
     pendingConfirmation === "policy"
-      ? "Save backup policy"
+      ? "Confirm backup policy"
       : pendingConfirmation === "policy-prune"
-        ? "Prune backup artifacts"
+        ? "Confirm backup artifact prune"
+        : pendingConfirmation === "backup-request"
+          ? "Confirm backup request"
+          : pendingConfirmation === "artifact-upload"
+            ? "Confirm backup artifact upload"
+            : pendingConfirmation === "artifact-handoff"
+              ? "Confirm retained output promotion"
+              : pendingConfirmation === "restore-plan"
+                ? "Confirm restore plan"
+                : pendingConfirmation === "restore-run"
+                  ? "Confirm restore run"
+                  : pendingConfirmation === "restore-rollback"
+                    ? "Confirm restore rollback"
+                    : pendingConfirmation === "migration-link"
+                      ? "Confirm migration link"
+                      : "Confirm migration restore";
+  const backupConfirmationConfirmLabel =
+    pendingConfirmation === "policy"
+      ? "Save policy"
+      : pendingConfirmation === "policy-prune"
+        ? "Prune artifacts"
         : pendingConfirmation === "backup-request"
           ? "Request backup"
           : pendingConfirmation === "artifact-upload"
-            ? "Upload backup artifact"
+            ? "Upload artifact"
             : pendingConfirmation === "artifact-handoff"
               ? "Promote retained output"
               : pendingConfirmation === "restore-plan"
@@ -1160,7 +1180,7 @@ export function BackupsPanel({
       >
         <div className="backupInspector backupWorkflowBody">
           <ConfirmationPrompt
-            confirmLabel="Confirm"
+            confirmLabel={backupConfirmationConfirmLabel}
             detail={backupConfirmationDetail(pendingConfirmation)}
             items={backupConfirmationItems}
             onCancel={() => setPendingConfirmation(null)}

@@ -212,7 +212,7 @@ export function BackupPolicyForm({
             type="submit"
           >
             <Save size={17} />
-            Save policy
+            Review policy
           </button>
         )}
       </form>

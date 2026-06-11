@@ -570,7 +570,7 @@ export function DataSourcePresetPanel({
               }
               type="submit"
             >
-              Assign preset
+              Review assignment
             </button>
           )}
         </form>
@@ -578,10 +578,10 @@ export function DataSourcePresetPanel({
         <form className="compactForm presetForm" onSubmit={previewHotConfig}>
           <strong>Render selected config</strong>
           <span className="formHint">
-            Preview the generated redacted hot-config patch for one VPS before applying it.
+            Review the generated redacted hot-config patch for one VPS before applying it.
           </span>
           <label>
-            <span>Preview VPS</span>
+            <span>Review VPS</span>
             <select
               aria-label="Hot-config preview VPS"
               onChange={(event) => setRenderClientId(event.target.value)}
@@ -635,7 +635,7 @@ export function DataSourcePresetPanel({
               onClick={confirmApplyRenderedHotConfig}
               type="button"
             >
-              Apply selected patch
+              Review apply
             </button>
           )}
           {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} accepted</span>}
@@ -710,7 +710,7 @@ export function DataSourcePresetPanel({
                 onClick={updateLifecyclePreset}
                 type="button"
               >
-                Update
+                Review update
               </button>
             )}
           </div>

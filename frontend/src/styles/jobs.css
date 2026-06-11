@@ -109,25 +109,35 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  max-width: 148px;
-  min-width: 76px;
-  height: 24px;
+  max-width: 100%;
+  min-height: 24px;
   padding: 0 8px;
   border: 1px solid #dfe3eb;
   border-radius: 999px;
   background: #f8fafd;
   color: #202124;
   font-size: 12px;
-  line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .targetChip.mutedChip {
   min-width: auto;
   color: #5f6368;
   background: transparent;
+}
+
+.targetChip.showMoreChip {
+  cursor: pointer;
+  justify-content: center;
+  border-style: dashed;
+  font-weight: 700;
+}
+
+.targetChip.showMoreChip:hover {
+  border-color: #c8d7f0;
+  color: #174ea6;
 }
 
 .targetImpactPreview {
@@ -159,7 +169,7 @@
 
 .targetImpactGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -179,7 +189,8 @@
 }
 
 .targetImpactGroup.degraded,
-.targetImpactGroup.forced {
+.targetImpactGroup.forced,
+.targetImpactGroup.needs_review {
   border-color: #f9d99a;
   background: #fff8e7;
 }
@@ -231,9 +242,10 @@
 }
 
 .impactTargetChips .targetChip {
-  flex: 0 0 118px;
-  max-width: 118px;
+  flex: 0 1 auto;
+  max-width: 100%;
   min-width: 0;
+  width: fit-content;
 }
 
 .targetImpactGroup.ready svg {
@@ -242,7 +254,8 @@
 
 .targetImpactGroup.degraded svg,
 .targetImpactGroup.forced svg,
-.targetImpactGroup.stale svg {
+.targetImpactGroup.stale svg,
+.targetImpactGroup.needs_review svg {
   color: #b06000;
 }
 
@@ -1413,7 +1426,7 @@
 .sourceArtifactPanel {
   display: grid;
   gap: 12px;
-  padding: 0 18px 18px;
+  padding: 14px 18px 18px;
 }
 
 .sectionSubheader {
@@ -1643,7 +1656,14 @@
 
 .xtermReplay {
   min-width: 0;
-  height: 240px;
+  height: 260px;
+  min-height: 180px;
+  max-height: 70vh;
+  margin: 0 18px 14px;
+  overflow: hidden;
+  resize: vertical;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
   padding: 10px;
   background: #111827;
 }
@@ -2033,13 +2053,19 @@
 }
 
 .targetImpactGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .targetImpactGroupHeader span {
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
+}
+
+@media (max-width: 760px) {
+  .targetImpactGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .rowActionGroup button {

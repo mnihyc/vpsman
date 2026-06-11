@@ -183,7 +183,7 @@ export function MigrationLinkForm({
             onClick={onSubmit}
             type="button"
           >
-            Link migration
+            Review link
           </button>
         )}
         {!runConfirmationOpen && (
@@ -193,7 +193,7 @@ export function MigrationLinkForm({
             onClick={onRunMigrationRestore}
             type="button"
           >
-            Run migration restore
+            Review migration restore
           </button>
         )}
       </div>

@@ -139,7 +139,7 @@ export function RestoreRunForm({
             type="button"
           >
             <Play size={17} />
-            Run restore
+            Review restore
           </button>
         )}
       </form>

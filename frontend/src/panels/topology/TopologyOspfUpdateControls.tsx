@@ -297,7 +297,7 @@ export function TopologyOspfUpdateControls({
         <div className="dispatchActions">
           <button className="primaryAction" disabled={!canSubmit} onClick={openOspfPrompt} type="button">
             <Gauge size={17} />
-            Apply cost
+            Review cost apply
           </button>
         </div>
       </div>

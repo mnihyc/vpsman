@@ -43,7 +43,6 @@ type ConsoleShellProps = {
   onOpenAccessControls: () => void;
   onLockPrivilege: () => void;
   onSaveFleetView: () => void;
-  onSelectSubpage: (subpage: string) => void;
   onSelectView: (view: ActiveView, subpage?: string) => void;
   onSavedFleetViewNameChange: (name: string) => void;
   operatorPreferencesReady: boolean;
@@ -73,7 +72,6 @@ export function ConsoleShell({
   onLockPrivilege,
   onOpenAccessControls,
   onSaveFleetView,
-  onSelectSubpage,
   onSelectView,
   onSavedFleetViewNameChange,
   operatorPreferencesReady,
@@ -185,18 +183,27 @@ export function ConsoleShell({
                     </div>
                     {expanded && (
                       <div className="subnav" aria-label={`${item.view} sections`}>
-                        {subpages.map((subpage) => (
-                          <button
-                            aria-current={activeSubpage === subpage.id ? "page" : undefined}
-                            className={activeSubpage === subpage.id ? "subnavItem active" : "subnavItem"}
-                            key={subpage.id}
-                            onClick={() => onSelectSubpage(subpage.id)}
-                            title={subpage.description}
-                            type="button"
-                          >
-                            {subpage.label}
-                          </button>
-                        ))}
+                        {subpages.map((subpage) => {
+                          const active =
+                            activeView === item.view &&
+                            activeSubpage === subpage.id;
+                          return (
+                            <button
+                              aria-current={active ? "page" : undefined}
+                              className={
+                                active ? "subnavItem active" : "subnavItem"
+                              }
+                              key={subpage.id}
+                              onClick={() =>
+                                onSelectView(item.view, subpage.id)
+                              }
+                              title={subpage.description}
+                              type="button"
+                            >
+                              {subpage.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

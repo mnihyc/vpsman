@@ -709,6 +709,59 @@ const fleetAlertNotifications = [
   },
 ];
 
+const webhookRules = [
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    body_template:
+      "{rule.name} {event.kind} count={matched_vps.length} {matched_vps.0.display_name}",
+    cooldown_secs: 300,
+    created_at: "2026-06-02T10:00:00Z",
+    enabled: true,
+    expression: "interval.30sec && tag:edge",
+    id: "fefefefe-1111-4111-8111-111111111111",
+    name: "edge-interval-webhook",
+    notes: "Routes interval checks for edge fleet capacity reviews.",
+    target: "https://hooks.example/vpsman/edge-capacity",
+    updated_at: "2026-06-02T10:00:00Z",
+  },
+];
+
+const webhookDeliveries = [
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    attempt_count: 1,
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:01:00Z",
+    dedupe_key: "edge-interval-webhook:interval.30sec:q2-edge-capacity",
+    delivered_at: "2026-06-02T10:01:04Z",
+    error: null,
+    event_id: "q2-edge-capacity",
+    event_kind: "interval.30sec",
+    id: "abababab-1111-4111-8111-111111111111",
+    last_attempt_at: "2026-06-02T10:01:04Z",
+    matched_vps: [
+      {
+        capabilities: rootCapabilities,
+        display_name: "edge-sfo-01",
+        id: "agent-sfo-01",
+        status: "online",
+        tags: ["country:US", "provider:alpha"],
+      },
+    ],
+    message: "edge-interval-webhook interval.30sec count=1 edge-sfo-01",
+    next_attempt_at: null,
+    payload: {
+      event_kind: "interval.30sec",
+      matched_count: 1,
+      rule_name: "edge-interval-webhook",
+    },
+    rule_id: "fefefefe-1111-4111-8111-111111111111",
+    rule_name: "edge-interval-webhook",
+    status: "delivered",
+    target: "https://hooks.example/vpsman/edge-capacity",
+  },
+];
+
 const historyRetentionPolicies = [
   {
     built_in_default: true,
@@ -1619,6 +1672,8 @@ export async function installConsoleApiMock(page: Page) {
       terminalSessionsFixture,
       topologyGraphFixture,
       tunnelPlansFixture,
+      webhookDeliveriesFixture,
+      webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
@@ -1655,6 +1710,11 @@ export async function installConsoleApiMock(page: Page) {
         schedules: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlans: [] as unknown[],
+        webhookDeliveryRotations: [] as unknown[],
+        webhookRuleDispatches: [] as unknown[],
+        webhookRuleDryRuns: [] as unknown[],
+        webhookRuleProcesses: [] as unknown[],
+        webhookRules: [] as unknown[],
       };
       Object.defineProperty(window, "__vpsmanTestRequests", {
         configurable: true,
@@ -1760,6 +1820,67 @@ export async function installConsoleApiMock(page: Page) {
           }),
         );
       const emptyArrayResponse = () => jsonResponse([]);
+      const buildWebhookDelivery = (
+        request: Record<string, unknown>,
+        status: string,
+      ) => {
+        const expression =
+          typeof request.expression === "string" ? request.expression : "";
+        const matchedAgents = visibleAgents().filter((agent) => {
+          const tags = Array.isArray(agent.tags) ? agent.tags : [];
+          return tags.some((tag) => expression.includes(tag));
+        });
+        const selectedAgents =
+          matchedAgents.length > 0 ? matchedAgents : visibleAgents().slice(0, 2);
+        const ruleName =
+          typeof request.name === "string" && request.name.trim()
+            ? request.name.trim()
+            : webhookRulesFixture[0]?.name ?? "webhook-rule";
+        const eventKind =
+          typeof request.event_kind === "string" && request.event_kind.trim()
+            ? request.event_kind.trim()
+            : "interval.30sec";
+        const eventId =
+          typeof request.event_id === "string" && request.event_id.trim()
+            ? request.event_id.trim()
+            : "fixture-preview";
+        const target =
+          typeof request.target === "string" && request.target.trim()
+            ? request.target.trim()
+            : webhookRulesFixture[0]?.target ?? "https://hooks.example/vpsman";
+        return {
+          actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          attempt_count: status === "queued" || status === "matched_dry_run" ? 0 : 1,
+          cooldown_until_unix: 0,
+          created_at: "2026-06-02T10:04:00Z",
+          dedupe_key: `${ruleName}:${eventKind}:${eventId}`,
+          delivered_at: status === "delivered" ? "2026-06-02T10:04:05Z" : null,
+          error: null,
+          event_id: eventId,
+          event_kind: eventKind,
+          id: "acacacac-1111-4111-8111-111111111111",
+          last_attempt_at:
+            status === "queued" || status === "matched_dry_run"
+              ? null
+              : "2026-06-02T10:04:05Z",
+          matched_vps: selectedAgents,
+          message: `${ruleName} ${eventKind} count=${selectedAgents.length}`,
+          next_attempt_at: status === "queued" ? "2026-06-02T10:09:00Z" : null,
+          payload: {
+            event_kind: eventKind,
+            matched_count: selectedAgents.length,
+            rule_name: ruleName,
+          },
+          rule_id:
+            typeof request.id === "string"
+              ? request.id
+              : webhookRulesFixture[0]?.id ??
+                "fefefefe-1111-4111-8111-111111111111",
+          rule_name: ruleName,
+          status,
+          target,
+        };
+      };
 
       const readJsonBody = async (
         input: RequestInfo | URL,
@@ -2308,6 +2429,108 @@ export async function installConsoleApiMock(page: Page) {
               }),
             ),
           );
+        }
+        if (pathname === "/api/v1/webhook-rules" && method === "GET") {
+          return jsonResponse(webhookRulesFixture);
+        }
+        if (pathname === "/api/v1/webhook-rules" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.webhookRules.push(body);
+          return jsonResponse({
+            ...(body as Record<string, unknown>),
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            created_at: "2026-06-02T10:04:00Z",
+            id: "adadadad-1111-4111-8111-111111111111",
+            updated_at: "2026-06-02T10:04:00Z",
+          });
+        }
+        if (
+          pathname === "/api/v1/webhook-rules/dry-run" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          >;
+          requests.webhookRuleDryRuns.push(body);
+          const delivery = buildWebhookDelivery(body, "matched_dry_run");
+          return jsonResponse({
+            delivery,
+            matched_vps: delivery.matched_vps,
+            payload_context: delivery.payload,
+            rendered_message: delivery.message,
+            validation_errors: [],
+          });
+        }
+        if (
+          pathname === "/api/v1/webhook-rules/dispatch" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          >;
+          requests.webhookRuleDispatches.push(body);
+          return jsonResponse(
+            webhookRulesFixture.map((rule: Record<string, unknown>) =>
+              buildWebhookDelivery(
+                {
+                  ...rule,
+                  event_id: body.event_id,
+                  event_kind: body.event_kind,
+                },
+                body.dry_run ? "matched_dry_run" : "queued",
+              ),
+            ),
+          );
+        }
+        const webhookRuleMatch = pathname.match(
+          /^\/api\/v1\/webhook-rules\/([^/]+)$/,
+        );
+        if (webhookRuleMatch && method === "DELETE") {
+          const ruleId = decodeURIComponent(webhookRuleMatch[1]);
+          requests.webhookRules.push({ delete: ruleId });
+          return jsonResponse({ deleted: true, id: ruleId });
+        }
+        if (pathname === "/api/v1/webhook-deliveries" && method === "GET") {
+          return jsonResponse(webhookDeliveriesFixture);
+        }
+        if (
+          pathname === "/api/v1/webhook-deliveries/process" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            dry_run?: boolean;
+          } | null;
+          requests.webhookRuleProcesses.push(body);
+          return jsonResponse(
+            webhookDeliveriesFixture.map((delivery: Record<string, unknown>) => ({
+              ...delivery,
+              status: body?.dry_run ? delivery.status : "delivered",
+            })),
+          );
+        }
+        if (
+          pathname === "/api/v1/webhook-deliveries/rotate" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            confirmed?: boolean;
+            rule_id?: string | null;
+            status?: string | null;
+          } | null;
+          requests.webhookDeliveryRotations.push(body);
+          const matchedCount = webhookDeliveriesFixture.filter(
+            (delivery: Record<string, unknown>) =>
+              (!body?.rule_id || delivery.rule_id === body.rule_id) &&
+              (!body?.status || delivery.status === body.status),
+          ).length;
+          return jsonResponse({
+            deleted_count: body?.confirmed ? matchedCount : 0,
+            matched_count: matchedCount,
+            rule_id: body?.rule_id ?? null,
+            status: body?.status ?? null,
+          });
         }
         const deleteAgentMatch = pathname.match(
           /^\/api\/v1\/agents\/([^/]+)\/delete$/,
@@ -3351,6 +3574,8 @@ export async function installConsoleApiMock(page: Page) {
       terminalSessionsFixture: terminalSessions,
       topologyGraphFixture: topologyGraph,
       tunnelPlansFixture: tunnelPlans,
+      webhookDeliveriesFixture: webhookDeliveries,
+      webhookRulesFixture: webhookRules,
     },
   );
   await installTransferJobApiMock(page);

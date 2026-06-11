@@ -10,6 +10,36 @@ test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
 });
 
+async function selectScheduleRow(page: Page, scheduleName: string) {
+  const grid = page.getByLabel("Schedule records data grid");
+  await expect(grid.getByText(scheduleName)).toBeVisible();
+  const checkbox = grid
+    .getByRole("checkbox", {
+      exact: true,
+      name: "Select Schedule records row",
+    })
+    .first();
+  if (!(await checkbox.isChecked())) {
+    await checkbox.check();
+  }
+  await expect(
+    grid.getByRole("button", { name: /Selection/ }),
+  ).toBeEnabled();
+}
+
+async function chooseScheduleSelectionAction(page: Page, actionName: string) {
+  const grid = page.getByLabel("Schedule records data grid");
+  await grid.getByRole("button", { name: /Selection/ }).click();
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  const action = menu.getByRole("menuitem", {
+    exact: true,
+    name: actionName,
+  });
+  await expect(action).toBeEnabled();
+  await action.click();
+}
+
 test("schedule registry lifecycle uses UUID actions from the browser", async ({
   page,
 }, testInfo) => {
@@ -28,9 +58,8 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   ).toBeVisible();
   await expect(page.getByText("edge-health-hourly")).toBeVisible();
 
-  await activate(
-    page.getByRole("button", { name: /Disable schedule edge-health-hourly/ }),
-  );
+  await selectScheduleRow(page, "edge-health-hourly");
+  await chooseScheduleSelectionAction(page, "Review disable");
   await expect(page.getByText("Confirm schedule disable")).toBeVisible();
   await activate(
     page
@@ -41,9 +70,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     page.locator(".status").filter({ hasText: "disabled" }),
   ).toBeVisible();
 
-  await activate(
-    page.getByRole("button", { name: /Enable schedule edge-health-hourly/ }),
-  );
+  await chooseScheduleSelectionAction(page, "Review enable");
   await expect(page.getByText("Confirm schedule enable")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", { name: "Enable" }),
@@ -52,9 +79,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     page.locator(".status").filter({ hasText: "enabled" }).first(),
   ).toBeVisible();
 
-  await activate(
-    page.getByRole("button", { name: /Edit schedule edge-health-hourly/ }),
-  );
+  await chooseScheduleSelectionAction(page, "Edit");
   await expect(
     page.getByRole("heading", { name: "Modify schedule" }),
   ).toBeVisible();
@@ -66,7 +91,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     "provider:alpha && country:US",
   );
   await expect(page.getByText("1 VPSs will be fixed on save")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Update", exact: true }));
+  await activate(page.getByRole("button", { name: "Review update", exact: true }));
   await expect(page.getByText("Confirm schedule update")).toBeVisible();
   await activate(
     page
@@ -75,9 +100,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   );
   await expect(page.getByText("10,40 * * * *")).toBeVisible();
 
-  await activate(
-    page.getByRole("button", { name: /Defer schedule edge-health-hourly/ }),
-  );
+  await chooseScheduleSelectionAction(page, "Defer");
   await page.getByLabel("Schedule defer until").fill("2026-06-04T09:30");
   await page
     .getByLabel("Schedule defer reason")
@@ -85,7 +108,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await activate(
     page
       .locator(".inlineOpsForm")
-      .getByRole("button", { name: "Defer", exact: true }),
+      .getByRole("button", { name: "Review defer", exact: true }),
   );
   await expect(page.getByText("Confirm schedule defer")).toBeVisible();
   await expect(
@@ -111,11 +134,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     )
     .toBe(4);
 
-  await activate(
-    page.getByRole("button", {
-      name: /Apply schedule edge-health-hourly now/,
-    }),
-  );
+  await chooseScheduleSelectionAction(page, "Review apply");
   await expect(page.getByText("Confirm apply now")).toBeVisible();
   await expect(
     page.getByText(
@@ -142,9 +161,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     )
     .toBe(5);
 
-  await activate(
-    page.getByRole("button", { name: /Delete schedule edge-health-hourly/ }),
-  );
+  await chooseScheduleSelectionAction(page, "Review deletion");
   await expect(page.getByText("Confirm schedule delete")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", { name: "Delete" }),
@@ -253,14 +270,15 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .getByLabel("Bulk target selector expression")
     .fill("provider:acmecloud && tag:payments");
   await expect(composer.getByText("24/24").first()).toBeVisible();
-  await activate(composer.getByRole("button", { name: "Preview" }));
+  await activate(composer.getByRole("button", { name: "Review targets" }));
   await expect(composer.getByText("24 resolved targets")).toBeVisible();
 
   const impact = composer.locator(".targetImpactPreview");
   await expect(
     impact.getByText("24 targets / standard dispatch"),
   ).toBeVisible();
-  await expect(impact.getByText("Stale")).toBeVisible();
+  await expect(impact.locator(".targetImpactGroup")).toHaveCount(3);
+  await expect(impact.getByText("Needs review")).toBeVisible();
   await expect(impact.getByText("Unavailable")).toBeVisible();
   await expect(
     impact
@@ -271,7 +289,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(impact.getByText(/more/)).toBeVisible();
 
   await composer.getByLabel("Timeout seconds").fill("120");
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
   await expect(

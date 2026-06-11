@@ -30,7 +30,7 @@ async function checkControl(locator: Locator) {
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(
     composer
@@ -265,12 +265,12 @@ test("renders an operational cloud-console fleet workspace", async ({
   ).toBeVisible();
 });
 
-test("deletes a VPS through a styled in-panel confirmation", async ({
+test("deletes a VPS through grid actions and explicit confirmation", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "delete confirmation layout is covered in desktop detail view",
+    "delete confirmation layout is covered in desktop grid actions",
   );
 
   await page.goto("/");
@@ -287,13 +287,15 @@ test("deletes a VPS through a styled in-panel confirmation", async ({
   await expect(
     backupDetail.getByRole("heading", { name: "backup-nyc-03 (yc03)" }),
   ).toBeVisible();
-
-  await activate(
-    backupDetail
-      .locator(".deleteVpsControls")
-      .getByRole("button", { name: "Delete VPS" }),
+  await expect(backupDetail.getByRole("button", { name: "Review VPS deletion" })).toHaveCount(
+    0,
   );
-  const prompt = backupDetail.locator(".confirmationPrompt");
+
+  await backupRow.getByLabel("Select VPS instance records row").check();
+  await fleetGrid.getByRole("button", { name: "Selection" }).click();
+  await expect(page.getByRole("menuitem", { name: "Review VPS deletion" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+  const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
   await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
   await expect(prompt).toContainText("deactivates VPS access immediately");
   await activate(prompt.getByRole("button", { name: "Cancel" }));
@@ -301,11 +303,9 @@ test("deletes a VPS through a styled in-panel confirmation", async ({
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
   ).toBeVisible();
 
-  await activate(
-    backupDetail
-      .locator(".deleteVpsControls")
-      .getByRole("button", { name: "Delete VPS" }),
-  );
+  await fleetGrid.getByRole("button", { name: "Selection" }).click();
+  await expect(page.getByRole("menuitem", { name: "Review VPS deletion" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   await activate(prompt.getByRole("button", { name: "Delete VPS" }));
   await expect(
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
@@ -322,8 +322,124 @@ test("deletes a VPS through a styled in-panel confirmation", async ({
   });
   expect(deleteRequest).toMatchObject({
     confirmed: true,
-    reason: "Deleted from expanded fleet inventory details",
+    reason: "Deleted from fleet inventory selection action",
   });
+});
+
+test("reviews notification and webhook queue mutations before commit", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "queue mutation confirmations are covered in the desktop notifications panel",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Notifications");
+  const notifications = page.locator("main");
+
+  await activate(
+    notifications.getByRole("button", { name: "Review queue dispatch" }),
+  );
+  await expect(
+    notifications.getByLabel("Confirm notification queue dispatch"),
+  ).toBeVisible();
+  await activate(
+    notifications
+      .getByLabel("Confirm notification queue dispatch")
+      .getByRole("button", { name: "Queue dispatch" }),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertNotificationDispatches: Array<Record<string, unknown>>;
+            };
+          }
+        ).__vpsmanTestRequests;
+        return requests.fleetAlertNotificationDispatches.at(-1);
+      }),
+    )
+    .toMatchObject({ confirmed: true, dry_run: false });
+
+  await activate(notifications.getByRole("button", { name: "Review delivery" }));
+  await expect(
+    notifications.getByLabel("Confirm notification delivery"),
+  ).toBeVisible();
+  await activate(
+    notifications
+      .getByLabel("Confirm notification delivery")
+      .getByRole("button", { name: "Deliver queued" }),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertNotificationProcesses: Array<Record<string, unknown>>;
+            };
+          }
+        ).__vpsmanTestRequests;
+        return requests.fleetAlertNotificationProcesses.at(-1);
+      }),
+    )
+    .toMatchObject({ confirmed: true, dry_run: false });
+
+  await activate(notifications.getByRole("tab", { name: "Webhooks" }));
+  await expect(
+    notifications.getByText("Webhook rules", { exact: true }).first(),
+  ).toBeVisible();
+
+  await activate(
+    notifications.getByRole("button", { name: "Review queue dispatch" }),
+  );
+  await expect(
+    notifications.getByLabel("Confirm webhook queue dispatch"),
+  ).toBeVisible();
+  await activate(
+    notifications
+      .getByLabel("Confirm webhook queue dispatch")
+      .getByRole("button", { name: "Queue dispatch" }),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              webhookRuleDispatches: Array<Record<string, unknown>>;
+            };
+          }
+        ).__vpsmanTestRequests;
+        return requests.webhookRuleDispatches.at(-1);
+      }),
+    )
+    .toMatchObject({ confirmed: true, dry_run: false });
+
+  await activate(notifications.getByRole("button", { name: "Review delivery" }));
+  await expect(notifications.getByLabel("Confirm webhook delivery")).toBeVisible();
+  await activate(
+    notifications
+      .getByLabel("Confirm webhook delivery")
+      .getByRole("button", { name: "Deliver queued" }),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              webhookRuleProcesses: Array<Record<string, unknown>>;
+            };
+          }
+        ).__vpsmanTestRequests;
+        return requests.webhookRuleProcesses.at(-1);
+      }),
+    )
+    .toMatchObject({ confirmed: true, dry_run: false });
 });
 
 test("clears browser-local console selections without deleting vault records", async ({
@@ -379,6 +495,46 @@ test("clears browser-local console selections without deleting vault records", a
     privilegeVault: "preserved-privilege",
     sidebarSubpanels: null,
   });
+});
+
+test("scopes duplicate sidebar subpage labels to their parent view", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop sidebar state is not visible in the mobile layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Preferences", "Operator");
+  await page.getByLabel("Default expansion").selectOption("all");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await expect(
+    page.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
+  ).toBeVisible();
+
+  const nav = page.getByRole("navigation", {
+    name: "Primary console navigation",
+  });
+  const fleetAlertPolicies = nav
+    .getByLabel("Fleet sections")
+    .getByRole("button", { name: "Alert policies", exact: true });
+  const backupPolicies = nav
+    .getByLabel("Backups sections")
+    .getByRole("button", { name: "Policies", exact: true });
+
+  await openConsoleSubpage(page, "Fleet", "Alert policies");
+  await expect(fleetAlertPolicies).toHaveAttribute("aria-current", "page");
+  await expect(backupPolicies).not.toHaveAttribute("aria-current", "page");
+  await expect(backupPolicies).not.toHaveClass(/active/);
+
+  await backupPolicies.click();
+  await expect(
+    page.getByRole("heading", { name: "Backup policies" }),
+  ).toBeVisible();
+  await expect(backupPolicies).toHaveAttribute("aria-current", "page");
+  await expect(fleetAlertPolicies).not.toHaveAttribute("aria-current", "page");
+  await expect(fleetAlertPolicies).not.toHaveClass(/active/);
 });
 
 test("supports interactive fleet data grid controls", async ({
@@ -538,6 +694,60 @@ test("keeps console layout usable on desktop and mobile widths", async ({
   }
 });
 
+test("packs dashboard top VPS cards by label length", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop dashboard card packing is the production density target",
+  );
+
+  await page.goto("/");
+  const resourceUsage = page.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Resource Usage" }),
+  });
+  const topVps = resourceUsage.locator(".dashboardTopClients");
+  await expect(topVps.getByText("Top VPS")).toBeVisible();
+
+  const layout = await topVps.evaluate((container) => {
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>(".dashboardClientRow"),
+    );
+    const labels = [
+      "db-a",
+      "edge-observability-relay-long-production-name-us-west",
+      "cache-02",
+    ];
+    rows.forEach((row, index) => {
+      row.querySelector("strong")!.textContent = labels[index] ?? `vps-${index}`;
+      row.querySelector("small")!.textContent =
+        index === 1
+          ? "peak measurement over internet-facing production adapters"
+          : "peak";
+    });
+    return {
+      display: getComputedStyle(container).display,
+      gridTemplateColumns: getComputedStyle(container).gridTemplateColumns,
+      rows: rows.map((row) => {
+        const label = row.querySelector<HTMLElement>("strong")!;
+        return {
+          clipped: label.scrollWidth > label.clientWidth + 1,
+          width: Math.round(row.getBoundingClientRect().width),
+        };
+      }),
+    };
+  });
+
+  expect(layout.display).toBe("flex");
+  expect(layout.gridTemplateColumns).toBe("none");
+  expect(layout.rows.some((row) => row.clipped)).toBe(false);
+  const widths = layout.rows.map((row) => row.width);
+  const shortest = Math.min(...widths);
+  const longest = Math.max(...widths);
+  expect(longest - shortest).toBeGreaterThan(40);
+  expect(shortest / longest).toBeLessThan(0.6);
+});
+
 test("manages data-source preset assignments from the config view", async ({
   page,
 }, testInfo) => {
@@ -637,7 +847,7 @@ test("manages data-source preset assignments from the config view", async ({
     })
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
   await expect(presetPanel.getByText("2/3 matching VPSs")).toBeVisible();
-  await activate(presetPanel.getByRole("button", { name: "Assign preset" }));
+  await activate(presetPanel.getByRole("button", { name: "Review assignment" }));
   await expect(
     presetPanel.getByText("Assign data-source preset"),
   ).toBeVisible();
@@ -892,8 +1102,8 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     page.getByRole("heading", { name: "Topology evidence" }),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Refresh evidence" }));
-  await expect(page.getByLabel("Network probe latency history")).toBeVisible();
   const evidence = page.locator(".topologyEvidence");
+  await expect(evidence.getByText("network_probe").first()).toBeVisible();
   await expect(evidence.getByText("1 OSPF update plans")).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(evidence.getByText("14 -> 22").first()).toBeVisible();
@@ -1224,7 +1434,7 @@ test("generates local privilege assertions before dispatching a privileged job",
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Preview" }));
+  await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("1 resolved targets")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
 
@@ -1335,15 +1545,16 @@ test("previews degraded update targets and sends explicit force override", async
     .locator(".commandComposer")
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-nyc-03");
-  await activate(page.getByRole("button", { name: "Preview" }));
+  await activate(page.getByRole("button", { name: "Review targets" }));
 
   const impact = page.locator(".commandComposer .targetImpactPreview");
   await expect(impact.getByText("1 target / agent update")).toBeVisible();
-  await expect(impact.getByText("Stale")).toBeVisible();
+  await expect(impact.locator(".targetImpactGroup")).toHaveCount(3);
+  await expect(impact.getByText("Needs review")).toBeVisible();
   await expect(impact.getByText("backup-nyc-03")).toBeVisible();
 
   await checkControl(page.getByLabel("Force unprivileged job best effort"));
-  await expect(impact.getByText("Stale")).toBeVisible();
+  await expect(impact.getByText("Needs review")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
   await expect(
     page.getByLabel("Execution result").getByText(/failed on 1 VPS/),
@@ -1418,12 +1629,12 @@ test("prepares backup artifacts server-side before dispatching executable restor
     .getByLabel("Restore target client")
     .selectOption("agent-fra-02");
   await restoreWorkflow.getByLabel("Restore destination root").fill("/restore");
-  await activate(restoreWorkflow.getByRole("button", { name: "Plan restore" }));
-  await expect(restoreWorkflow.getByLabel("Create restore plan")).toBeVisible();
+  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Create restore plan")
-      .getByRole("button", { name: "Confirm" }),
+      .getByLabel("Confirm restore plan")
+      .getByRole("button", { name: "Create restore plan" }),
   );
   await expect(
     page.getByText(/Restore cccccccc planned_metadata_only/),
@@ -1451,12 +1662,12 @@ test("prepares backup artifacts server-side before dispatching executable restor
     .getByLabel("Backup private key hex")
     .fill(privateKeyHex);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
-  await activate(restoreWorkflow.getByRole("button", { name: "Run restore" }));
-  await expect(restoreWorkflow.getByLabel("Run restore")).toBeVisible();
+  await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Run restore")
-      .getByRole("button", { name: "Confirm" }),
+      .getByLabel("Confirm restore run")
+      .getByRole("button", { name: "Run restore" }),
   );
 
   await expect(page.getByText(/Restore job 11111111 accepted/)).toBeVisible();
@@ -1560,13 +1771,13 @@ test("prepares backup artifacts server-side before dispatching executable restor
     .getByLabel("Restore rollback timeout seconds")
     .fill("45");
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Rollback restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review rollback" }),
   );
-  await expect(restoreWorkflow.getByLabel("Rollback restore")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore rollback")).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Rollback restore")
-      .getByRole("button", { name: "Confirm" }),
+      .getByLabel("Confirm restore rollback")
+      .getByRole("button", { name: "Rollback restore" }),
   );
   await expect(
     page.getByText(/Restore rollback job 11111111 accepted/),
@@ -1624,15 +1835,15 @@ test("promotes retained backup output into a stored artifact", async ({
     .getByLabel("Backup artifact handoff source job ID")
     .fill(sourceJobId);
   await activate(
-    artifactWorkflow.getByRole("button", { name: "Promote retained output" }),
+    artifactWorkflow.getByRole("button", { name: "Review promotion" }),
   );
   await expect(
-    artifactWorkflow.getByLabel("Promote retained output"),
+    artifactWorkflow.getByLabel("Confirm retained output promotion"),
   ).toBeVisible();
   await activate(
     artifactWorkflow
-      .getByLabel("Promote retained output")
-      .getByRole("button", { name: "Confirm" }),
+      .getByLabel("Confirm retained output promotion")
+      .getByRole("button", { name: "Promote retained output" }),
   );
 
   await expect(page.getByText(/Artifact dddddddd uploaded/)).toBeVisible();
@@ -1672,7 +1883,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network apply endpoint side").selectOption("left");
   await page.getByLabel("Network apply timeout seconds").fill("90");
-  await activate(page.getByRole("button", { name: "Apply side" }));
+  await activate(page.getByRole("button", { name: "Review apply" }));
   await confirmVisiblePrompt(page, "Apply side");
 
   await expect(
@@ -1738,7 +1949,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   );
   expectPrivilegeAssertion(request);
 
-  await activate(page.getByRole("button", { name: "Rollback side" }));
+  await activate(page.getByRole("button", { name: "Review rollback" }));
   await confirmVisiblePrompt(page, "Rollback side");
   await expect(
     page
@@ -1769,7 +1980,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   });
   expectPrivilegeAssertion(rollbackRequest);
 
-  await activate(page.getByRole("button", { name: "Inspect side" }));
+  await activate(page.getByRole("button", { name: "Review inspect" }));
   await confirmVisiblePrompt(page, "Inspect side");
   await expect(
     page
@@ -1802,7 +2013,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
 
   await page.getByLabel("Network probe count").fill("4");
   await page.getByLabel("Network probe interval milliseconds").fill("700");
-  await activate(page.getByRole("button", { name: "Probe latency" }));
+  await activate(page.getByRole("button", { name: "Review probe" }));
   await confirmVisiblePrompt(page, "Probe latency");
   await expect(
     page
@@ -1842,7 +2053,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page
     .getByLabel("Network speed test connect timeout milliseconds")
     .fill("2500");
-  await activate(page.getByRole("button", { name: "Test speed" }));
+  await activate(page.getByRole("button", { name: "Review speed test" }));
   await confirmVisiblePrompt(page, "Run speed test");
   await expect(
     page
@@ -1888,7 +2099,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     .selectOption(ospfUpdatePlans[0].plan_id);
   await page.getByLabel("OSPF update endpoint side").selectOption("left");
   await page.getByLabel("OSPF update timeout seconds").fill("45");
-  await activate(page.getByRole("button", { name: "Apply cost" }));
+  await activate(page.getByRole("button", { name: "Review cost apply" }));
   await confirmVisiblePrompt(page, "Apply cost");
   await expect(
     page

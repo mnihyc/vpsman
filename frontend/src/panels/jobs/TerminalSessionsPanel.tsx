@@ -361,8 +361,11 @@ function XtermReplay({ label, text }: { label: string; text: string }) {
     fitRef.current = fit;
     window.setTimeout(() => fit.fit(), 0);
     const resize = () => fit.fit();
+    const resizeObserver = new ResizeObserver(() => fit.fit());
+    resizeObserver.observe(containerRef.current);
     window.addEventListener("resize", resize);
     return () => {
+      resizeObserver.disconnect();
       window.removeEventListener("resize", resize);
       terminal.dispose();
       terminalRef.current = null;

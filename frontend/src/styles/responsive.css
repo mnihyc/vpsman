@@ -102,8 +102,7 @@
     justify-content: flex-start;
   }
 
-  .operationalGrid,
-  .dashboardClusterGrid {
+  .operationalGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -229,8 +228,7 @@
   }
 
   .operationalGrid,
-  .resourceGrid,
-  .dashboardClusterGrid {
+  .resourceGrid {
     grid-template-columns: 1fr;
   }
 

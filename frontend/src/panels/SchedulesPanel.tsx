@@ -666,7 +666,7 @@ export function SchedulesPanel({
           "Enable",
           "Automatic runs will resume.",
         ),
-      label: "Enable",
+      label: "Review enable",
       disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
       icon: <Power size={14} />,
       onSelect: (rows) =>
@@ -680,7 +680,7 @@ export function SchedulesPanel({
           "Disable",
           "Automatic runs will stop.",
         ),
-      label: "Disable",
+      label: "Review disable",
       disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === false,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
@@ -695,7 +695,7 @@ export function SchedulesPanel({
           "Dispatches one job from the saved fixed target snapshot.",
           " now",
         ),
-      label: "Apply",
+      label: "Review apply",
       disabled: (rows) => rows.length !== 1 || rows[0]?.enabled !== true,
       icon: <Play size={14} />,
       onSelect: (rows) =>
@@ -704,7 +704,7 @@ export function SchedulesPanel({
     },
     {
       description: (rows) => describeScheduleTargetUpdate(rows),
-      label: "Update targets",
+      label: "Review target update",
       disabled: (rows) =>
         rows.length !== 1 || !rows[0] || !scheduleTargetDrifted(rows[0]),
       icon: <Target size={14} />,
@@ -738,7 +738,7 @@ export function SchedulesPanel({
           "Delete",
           "Permanently removes this schedule.",
         ),
-      label: "Delete",
+      label: "Review deletion",
       disabled: (rows) => rows.length !== 1,
       icon: <Trash2 size={14} />,
       onSelect: (rows) =>
@@ -863,7 +863,7 @@ export function SchedulesPanel({
               type="submit"
             >
               <Clock3 size={17} />
-              Defer
+              Review defer
             </button>
             <button
               className="secondaryAction"
@@ -1081,7 +1081,7 @@ export function SchedulesPanel({
                 type="submit"
               >
                 <Save size={17} />
-                {editingScheduleId ? "Update" : "Save"}
+                {editingScheduleId ? "Review update" : "Review save"}
               </button>
             )}
             <ConfirmationPrompt

@@ -12,7 +12,7 @@ async function activate(locator: Locator) {
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
@@ -146,7 +146,7 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
 
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent("download"),

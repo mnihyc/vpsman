@@ -11,7 +11,7 @@ async function activate(locator: Locator) {
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Dispatch" }));
+  await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
@@ -115,4 +115,31 @@ test("loads durable terminal replay from persisted output history", async ({ pag
   await expect(preview).toContainText("2 chunks");
   await expect(preview).toContainText("durable replay line 1");
   await expect(preview).toContainText("prompt$");
+});
+
+test("keeps terminal emulator resizable and target impact compact", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop terminal emulator sizing is covered in the desktop layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "Terminal sessions");
+
+  const terminal = page.getByLabel("Active terminal emulator");
+  await expect(terminal).toBeVisible();
+  await expect(
+    terminal.evaluate((element) => getComputedStyle(element).resize),
+  ).resolves.toBe("vertical");
+  await expect(
+    terminal.evaluate((element) => getComputedStyle(element).overflow),
+  ).resolves.toBe("hidden");
+
+  const impact = page.locator(".commandComposer .targetImpactPreview");
+  await expect(impact.locator(".targetImpactGroup")).toHaveCount(3);
+  await expect(impact.getByText("Ready", { exact: true })).toBeVisible();
+  await expect(impact.getByText("Needs review", { exact: true })).toBeVisible();
+  await expect(impact.getByText("Unavailable", { exact: true })).toBeVisible();
 });

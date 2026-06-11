@@ -150,7 +150,7 @@ export function RestorePlanForm({
             type="submit"
           >
             <RotateCcw size={17} />
-            Plan restore
+            Review plan
           </button>
         )}
       </form>

@@ -16,13 +16,13 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
   await unlockPrivilege(page);
 
-  await activate(page.getByRole("button", { name: "Preview" }));
+  await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
   await expect(page.getByText("edge-us-00", { exact: true })).toBeVisible();
   await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-00" }).first()).toHaveAttribute("title", "a0000000-target-00");
 
   await page.getByLabel("Bulk file path").fill("/var/log/nginx/");
-  await activate(page.getByRole("button", { name: "Run download" }));
+  await activate(page.getByRole("button", { name: "Review download" }));
   await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
   await expect(page.getByText("Download /var/log/nginx on 24 VPSs")).toBeVisible();
   await activate(page.getByRole("button", { name: "Run bulk action" }));
@@ -65,10 +65,10 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
   await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
   await openConsoleSubpage(page, "Jobs", "Multi files");
   await unlockPrivilege(page);
-  await activate(page.getByRole("button", { name: "Preview" }));
+  await activate(page.getByRole("button", { name: "Review targets" }));
 
   await page.getByLabel("Bulk file path").fill("/same-tree-diff/");
-  await activate(page.getByRole("button", { name: "Run download" }));
+  await activate(page.getByRole("button", { name: "Review download" }));
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   await expect(page.getByText("File content differs")).toBeVisible();
   await expect(page.getByText("Hierarchy matches; differing files are listed by relative path.")).toBeVisible();
@@ -77,7 +77,7 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
   await page.screenshot({ fullPage: true, path: testInfo.outputPath("bulk-same-tree-diff.png") });
 
   await page.getByLabel("Bulk file path").fill("/different-tree/");
-  await activate(page.getByRole("button", { name: "Run download" }));
+  await activate(page.getByRole("button", { name: "Review download" }));
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   await expect(page.getByText("Hierarchy differs")).toBeVisible();
   await expect(page.getByText("Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.")).toBeVisible();
