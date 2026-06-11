@@ -19,13 +19,55 @@ use crate::util::percent_encode_path_segment;
 
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
+pub(crate) struct AgentUpdateOptions {
+    pub(crate) artifact_url: String,
+    pub(crate) sha256_hex: String,
+    pub(crate) artifact_signature_hex: Option<String>,
+    pub(crate) artifact_signing_key_hex: Option<String>,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
+pub(crate) struct AgentUpdateCheckOptions {
+    pub(crate) version_url: Option<String>,
+    pub(crate) activate: bool,
+    pub(crate) restart_agent: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
+pub(crate) struct AgentUpdateReleasePublishOptions {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) channel: String,
+    pub(crate) artifact_file: PathBuf,
+    pub(crate) artifact_url: String,
+    pub(crate) signing_seed_hex: String,
+    pub(crate) rollback_artifact_file: Option<PathBuf>,
+    pub(crate) rollback_artifact_url: Option<String>,
+    pub(crate) rollback_signing_seed_hex: Option<String>,
+    pub(crate) notes: Option<String>,
+    pub(crate) confirmed: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamedAgentUpdateArtifactRecord {
     artifact_sha256_hex: String,
     size_bytes: i64,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hot_config(
     api_url: &str,
     token: Option<&str>,
@@ -79,43 +121,35 @@ pub(crate) fn hot_config(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update(
     api_url: &str,
     token: Option<&str>,
-    artifact_url: String,
-    sha256_hex: String,
-    artifact_signature_hex: Option<String>,
-    artifact_signing_key_hex: Option<String>,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
+    options: AgentUpdateOptions,
 ) -> Result<()> {
     anyhow::ensure!(
-        confirmed,
+        options.confirmed,
         "agent-update requires --confirmed because it stages a replacement binary"
     );
     validate_update_input(
-        &artifact_url,
-        &sha256_hex,
-        artifact_signature_hex.as_deref(),
-        artifact_signing_key_hex.as_deref(),
+        &options.artifact_url,
+        &options.sha256_hex,
+        options.artifact_signature_hex.as_deref(),
+        options.artifact_signing_key_hex.as_deref(),
     )?;
     let operation = JobCommand::UpdateAgent {
-        artifact_url,
-        sha256_hex: sha256_hex.to_ascii_lowercase(),
-        artifact_signature_hex: artifact_signature_hex.map(|value| value.to_ascii_lowercase()),
-        artifact_signing_key_hex: artifact_signing_key_hex.map(|value| value.to_ascii_lowercase()),
+        artifact_url: options.artifact_url,
+        sha256_hex: options.sha256_hex.to_ascii_lowercase(),
+        artifact_signature_hex: options
+            .artifact_signature_hex
+            .map(|value| value.to_ascii_lowercase()),
+        artifact_signing_key_hex: options
+            .artifact_signing_key_hex
+            .map(|value| value.to_ascii_lowercase()),
     };
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let password = load_super_password(&options.password_env)?;
+    let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
+    let target_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
     let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
@@ -123,9 +157,9 @@ pub(crate) fn agent_update(
         &selector_expression,
         &password,
         &salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
+        options.privilege_ttl_secs,
+        options.timeout_secs,
+        options.force_unprivileged,
         true,
     )?;
     println!(
@@ -143,9 +177,9 @@ pub(crate) fn agent_update(
                 "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
-                "confirmed": confirmed,
-                "force_unprivileged": force_unprivileged,
-                "timeout_secs": timeout_secs,
+                "confirmed": options.confirmed,
+                "force_unprivileged": options.force_unprivileged,
+                "timeout_secs": options.timeout_secs,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -153,27 +187,16 @@ pub(crate) fn agent_update(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_check(
     api_url: &str,
     token: Option<&str>,
-    version_url: Option<String>,
-    activate: bool,
-    restart_agent: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
+    options: AgentUpdateCheckOptions,
 ) -> Result<()> {
     anyhow::ensure!(
-        confirmed,
+        options.confirmed,
         "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
     );
-    if let Some(version_url) = version_url.as_deref() {
+    if let Some(version_url) = options.version_url.as_deref() {
         anyhow::ensure!(
             version_url.starts_with("https://")
                 || version_url.starts_with("http://localhost")
@@ -183,14 +206,14 @@ pub(crate) fn agent_update_check(
         );
     }
     let operation = JobCommand::AgentUpdateCheck {
-        version_url,
-        activate,
-        restart_agent,
+        version_url: options.version_url,
+        activate: options.activate,
+        restart_agent: options.restart_agent,
     };
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let password = load_super_password(&options.password_env)?;
+    let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
+    let target_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
     let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
@@ -198,9 +221,9 @@ pub(crate) fn agent_update_check(
         &selector_expression,
         &password,
         &salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
+        options.privilege_ttl_secs,
+        options.timeout_secs,
+        options.force_unprivileged,
         true,
     )?;
     println!(
@@ -218,9 +241,9 @@ pub(crate) fn agent_update_check(
                 "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
-                "confirmed": confirmed,
-                "force_unprivileged": force_unprivileged,
-                "timeout_secs": timeout_secs,
+                "confirmed": options.confirmed,
+                "force_unprivileged": options.force_unprivileged,
+                "timeout_secs": options.timeout_secs,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -239,57 +262,49 @@ pub(crate) fn agent_update_signature(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_release_publish(
     api_url: &str,
     token: Option<&str>,
-    name: String,
-    version: String,
-    channel: String,
-    artifact_file: PathBuf,
-    artifact_url: String,
-    signing_seed_hex: String,
-    rollback_artifact_file: Option<PathBuf>,
-    rollback_artifact_url: Option<String>,
-    rollback_signing_seed_hex: Option<String>,
-    notes: Option<String>,
-    confirmed: bool,
+    options: AgentUpdateReleasePublishOptions,
 ) -> Result<()> {
     anyhow::ensure!(
-        confirmed,
+        options.confirmed,
         "agent-update-release-publish requires --confirmed because it records trusted update metadata"
     );
-    let signature = build_update_signature(&artifact_file, &signing_seed_hex)?;
+    let signature = build_update_signature(&options.artifact_file, &options.signing_seed_hex)?;
     validate_update_input(
-        &artifact_url,
+        &options.artifact_url,
         &signature.artifact_sha256_hex,
         Some(&signature.artifact_signature_hex),
         Some(&signature.artifact_signing_key_hex),
     )?;
-    let rollback_signature = if let Some(rollback_artifact_file) = rollback_artifact_file.as_ref() {
-        let rollback_artifact_url = rollback_artifact_url
-            .as_deref()
-            .context("--rollback-artifact-url is required with --rollback-artifact-file")?;
-        let rollback_signature = build_update_signature(
-            rollback_artifact_file,
-            rollback_signing_seed_hex
+    let rollback_signature =
+        if let Some(rollback_artifact_file) = options.rollback_artifact_file.as_ref() {
+            let rollback_artifact_url = options
+                .rollback_artifact_url
                 .as_deref()
-                .unwrap_or(signing_seed_hex.as_str()),
-        )?;
-        validate_update_input(
-            rollback_artifact_url,
-            &rollback_signature.artifact_sha256_hex,
-            Some(&rollback_signature.artifact_signature_hex),
-            Some(&rollback_signature.artifact_signing_key_hex),
-        )?;
-        Some((rollback_artifact_url.to_string(), rollback_signature))
-    } else {
-        anyhow::ensure!(
-            rollback_artifact_url.is_none() && rollback_signing_seed_hex.is_none(),
+                .context("--rollback-artifact-url is required with --rollback-artifact-file")?;
+            let rollback_signature = build_update_signature(
+                rollback_artifact_file,
+                options
+                    .rollback_signing_seed_hex
+                    .as_deref()
+                    .unwrap_or(options.signing_seed_hex.as_str()),
+            )?;
+            validate_update_input(
+                rollback_artifact_url,
+                &rollback_signature.artifact_sha256_hex,
+                Some(&rollback_signature.artifact_signature_hex),
+                Some(&rollback_signature.artifact_signing_key_hex),
+            )?;
+            Some((rollback_artifact_url.to_string(), rollback_signature))
+        } else {
+            anyhow::ensure!(
+            options.rollback_artifact_url.is_none() && options.rollback_signing_seed_hex.is_none(),
             "--rollback-artifact-file is required when rollback URL or rollback signing seed is set"
         );
-        None
-    };
+            None
+        };
     println!(
         "{}",
         http_post_json(
@@ -297,28 +312,27 @@ pub(crate) fn agent_update_release_publish(
             "/api/v1/agent-update-releases",
             token,
             &serde_json::json!({
-                "name": name,
-                "version": version,
-                "channel": channel,
+                "name": options.name,
+                "version": options.version,
+                "channel": options.channel,
                 "artifact_sha256_hex": signature.artifact_sha256_hex,
                 "artifact_signature_hex": signature.artifact_signature_hex,
                 "artifact_signing_key_hex": signature.artifact_signing_key_hex,
-                "artifact_url": artifact_url,
+                "artifact_url": options.artifact_url,
                 "rollback_artifact_sha256_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_sha256_hex.clone()),
                 "rollback_artifact_signature_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_signature_hex.clone()),
                 "rollback_artifact_signing_key_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_signing_key_hex.clone()),
                 "rollback_artifact_url": rollback_signature.as_ref().map(|(url, _)| url.clone()),
                 "rollback_size_bytes": rollback_signature.as_ref().map(|(_, signature)| signature.size_bytes),
                 "size_bytes": signature.size_bytes,
-                "notes": notes,
-                "confirmed": confirmed,
+                "notes": options.notes,
+                "confirmed": options.confirmed,
             }),
         )?
     );
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_artifact_upload(
     api_url: &str,
     token: Option<&str>,
@@ -353,7 +367,6 @@ pub(crate) fn agent_update_artifact_upload(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_artifact_upload_response(
     api_url: &str,
     token: Option<&str>,
@@ -402,7 +415,6 @@ pub(crate) fn agent_update_artifact_upload_response(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn agent_update_artifact_upload_streamed(
     api_url: &str,
     token: Option<&str>,
@@ -554,7 +566,6 @@ pub(crate) fn agent_update_release_latest(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_activate(
     api_url: &str,
     token: Option<&str>,
@@ -598,7 +609,6 @@ pub(crate) fn agent_update_activate(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_update_rollback(
     api_url: &str,
     token: Option<&str>,
@@ -662,7 +672,6 @@ fn build_update_signature_json(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_update_artifact_upload_payload(
     name: String,
     version: String,

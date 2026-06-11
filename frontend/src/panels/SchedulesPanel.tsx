@@ -3,6 +3,8 @@ import {
   Clock3,
   Pencil,
   Play,
+  Power,
+  PowerOff,
   RefreshCcw,
   Save,
   Target,
@@ -122,6 +124,9 @@ export function SchedulesPanel({
   const [scheduleAction, setScheduleAction] = useState<ScheduleAction | null>(
     null,
   );
+  const [scheduleActionError, setScheduleActionError] = useState<string | null>(
+    null,
+  );
   const [deferDraft, setDeferDraft] = useState<{
     schedule: ScheduleRecord;
     deferredUntil: string;
@@ -189,7 +194,10 @@ export function SchedulesPanel({
 
   function scheduleTargetDrifted(schedule: ScheduleRecord): boolean {
     const currentIds = resolvedTargetIdsForSchedule(schedule);
-    return currentIds.length > 0 && !sameStringSet(fixedTargetIds(schedule), currentIds);
+    return (
+      currentIds.length > 0 &&
+      !sameStringSet(fixedTargetIds(schedule), currentIds)
+    );
   }
 
   const confirmationItems = [
@@ -225,77 +233,6 @@ export function SchedulesPanel({
   const scheduleColumns = useMemo<ConsoleDataGridColumn<ScheduleRecord>[]>(
     () => [
       {
-        id: "actions",
-        header: "",
-        size: 330,
-        minSize: 300,
-        cell: (schedule) => (
-          <div className="rowActionGroup">
-            <button
-              aria-label={`Edit ${schedule.name}`}
-              onClick={() => editSchedule(schedule)}
-              type="button"
-            >
-              <Pencil size={15} />
-            </button>
-            <button
-              aria-label={
-                schedule.enabled
-                  ? `Disable ${schedule.name}`
-                  : `Enable ${schedule.name}`
-              }
-              onClick={() =>
-                setScheduleAction({
-                  type: schedule.enabled ? "disable" : "enable",
-                  schedule,
-                })
-              }
-              type="button"
-            >
-              {schedule.enabled ? "Disable" : "Enable"}
-            </button>
-            <button
-              aria-label={`Apply ${schedule.name} now`}
-              disabled={!schedule.enabled}
-              onClick={() => setScheduleAction({ type: "applyNow", schedule })}
-              type="button"
-            >
-              <Play size={15} />
-            </button>
-            <button
-              aria-label={`Update fixed targets for ${schedule.name}`}
-              disabled={!scheduleTargetDrifted(schedule)}
-              onClick={() =>
-                setScheduleAction({
-                  type: "targetUpdate",
-                  schedule,
-                  selectorExpression: schedule.selector_expression,
-                  targetClientIds: resolvedTargetIdsForSchedule(schedule),
-                })
-              }
-              type="button"
-            >
-              <Target size={15} />
-              Update targets
-            </button>
-            <button
-              aria-label={`Defer ${schedule.name}`}
-              onClick={() => startDefer(schedule)}
-              type="button"
-            >
-              <Clock3 size={15} />
-            </button>
-            <button
-              aria-label={`Delete ${schedule.name}`}
-              onClick={() => setScheduleAction({ type: "delete", schedule })}
-              type="button"
-            >
-              <Trash2 size={15} />
-            </button>
-          </div>
-        ),
-      },
-      {
         id: "name",
         header: "Name",
         size: 220,
@@ -320,20 +257,24 @@ export function SchedulesPanel({
       },
       {
         id: "targets",
-        header: "Fixed targets",
-        size: 190,
-        minSize: 170,
+        header: "Targets",
+        size: 230,
+        minSize: 190,
         sortValue: (schedule) => fixedTargetIds(schedule).length,
         searchValue: (schedule) =>
           `${schedule.selector_expression} ${fixedTargetIds(schedule).join(" ")}`,
         cell: (schedule) => {
-          const fixedCount = fixedTargetIds(schedule).length;
-          const drifted = scheduleTargetDrifted(schedule);
+          const fixedIds = fixedTargetIds(schedule);
+          const currentIds = resolvedTargetIdsForSchedule(schedule);
+          const drifted =
+            currentIds.length > 0 && !sameStringSet(fixedIds, currentIds);
           return (
             <span className="historyPrimary">
-              <strong>{fixedCount} VPSs</strong>
+              <strong>{fixedIds.length} fixed VPSs</strong>
               <small className="mutedText">
-                {drifted ? "target update available" : "selector aligned"}
+                {drifted
+                  ? `${currentIds.length} current · target update available`
+                  : `${currentIds.length || fixedIds.length} current · aligned`}
               </small>
             </span>
           );
@@ -515,11 +456,20 @@ export function SchedulesPanel({
     });
   }
 
+  function openScheduleAction(action: ScheduleAction) {
+    setScheduleActionError(null);
+    setScheduleAction(action);
+  }
+
   async function runScheduleAction(action: ScheduleAction) {
-    setScheduleAction(null);
-    await runPanelAction(setPending, setActionError, async () => {
+    if (pending) return;
+    setPending(true);
+    setActionError(null);
+    setScheduleActionError(null);
+    try {
       if (action.type === "applyNow") {
         await onApplyScheduleNow(action.schedule.id);
+        setScheduleAction(null);
         return;
       }
       if (!privilegeMaterial) {
@@ -578,7 +528,15 @@ export function SchedulesPanel({
           privilege_assertion: privilegeAssertion,
         });
       }
-    });
+      setScheduleAction(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Schedule action failed";
+      setActionError(message);
+      setScheduleActionError(message);
+    } finally {
+      setPending(false);
+    }
   }
 
   async function buildSchedulePrivilege(
@@ -755,6 +713,104 @@ export function SchedulesPanel({
               </span>
             </div>
           )}
+          rowActions={[
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Edit",
+                  "Opens the schedule composer.",
+                ),
+              icon: <Pencil size={14} />,
+              label: "Edit",
+              onSelect: (rows) => rows[0] && editSchedule(rows[0]),
+            },
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Enable",
+                  "Automatic runs will resume.",
+                ),
+              label: "Enable",
+              disabled: (rows) => rows[0]?.enabled === true,
+              icon: <Power size={14} />,
+              onSelect: (rows) =>
+                rows[0] &&
+                openScheduleAction({ type: "enable", schedule: rows[0] }),
+            },
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Disable",
+                  "Automatic runs will stop.",
+                ),
+              label: "Disable",
+              disabled: (rows) => rows[0]?.enabled === false,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) =>
+                rows[0] &&
+                openScheduleAction({ type: "disable", schedule: rows[0] }),
+            },
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Apply",
+                  "Dispatches one job from the saved fixed target snapshot.",
+                  " now",
+                ),
+              label: "Apply",
+              disabled: (rows) => rows[0]?.enabled !== true,
+              icon: <Play size={14} />,
+              onSelect: (rows) =>
+                rows[0] &&
+                openScheduleAction({ type: "applyNow", schedule: rows[0] }),
+            },
+            {
+              description: (rows) =>
+                describeScheduleTargetUpdate(rows),
+              label: "Update targets",
+              disabled: (rows) => !rows[0] || !scheduleTargetDrifted(rows[0]),
+              icon: <Target size={14} />,
+              onSelect: (rows) => {
+                const schedule = rows[0];
+                if (!schedule) return;
+                openScheduleAction({
+                  type: "targetUpdate",
+                  schedule,
+                  selectorExpression: schedule.selector_expression,
+                  targetClientIds: resolvedTargetIdsForSchedule(schedule),
+                });
+              },
+            },
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Defer",
+                  "Opens a defer form before confirmation.",
+                ),
+              label: "Defer",
+              icon: <Clock3 size={14} />,
+              onSelect: (rows) => rows[0] && startDefer(rows[0]),
+            },
+            {
+              description: (rows) =>
+                describeScheduleAction(
+                  rows,
+                  "Delete",
+                  "Permanently removes this schedule.",
+                ),
+              label: "Delete",
+              icon: <Trash2 size={14} />,
+              onSelect: (rows) =>
+                rows[0] &&
+                openScheduleAction({ type: "delete", schedule: rows[0] }),
+              tone: "danger",
+            },
+          ]}
           rows={schedules}
           storageKey="vpsman.grid.schedules"
           title="Schedule records"
@@ -764,7 +820,7 @@ export function SchedulesPanel({
             className="inlineOpsForm"
             onSubmit={(event) => {
               event.preventDefault();
-              setScheduleAction({
+              openScheduleAction({
                 type: "defer",
                 schedule: deferDraft.schedule,
                 deferredUntil: datetimeLocalToRfc3339(deferDraft.deferredUntil),
@@ -818,8 +874,12 @@ export function SchedulesPanel({
             scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Confirm"
           }
           detail={scheduleAction ? actionDetail(scheduleAction) : ""}
+          error={scheduleActionError}
           items={scheduleAction ? actionConfirmationItems(scheduleAction) : []}
-          onCancel={() => setScheduleAction(null)}
+          onCancel={() => {
+            setScheduleActionError(null);
+            setScheduleAction(null);
+          }}
           onConfirm={() => {
             if (scheduleAction) {
               const action = scheduleAction;
@@ -836,6 +896,7 @@ export function SchedulesPanel({
               ? actionTitle(scheduleAction.type)
               : "Confirm schedule action"
           }
+          tone={scheduleAction?.type === "delete" ? "danger" : "normal"}
         />
       </section>
 
@@ -1122,6 +1183,21 @@ function actionConfirmLabel(type: ScheduleAction["type"]): string {
     case "delete":
       return "Delete";
   }
+}
+
+function describeScheduleAction(
+  rows: ScheduleRecord[],
+  verb: string,
+  consequence: string,
+  suffix = "",
+): string {
+  const scheduleName = rows[0]?.name ?? "selected schedule";
+  return `${verb} schedule ${scheduleName}${suffix}. ${consequence}`;
+}
+
+function describeScheduleTargetUpdate(rows: ScheduleRecord[]): string {
+  const scheduleName = rows[0]?.name ?? "selected schedule";
+  return `Update targets for schedule ${scheduleName}. Replaces saved fixed targets with the current audit selector resolution.`;
 }
 
 function fixedTargetIds(schedule: ScheduleRecord): string[] {

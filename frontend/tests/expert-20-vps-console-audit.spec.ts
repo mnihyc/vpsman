@@ -29,7 +29,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await expect(page.getByText("edge-health-hourly")).toBeVisible();
 
   await activate(
-    page.getByRole("button", { name: "Disable edge-health-hourly" }),
+    page.getByRole("button", { name: /Disable schedule edge-health-hourly/ }),
   );
   await expect(page.getByText("Confirm schedule disable")).toBeVisible();
   await activate(
@@ -42,7 +42,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   ).toBeVisible();
 
   await activate(
-    page.getByRole("button", { name: "Enable edge-health-hourly" }),
+    page.getByRole("button", { name: /Enable schedule edge-health-hourly/ }),
   );
   await expect(page.getByText("Confirm schedule enable")).toBeVisible();
   await activate(
@@ -52,16 +52,20 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     page.locator(".status").filter({ hasText: "enabled" }).first(),
   ).toBeVisible();
 
-  await activate(page.getByRole("button", { name: "Edit edge-health-hourly" }));
+  await activate(
+    page.getByRole("button", { name: /Edit schedule edge-health-hourly/ }),
+  );
   await expect(
     page.getByRole("heading", { name: "Modify schedule" }),
   ).toBeVisible();
   await page.getByLabel("Schedule name").fill("edge-health-hourly");
   await page.getByLabel("Schedule cron expression").fill("10,40 * * * *");
-  await page
-    .getByLabel("Schedule target expression")
-    .fill("provider:alpha && country:US");
-  await expect(page.getByText("1 matching VPSs")).toBeVisible();
+  await replaceSearchExpression(
+    page,
+    "Schedule target expression",
+    "provider:alpha && country:US",
+  );
+  await expect(page.getByText("1 VPSs will be fixed on save")).toBeVisible();
   await activate(page.getByRole("button", { name: "Update", exact: true }));
   await expect(page.getByText("Confirm schedule update")).toBeVisible();
   await activate(
@@ -72,7 +76,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await expect(page.getByText("10,40 * * * *")).toBeVisible();
 
   await activate(
-    page.getByRole("button", { name: "Defer edge-health-hourly" }),
+    page.getByRole("button", { name: /Defer schedule edge-health-hourly/ }),
   );
   await page.getByLabel("Schedule defer until").fill("2026-06-04T09:30");
   await page
@@ -108,12 +112,14 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     .toBe(4);
 
   await activate(
-    page.getByRole("button", { name: "Apply edge-health-hourly now" }),
+    page.getByRole("button", {
+      name: /Apply schedule edge-health-hourly now/,
+    }),
   );
   await expect(page.getByText("Confirm apply now")).toBeVisible();
   await expect(
     page.getByText(
-      "Dispatches a normal job from the saved schedule without changing the next scheduled run.",
+      "Dispatches a normal job from the saved fixed target snapshot without changing the next scheduled run.",
     ),
   ).toBeVisible();
   await activate(
@@ -137,7 +143,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     .toBe(5);
 
   await activate(
-    page.getByRole("button", { name: "Delete edge-health-hourly" }),
+    page.getByRole("button", { name: /Delete schedule edge-health-hourly/ }),
   );
   await expect(page.getByText("Confirm schedule delete")).toBeVisible();
   await activate(
@@ -654,6 +660,20 @@ async function installTwentyFourVpsExpertMock(page: Page) {
       return previousFetch(input, init);
     };
   });
+}
+
+async function replaceSearchExpression(
+  page: Page,
+  label: string,
+  value: string,
+) {
+  await page.getByLabel(label).click();
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+A" : "Control+A",
+  );
+  await page.keyboard.press("Backspace");
+  await page.keyboard.insertText(value);
+  await page.keyboard.press("Escape");
 }
 
 async function collectLayoutSignals(page: Page, scopeSelector: string) {

@@ -342,44 +342,11 @@ write_requested_config() {
   elif [[ -n "${VPSMAN_AGENT_CONFIG_URL:-}" ]]; then
     require_tool curl
     curl -fsSL "$VPSMAN_AGENT_CONFIG_URL" -o "$tmp_config"
-  elif [[ -n "${VPSMAN_ENROLLMENT_TOKEN:-}" ]]; then
-    render_enrolled_config "$tmp_config"
   elif is_true "${VPSMAN_ALLOW_DEV_CONFIG:-0}"; then
     render_dev_config >"$tmp_config"
   else
-    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, VPSMAN_AGENT_CONFIG_URL, or VPSMAN_ENROLLMENT_TOKEN; set VPSMAN_ALLOW_DEV_CONFIG=1 only for dev_xx local testing"
+    fail "provide VPSMAN_AGENT_CONFIG_B64, VPSMAN_AGENT_CONFIG_PATH, or VPSMAN_AGENT_CONFIG_URL; set VPSMAN_ALLOW_DEV_CONFIG=1 only for dev_xx local testing"
   fi
-}
-
-render_enrolled_config() {
-  local tmp_config="$1"
-  : "${VPSMAN_API_URL:?set VPSMAN_API_URL for target-side enrollment}"
-  local command_timeout_secs="${VPSMAN_COMMAND_TIMEOUT_SECS:-30}"
-  local helper
-  helper="$(mktemp "$stage_install_dir/vpsctl.XXXXXX")"
-  if [[ -n "${VPSMAN_VPSCTL_BINARY:-}" ]]; then
-    cp "$VPSMAN_VPSCTL_BINARY" "$helper"
-  else
-    : "${VPSMAN_VPSCTL_URL:?set VPSMAN_VPSCTL_URL or VPSMAN_VPSCTL_BINARY for target-side enrollment}"
-    : "${VPSMAN_VPSCTL_SHA256_HEX:?set VPSMAN_VPSCTL_SHA256_HEX when downloading vpsctl helper}"
-    require_tool curl
-    curl -fsSL "$VPSMAN_VPSCTL_URL" -o "$helper"
-  fi
-  verify_sha256 "$helper" "${VPSMAN_VPSCTL_SHA256_HEX:-}" "vpsctl helper"
-  chmod 0755 "$helper"
-
-  local args=(
-    --api-url "$VPSMAN_API_URL"
-    enroll-config
-    --command-timeout-secs "$command_timeout_secs"
-    --output-file "$tmp_config"
-  )
-
-  if ! VPSMAN_ENROLLMENT_TOKEN="$VPSMAN_ENROLLMENT_TOKEN" "$helper" "${args[@]}"; then
-    rm -f "$helper"
-    return 1
-  fi
-  rm -f "$helper"
 }
 
 install_mode="${VPSMAN_INSTALL_MODE:-root}"

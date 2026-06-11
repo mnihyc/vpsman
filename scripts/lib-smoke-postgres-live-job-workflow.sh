@@ -22,33 +22,26 @@ smoke_track_pid "$!"
 smoke_wait_tcp 127.0.0.1 "$gateway_port"
 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
-token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags postgres-live-job)"
-enrollment_token="$(jq -r '.token' <<<"$token_json")"
-
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$enrollment_token" \
-  --output-file "$agent_config"
-client_id="$(smoke_agent_config_client_id "$agent_config")"
-if [[ -z "$client_id" ]]; then
-  smoke_fail "enroll-config did not write primary client_id for postgres live job smoke"
-fi
-
-peer_token_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-    --ttl-secs 600 \
-    --default-tags postgres-live-job)"
-peer_enrollment_token="$(jq -r '.token' <<<"$peer_token_json")"
-
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$peer_enrollment_token" \
-  --output-file "$peer_agent_config"
-peer_client_id="$(smoke_agent_config_client_id "$peer_agent_config")"
-if [[ -z "$peer_client_id" ]]; then
-  smoke_fail "enroll-config did not write peer client_id for postgres live job smoke"
-fi
+client_id="postgres-live-job-a"
+peer_client_id="postgres-live-job-b"
+smoke_create_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$agent_config" \
+  "$client_id" \
+  "$client_id" \
+  "postgres-live-job" \
+  "$gateway_public_hex" \
+  "primary=$gateway_addr=10"
+smoke_create_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$peer_agent_config" \
+  "$peer_client_id" \
+  "$peer_client_id" \
+  "postgres-live-job" \
+  "$gateway_public_hex" \
+  "primary=$gateway_addr=10"
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 VPSMAN_SUPERVISOR_DIR="$agent_supervisor_dir" \

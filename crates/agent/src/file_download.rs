@@ -243,7 +243,6 @@ async fn stream_file_payload(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn file_download_status(
     job_id: uuid::Uuid,
     path: &str,
@@ -270,7 +269,6 @@ fn file_download_status(
     )?])
 }
 
-#[allow(clippy::too_many_arguments)]
 fn file_download_status_output(
     job_id: uuid::Uuid,
     path: &str,

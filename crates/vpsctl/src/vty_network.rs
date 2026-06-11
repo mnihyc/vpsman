@@ -473,7 +473,6 @@ pub(crate) fn submit_vty_tunnel_rollback(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_vty_network_job(
     api_url: &str,
     token: Option<&str>,

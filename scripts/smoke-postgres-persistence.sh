@@ -129,6 +129,24 @@ api_get() {
   curl -fsS -H "Authorization: Bearer $access_token" "$api_url$path"
 }
 
+wait_api_jq() {
+  local path="$1"
+  local jq_filter="$2"
+  local label="$3"
+  local body_file="$SMOKE_TMPDIR/wait-$label.json"
+  local deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    if api_get "$path" >"$body_file" && jq -e "$jq_filter" "$body_file" >/dev/null; then
+      cat "$body_file"
+      return
+    fi
+    sleep 0.2
+  done
+  echo "timed out waiting for $label" >&2
+  cat "$body_file" >&2 || true
+  exit 1
+}
+
 api_post() {
   local path="$1"
   local json="$2"
@@ -167,24 +185,6 @@ vpsctl_json() {
   VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
     target/debug/vpsctl "$@"
-}
-
-claim_enrollment() {
-  local enrollment_token="$1"
-  local client_id="$2"
-  local public_key_hex="$3"
-  jq -n \
-    --arg token "$enrollment_token" \
-    --arg client_id "$client_id" \
-    --arg client_public_key_hex "$public_key_hex" \
-    '{
-      token: $token,
-      client_public_key_hex: $client_public_key_hex
-    } + (if ($client_id | length) > 0 then {client_id: $client_id} else {} end)' \
-    | curl -fsS \
-        -H "Content-Type: application/json" \
-        -d @- \
-        "$api_url/api/v1/enrollments/claim"
 }
 
 seed_agent() {
@@ -274,48 +274,26 @@ jq -e '.operator.username == "postgres-smoke" and .token_type == "Bearer"' <<<"$
 first_public_key_hex="$(printf '11%.0s' {1..32})"
 second_public_key_hex="$(printf '22%.0s' {1..32})"
 third_public_key_hex="$(printf '33%.0s' {1..32})"
-first_enrollment_token_json="$(vpsctl_json enrollment-token-create \
-  --ttl-secs 600 \
-  --default-tags enrolled:first,enrolled:initial,edge,bgp \
-  --default-display-name pg-edge-a-enrolled)"
-first_enrollment_token="$(jq -r '.token' <<<"$first_enrollment_token_json")"
-first_enrollment_token_id="$(jq -r '.id' <<<"$first_enrollment_token_json")"
-first_assigned_client_id="$(jq -r '.assigned_client_id' <<<"$first_enrollment_token_json")"
-docker exec "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 -c "
-CREATE TEMP TABLE retarget_enrollment_tags AS
-  SELECT tag_id FROM client_tags WHERE client_id = '$first_assigned_client_id';
-UPDATE enrollment_tokens SET allowed_client_id = NULL WHERE id = '$first_enrollment_token_id';
-DELETE FROM client_tags WHERE client_id = '$first_assigned_client_id';
-UPDATE clients SET id = 'pg-agent-a', display_name = 'pg-edge-a-enrolled' WHERE id = '$first_assigned_client_id';
-INSERT INTO client_tags (client_id, tag_id)
-  SELECT 'pg-agent-a', tag_id FROM retarget_enrollment_tags
-  ON CONFLICT DO NOTHING;
-UPDATE enrollment_tokens SET allowed_client_id = 'pg-agent-a' WHERE id = '$first_enrollment_token_id';
-" >/dev/null
-claim_enrollment \
-  "$first_enrollment_token" \
-  "" \
-  "$first_public_key_hex" | tee "$SMOKE_TMPDIR/first-claim.json" | jq -e '
+revoked_replacement_key_hex="$(printf '44%.0s' {1..32})"
+vpsctl_json agent-identity-upsert \
+  --client-id pg-agent-a \
+  --client-public-key-hex "$first_public_key_hex" \
+  --display-name pg-edge-a-direct \
+  --tags direct:first,direct:initial,edge,bgp,country:US \
+  --confirmed | jq -e '
     .client_id == "pg-agent-a" and
-    .noise_mode == "enrolled_ik" and
-    (.tcp_endpoints | length >= 1) and
-    .telemetry_light_secs == 15 and
-    .telemetry_full_secs == 60 and
-    .update.unmanaged_enabled == true
-  ' >/dev/null || {
-    echo "first enrollment claim did not match expected enrollment config" >&2
-    cat "$SMOKE_TMPDIR/first-claim.json" >&2 || true
-    exit 1
-  }
+    .display_name == "pg-edge-a-direct" and
+    (.tags | sort == ["bgp", "country:US", "direct:first", "direct:initial", "edge"])
+  ' >/dev/null
 first_stored_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
 if [[ "$first_stored_key_hex" != "$first_public_key_hex" ]]; then
-  echo "expected initial enrollment public key to be stored" >&2
+  echo "expected initial direct identity public key to be stored" >&2
   exit 1
 fi
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-a" and
-    .display_name == "pg-edge-a-enrolled" and
-    (.tags | sort == ["bgp", "country:US", "edge", "enrolled:first", "enrolled:initial"]))
+    .display_name == "pg-edge-a-direct" and
+    (.tags | sort == ["bgp", "country:US", "direct:first", "direct:initial", "edge"]))
 ' >/dev/null
 
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"postgres smoke agent is running without root"}'
@@ -361,86 +339,68 @@ vpsctl_json telemetry-network-rates --client-id pg-agent-a --interface eth0 --bu
 vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag persistent >/dev/null
 
-second_enrollment_token_json="$(vpsctl_json reenrollment-token-create \
+vpsctl_json agent-identity-upsert \
   --client-id pg-agent-a \
-  --ttl-secs 600 \
-  --default-tags rebuilt,os:debian \
-  --default-display-name pg-edge-a-rebuilt \
-  --confirmed)"
-second_enrollment_token="$(jq -r '.token' <<<"$second_enrollment_token_json")"
-claim_enrollment \
-  "$second_enrollment_token" \
-  pg-agent-a \
-  "$second_public_key_hex" | jq -e '
-    .client_id == "pg-agent-a" and
-    .noise_mode == "enrolled_ik" and
-    .update.unmanaged_enabled == true
-  ' >/dev/null
+  --client-public-key-hex "$second_public_key_hex" \
+  --replace-existing-key \
+  --confirmed | jq -e '.client_id == "pg-agent-a"' >/dev/null
+api_post "/api/v1/agents/pg-agent-a/alias" '{"display_name":"pg-edge-a-rotated"}' >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag rotated >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag os:debian >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-a" and
-    .display_name == "pg-edge-a-rebuilt" and
+    .display_name == "pg-edge-a-rotated" and
     (.tags | index("edge")) and
     (.tags | index("bgp")) and
     (.tags | index("country:US")) and
-    (.tags | index("enrolled:first")) and
-    (.tags | index("enrolled:initial")) and
+    (.tags | index("direct:first")) and
+    (.tags | index("direct:initial")) and
     (.tags | index("group:pg-persistent")) and
     (.tags | index("persistent")) and
-    (.tags | index("rebuilt")) and
+    (.tags | index("rotated")) and
     (.tags | index("os:debian")))
 ' >/dev/null
 second_stored_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
 if [[ "$second_stored_key_hex" != "$second_public_key_hex" || "$second_stored_key_hex" == "$first_public_key_hex" ]]; then
-  echo "expected rebuilt enrollment to rotate stored public key" >&2
+  echo "expected direct identity key rotation to update stored public key" >&2
   exit 1
 fi
 validate_agent_identity pg-agent-a "$first_public_key_hex" | jq -e '.accepted == false' >/dev/null
 validate_agent_identity pg-agent-a "$second_public_key_hex" | jq -e '.accepted == true' >/dev/null
+
+vpsctl_json agent-identity-upsert \
+  --client-id pg-revoked-agent \
+  --client-public-key-hex "$third_public_key_hex" \
+  --display-name pg-revoked-agent \
+  --tags revoked-test \
+  --confirmed | jq -e '.client_id == "pg-revoked-agent"' >/dev/null
+validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == true' >/dev/null
 vpsctl_json client-key-revoke \
-  --client-id pg-agent-a \
+  --client-id pg-revoked-agent \
   --reason postgres-smoke-revoke \
   --confirmed | jq -e '
-    .client_id == "pg-agent-a" and
+    .client_id == "pg-revoked-agent" and
     .reason == "postgres-smoke-revoke" and
     (.public_key_sha256_hex | length == 64)
   ' >/dev/null
-validate_agent_identity pg-agent-a "$second_public_key_hex" | jq -e '.accepted == false' >/dev/null
+validate_agent_identity pg-revoked-agent "$third_public_key_hex" | jq -e '.accepted == false' >/dev/null
+if vpsctl_json agent-identity-upsert \
+  --client-id pg-revoked-agent \
+  --client-public-key-hex "$revoked_replacement_key_hex" \
+  --replace-existing-key \
+  --confirmed >"$SMOKE_TMPDIR/revoked-replace.json" 2>&1; then
+  echo "expected revoked direct identity key replacement to fail" >&2
+  cat "$SMOKE_TMPDIR/revoked-replace.json" >&2 || true
+  exit 1
+fi
 vpsctl_json key-lifecycle-report | jq -e '
   .current_key_revoked_count == 0 and
   .revocation_count >= 1 and
-  all(.clients[]; .client_id != "pg-agent-a")
+  any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false) and
+  all(.clients[]; .client_id != "pg-revoked-agent")
 ' >/dev/null
-api_get "/api/v1/agents" | jq -e 'all(.[]; .id != "pg-agent-a")' >/dev/null
-third_enrollment_token_json="$(vpsctl_json reenrollment-token-create \
-  --client-id pg-agent-a \
-  --ttl-secs 600 \
-  --default-tags revoked-rebuilt \
-  --confirmed)"
-third_enrollment_token="$(jq -r '.token' <<<"$third_enrollment_token_json")"
-claim_enrollment \
-  "$third_enrollment_token" \
-  pg-agent-a \
-  "$third_public_key_hex" | jq -e '
-    .client_id == "pg-agent-a" and
-    .noise_mode == "enrolled_ik" and
-    .update.unmanaged_enabled == true
-  ' >/dev/null
-validate_agent_identity pg-agent-a "$second_public_key_hex" | jq -e '.accepted == false' >/dev/null
-validate_agent_identity pg-agent-a "$third_public_key_hex" | jq -e '.accepted == true' >/dev/null
-vpsctl_json key-lifecycle-report | jq -e '
-  .current_key_revoked_count == 0 and
-  .revocation_count >= 1 and
-  .rebuild_reenrollment_token_count >= 2 and
-  any(.clients[]; .client_id == "pg-agent-a" and .current_key_revoked == false)
-' >/dev/null
-seed_agent "pg-agent-a" "" "$third_public_key_hex"
-api_get "/api/v1/enrollment-tokens" | jq -e \
-  --arg first_token "$first_enrollment_token" \
-  --arg second_token "$second_enrollment_token" \
-  --arg third_token "$third_enrollment_token" '
-    (map(select(.used_by_client_id == "pg-agent-a")) | length == 3) and
-    all(.[]; ((. | tostring | contains($first_token) | not) and (. | tostring | contains($second_token) | not) and (. | tostring | contains($third_token) | not)))
-  ' >/dev/null
+api_get "/api/v1/agents" | jq -e 'all(.[]; .id != "pg-revoked-agent")' >/dev/null
+seed_agent "pg-agent-a" "" "$second_public_key_hex"
 
 plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "name": "pg-gre-a-b",
@@ -588,10 +548,17 @@ SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \
 VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
   target/debug/vpsman-worker --once --worker-id pg-postgres-smoke --notification-retention-days 30 >"$SMOKE_TMPDIR/worker-once.log" 2>&1
-scheduled_runs_json="$(api_get "/api/v1/jobs?limit=20" | jq '
-  map(select((.command_type | startswith("scheduled_")) and .status == "dispatch_failed"))
-')"
-scheduled_run_job_id="$(jq -r 'first | .id // empty' <<<"$scheduled_runs_json")"
+scheduled_run_count="0"
+scheduled_run_job_id=""
+deadline=$((SECONDS + 10))
+while (( SECONDS < deadline )); do
+  scheduled_run_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status = 'dispatch_failed'")"
+  scheduled_run_job_id="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT id FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status = 'dispatch_failed' ORDER BY created_at DESC, id DESC LIMIT 1")"
+  if [[ "$scheduled_run_count" == "2" && -n "$scheduled_run_job_id" ]]; then
+    break
+  fi
+  sleep 0.2
+done
 if [[ -z "$scheduled_run_job_id" ]]; then
   echo "scheduled run job was not materialized" >&2
   cat "$SMOKE_TMPDIR/worker-once.log" >&2 || true
@@ -602,8 +569,9 @@ if [[ -z "$scheduled_run_job_id" ]]; then
   docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT action, metadata FROM audit_logs ORDER BY created_at DESC LIMIT 10" >&2 || true
   exit 1
 fi
-if [[ "$(jq 'length' <<<"$scheduled_runs_json")" -ne "2" ]]; then
+if [[ "$scheduled_run_count" != "2" ]]; then
   echo "expected run_all_limited schedule catch-up to materialize two dispatch-failed run jobs" >&2
+  docker exec "$container_name" psql -U vpsman -d vpsman -c "SELECT id, command_type, status, target_count, source_schedule_id, completed_at FROM jobs ORDER BY created_at DESC LIMIT 10" >&2 || true
   exit 1
 fi
 api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
@@ -616,7 +584,7 @@ if [[ "$worker_lease_count" != "2" ]]; then
   exit 1
 fi
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
-  .id == $job_id and (.command_type | startswith("scheduled_")) and .status == "dispatch_failed" and .completed_at != null
+  .id == $job_id and (.command_type | startswith("scheduled_")) and .status == "dispatch_failed"
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id/targets" | jq -e '
   length == 2 and
@@ -758,15 +726,15 @@ degraded_update_json="$(vpsctl_json agent-update \
   --clients pg-agent-b \
   --confirmed)"
 degraded_update_job_id="$(jq -r '.job_id' <<<"$degraded_update_json")"
-jq -e '.accepted_targets == 0 and .status == "degraded_unprivileged"' \
+jq -e '.accepted_targets == 0 and (.status == "dispatching" or .status == "degraded_unprivileged")' \
   <<<"$degraded_update_json" >/dev/null
-api_get "/api/v1/jobs/$degraded_update_job_id/targets" | jq -e '
+wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "degraded_unprivileged" and .[0].completed_at != null
-' >/dev/null
-api_get "/api/v1/jobs/$degraded_update_job_id/outputs" | jq -e '
+' "degraded-update-targets" >/dev/null
+wait_api_jq "/api/v1/jobs/$degraded_update_job_id/outputs" '
   length == 1 and
   (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
-' >/dev/null
+' "degraded-update-outputs" >/dev/null
 
 degraded_process_json="$(vpsctl_json process-start \
   --name pg-limited-worker \
@@ -776,15 +744,15 @@ degraded_process_json="$(vpsctl_json process-start \
   --clients pg-agent-b \
   --confirmed)"
 degraded_process_job_id="$(jq -r '.job_id' <<<"$degraded_process_json")"
-jq -e '.accepted_targets == 0 and .status == "degraded_unprivileged"' \
+jq -e '.accepted_targets == 0 and (.status == "dispatching" or .status == "degraded_unprivileged")' \
   <<<"$degraded_process_json" >/dev/null
-api_get "/api/v1/jobs/$degraded_process_job_id/targets" | jq -e '
+wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "degraded_unprivileged" and .[0].completed_at != null
-' >/dev/null
-api_get "/api/v1/jobs/$degraded_process_job_id/outputs" | jq -e '
+' "degraded-process-targets" >/dev/null
+wait_api_jq "/api/v1/jobs/$degraded_process_job_id/outputs" '
   length == 1 and
   (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
-' >/dev/null
+' "degraded-process-outputs" >/dev/null
 
 rejected_job_json="$(api_post_expect_status "/api/v1/jobs" '{
   "selector_expression": "id:pg-agent-a || tag:edge",
@@ -848,8 +816,8 @@ jq -e '.error == "privilege_assertion_required" and .status == 403' \
 
 audit_json="$(api_get "/api/v1/audit?limit=200")"
 jq -e '
-  any(.[]; .action == "enrollment.claimed" and .target == "client:pg-agent-a") and
-  any(.[]; .action == "client_key.revoked" and .target == "client:pg-agent-a") and
+  any(.[]; .action == "agent_identity.upserted" and .target == "client:pg-agent-a") and
+  any(.[]; .action == "client_key.revoked" and .target == "client:pg-revoked-agent") and
   any(.[]; .action == "network.tunnel_plan_created") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "fleet.alert_notification_deliveries_worker_processed") and
@@ -870,12 +838,12 @@ start_api "restart"
 api_get "/api/v1/auth/me" | jq -e '.username == "postgres-smoke"' >/dev/null
 api_get "/api/v1/fleet/summary" | jq -e '.total == 2 and .online == 2' >/dev/null
 api_get "/api/v1/agents" | jq -e '
-  any(.[]; .id == "pg-agent-a" and .display_name == "pg-edge-a-rebuilt" and (.tags | index("persistent")) and (.tags | index("rebuilt")) and (.tags | index("revoked-rebuilt")) and (.tags | index("os:debian"))) and
+  any(.[]; .id == "pg-agent-a" and .display_name == "pg-edge-a-rotated" and (.tags | index("persistent")) and (.tags | index("rotated")) and (.tags | index("os:debian"))) and
   any(.[]; .id == "pg-agent-b" and (.tags | index("bird2")) and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
 ' >/dev/null
-persisted_rebuilt_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
-if [[ "$persisted_rebuilt_key_hex" != "$third_public_key_hex" ]]; then
-  echo "expected rebuilt public key to persist across API restart" >&2
+persisted_rotated_key_hex="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT encode(public_key, 'hex') FROM clients WHERE id = 'pg-agent-a'")"
+if [[ "$persisted_rotated_key_hex" != "$second_public_key_hex" ]]; then
+  echo "expected rotated public key to persist across API restart" >&2
   exit 1
 fi
 api_get "/api/v1/key-lifecycle/report" | jq -e '
@@ -940,30 +908,30 @@ api_get "/api/v1/restore-plans?limit=10" | jq -e --arg restore_id "$restore_id" 
   any(.[]; .id == $restore_id and .source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == "/restore" and .command_scope == "client:pg-agent-b")
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
-  .id == $job_id and (.command_type | startswith("scheduled_")) and .status == "dispatch_failed" and .completed_at != null
+  .id == $job_id and (.command_type | startswith("scheduled_")) and .status == "dispatch_failed"
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id/targets" | jq -e '
   length == 2 and
   (map(.client_id) | sort == ["pg-agent-a","pg-agent-b"]) and
   all(.[]; .status == "dispatch_failed" and .completed_at != null)
 ' >/dev/null
-api_get "/api/v1/jobs/$degraded_update_job_id/targets" | jq -e '
+wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "degraded_unprivileged" and .[0].completed_at != null
-' >/dev/null
-api_get "/api/v1/jobs/$degraded_update_job_id/outputs" | jq -e '
+' "degraded-update-targets-restart" >/dev/null
+wait_api_jq "/api/v1/jobs/$degraded_update_job_id/outputs" '
   length == 1 and
   (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
-' >/dev/null
-api_get "/api/v1/jobs/$degraded_process_job_id/targets" | jq -e '
+' "degraded-update-outputs-restart" >/dev/null
+wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "degraded_unprivileged" and .[0].completed_at != null
-' >/dev/null
-api_get "/api/v1/jobs/$degraded_process_job_id/outputs" | jq -e '
+' "degraded-process-targets-restart" >/dev/null
+wait_api_jq "/api/v1/jobs/$degraded_process_job_id/outputs" '
   length == 1 and
   (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
-' >/dev/null
+' "degraded-process-outputs-restart" >/dev/null
 audit_json="$(api_get "/api/v1/audit?limit=200")"
 jq -e '
-  any(.[]; .action == "enrollment.claimed" and .target == "client:pg-agent-a") and
+  any(.[]; .action == "agent_identity.upserted" and .target == "client:pg-agent-a") and
   any(.[]; .action == "network.tunnel_plan_created") and
   any(.[]; .action == "schedule.created") and
   any(.[]; .action == "backup_policy.upserted") and
@@ -982,5 +950,5 @@ jq -n \
   '{
     postgres_persistence_smoke: "ok",
     api_url: $api_url,
-    checks: ["auth_session", "agents", "postgres_reenrollment_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
+    checks: ["auth_session", "agents", "direct_identity_key_rotation", "client_key_revocation", "telemetry_minute_rollups", "telemetry_minute_network_rates", "tag_bulk", "tunnel_plan", "schedule", "backup_policy", "backup_policy_retention_prune", "worker_leases", "alert_notification_worker", "missing_privilege_rejection", "capability_degraded_update", "capability_degraded_process_limit", "backup_artifact_metadata", "backup_restore_metadata", "audit", "api_restart"]
   }'

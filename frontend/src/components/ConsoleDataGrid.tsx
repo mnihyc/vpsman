@@ -59,8 +59,10 @@ export type ConsoleDataGridColumn<T> = {
 };
 
 export type ConsoleDataGridAction<T> = {
+  description?: (rows: T[]) => string;
   disabled?: (rows: T[]) => boolean;
   expandRow?: boolean;
+  icon?: ReactNode;
   label: string;
   onSelect: (rows: T[]) => void;
   tone?: "danger" | "normal";
@@ -89,11 +91,13 @@ export function ConsoleDataGrid<T>({
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
+  rowActions = [],
   rows,
   singleExpandedRow = false,
   searchPlaceholder = "Search",
   storageKey,
   title,
+  toolbarActions,
 }: {
   actions?: ConsoleDataGridAction<T>[];
   columns: ConsoleDataGridColumn<T>[];
@@ -108,11 +112,13 @@ export function ConsoleDataGrid<T>({
   onSelectionChange?: (rows: T[]) => void;
   renderExpandedRow?: (row: T) => ReactNode;
   renderSelectionPanel?: (rows: T[]) => ReactNode;
+  rowActions?: ConsoleDataGridAction<T>[];
   rows: T[];
   singleExpandedRow?: boolean;
   searchPlaceholder?: string;
   storageKey: string;
   title: string;
+  toolbarActions?: ReactNode;
 }) {
   const [preferences] = useState(() => readGridPreferences(storageKey));
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(
@@ -230,8 +236,59 @@ export function ConsoleDataGrid<T>({
           </span>
         ),
       })),
+      ...(rowActions.length > 0
+        ? [
+            {
+              id: "__actions",
+              header: "Actions",
+              size: Math.max(136, Math.min(280, rowActions.length * 74 + 26)),
+              minSize: 136,
+              enableHiding: false,
+              cell: ({ row }: { row: Row<T> }) => (
+                <span className="inlineActions gridRowActions">
+                  {rowActions.map((action) => {
+                    const sourceRows = [row.original];
+                    const description = actionDescription(action, sourceRows);
+                    return (
+                      <button
+                        aria-label={description}
+                        className={
+                          action.tone === "danger"
+                            ? "gridRowAction danger"
+                            : "gridRowAction"
+                        }
+                        disabled={action.disabled?.(sourceRows)}
+                        key={action.label}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          invokeAction(action, sourceRows);
+                        }}
+                        title={description}
+                        type="button"
+                      >
+                        {action.icon && (
+                          <span className="gridRowActionIcon" aria-hidden>
+                            {action.icon}
+                          </span>
+                        )}
+                        <span>{action.label}</span>
+                      </button>
+                    );
+                  })}
+                </span>
+              ),
+            } satisfies ColumnDef<T>,
+          ]
+        : []),
     ],
-    [columns, expandedRows, renderExpandedRow, singleExpandedRow, title],
+    [
+      columns,
+      expandedRows,
+      renderExpandedRow,
+      rowActions,
+      singleExpandedRow,
+      title,
+    ],
   );
   const defaultColumnOrder = useMemo(
     () =>
@@ -280,6 +337,9 @@ export function ConsoleDataGrid<T>({
     .getSelectedRowModel()
     .rows.map((row) => row.original);
   const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
+  const contextRowActions = rowActions.length > 0 ? rowActions : actions;
+  const showContextSelectionActions =
+    rowActions.length > 0 && actions.length > 0;
   const pageCount = table.getPageCount() || 1;
   const currentPage = table.getState().pagination.pageIndex + 1;
 
@@ -359,6 +419,10 @@ export function ConsoleDataGrid<T>({
     action.onSelect(actionRows);
   }
 
+  function actionDescription(action: ConsoleDataGridAction<T>, rows: T[]) {
+    return action.description?.(rows) ?? action.label;
+  }
+
   function handleColumnDragEnd(event: DragEndEvent) {
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : "";
@@ -402,6 +466,7 @@ export function ConsoleDataGrid<T>({
           value={globalFilter}
         />
         <div className="gridToolbarActions">
+          {toolbarActions}
           {actions.length > 0 && (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
@@ -416,23 +481,35 @@ export function ConsoleDataGrid<T>({
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content align="end" className="consoleMenu">
-                  {actions.map((action) => (
-                    <DropdownMenu.Item
-                      className={
-                        action.tone === "danger"
-                          ? "consoleMenuItem danger"
-                          : "consoleMenuItem"
-                      }
-                      disabled={
-                        selectedRows.length === 0 ||
-                        action.disabled?.(selectedRows)
-                      }
-                      key={action.label}
-                      onSelect={() => invokeAction(action)}
-                    >
-                      {action.label}
-                    </DropdownMenu.Item>
-                  ))}
+                  {actions.map((action) => {
+                    const description = actionDescription(
+                      action,
+                      selectedRows,
+                    );
+                    return (
+                      <DropdownMenu.Item
+                        className={
+                          action.tone === "danger"
+                            ? "consoleMenuItem danger"
+                            : "consoleMenuItem"
+                        }
+                        disabled={
+                          selectedRows.length === 0 ||
+                          action.disabled?.(selectedRows)
+                        }
+                        key={action.label}
+                        onSelect={() => invokeAction(action)}
+                        title={description}
+                      >
+                        {action.icon && (
+                          <span className="consoleMenuIcon" aria-hidden>
+                            {action.icon}
+                          </span>
+                        )}
+                        <span>{action.label}</span>
+                      </DropdownMenu.Item>
+                    );
+                  })}
                 </DropdownMenu.Content>
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
@@ -562,7 +639,11 @@ export function ConsoleDataGrid<T>({
                     >
                       {row.getVisibleCells().map((cell) => (
                         <div
-                          className="gridCell"
+                          className={
+                            cell.column.id === "__actions"
+                              ? "gridCell gridStickyActions"
+                              : "gridCell"
+                          }
                           key={cell.id}
                           role="gridcell"
                           style={{ width: cell.column.getSize() }}
@@ -581,26 +662,73 @@ export function ConsoleDataGrid<T>({
                     )}
                   </div>
                 </ContextMenu.Trigger>
-                {actions.length > 0 && (
+                {(contextRowActions.length > 0 ||
+                  showContextSelectionActions) && (
                   <ContextMenu.Portal>
                     <ContextMenu.Content className="consoleMenu">
-                      <ContextMenu.Label className="consoleMenuLabel">
-                        Row actions
-                      </ContextMenu.Label>
-                      {actions.map((action) => (
-                        <ContextMenu.Item
-                          className={
-                            action.tone === "danger"
-                              ? "consoleMenuItem danger"
-                              : "consoleMenuItem"
-                          }
-                          disabled={action.disabled?.([row.original])}
-                          key={action.label}
-                          onSelect={() => invokeAction(action, [row.original])}
-                        >
-                          {action.label}
-                        </ContextMenu.Item>
-                      ))}
+                      {contextRowActions.length > 0 && (
+                        <>
+                          <ContextMenu.Label className="consoleMenuLabel">
+                            Row actions
+                          </ContextMenu.Label>
+                          {contextRowActions.map((action) => {
+                            const sourceRows = [row.original];
+                            return (
+                              <ContextMenu.Item
+                                className={
+                                  action.tone === "danger"
+                                    ? "consoleMenuItem danger"
+                                    : "consoleMenuItem"
+                                }
+                                disabled={action.disabled?.(sourceRows)}
+                                key={`row:${action.label}`}
+                                onSelect={() => invokeAction(action, sourceRows)}
+                                title={actionDescription(action, sourceRows)}
+                              >
+                                {action.icon && (
+                                  <span
+                                    className="consoleMenuIcon"
+                                    aria-hidden
+                                  >
+                                    {action.icon}
+                                  </span>
+                                )}
+                                <span>{action.label}</span>
+                              </ContextMenu.Item>
+                            );
+                          })}
+                        </>
+                      )}
+                      {showContextSelectionActions && (
+                        <>
+                          <ContextMenu.Label className="consoleMenuLabel">
+                            Selection actions
+                          </ContextMenu.Label>
+                          {actions.map((action) => (
+                            <ContextMenu.Item
+                              className={
+                                action.tone === "danger"
+                                  ? "consoleMenuItem danger"
+                                  : "consoleMenuItem"
+                              }
+                              disabled={
+                                selectedRows.length === 0 ||
+                                action.disabled?.(selectedRows)
+                              }
+                              key={`selection:${action.label}`}
+                              onSelect={() => invokeAction(action)}
+                              title={actionDescription(action, selectedRows)}
+                            >
+                              {action.icon && (
+                                <span className="consoleMenuIcon" aria-hidden>
+                                  {action.icon}
+                                </span>
+                              )}
+                              <span>{action.label}</span>
+                            </ContextMenu.Item>
+                          ))}
+                        </>
+                      )}
                     </ContextMenu.Content>
                   </ContextMenu.Portal>
                 )}
@@ -666,9 +794,17 @@ function SortableHeaderCell<T>({
     disabled: !canDrag,
     id: header.column.id,
   });
+  const headerClassName = [
+    "gridHeaderCell",
+    isDragging ? "dragging" : "",
+    header.column.id === "__actions" ? "gridStickyActions" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div
-      className={isDragging ? "gridHeaderCell dragging" : "gridHeaderCell"}
+      className={headerClassName}
       ref={setNodeRef}
       role="columnheader"
       style={{

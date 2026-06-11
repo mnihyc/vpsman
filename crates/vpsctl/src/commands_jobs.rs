@@ -25,38 +25,41 @@ pub(crate) fn jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()>
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct JobCreateOptions {
+    pub(crate) command: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) pty: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) privileged: bool,
+    pub(crate) destructive: bool,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
 pub(crate) fn job_create(
     api_url: &str,
     token: Option<&str>,
-    command: String,
-    argv: Vec<String>,
-    pty: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    privileged: bool,
-    destructive: bool,
-    confirmed: bool,
-    force_unprivileged: bool,
+    options: JobCreateOptions,
 ) -> Result<()> {
-    let effective_argv = if argv.is_empty() {
-        vec![command.clone()]
+    let effective_argv = if options.argv.is_empty() {
+        vec![options.command.clone()]
     } else {
-        argv.clone()
+        options.argv.clone()
     };
-    let operation = pty.then(|| JobCommand::Shell {
+    let operation = options.pty.then(|| JobCommand::Shell {
         argv: effective_argv.clone(),
         pty: true,
     });
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
-    let privilege_assertion = if privileged {
-        let password = load_super_password(&password_env)?;
-        let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
+    let target_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
+    let privilege_assertion = if options.privileged {
+        let password = load_super_password(&options.password_env)?;
+        let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
         let assertion_command = if let Some(operation) = &operation {
             operation.clone()
         } else {
@@ -77,9 +80,9 @@ pub(crate) fn job_create(
                 &selector_expression,
                 &password,
                 &salt_hex,
-                privilege_ttl_secs,
-                timeout_secs,
-                force_unprivileged,
+                options.privilege_ttl_secs,
+                options.timeout_secs,
+                options.force_unprivileged,
                 true,
             )?
             .privilege_assertion,
@@ -95,16 +98,16 @@ pub(crate) fn job_create(
             token,
             &serde_json::json!({
                 "job_id": Uuid::new_v4(),
-                "command": command,
-                "argv": if operation.is_some() { Vec::<String>::new() } else { argv },
+                "command": options.command,
+                "argv": if operation.is_some() { Vec::<String>::new() } else { options.argv },
                 "operation": operation,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
-                "privileged": privileged,
-                "destructive": destructive,
-                "confirmed": confirmed,
-                "force_unprivileged": force_unprivileged,
-                "timeout_secs": timeout_secs,
+                "privileged": options.privileged,
+                "destructive": options.destructive,
+                "confirmed": options.confirmed,
+                "force_unprivileged": options.force_unprivileged,
+                "timeout_secs": options.timeout_secs,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -112,7 +115,6 @@ pub(crate) fn job_create(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn job_shell(
     api_url: &str,
     token: Option<&str>,

@@ -9,7 +9,6 @@ use vpsman_common::{
 
 use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn file_pull(
     api_url: &str,
     token: Option<&str>,
@@ -44,7 +43,6 @@ pub(crate) fn file_pull(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn file_push(
     api_url: &str,
     token: Option<&str>,

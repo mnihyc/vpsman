@@ -27,6 +27,57 @@ pub(crate) use crate::backup_artifact_crypto::restore_artifact_bytes;
 const MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) struct BackupPolicyUpsertOptions {
+    pub(crate) name: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) recipient_public_key_hex: Option<String>,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) cron_expr: String,
+    pub(crate) enabled: bool,
+    pub(crate) catch_up_policy: String,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+    pub(crate) retention_days: Option<i32>,
+    pub(crate) keep_last: Option<i32>,
+    pub(crate) rotation_generation: Option<String>,
+    pub(crate) confirmed: bool,
+}
+
+pub(crate) struct RestoreRunOptions {
+    pub(crate) source_backup_request_id: String,
+    pub(crate) target_client_id: String,
+    pub(crate) artifact_file: Option<PathBuf>,
+    pub(crate) private_key_env: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) destination_root: Option<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
+pub(crate) struct RestoreRunWithCredentials<'a> {
+    pub(crate) source_backup_request_id: Uuid,
+    pub(crate) target_client_id: String,
+    pub(crate) artifact_file: Option<PathBuf>,
+    pub(crate) private_key_env: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) destination_root: Option<String>,
+    pub(crate) password: &'a str,
+    pub(crate) salt_hex: &'a str,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct JobOutputRecord {
     client_id: String,
@@ -124,35 +175,22 @@ fn backup_policy_prune_payload(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_policy_upsert(
     api_url: &str,
     token: Option<&str>,
-    name: String,
-    paths: Vec<String>,
-    include_config: bool,
-    recipient_public_key_hex: Option<String>,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    cron_expr: String,
-    enabled: bool,
-    catch_up_policy: String,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
-    retention_days: Option<i32>,
-    keep_last: Option<i32>,
-    rotation_generation: Option<String>,
-    confirmed: bool,
+    options: BackupPolicyUpsertOptions,
 ) -> Result<()> {
-    validate_backup_scope(&paths, include_config)?;
-    validate_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
+    validate_backup_scope(&options.paths, options.include_config)?;
+    validate_backup_recipient_public_key(options.recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
-        !clients.is_empty() || !tags.is_empty(),
+        !options.clients.is_empty() || !options.tags.is_empty(),
         "backup-policy-upsert requires at least one target selector"
     );
-    anyhow::ensure!(confirmed, "backup-policy-upsert requires --confirmed");
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    anyhow::ensure!(
+        options.confirmed,
+        "backup-policy-upsert requires --confirmed"
+    );
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
     println!(
         "{}",
@@ -161,23 +199,23 @@ pub(crate) fn backup_policy_upsert(
             "/api/v1/backup-policies",
             token,
             &serde_json::json!({
-                "name": name,
-                "paths": paths,
-                "include_config": include_config,
-                "recipient_public_key_hex": recipient_public_key_hex,
+                "name": options.name,
+                "paths": options.paths,
+                "include_config": options.include_config,
+                "recipient_public_key_hex": options.recipient_public_key_hex,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
-                "cron_expr": cron_expr,
+                "cron_expr": options.cron_expr,
                 "timezone": "UTC",
-                "enabled": enabled,
-                "catch_up_policy": catch_up_policy,
-                "catch_up_limit": catch_up_limit,
-                "retry_delay_secs": retry_delay_secs,
-                "max_failures": max_failures,
-                "retention_days": retention_days,
-                "keep_last": keep_last,
-                "rotation_generation": rotation_generation,
-                "confirmed": confirmed,
+                "enabled": options.enabled,
+                "catch_up_policy": options.catch_up_policy,
+                "catch_up_limit": options.catch_up_limit,
+                "retry_delay_secs": options.retry_delay_secs,
+                "max_failures": options.max_failures,
+                "retention_days": options.retention_days,
+                "keep_last": options.keep_last,
+                "rotation_generation": options.rotation_generation,
+                "confirmed": options.confirmed,
             }),
         )?
     );
@@ -405,7 +443,6 @@ pub(crate) fn backup_artifact_handoff(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_run(
     api_url: &str,
     token: Option<&str>,
@@ -468,7 +505,6 @@ pub(crate) fn backup_run(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_request(
     api_url: &str,
     token: Option<&str>,
@@ -566,7 +602,6 @@ fn sha256_file_hex(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_plan(
     api_url: &str,
     token: Option<&str>,
@@ -646,97 +681,73 @@ pub(crate) fn restore_plan(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_run(
     api_url: &str,
     token: Option<&str>,
-    source_backup_request_id: String,
-    target_client_id: String,
-    artifact_file: Option<PathBuf>,
-    private_key_env: String,
-    paths: Vec<String>,
-    include_config: bool,
-    destination_root: Option<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
+    options: RestoreRunOptions,
 ) -> Result<()> {
-    anyhow::ensure!(confirmed, "restore-run requires --confirmed");
-    let source_backup_request_id =
-        Uuid::parse_str(&source_backup_request_id).context("invalid source backup request UUID")?;
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
+    anyhow::ensure!(options.confirmed, "restore-run requires --confirmed");
+    let source_backup_request_id = Uuid::parse_str(&options.source_backup_request_id)
+        .context("invalid source backup request UUID")?;
+    let password = load_super_password(&options.password_env)?;
+    let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
     println!(
         "{}",
         restore_run_with_credentials(
             api_url,
             token,
-            source_backup_request_id,
-            target_client_id,
-            artifact_file,
-            private_key_env,
-            paths,
-            include_config,
-            destination_root,
-            &password,
-            &salt_hex,
-            privilege_ttl_secs,
-            timeout_secs,
-            confirmed,
-            force_unprivileged,
+            RestoreRunWithCredentials {
+                source_backup_request_id,
+                target_client_id: options.target_client_id,
+                artifact_file: options.artifact_file,
+                private_key_env: options.private_key_env,
+                paths: options.paths,
+                include_config: options.include_config,
+                destination_root: options.destination_root,
+                password: &password,
+                salt_hex: &salt_hex,
+                privilege_ttl_secs: options.privilege_ttl_secs,
+                timeout_secs: options.timeout_secs,
+                confirmed: options.confirmed,
+                force_unprivileged: options.force_unprivileged,
+            },
         )?
     );
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_run_with_credentials(
     api_url: &str,
     token: Option<&str>,
-    source_backup_request_id: Uuid,
-    target_client_id: String,
-    artifact_file: Option<PathBuf>,
-    private_key_env: String,
-    paths: Vec<String>,
-    include_config: bool,
-    destination_root: Option<String>,
-    password: &str,
-    salt_hex: &str,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
+    request: RestoreRunWithCredentials<'_>,
 ) -> Result<String> {
-    anyhow::ensure!(confirmed, "restore-run requires --confirmed");
+    anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
     let artifact_bytes = restore_artifact_bytes(
         api_url,
         token,
-        source_backup_request_id,
-        artifact_file.as_ref(),
+        request.source_backup_request_id,
+        request.artifact_file.as_ref(),
     )?;
     let operation = restore_run_operation(
-        source_backup_request_id,
+        request.source_backup_request_id,
         &artifact_bytes,
-        &private_key_env,
-        paths,
-        include_config,
-        destination_root,
+        &request.private_key_env,
+        request.paths,
+        request.include_config,
+        request.destination_root,
     )?;
-    let target_ids = vec![target_client_id.clone()];
+    let target_ids = vec![request.target_client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
     let privilege = build_privilege_for_job_command(
         &target_ids,
         &operation,
         "restore",
         &selector_expression,
-        password,
-        salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        force_unprivileged,
+        request.password,
+        request.salt_hex,
+        request.privilege_ttl_secs,
+        request.timeout_secs,
+        request.force_unprivileged,
         true,
     )?;
 
@@ -752,16 +763,15 @@ pub(crate) fn restore_run_with_credentials(
             "target_client_ids": target_ids,
             "privileged": true,
             "destructive": true,
-            "confirmed": confirmed,
-            "force_unprivileged": force_unprivileged,
-            "timeout_secs": timeout_secs,
+            "confirmed": request.confirmed,
+            "force_unprivileged": request.force_unprivileged,
+            "timeout_secs": request.timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn restore_rollback(
     api_url: &str,
     token: Option<&str>,

@@ -684,7 +684,6 @@ fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_vty_config_operation(
     api_url: &str,
     token: Option<&str>,

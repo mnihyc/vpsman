@@ -191,21 +191,19 @@ for ((i = 1; i <= agent_count; i += 1)); do
   display_name="$(printf 'df-%s-%s-%02d' "$provider" "$country" "$i")"
   tag_csv="provider:$provider,country:$country,role:$role,audit:docker-fleet,bulk-target"
 
-  token_json="$(vpsctl_json enrollment-token-create \
-    --ttl-secs 900 \
-    --default-tags "$tag_csv" \
-    --default-display-name "$display_name")"
-  enrollment_token="$(jq -r '.token' <<<"$token_json")"
   agent_dir="$SMOKE_TMPDIR/$logical_client_id"
   agent_config="$agent_dir/agent.toml"
   mkdir -p "$agent_dir/state"
-  target/debug/vpsctl --api-url "$api_url" enroll-config \
-    --token "$enrollment_token" \
-    --output-file "$agent_config" >/dev/null
-  enrolled_client_id="$(sed -n 's/^client_id = "\(.*\)"$/\1/p' "$agent_config" | head -n 1)"
-  if [[ -z "$enrolled_client_id" ]]; then
-    smoke_fail "enroll-config did not write client_id for $logical_client_id"
-  fi
+  smoke_create_direct_agent_config \
+    "$api_url" \
+    "$access_token" \
+    "$agent_config" \
+    "$logical_client_id" \
+    "$display_name" \
+    "$tag_csv" \
+    "$gateway_public_hex" \
+    "primary=$gateway_addr=10"
+  enrolled_client_id="$logical_client_id"
   [[ -n "$first_client_id" ]] || first_client_id="$enrolled_client_id"
   if [[ -z "$second_client_id" && "$enrolled_client_id" != "$first_client_id" ]]; then
     second_client_id="$enrolled_client_id"

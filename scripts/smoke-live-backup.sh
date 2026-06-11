@@ -57,6 +57,12 @@ if ! smoke_wait_http "$api_url/health"; then
   exit 1
 fi
 
+auth_json="$(curl -fsS \
+  -H "Content-Type: application/json" \
+  -d '{"username":"backup-smoke","password":"backup-smoke-password"}' \
+  "$api_url/api/v1/auth/bootstrap")"
+access_token="$(jq -r '.access_token' <<<"$auth_json")"
+
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
 VPSMAN_GATEWAY_NOISE_MODE="enrolled_ik" \
@@ -79,18 +85,15 @@ if ! smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
   exit 1
 fi
 
-token_json="$(target/debug/vpsctl --api-url "$api_url" enrollment-token-create \
-  --ttl-secs 600 \
-  --default-tags backup-smoke)"
-enrollment_token="$(jq -r '.token' <<<"$token_json")"
-
-target/debug/vpsctl --api-url "$api_url" enroll-config \
-  --token "$enrollment_token" \
-  --output-file "$agent_config"
-client_id="$(smoke_agent_config_client_id "$agent_config")"
-if [[ -z "$client_id" ]]; then
-  smoke_fail "enroll-config did not write client_id for live backup smoke"
-fi
+smoke_create_direct_agent_config \
+  "$api_url" \
+  "$access_token" \
+  "$agent_config" \
+  "$client_id" \
+  "$client_id" \
+  "backup-smoke" \
+  "$gateway_public_hex" \
+  "primary=$gateway_addr=10"
 
 if grep -q '^\[backup\]' "$agent_config"; then
   sed -i "/^\[backup\]/a recipient_public_key_hex = \"$backup_public_hex\"" "$agent_config"

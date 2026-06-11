@@ -11,7 +11,25 @@ pub(crate) struct BuiltJobPrivilege {
     pub(crate) privilege_assertion: PrivilegeAssertion,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct SchedulePrivilegeRequest<'a> {
+    pub(crate) action: &'a str,
+    pub(crate) schedule_id: Option<&'a str>,
+    pub(crate) name: &'a str,
+    pub(crate) command: &'a JobCommand,
+    pub(crate) command_type: &'a str,
+    pub(crate) selector_expression: &'a str,
+    pub(crate) resolved_targets: &'a [String],
+    pub(crate) cron_expr: &'a str,
+    pub(crate) timezone: &'a str,
+    pub(crate) enabled: bool,
+    pub(crate) catch_up_policy: &'a str,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+    pub(crate) deferred_until: Option<&'a str>,
+    pub(crate) deleted: bool,
+}
+
 pub(crate) fn build_privilege_for_job_command(
     client_ids: &[String],
     command: &JobCommand,
@@ -39,7 +57,6 @@ pub(crate) fn build_privilege_for_job_command(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_privilege_for_payload_hash(
     client_ids: &[String],
     payload_hash_hex: &str,
@@ -92,47 +109,14 @@ pub(crate) fn build_privilege_assertion(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_privilege_for_schedule(
-    action: &str,
-    schedule_id: Option<&str>,
-    name: &str,
-    command: &JobCommand,
-    command_type: &str,
-    selector_expression: &str,
-    resolved_targets: &[String],
-    cron_expr: &str,
-    timezone: &str,
-    enabled: bool,
-    catch_up_policy: &str,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
-    deferred_until: Option<&str>,
-    deleted: bool,
+    request: SchedulePrivilegeRequest<'_>,
     password: &str,
     salt_hex: &str,
     ttl_secs: u64,
 ) -> Result<PrivilegeAssertion> {
-    let payload_hash_hex = payload_hash(&encode_json(command)?);
-    let intent = canonical_schedule_privilege_intent(
-        action,
-        schedule_id,
-        name,
-        command_type,
-        &payload_hash_hex,
-        selector_expression,
-        resolved_targets,
-        cron_expr,
-        timezone,
-        enabled,
-        catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
-        deferred_until,
-        deleted,
-    )?;
+    let payload_hash_hex = payload_hash(&encode_json(request.command)?);
+    let intent = canonical_schedule_privilege_intent(&request, &payload_hash_hex)?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }
 
@@ -256,48 +240,34 @@ fn canonical_db_privilege_intent(
     })?)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn canonical_schedule_privilege_intent(
-    action: &str,
-    schedule_id: Option<&str>,
-    name: &str,
-    command_type: &str,
+    request: &SchedulePrivilegeRequest<'_>,
     operation_payload_hash: &str,
-    selector_expression: &str,
-    resolved_targets: &[String],
-    cron_expr: &str,
-    timezone: &str,
-    enabled: bool,
-    catch_up_policy: &str,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
-    deferred_until: Option<&str>,
-    deleted: bool,
 ) -> Result<String> {
-    let mut resolved_targets = resolved_targets
+    let mut resolved_targets = request
+        .resolved_targets
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
     resolved_targets.sort_unstable();
     Ok(serde_json::to_string(&SchedulePrivilegeIntent {
         version: 1,
-        action,
-        schedule_id,
-        name: name.trim(),
-        command_type,
+        action: request.action,
+        schedule_id: request.schedule_id,
+        name: request.name.trim(),
+        command_type: request.command_type,
         operation_payload_hash,
-        selector_expression: selector_expression.trim(),
+        selector_expression: request.selector_expression.trim(),
         resolved_targets,
-        cron_expr: cron_expr.trim(),
-        timezone,
-        enabled,
-        catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
-        deferred_until,
-        deleted,
+        cron_expr: request.cron_expr.trim(),
+        timezone: request.timezone,
+        enabled: request.enabled,
+        catch_up_policy: request.catch_up_policy,
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+        deferred_until: request.deferred_until,
+        deleted: request.deleted,
     })?)
 }
 
@@ -403,22 +373,24 @@ mod tests {
             pty: false,
         };
         let assertion = build_privilege_for_schedule(
-            "schedule.create",
-            None,
-            "nightly",
-            &command,
-            "shell_argv",
-            "id:client-a",
-            &clients,
-            "0 3 * * *",
-            "UTC",
-            true,
-            "skip_missed",
-            1,
-            60,
-            3,
-            None,
-            false,
+            SchedulePrivilegeRequest {
+                action: "schedule.create",
+                schedule_id: None,
+                name: "nightly",
+                command: &command,
+                command_type: "shell_argv",
+                selector_expression: "id:client-a",
+                resolved_targets: &clients,
+                cron_expr: "0 3 * * *",
+                timezone: "UTC",
+                enabled: true,
+                catch_up_policy: "skip_missed",
+                catch_up_limit: 1,
+                retry_delay_secs: 60,
+                max_failures: 3,
+                deferred_until: None,
+                deleted: false,
+            },
             "correct horse",
             "01020304",
             120,

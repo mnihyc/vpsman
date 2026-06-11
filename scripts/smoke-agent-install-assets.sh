@@ -9,16 +9,12 @@ smoke_require_tools awk bash base64 chmod cmp curl find grep jq sha256sum stat w
 smoke_init_tmpdir "vpsman-agent-install"
 
 fake_agent="$SMOKE_TMPDIR/vpsman-agent"
-fake_vpsctl="$SMOKE_TMPDIR/vpsctl"
-fake_vpsctl_args="$SMOKE_TMPDIR/vpsctl.args"
 config_a="$SMOKE_TMPDIR/agent-a.toml"
 config_b="$SMOKE_TMPDIR/agent-b.toml"
 stage_root="$SMOKE_TMPDIR/root"
 unprivileged_root="$SMOKE_TMPDIR/unprivileged-root"
-enroll_root="$SMOKE_TMPDIR/enroll-root"
 download_root="$SMOKE_TMPDIR/download-root"
 bad_agent_root="$SMOKE_TMPDIR/bad-agent-root"
-bad_helper_root="$SMOKE_TMPDIR/bad-helper-root"
 dev_root="$SMOKE_TMPDIR/dev-root"
 unsafe_path_root="$SMOKE_TMPDIR/unsafe-path-root"
 
@@ -28,82 +24,15 @@ echo vpsman-agent-smoke
 SH
 chmod 0755 "$fake_agent"
 
-cat >"$fake_vpsctl" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-: "${VPSMAN_FAKE_VPSCTL_ARGS:?}"
-printf '%s\n' "$*" >"$VPSMAN_FAKE_VPSCTL_ARGS"
-
-if [[ "${VPSMAN_ENROLLMENT_TOKEN:-}" != "enroll-token-smoke" ]]; then
-  echo "missing enrollment token env" >&2
-  exit 1
-fi
-
-output=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --token)
-      echo "token must not be passed on the process command line" >&2
-      exit 1
-      ;;
-    --api-url)
-      test "${2:-}" = "http://127.0.0.1:18080"
-      shift 2
-      ;;
-    enroll-config)
-      shift
-      ;;
-    --command-timeout-secs)
-      test "${2:-}" = "45"
-      shift 2
-      ;;
-    --output-file)
-      output="${2:-}"
-      shift 2
-      ;;
-    *)
-      echo "unexpected argument: $1" >&2
-      exit 1
-      ;;
-  esac
-done
-
-test -n "$output"
-
-cat >"$output" <<TOML
-client_id = "target-enrolled"
-discovery_url = "https://panel.example.com/.well-known/vpsman/endpoints.json"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-
-[noise]
-mode = "enrolled_ik"
-client_private_key_hex = "9999999999999999999999999999999999999999999999999999999999999999"
-server_public_key_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-[auth]
-command_timeout_secs = 45
-
-[[tcp_endpoints]]
-label = "primary"
-tcp_addr = "panel.example.com:9443"
-priority = 10
-TOML
-SH
-chmod 0755 "$fake_vpsctl"
-
 fake_agent_sha="$(sha256sum "$fake_agent" | awk '{print $1}')"
-fake_vpsctl_sha="$(sha256sum "$fake_vpsctl" | awk '{print $1}')"
 wrong_sha="0000000000000000000000000000000000000000000000000000000000000000"
-if [[ "$wrong_sha" == "$fake_agent_sha" || "$wrong_sha" == "$fake_vpsctl_sha" ]]; then
+if [[ "$wrong_sha" == "$fake_agent_sha" ]]; then
   wrong_sha="1111111111111111111111111111111111111111111111111111111111111111"
 fi
 
 cat >"$config_a" <<'TOML'
 client_id = "install-smoke-a"
 display_name = "install-smoke-a"
-discovery_url = "https://panel.example.com/.well-known/vpsman/endpoints.json"
 telemetry_light_secs = 15
 telemetry_full_secs = 60
 tags = ["edge"]
@@ -330,24 +259,6 @@ if VPSMAN_INSTALL_ROOT="$dev_root" \
 fi
 grep -q 'VPSMAN_ALLOW_DEV_CONFIG=1' "$SMOKE_TMPDIR/dev-rejected.log"
 
-VPSMAN_INSTALL_ROOT="$enroll_root" \
-  VPSMAN_AGENT_BINARY="$fake_agent" \
-  VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_VPSCTL_BINARY="$fake_vpsctl" \
-  VPSMAN_VPSCTL_SHA256_HEX="$fake_vpsctl_sha" \
-  VPSMAN_FAKE_VPSCTL_ARGS="$fake_vpsctl_args" \
-  VPSMAN_API_URL="http://127.0.0.1:18080" \
-  VPSMAN_ENROLLMENT_TOKEN="enroll-token-smoke" \
-  VPSMAN_COMMAND_TIMEOUT_SECS=45 \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/enroll-config.log"
-grep -q 'client_id = "target-enrolled"' "$enroll_root/etc/vpsman/agent.toml"
-grep -q 'mode = "enrolled_ik"' "$enroll_root/etc/vpsman/agent.toml"
-if grep -q -- '--token' "$fake_vpsctl_args"; then
-  echo "installer exposed enrollment token through vpsctl command-line args" >&2
-  exit 1
-fi
-
 if VPSMAN_INSTALL_ROOT="$download_root" \
   VPSMAN_AGENT_URL="file://$fake_agent" \
   VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
@@ -369,23 +280,6 @@ if VPSMAN_INSTALL_ROOT="$bad_agent_root" \
 fi
 grep -q 'agent binary sha256 mismatch' "$SMOKE_TMPDIR/bad-agent-hash.log"
 test ! -e "$bad_agent_root/opt/vpsman/vpsman-agent"
-
-if VPSMAN_INSTALL_ROOT="$bad_helper_root" \
-  VPSMAN_AGENT_BINARY="$fake_agent" \
-  VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_VPSCTL_BINARY="$fake_vpsctl" \
-  VPSMAN_VPSCTL_SHA256_HEX="$wrong_sha" \
-  VPSMAN_FAKE_VPSCTL_ARGS="$fake_vpsctl_args" \
-  VPSMAN_API_URL="http://127.0.0.1:18080" \
-  VPSMAN_ENROLLMENT_TOKEN="enroll-token-smoke" \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/bad-helper-hash.log" 2>&1; then
-  echo "expected installer to reject vpsctl helper sha256 mismatch" >&2
-  exit 1
-fi
-grep -q 'vpsctl helper sha256 mismatch' "$SMOKE_TMPDIR/bad-helper-hash.log"
-test ! -e "$bad_helper_root/opt/vpsman/vpsman-agent"
-test ! -e "$bad_helper_root/etc/vpsman/agent.toml"
 
 if VPSMAN_INSTALL_ROOT="$unsafe_path_root" \
   VPSMAN_INSTALL_DIR="/" \
@@ -428,9 +322,7 @@ jq -n \
       "unprivileged_no_root_autostart_assets",
       "unprivileged_uninstall_preserves_config",
       "unprivileged_uninstall_purge_config_state_logs",
-      "target_side_enroll_config",
       "agent_hash_verified",
-      "helper_hash_verified",
       "url_hash_required",
       "hash_mismatch_rejected",
       "filesystem_root_paths_rejected",

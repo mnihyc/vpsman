@@ -347,3 +347,31 @@
     grid-template-columns: minmax(0, 1fr) 104px;
   }
 }
+
+@media (max-width: 980px) {
+  .consoleResourceLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .fieldWide,
+  .fieldFull,
+  .thresholdMatrix {
+    grid-column: 1 / -1;
+  }
+
+  .thresholdMatrixRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .consoleDetailPanelHeader,
+  .consoleOperationsBar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .consoleOperationsActions {
+    justify-content: flex-start;
+  }
+}

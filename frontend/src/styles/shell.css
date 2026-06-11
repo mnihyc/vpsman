@@ -712,6 +712,13 @@ nav {
   overflow-wrap: anywhere;
 }
 
+.confirmationPromptError {
+  color: #b3261e;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .confirmationPromptBody dl {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -890,7 +897,18 @@ h2 {
 }
 
 .consoleMenuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   cursor: pointer;
+}
+
+.consoleMenuIcon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 16px;
+  color: currentColor;
 }
 
 .consoleMenuItem[data-highlighted] {
@@ -1165,4 +1183,71 @@ h2 {
 .gridIconButton {
   width: 28px;
   height: 28px;
+}
+
+.gridStickyActions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  border-left: 1px solid #eef1f6;
+  background: inherit;
+  box-shadow: -8px 0 12px rgba(248, 250, 253, 0.78);
+}
+
+.gridHeaderCell.gridStickyActions {
+  z-index: 4;
+  background: #fff;
+}
+
+.gridRow:hover .gridStickyActions,
+.gridRow.selected .gridStickyActions {
+  background: #f8fafd;
+}
+
+.gridRowActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  width: 100%;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.gridRowAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+.gridRowActionIcon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.gridRowAction:hover:not(:disabled) {
+  border-color: #c3d5f8;
+  background: #f8fbff;
+  color: #174ea6;
+}
+
+.gridRowAction.danger {
+  color: #b3261e;
+}
+
+.gridRowAction:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }

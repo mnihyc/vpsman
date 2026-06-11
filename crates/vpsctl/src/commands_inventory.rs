@@ -781,7 +781,6 @@ pub(crate) fn data_source_hot_config(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn data_source_hot_config_apply(
     api_url: &str,
     token: Option<&str>,

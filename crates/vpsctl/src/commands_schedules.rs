@@ -4,7 +4,10 @@ use vpsman_common::JobCommand;
 
 use crate::{
     http::{http_delete_json, http_get, http_post_json, http_put_json},
-    privilege::{build_privilege_for_schedule, load_super_password, load_super_salt_hex},
+    privilege::{
+        build_privilege_for_schedule, load_super_password, load_super_salt_hex,
+        SchedulePrivilegeRequest,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -24,67 +27,92 @@ struct ScheduleRecord {
     deferred_until: Option<String>,
 }
 
+pub(crate) struct ScheduleCreateOptions {
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) pty: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) cron_expr: String,
+    pub(crate) disabled: bool,
+    pub(crate) catch_up_policy: String,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+}
+
+pub(crate) struct ScheduleUpdateOptions {
+    pub(crate) schedule_id: String,
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) pty: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) cron_expr: String,
+    pub(crate) disabled: bool,
+    pub(crate) catch_up_policy: String,
+    pub(crate) catch_up_limit: i32,
+    pub(crate) retry_delay_secs: i64,
+    pub(crate) max_failures: i32,
+}
+
 pub(crate) fn schedules(api_url: &str, token: Option<&str>) -> Result<()> {
     println!("{}", http_get(api_url, "/api/v1/schedules", token)?);
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_create(
     api_url: &str,
     token: Option<&str>,
-    name: String,
-    command: String,
-    argv: Vec<String>,
-    pty: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    cron_expr: String,
-    disabled: bool,
-    catch_up_policy: String,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
+    options: ScheduleCreateOptions,
 ) -> Result<()> {
     validate_schedule_policy(
-        &catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
+        &options.catch_up_policy,
+        options.catch_up_limit,
+        options.retry_delay_secs,
+        options.max_failures,
     )?;
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     anyhow::ensure!(
         !selector_expression.is_empty(),
         "schedule-create requires at least one target selector"
     );
     let operation = JobCommand::Shell {
-        argv: if argv.is_empty() {
-            vec![command.clone()]
+        argv: if options.argv.is_empty() {
+            vec![options.command.clone()]
         } else {
-            argv
+            options.argv
         },
-        pty,
+        pty: options.pty,
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
     let privilege_assertion = build_privilege_for_schedule(
-        "schedule.create",
-        None,
-        &name,
-        &operation,
-        if pty { "shell_pty" } else { "shell_argv" },
-        &selector_expression,
-        &target_ids,
-        &cron_expr,
-        "UTC",
-        !disabled,
-        &catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
-        None,
-        false,
+        SchedulePrivilegeRequest {
+            action: "schedule.create",
+            schedule_id: None,
+            name: &options.name,
+            command: &operation,
+            command_type: if options.pty {
+                "shell_pty"
+            } else {
+                "shell_argv"
+            },
+            selector_expression: &selector_expression,
+            resolved_targets: &target_ids,
+            cron_expr: &options.cron_expr,
+            timezone: "UTC",
+            enabled: !options.disabled,
+            catch_up_policy: &options.catch_up_policy,
+            catch_up_limit: options.catch_up_limit,
+            retry_delay_secs: options.retry_delay_secs,
+            max_failures: options.max_failures,
+            deferred_until: None,
+            deleted: false,
+        },
         &password,
         &salt_hex,
         300,
@@ -96,17 +124,17 @@ pub(crate) fn schedule_create(
             "/api/v1/schedules",
             token,
             &serde_json::json!({
-                "name": name,
+                "name": options.name,
                 "operation": operation,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
-                "cron_expr": cron_expr,
+                "cron_expr": options.cron_expr,
                 "timezone": "UTC",
-                "enabled": !disabled,
-                "catch_up_policy": catch_up_policy,
-                "catch_up_limit": catch_up_limit,
-                "retry_delay_secs": retry_delay_secs,
-                "max_failures": max_failures,
+                "enabled": !options.disabled,
+                "catch_up_policy": options.catch_up_policy,
+                "catch_up_limit": options.catch_up_limit,
+                "retry_delay_secs": options.retry_delay_secs,
+                "max_failures": options.max_failures,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -114,81 +142,71 @@ pub(crate) fn schedule_create(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_update(
     api_url: &str,
     token: Option<&str>,
-    schedule_id: String,
-    name: String,
-    command: String,
-    argv: Vec<String>,
-    pty: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    cron_expr: String,
-    disabled: bool,
-    catch_up_policy: String,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
+    options: ScheduleUpdateOptions,
 ) -> Result<()> {
     validate_schedule_policy(
-        &catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
+        &options.catch_up_policy,
+        options.catch_up_limit,
+        options.retry_delay_secs,
+        options.max_failures,
     )?;
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     anyhow::ensure!(
         !selector_expression.is_empty(),
         "schedule-update requires at least one target selector"
     );
     let operation = JobCommand::Shell {
-        argv: if argv.is_empty() {
-            vec![command.clone()]
+        argv: if options.argv.is_empty() {
+            vec![options.command.clone()]
         } else {
-            argv
+            options.argv
         },
-        pty,
+        pty: options.pty,
     };
     let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
-    let privilege_assertion = schedule_privilege_assertion(
-        api_url,
-        token,
-        "schedule.update",
-        Some(&schedule_id),
-        &name,
-        &operation,
-        if pty { "shell_pty" } else { "shell_argv" },
-        &selector_expression,
-        &target_ids,
-        &cron_expr,
-        !disabled,
-        &catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
-        None,
-        false,
-    )?;
+    let privilege_assertion = schedule_privilege_assertion(SchedulePrivilegeRequest {
+        action: "schedule.update",
+        schedule_id: Some(&options.schedule_id),
+        name: &options.name,
+        command: &operation,
+        command_type: if options.pty {
+            "shell_pty"
+        } else {
+            "shell_argv"
+        },
+        selector_expression: &selector_expression,
+        resolved_targets: &target_ids,
+        cron_expr: &options.cron_expr,
+        timezone: "UTC",
+        enabled: !options.disabled,
+        catch_up_policy: &options.catch_up_policy,
+        catch_up_limit: options.catch_up_limit,
+        retry_delay_secs: options.retry_delay_secs,
+        max_failures: options.max_failures,
+        deferred_until: None,
+        deleted: false,
+    })?;
     println!(
         "{}",
         http_put_json(
             api_url,
-            &format!("/api/v1/schedules/{schedule_id}"),
+            &format!("/api/v1/schedules/{}", options.schedule_id),
             token,
             &serde_json::json!({
-                "name": name,
+                "name": options.name,
                 "operation": operation,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
-                "cron_expr": cron_expr,
+                "cron_expr": options.cron_expr,
                 "timezone": "UTC",
-                "enabled": !disabled,
-                "catch_up_policy": catch_up_policy,
-                "catch_up_limit": catch_up_limit,
-                "retry_delay_secs": retry_delay_secs,
-                "max_failures": max_failures,
+                "enabled": !options.disabled,
+                "catch_up_policy": options.catch_up_policy,
+                "catch_up_limit": options.catch_up_limit,
+                "retry_delay_secs": options.retry_delay_secs,
+                "max_failures": options.max_failures,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -348,78 +366,40 @@ fn schedule_by_id(api_url: &str, token: Option<&str>, schedule_id: &str) -> Resu
 }
 
 fn schedule_privilege_for_record(
-    api_url: &str,
-    token: Option<&str>,
+    _api_url: &str,
+    _token: Option<&str>,
     action: &str,
     schedule: &ScheduleRecord,
     enabled: bool,
     deferred_until: Option<&str>,
     deleted: bool,
 ) -> Result<vpsman_common::PrivilegeAssertion> {
-    schedule_privilege_assertion(
-        api_url,
-        token,
+    schedule_privilege_assertion(SchedulePrivilegeRequest {
         action,
-        Some(&schedule.id),
-        &schedule.name,
-        &schedule.operation,
-        &schedule.command_type,
-        &schedule.selector_expression,
-        &schedule.target_client_ids,
-        &schedule.cron_expr,
+        schedule_id: Some(&schedule.id),
+        name: &schedule.name,
+        command: &schedule.operation,
+        command_type: &schedule.command_type,
+        selector_expression: &schedule.selector_expression,
+        resolved_targets: &schedule.target_client_ids,
+        cron_expr: &schedule.cron_expr,
+        timezone: "UTC",
         enabled,
-        &schedule.catch_up_policy,
-        schedule.catch_up_limit,
-        schedule.retry_delay_secs,
-        schedule.max_failures,
+        catch_up_policy: &schedule.catch_up_policy,
+        catch_up_limit: schedule.catch_up_limit,
+        retry_delay_secs: schedule.retry_delay_secs,
+        max_failures: schedule.max_failures,
         deferred_until,
         deleted,
-    )
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn schedule_privilege_assertion(
-    _api_url: &str,
-    _token: Option<&str>,
-    action: &str,
-    schedule_id: Option<&str>,
-    name: &str,
-    operation: &JobCommand,
-    command_type: &str,
-    selector_expression: &str,
-    target_ids: &[String],
-    cron_expr: &str,
-    enabled: bool,
-    catch_up_policy: &str,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
-    deferred_until: Option<&str>,
-    deleted: bool,
+    request: SchedulePrivilegeRequest<'_>,
 ) -> Result<vpsman_common::PrivilegeAssertion> {
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
-    build_privilege_for_schedule(
-        action,
-        schedule_id,
-        name,
-        operation,
-        command_type,
-        selector_expression,
-        target_ids,
-        cron_expr,
-        "UTC",
-        enabled,
-        catch_up_policy,
-        catch_up_limit,
-        retry_delay_secs,
-        max_failures,
-        deferred_until,
-        deleted,
-        &password,
-        &salt_hex,
-        300,
-    )
+    build_privilege_for_schedule(request, &password, &salt_hex, 300)
 }
 
 pub(crate) fn selector_expression_from_targets(clients: &[String], tags: &[String]) -> String {

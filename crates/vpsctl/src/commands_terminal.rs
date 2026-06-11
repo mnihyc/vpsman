@@ -288,7 +288,6 @@ pub(crate) fn terminal_close(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_terminal_operation(
     api_url: &str,
     token: Option<&str>,

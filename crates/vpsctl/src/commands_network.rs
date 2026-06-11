@@ -632,7 +632,6 @@ pub(crate) fn tunnel_speed_test(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_network_job(
     api_url: &str,
     token: Option<&str>,

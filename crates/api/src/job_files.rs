@@ -46,7 +46,6 @@ pub(crate) fn validate_chunked_file_push(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_resumable_file_transfer_start(
     session_id: uuid::Uuid,
     path: &str,

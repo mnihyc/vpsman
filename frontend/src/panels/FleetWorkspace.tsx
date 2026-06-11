@@ -10,21 +10,29 @@ import { basicSetup, EditorView } from "codemirror";
 import {
   Activity,
   AlertTriangle,
+  ArrowUpCircle,
   BarChart3,
   Bell,
   Boxes,
+  Check,
+  CircleCheck,
   Clock3,
+  Eye,
   FileCog,
   FolderOpen,
   Gauge,
   LockKeyhole,
   Network,
+  Pencil,
   Plus,
+  Power,
+  PowerOff,
   RefreshCw,
   Server,
   Tags,
   TerminalSquare,
   Trash2,
+  VolumeX,
   X,
 } from "lucide-react";
 import {
@@ -653,14 +661,13 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Fleet alerts</h2>
-              <span>
-                {apiError ?? `${fleetAlerts.length} active fleet alerts`}
-              </span>
+              <span>{`${fleetAlerts.length} active fleet alerts`}</span>
             </div>
             <span className="sectionContext">
               {fleetAlertStates.length} triaged states
             </span>
           </div>
+          <ConsoleFreshnessBanner error={apiError} />
           <FleetAlertList
             agents={agents}
             alerts={fleetAlerts}
@@ -675,14 +682,13 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Alert policies</h2>
-              <span>
-                {apiError ?? `${fleetAlertPolicies.length} scoped thresholds`}
-              </span>
+              <span>{`${fleetAlertPolicies.length} scoped thresholds`}</span>
             </div>
             <span className="sectionContext">
               Thresholds resolve by tag, provider, client, or global scope
             </span>
           </div>
+          <ConsoleFreshnessBanner error={apiError} />
           <FleetAlertPolicyManager
             onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
@@ -696,34 +702,30 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Notification channels</h2>
-              <span>
-                {apiError ??
-                  `${fleetAlertNotificationChannels.length} alert channels, ${webhookRules.length} expression webhooks`}
-              </span>
+              <span>{`${fleetAlertNotificationChannels.length} alert channels, ${webhookRules.length} expression webhooks`}</span>
             </div>
             <span className="sectionContext">
               {fleetAlertNotifications.length + webhookRuleDeliveries.length}{" "}
               retained deliveries
             </span>
           </div>
-          <FleetAlertNotificationManager
-            channels={fleetAlertNotificationChannels}
-            deliveries={fleetAlertNotifications}
-            onDelete={onDeleteFleetAlertNotificationChannel}
-            onDispatch={onDispatchFleetAlertNotifications}
-            onProcess={onProcessFleetAlertNotifications}
-            onUpsert={onUpsertFleetAlertNotificationChannel}
-          />
-          <WebhookRuleManager
+          <ConsoleFreshnessBanner error={apiError} />
+          <FleetNotificationsHub
             agents={agents}
-            deliveries={webhookRuleDeliveries}
-            onDelete={onDeleteWebhookRule}
-            onDispatch={onDispatchWebhookRules}
-            onDryRun={onDryRunWebhookRule}
-            onProcess={onProcessWebhookRuleDeliveries}
-            onRotate={onRotateWebhookDeliveryHistory}
-            onUpsert={onUpsertWebhookRule}
-            rules={webhookRules}
+            alertChannels={fleetAlertNotificationChannels}
+            alertDeliveries={fleetAlertNotifications}
+            webhookDeliveries={webhookRuleDeliveries}
+            webhookRules={webhookRules}
+            onDeleteAlertChannel={onDeleteFleetAlertNotificationChannel}
+            onDeleteWebhookRule={onDeleteWebhookRule}
+            onDispatchAlertNotifications={onDispatchFleetAlertNotifications}
+            onDispatchWebhookRules={onDispatchWebhookRules}
+            onDryRunWebhookRule={onDryRunWebhookRule}
+            onProcessAlertNotifications={onProcessFleetAlertNotifications}
+            onProcessWebhookRuleDeliveries={onProcessWebhookRuleDeliveries}
+            onRotateWebhookDeliveryHistory={onRotateWebhookDeliveryHistory}
+            onUpsertAlertChannel={onUpsertFleetAlertNotificationChannel}
+            onUpsertWebhookRule={onUpsertWebhookRule}
           />
         </div>
       )}
@@ -2115,6 +2117,75 @@ function ConsoleFormGroup({
   );
 }
 
+function ConsoleDetailPanel({
+  actions,
+  children,
+  description,
+  onClose,
+  title,
+}: {
+  actions?: ReactNode;
+  children: ReactNode;
+  description?: ReactNode;
+  onClose?: () => void;
+  title: ReactNode;
+}) {
+  return (
+    <section className="consoleDetailPanel">
+      <div className="consoleDetailPanelHeader">
+        <span>
+          <strong>{title}</strong>
+          {description && <small>{description}</small>}
+        </span>
+        {onClose && (
+          <button
+            aria-label="Close detail panel"
+            className="iconButton"
+            onClick={onClose}
+            type="button"
+          >
+            <X size={16} />
+          </button>
+        )}
+      </div>
+      {children}
+      {actions && <div className="consoleFormActions">{actions}</div>}
+    </section>
+  );
+}
+
+function ConsoleFreshnessBanner({ error }: { error: string | null }) {
+  if (!error) {
+    return null;
+  }
+  return (
+    <div className="consoleFreshnessBanner">
+      <span>Using cached data. Last refresh failed: {error}</span>
+    </div>
+  );
+}
+
+function TokenPreview({
+  empty = "all",
+  values,
+}: {
+  empty?: string;
+  values: string[];
+}) {
+  if (values.length === 0) {
+    return <small>{empty}</small>;
+  }
+  return (
+    <span className="tokenPreview">
+      {values.map((value) => (
+        <span className="tokenChip" key={value} title={value}>
+          {value}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function formatEditableNumber(value: number | null | undefined): string {
   return value == null ? "" : String(value);
 }
@@ -2191,7 +2262,9 @@ function formatLastSeen(value: string | null | undefined): string {
 
 function formatLastSeenDetail(value: string | null | undefined): string {
   const normalized = normalizeAgentTimestamp(value);
-  return normalized ? formatTime(normalized) : "never seen until first gateway report";
+  return normalized
+    ? formatTime(normalized)
+    : "never seen until first gateway report";
 }
 
 function normalizedLastSeenSort(value: string | null | undefined): string {
@@ -2219,6 +2292,45 @@ async function copyText(value: string) {
     return;
   }
   await navigator.clipboard?.writeText(value);
+}
+
+function actionTargetDescription(
+  action: string,
+  kind: string,
+  name: string | undefined,
+  detail?: string,
+): string {
+  const target = name ? `${kind} ${name}` : kind;
+  return detail ? `${action} ${target}. ${detail}` : `${action} ${target}.`;
+}
+
+function selectedRecordSummary<T>(
+  rows: T[] | null,
+  singularLabel: string,
+  pluralLabel: string,
+  getName: (row: T) => string,
+  getId: (row: T) => string,
+) {
+  const selectedRows = rows ?? [];
+  if (selectedRows.length === 0) {
+    return `0 ${pluralLabel}`;
+  }
+  const names = selectedRows.map(getName).join(", ");
+  const ids = selectedRows.map(getId).join(", ");
+  return (
+    <span title={ids}>
+      {selectedRows.length}{" "}
+      {selectedRows.length === 1 ? singularLabel : pluralLabel}: {names}
+    </span>
+  );
+}
+
+function shortDeliveryError(error: string | null | undefined): string {
+  const trimmed = error?.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.length > 96 ? `${trimmed.slice(0, 93)}...` : trimmed;
 }
 
 function thresholdSummary(policy: FleetAlertPolicyRecord): string {
@@ -2257,6 +2369,12 @@ function FleetAlertPolicyManager({
   ) => Promise<FleetAlertPolicyRecord>;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [deleteRows, setDeleteRows] = useState<FleetAlertPolicyRecord[] | null>(
+    null,
+  );
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [name, setName] = useState("edge-resource-policy");
   const [scopeKind, setScopeKind] = useState("tag");
   const [scopeValue, setScopeValue] = useState("edge");
@@ -2278,8 +2396,8 @@ function FleetAlertPolicyManager({
       {
         id: "name",
         header: "Policy",
-        size: 250,
-        minSize: 180,
+        size: 260,
+        minSize: 190,
         sortValue: (policy) => policy.name,
         searchValue: (policy) => `${policy.name} ${policy.notes ?? ""}`,
         cell: (policy) => (
@@ -2329,15 +2447,13 @@ function FleetAlertPolicyManager({
       {
         id: "thresholds",
         header: "Thresholds",
-        size: 380,
+        size: 360,
         minSize: 240,
         searchValue: thresholdSummary,
         cell: (policy) => (
           <span className="historyPrimary">
             <strong>{thresholdSummary(policy)}</strong>
-            <small>
-              Memory, disk, and CPU thresholds are independently optional.
-            </small>
+            <small>Memory, disk, and CPU matrix.</small>
           </span>
         ),
       },
@@ -2370,6 +2486,11 @@ function FleetAlertPolicyManager({
     setStatus(null);
   }
 
+  function createPolicy() {
+    resetForm();
+    setEditorOpen(true);
+  }
+
   function editPolicy(policy: FleetAlertPolicyRecord) {
     setEditingId(policy.id);
     setName(policy.name);
@@ -2389,6 +2510,7 @@ function FleetAlertPolicyManager({
     setEnabled(policy.enabled);
     setNotes(policy.notes ?? "");
     setStatus(`editing ${policy.name}`);
+    setEditorOpen(true);
   }
 
   function requestFromPolicy(
@@ -2434,16 +2556,23 @@ function FleetAlertPolicyManager({
         confirmed: true,
       });
       setEditingId(policy.id);
+      setEditorOpen(true);
       setStatus(`saved ${policy.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "policy save failed");
     }
   }
 
-  async function deletePolicies(rows: FleetAlertPolicyRecord[]) {
-    if (rows.length === 0) return;
-    const label = rows.length === 1 ? rows[0].name : `${rows.length} policies`;
-    if (!window.confirm(`Delete ${label}?`)) return;
+  function requestDeletePolicies(rows: FleetAlertPolicyRecord[]) {
+    setDeleteError(null);
+    setDeleteRows(rows);
+  }
+
+  async function confirmDeletePolicies() {
+    const rows = deleteRows ?? [];
+    if (rows.length === 0 || deletePending) return;
+    setDeletePending(true);
+    setDeleteError(null);
     setStatus("deleting policies");
     try {
       for (const policy of rows) {
@@ -2451,12 +2580,17 @@ function FleetAlertPolicyManager({
       }
       if (rows.some((policy) => policy.id === editingId)) {
         resetForm();
+        setEditorOpen(false);
       }
+      setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "policy delete failed",
-      );
+      const message =
+        error instanceof Error ? error.message : "policy delete failed";
+      setDeleteError(message);
+      setStatus(message);
+    } finally {
+      setDeletePending(false);
     }
   }
 
@@ -2480,190 +2614,515 @@ function FleetAlertPolicyManager({
 
   return (
     <div className="consoleCrudPanel">
-      <ConsoleDataGrid
-        actions={[
+      <div className="consoleResourceLayout">
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Enable selected",
+              description: (rows) =>
+                `Enable ${rows.length} selected alert policy records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setPoliciesEnabled(rows, true),
+            },
+            {
+              label: "Disable selected",
+              description: (rows) =>
+                `Disable ${rows.length} selected alert policy records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setPoliciesEnabled(rows, false),
+            },
+            {
+              label: "Delete selected",
+              description: (rows) =>
+                `Delete ${rows.length} selected alert policy records. Existing alert states are not changed.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeletePolicies,
+              tone: "danger",
+            },
+          ]}
+          columns={policyColumns}
+          defaultPageSize={10}
+          empty="No alert policies saved."
+          getRowId={(policy) => policy.id}
+          itemLabel="policies"
+          onOpenRow={editPolicy}
+          rowActions={[
+            {
+              label: "Edit",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Edit",
+                  "alert policy",
+                  rows[0]?.name,
+                  "Opens the side detail editor.",
+                ),
+              icon: <Pencil size={14} />,
+              onSelect: (rows) => rows[0] && editPolicy(rows[0]),
+            },
+            {
+              label: "Enable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Enable",
+                  "alert policy",
+                  rows[0]?.name,
+                  "The policy will be evaluated.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === true,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setPoliciesEnabled(rows, true),
+            },
+            {
+              label: "Disable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Disable",
+                  "alert policy",
+                  rows[0]?.name,
+                  "The policy will stop evaluating.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === false,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setPoliciesEnabled(rows, false),
+            },
+            {
+              label: "Delete",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Delete",
+                  "alert policy",
+                  rows[0]?.name,
+                  "Existing alert states are not changed.",
+                ),
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeletePolicies,
+              tone: "danger",
+            },
+          ]}
+          rows={policies}
+          searchPlaceholder="Search policies by name, scope, thresholds, or notes"
+          storageKey="vpsman.grid.fleet.alertPolicies.v2"
+          title="Alert policy rules"
+          toolbarActions={
+            <button
+              className="primaryAction compactAction"
+              onClick={createPolicy}
+              type="button"
+            >
+              <Plus size={16} />
+              <span>Create policy</span>
+            </button>
+          }
+        />
+        {editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <>
+                <button
+                  className="primaryAction"
+                  type="button"
+                  onClick={() => void submit()}
+                >
+                  {editingId ? "Update policy" : "Create policy"}
+                </button>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={createPolicy}
+                >
+                  New policy
+                </button>
+              </>
+            }
+            description="Scoped thresholds are saved records. Table context stays visible while editing."
+            onClose={() => setEditorOpen(false)}
+            title={editingId ? "Edit alert policy" : "Create alert policy"}
+          >
+            <div className="consoleFormGrid">
+              <ConsoleField label="Policy name" className="fieldWide">
+                <input
+                  aria-label="Policy name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Scope kind">
+                <select
+                  aria-label="Policy scope kind"
+                  value={scopeKind}
+                  onChange={(event) => setScopeKind(event.target.value)}
+                >
+                  <option value="global">global</option>
+                  <option value="provider">provider</option>
+                  <option value="tag">tag</option>
+                  <option value="client">client</option>
+                </select>
+              </ConsoleField>
+              <ConsoleField
+                label="Scope value"
+                hint={
+                  scopeKind === "global"
+                    ? "Global policies do not need a value."
+                    : "Tag, provider, or client id."
+                }
+              >
+                <input
+                  aria-label="Policy scope value"
+                  disabled={scopeKind === "global"}
+                  value={scopeValue}
+                  onChange={(event) => setScopeValue(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Priority">
+                <input
+                  aria-label="Policy priority"
+                  value={priority}
+                  onChange={(event) => setPriority(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="State">
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Evaluate policy</span>
+                </label>
+              </ConsoleField>
+              <div className="thresholdMatrix">
+                <div className="thresholdMatrixRow header">
+                  <span>Resource</span>
+                  <span>Warning</span>
+                  <span>Critical</span>
+                </div>
+                <div className="thresholdMatrixRow">
+                  <strong>Memory available ratio</strong>
+                  <input
+                    aria-label="Memory warning ratio"
+                    value={memoryWarning}
+                    onChange={(event) => setMemoryWarning(event.target.value)}
+                    placeholder="0.20"
+                  />
+                  <input
+                    aria-label="Memory critical ratio"
+                    value={memoryCritical}
+                    onChange={(event) => setMemoryCritical(event.target.value)}
+                    placeholder="0.10"
+                  />
+                </div>
+                <div className="thresholdMatrixRow">
+                  <strong>Disk available ratio</strong>
+                  <input
+                    aria-label="Disk warning ratio"
+                    value={diskWarning}
+                    onChange={(event) => setDiskWarning(event.target.value)}
+                    placeholder="0.15"
+                  />
+                  <input
+                    aria-label="Disk critical ratio"
+                    value={diskCritical}
+                    onChange={(event) => setDiskCritical(event.target.value)}
+                    placeholder="0.08"
+                  />
+                </div>
+                <div className="thresholdMatrixRow">
+                  <strong>CPU load</strong>
+                  <input
+                    aria-label="CPU warning load"
+                    value={cpuWarning}
+                    onChange={(event) => setCpuWarning(event.target.value)}
+                    placeholder="4.0"
+                  />
+                  <input
+                    aria-label="CPU critical load"
+                    value={cpuCritical}
+                    onChange={(event) => setCpuCritical(event.target.value)}
+                    placeholder="8.0"
+                  />
+                </div>
+              </div>
+              <ConsoleField label="Notes" className="fieldFull">
+                <textarea
+                  aria-label="Policy notes"
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                />
+              </ConsoleField>
+            </div>
+          </ConsoleDetailPanel>
+        ) : (
+          <ConsoleDetailPanel
+            description="Create a policy or select a row to inspect and edit it."
+            title="Policy detail"
+          >
+            <div className="emptyState compactEmpty">
+              Select a policy row or create a new scoped threshold.
+            </div>
+          </ConsoleDetailPanel>
+        )}
+      </div>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConfirmationPrompt
+        confirmLabel="Delete"
+        detail="Deletes selected alert policy records. Existing alert states are not changed."
+        items={[
           {
-            label: "Edit policy",
-            disabled: (rows) => rows.length !== 1,
-            onSelect: (rows) => rows[0] && editPolicy(rows[0]),
-          },
-          {
-            label: "Enable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setPoliciesEnabled(rows, true),
-          },
-          {
-            label: "Disable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setPoliciesEnabled(rows, false),
-          },
-          {
-            label: "Delete",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void deletePolicies(rows),
-            tone: "danger",
+            label: "Policies",
+            value: selectedRecordSummary(
+              deleteRows,
+              "policy",
+              "policies",
+              (row) => row.name,
+              (row) => row.id,
+            ),
           },
         ]}
-        columns={policyColumns}
-        defaultPageSize={10}
-        empty="No alert policies saved."
-        getRowId={(policy) => policy.id}
-        itemLabel="policies"
-        onOpenRow={editPolicy}
-        rows={policies}
-        searchPlaceholder="Search policies by name, scope, thresholds, or notes"
-        storageKey="vpsman.grid.fleet.alertPolicies.v1"
-        title="Alert policy rules"
+        error={deleteError}
+        onCancel={() => {
+          setDeleteError(null);
+          setDeleteRows(null);
+        }}
+        onConfirm={() => void confirmDeletePolicies()}
+        open={deleteRows !== null}
+        pending={deletePending}
+        title="Delete alert policies"
+        tone="danger"
       />
-      <ConsoleFormGroup
-        title={editingId ? "Edit selected policy" : "Create alert policy"}
-        description="Threshold policies are editable records with explicit scope, priority, and independent resource thresholds."
-        actions={
-          <>
-            <button
-              className="primaryAction"
-              type="button"
-              onClick={() => void submit()}
-            >
-              {editingId ? "Update policy" : "Create policy"}
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={resetForm}
-            >
-              New policy
-            </button>
-          </>
-        }
-      >
-        <ConsoleField label="Policy name" className="fieldWide">
-          <input
-            aria-label="Policy name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Scope kind">
-          <select
-            aria-label="Policy scope kind"
-            value={scopeKind}
-            onChange={(event) => setScopeKind(event.target.value)}
-          >
-            <option value="global">global</option>
-            <option value="provider">provider</option>
-            <option value="tag">tag</option>
-            <option value="client">client</option>
-          </select>
-        </ConsoleField>
-        <ConsoleField
-          label="Scope value"
-          hint={
-            scopeKind === "global"
-              ? "Global policies do not need a value."
-              : "Tag, provider, or client id."
-          }
-        >
-          <input
-            aria-label="Policy scope value"
-            disabled={scopeKind === "global"}
-            value={scopeValue}
-            onChange={(event) => setScopeValue(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Priority">
-          <input
-            aria-label="Policy priority"
-            value={priority}
-            onChange={(event) => setPriority(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Enabled">
-          <label className="checkboxRow">
-            <input
-              checked={enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Evaluate policy</span>
-          </label>
-        </ConsoleField>
-        <ConsoleField
-          label="Memory warning ratio"
-          hint="Example: 0.20 means less than 20% memory free."
-        >
-          <input
-            aria-label="Memory warning ratio"
-            value={memoryWarning}
-            onChange={(event) => setMemoryWarning(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Memory critical ratio">
-          <input
-            aria-label="Memory critical ratio"
-            value={memoryCritical}
-            onChange={(event) => setMemoryCritical(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Disk warning ratio">
-          <input
-            aria-label="Disk warning ratio"
-            value={diskWarning}
-            onChange={(event) => setDiskWarning(event.target.value)}
-            placeholder="0.15"
-          />
-        </ConsoleField>
-        <ConsoleField label="Disk critical ratio">
-          <input
-            aria-label="Disk critical ratio"
-            value={diskCritical}
-            onChange={(event) => setDiskCritical(event.target.value)}
-            placeholder="0.08"
-          />
-        </ConsoleField>
-        <ConsoleField label="CPU warning load">
-          <input
-            aria-label="CPU warning load"
-            value={cpuWarning}
-            onChange={(event) => setCpuWarning(event.target.value)}
-            placeholder="4.0"
-          />
-        </ConsoleField>
-        <ConsoleField label="CPU critical load">
-          <input
-            aria-label="CPU critical load"
-            value={cpuCritical}
-            onChange={(event) => setCpuCritical(event.target.value)}
-            placeholder="8.0"
-          />
-        </ConsoleField>
-        <ConsoleField label="Notes" className="fieldFull">
-          <textarea
-            aria-label="Policy notes"
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-          />
-        </ConsoleField>
-      </ConsoleFormGroup>
-      {status && <small className="fleetPolicyStatus">{status}</small>}
     </div>
+  );
+}
+
+type NotificationRegistryTab =
+  | "channels"
+  | "webhooks"
+  | "deliveries"
+  | "maintenance";
+
+function FleetNotificationsHub({
+  agents,
+  alertChannels,
+  alertDeliveries,
+  webhookDeliveries,
+  webhookRules,
+  onDeleteAlertChannel,
+  onDeleteWebhookRule,
+  onDispatchAlertNotifications,
+  onDispatchWebhookRules,
+  onDryRunWebhookRule,
+  onProcessAlertNotifications,
+  onProcessWebhookRuleDeliveries,
+  onRotateWebhookDeliveryHistory,
+  onUpsertAlertChannel,
+  onUpsertWebhookRule,
+}: {
+  agents: AgentView[];
+  alertChannels: FleetAlertNotificationChannelRecord[];
+  alertDeliveries: FleetAlertNotificationDeliveryRecord[];
+  webhookDeliveries: WebhookRuleDeliveryRecord[];
+  webhookRules: WebhookRuleRecord[];
+  onDeleteAlertChannel: (channelId: string) => Promise<void>;
+  onDeleteWebhookRule: (ruleId: string) => Promise<void>;
+  onDispatchAlertNotifications: (
+    request: FleetAlertNotificationDispatchRequest,
+  ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onDispatchWebhookRules: (
+    request: WebhookRuleDispatchRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRunWebhookRule: (
+    request: WebhookRuleDryRunRequest,
+  ) => Promise<WebhookRuleDryRunRecord>;
+  onProcessAlertNotifications: (
+    request: FleetAlertNotificationProcessRequest,
+  ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onProcessWebhookRuleDeliveries: (
+    request: WebhookRuleProcessRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotateWebhookDeliveryHistory: (
+    request: WebhookDeliveryRotationRequest,
+  ) => Promise<WebhookDeliveryRotationResponse>;
+  onUpsertAlertChannel: (
+    request: FleetAlertNotificationChannelRequest,
+  ) => Promise<FleetAlertNotificationChannelRecord>;
+  onUpsertWebhookRule: (
+    request: WebhookRuleRequest,
+  ) => Promise<WebhookRuleRecord>;
+}) {
+  const [tab, setTab] = useState<NotificationRegistryTab>("channels");
+  const [alertPreviewRows, setAlertPreviewRows] = useState<
+    FleetAlertNotificationDeliveryRecord[]
+  >([]);
+  const [webhookPreviewRows, setWebhookPreviewRows] = useState<
+    WebhookRuleDeliveryRecord[]
+  >([]);
+  const [dryRunPreview, setDryRunPreview] =
+    useState<WebhookRuleDryRunRecord | null>(null);
+
+  function openDeliveries() {
+    setTab("deliveries");
+  }
+
+  function clearAlertPreview() {
+    setAlertPreviewRows([]);
+  }
+
+  function clearWebhookPreview() {
+    setDryRunPreview(null);
+    setWebhookPreviewRows([]);
+  }
+
+  return (
+    <div className="consoleCrudPanel">
+      <div
+        className="consoleRegistryTabs"
+        role="tablist"
+        aria-label="Notification registries"
+      >
+        {[
+          ["channels", "Channels"],
+          ["webhooks", "Webhooks"],
+          ["deliveries", "Deliveries"],
+          ["maintenance", "Maintenance"],
+        ].map(([id, label]) => (
+          <button
+            aria-selected={tab === id}
+            className={tab === id ? "active" : undefined}
+            key={id}
+            onClick={() => setTab(id as NotificationRegistryTab)}
+            role="tab"
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "channels" && (
+        <FleetAlertNotificationManager
+          channels={alertChannels}
+          onDelete={onDeleteAlertChannel}
+          onDispatch={onDispatchAlertNotifications}
+          onOpenDeliveries={openDeliveries}
+          onPreviewRows={setAlertPreviewRows}
+          onProcess={onProcessAlertNotifications}
+          onUpsert={onUpsertAlertChannel}
+        />
+      )}
+      {tab === "webhooks" && (
+        <WebhookRuleManager
+          agents={agents}
+          onDelete={onDeleteWebhookRule}
+          onDispatch={onDispatchWebhookRules}
+          onDryRun={onDryRunWebhookRule}
+          onOpenDeliveries={openDeliveries}
+          onPreviewDryRun={setDryRunPreview}
+          onPreviewRows={setWebhookPreviewRows}
+          onProcess={onProcessWebhookRuleDeliveries}
+          onUpsert={onUpsertWebhookRule}
+          rules={webhookRules}
+        />
+      )}
+      {tab === "deliveries" && (
+        <div className="consoleCrudPanel">
+          {alertPreviewRows.length > 0 && (
+            <DeliveryPreviewSection
+              count={alertPreviewRows.length}
+              onClear={clearAlertPreview}
+              title="Notification delivery preview"
+            >
+              <NotificationDeliveryHistoryGrid
+                deliveries={alertPreviewRows}
+                preview
+              />
+            </DeliveryPreviewSection>
+          )}
+          {(dryRunPreview || webhookPreviewRows.length > 0) && (
+            <DeliveryPreviewSection
+              count={webhookPreviewRows.length}
+              onClear={clearWebhookPreview}
+              title="Webhook delivery preview"
+            >
+              {dryRunPreview && (
+                <WebhookDryRunNotice agents={agents} preview={dryRunPreview} />
+              )}
+              <WebhookDeliveryHistoryGrid
+                deliveries={webhookPreviewRows}
+                preview
+              />
+            </DeliveryPreviewSection>
+          )}
+          <NotificationDeliveryHistoryGrid
+            deliveries={alertDeliveries}
+            preview={false}
+          />
+          <WebhookDeliveryHistoryGrid
+            deliveries={webhookDeliveries}
+            preview={false}
+          />
+        </div>
+      )}
+      {tab === "maintenance" && (
+        <WebhookDeliveryMaintenancePanel
+          onRotate={onRotateWebhookDeliveryHistory}
+          rules={webhookRules}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeliveryPreviewSection({
+  children,
+  count,
+  onClear,
+  title,
+}: {
+  children: ReactNode;
+  count: number;
+  onClear: () => void;
+  title: string;
+}) {
+  return (
+    <section className="deliveryPreviewSection">
+      <div className="deliveryPreviewHeader">
+        <span>
+          <strong>{title}</strong>
+          <small>
+            {count} preview {count === 1 ? "row" : "rows"}. Retained history is
+            still shown below.
+          </small>
+        </span>
+        <button
+          className="secondaryAction compactAction"
+          onClick={onClear}
+          type="button"
+        >
+          Clear preview
+        </button>
+      </div>
+      {children}
+    </section>
   );
 }
 
 function FleetAlertNotificationManager({
   channels,
-  deliveries,
   onDelete,
   onDispatch,
+  onOpenDeliveries,
+  onPreviewRows,
   onProcess,
   onUpsert,
 }: {
   channels: FleetAlertNotificationChannelRecord[];
-  deliveries: FleetAlertNotificationDeliveryRecord[];
   onDelete: (channelId: string) => Promise<void>;
   onDispatch: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
+  onOpenDeliveries: () => void;
+  onPreviewRows: (rows: FleetAlertNotificationDeliveryRecord[]) => void;
   onProcess: (
     request: FleetAlertNotificationProcessRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -2672,6 +3131,12 @@ function FleetAlertNotificationManager({
   ) => Promise<FleetAlertNotificationChannelRecord>;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [deleteRows, setDeleteRows] = useState<
+    FleetAlertNotificationChannelRecord[] | null
+  >(null);
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [name, setName] = useState("critical-audit-channel");
   const [scopeKind, setScopeKind] = useState("global");
   const [scopeValue, setScopeValue] = useState("");
@@ -2684,9 +3149,12 @@ function FleetAlertNotificationManager({
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<
-    FleetAlertNotificationDeliveryRecord[]
-  >([]);
+
+  const categoryTokens = useMemo(() => csvValues(categories), [categories]);
+  const operatorStateTokens = useMemo(
+    () => csvValues(operatorStates),
+    [operatorStates],
+  );
 
   const channelColumns = useMemo<
     ConsoleDataGridColumn<FleetAlertNotificationChannelRecord>[]
@@ -2695,8 +3163,8 @@ function FleetAlertNotificationManager({
       {
         id: "name",
         header: "Channel",
-        size: 240,
-        minSize: 170,
+        size: 250,
+        minSize: 180,
         sortValue: (channel) => channel.name,
         searchValue: (channel) => `${channel.name} ${channel.notes ?? ""}`,
         cell: (channel) => (
@@ -2730,34 +3198,44 @@ function FleetAlertNotificationManager({
         sortValue: (channel) => channel.min_severity,
         searchValue: (channel) => channel.min_severity,
         cell: (channel) => (
-          <span className="monoValue">{channel.min_severity}</span>
-        ),
-      },
-      {
-        id: "delivery",
-        header: "Delivery",
-        size: 260,
-        minSize: 190,
-        sortValue: (channel) => `${channel.delivery_kind}:${channel.target}`,
-        searchValue: (channel) => `${channel.delivery_kind} ${channel.target}`,
-        cell: (channel) => (
-          <span className="historyPrimary">
-            <strong>{channel.delivery_kind}</strong>
-            <small>{channel.target}</small>
-          </span>
+          <ConsoleStatusBadge tone={alertTone(channel.min_severity)}>
+            {channel.min_severity}
+          </ConsoleStatusBadge>
         ),
       },
       {
         id: "filters",
         header: "Filters",
         size: 260,
-        minSize: 200,
+        minSize: 190,
         searchValue: (channel) =>
           `${channel.categories.join(" ")} ${channel.operator_states.join(" ")}`,
         cell: (channel) => (
           <span className="historyPrimary">
-            <strong>{compactArray(channel.categories)} categories</strong>
-            <small>{compactArray(channel.operator_states)} states</small>
+            <strong>
+              {channel.categories.length > 0
+                ? channel.categories.join(", ")
+                : "all categories"}
+            </strong>
+            <small>
+              {channel.operator_states.length > 0
+                ? channel.operator_states.join(", ")
+                : "all states"}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "delivery",
+        header: "Delivery",
+        size: 240,
+        minSize: 170,
+        sortValue: (channel) => `${channel.delivery_kind}:${channel.target}`,
+        searchValue: (channel) => `${channel.delivery_kind} ${channel.target}`,
+        cell: (channel) => (
+          <span className="historyPrimary">
+            <strong>{channel.delivery_kind}</strong>
+            <small>{channel.target}</small>
           </span>
         ),
       },
@@ -2773,102 +3251,6 @@ function FleetAlertNotificationManager({
             {channel.enabled ? "enabled" : "disabled"}
           </ConsoleStatusBadge>
         ),
-      },
-      {
-        id: "updated",
-        header: "Updated",
-        size: 140,
-        minSize: 110,
-        sortValue: (channel) => channel.updated_at,
-        cell: (channel) => formatCompactTime(channel.updated_at),
-      },
-    ],
-    [],
-  );
-
-  const deliveryColumns = useMemo<
-    ConsoleDataGridColumn<FleetAlertNotificationDeliveryRecord>[]
-  >(
-    () => [
-      {
-        id: "channel",
-        header: "Channel",
-        size: 230,
-        minSize: 170,
-        sortValue: (delivery) => delivery.channel_name,
-        searchValue: (delivery) =>
-          `${delivery.channel_name} ${delivery.alert_category}`,
-        cell: (delivery) => (
-          <span className="historyPrimary">
-            <strong>{delivery.channel_name}</strong>
-            <small>
-              {delivery.alert_category} · {delivery.alert_severity}
-            </small>
-          </span>
-        ),
-      },
-      {
-        id: "status",
-        header: "Status",
-        size: 110,
-        minSize: 90,
-        sortValue: (delivery) => delivery.status,
-        searchValue: (delivery) => delivery.status,
-        cell: (delivery) => (
-          <ConsoleStatusBadge
-            tone={
-              delivery.status === "delivered"
-                ? "ok"
-                : delivery.status === "failed"
-                  ? "critical"
-                  : "warning"
-            }
-          >
-            {delivery.status}
-          </ConsoleStatusBadge>
-        ),
-      },
-      {
-        id: "target",
-        header: "Target",
-        size: 260,
-        minSize: 180,
-        sortValue: (delivery) => `${delivery.delivery_kind}:${delivery.target}`,
-        searchValue: (delivery) =>
-          `${delivery.delivery_kind} ${delivery.target}`,
-        cell: (delivery) => (
-          <span className="historyPrimary">
-            <strong>{delivery.delivery_kind}</strong>
-            <small>{delivery.target}</small>
-          </span>
-        ),
-      },
-      {
-        id: "attempts",
-        header: "Attempts",
-        size: 110,
-        minSize: 90,
-        sortValue: (delivery) => delivery.attempt_count,
-        cell: (delivery) => (
-          <span className="monoValue">{delivery.attempt_count}</span>
-        ),
-      },
-      {
-        id: "error",
-        header: "Error",
-        size: 260,
-        minSize: 160,
-        searchValue: (delivery) => delivery.error ?? "",
-        cell: (delivery) =>
-          delivery.error ? <small>{delivery.error}</small> : "-",
-      },
-      {
-        id: "created",
-        header: "Created",
-        size: 140,
-        minSize: 110,
-        sortValue: (delivery) => delivery.created_at,
-        cell: (delivery) => formatCompactTime(delivery.created_at),
       },
     ],
     [],
@@ -2890,6 +3272,11 @@ function FleetAlertNotificationManager({
     setStatus(null);
   }
 
+  function createChannel() {
+    resetForm();
+    setEditorOpen(true);
+  }
+
   function editChannel(channel: FleetAlertNotificationChannelRecord) {
     setEditingId(channel.id);
     setName(channel.name);
@@ -2904,6 +3291,7 @@ function FleetAlertNotificationManager({
     setEnabled(channel.enabled);
     setNotes(channel.notes ?? "");
     setStatus(`editing ${channel.name}`);
+    setEditorOpen(true);
   }
 
   function requestFromChannel(
@@ -2937,8 +3325,8 @@ function FleetAlertNotificationManager({
         scope_kind: scopeKind,
         scope_value: scopeKind === "global" ? null : scopeValue.trim(),
         min_severity: minSeverity,
-        categories: csvValues(categories),
-        operator_states: csvValues(operatorStates),
+        categories: categoryTokens,
+        operator_states: operatorStateTokens,
         delivery_kind: deliveryKind.trim(),
         target: target.trim(),
         cooldown_secs: optionalInteger(cooldownSecs),
@@ -2947,16 +3335,25 @@ function FleetAlertNotificationManager({
         confirmed: true,
       });
       setEditingId(channel.id);
+      setEditorOpen(true);
       setStatus(`saved ${channel.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "channel save failed");
     }
   }
 
-  async function deleteChannels(rows: FleetAlertNotificationChannelRecord[]) {
-    if (rows.length === 0) return;
-    const label = rows.length === 1 ? rows[0].name : `${rows.length} channels`;
-    if (!window.confirm(`Delete ${label}?`)) return;
+  function requestDeleteChannels(
+    rows: FleetAlertNotificationChannelRecord[],
+  ) {
+    setDeleteError(null);
+    setDeleteRows(rows);
+  }
+
+  async function confirmDeleteChannels() {
+    const rows = deleteRows ?? [];
+    if (rows.length === 0 || deletePending) return;
+    setDeletePending(true);
+    setDeleteError(null);
     setStatus("deleting channels");
     try {
       for (const channel of rows) {
@@ -2964,12 +3361,17 @@ function FleetAlertNotificationManager({
       }
       if (rows.some((channel) => channel.id === editingId)) {
         resetForm();
+        setEditorOpen(false);
       }
+      setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
     } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "channel delete failed",
-      );
+      const message =
+        error instanceof Error ? error.message : "channel delete failed";
+      setDeleteError(message);
+      setStatus(message);
+    } finally {
+      setDeletePending(false);
     }
   }
 
@@ -3000,7 +3402,8 @@ function FleetAlertNotificationManager({
         confirmed: !dryRun,
       });
       if (dryRun) {
-        setPreviewRows(rows);
+        onPreviewRows(rows);
+        onOpenDeliveries();
       }
       setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
@@ -3022,7 +3425,8 @@ function FleetAlertNotificationManager({
         confirmed: !dryRun,
       });
       if (dryRun) {
-        setPreviewRows(rows);
+        onPreviewRows(rows);
+        onOpenDeliveries();
       }
       setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
@@ -3034,236 +3438,486 @@ function FleetAlertNotificationManager({
     }
   }
 
-  const previewDeliveries = previewRows.length > 0 ? previewRows : deliveries;
-
   return (
     <div className="consoleCrudPanel">
-      <ConsoleDataGrid
-        actions={[
+      <div className="consoleResourceLayout">
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Enable selected",
+              description: (rows) =>
+                `Enable ${rows.length} selected notification channel records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setChannelsEnabled(rows, true),
+            },
+            {
+              label: "Disable selected",
+              description: (rows) =>
+                `Disable ${rows.length} selected notification channel records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setChannelsEnabled(rows, false),
+            },
+            {
+              label: "Delete selected",
+              description: (rows) =>
+                `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeleteChannels,
+              tone: "danger",
+            },
+          ]}
+          columns={channelColumns}
+          defaultPageSize={10}
+          empty="No notification channels saved."
+          getRowId={(channel) => channel.id}
+          itemLabel="channels"
+          onOpenRow={editChannel}
+          rowActions={[
+            {
+              label: "Edit",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Edit",
+                  "notification channel",
+                  rows[0]?.name,
+                  "Opens the side detail editor.",
+                ),
+              icon: <Pencil size={14} />,
+              onSelect: (rows) => rows[0] && editChannel(rows[0]),
+            },
+            {
+              label: "Enable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Enable",
+                  "notification channel",
+                  rows[0]?.name,
+                  "Matching alerts will route through this channel.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === true,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setChannelsEnabled(rows, true),
+            },
+            {
+              label: "Disable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Disable",
+                  "notification channel",
+                  rows[0]?.name,
+                  "Matching alerts will stop routing through this channel.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === false,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setChannelsEnabled(rows, false),
+            },
+            {
+              label: "Delete",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Delete",
+                  "notification channel",
+                  rows[0]?.name,
+                  "Retained delivery history is not removed.",
+                ),
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeleteChannels,
+              tone: "danger",
+            },
+          ]}
+          rows={channels}
+          searchPlaceholder="Search channels by name, scope, delivery target, or filters"
+          storageKey="vpsman.grid.fleet.notificationChannels.v2"
+          title="Alert notification channels"
+          toolbarActions={
+            <button
+              className="primaryAction compactAction"
+              onClick={createChannel}
+              type="button"
+            >
+              <Plus size={16} />
+              <span>Create channel</span>
+            </button>
+          }
+        />
+        {editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <>
+                <button
+                  className="primaryAction"
+                  type="button"
+                  onClick={() => void submit()}
+                >
+                  {editingId ? "Update channel" : "Create channel"}
+                </button>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={createChannel}
+                >
+                  New channel
+                </button>
+              </>
+            }
+            description="Routes alert deliveries through explicit saved records."
+            onClose={() => setEditorOpen(false)}
+            title={
+              editingId
+                ? "Edit notification channel"
+                : "Create notification channel"
+            }
+          >
+            <div className="consoleFormGrid">
+              <ConsoleField label="Channel name" className="fieldWide">
+                <input
+                  aria-label="Notification channel name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Scope kind">
+                <select
+                  aria-label="Notification scope kind"
+                  value={scopeKind}
+                  onChange={(event) => setScopeKind(event.target.value)}
+                >
+                  <option value="global">global</option>
+                  <option value="provider">provider</option>
+                  <option value="tag">tag</option>
+                  <option value="client">client</option>
+                </select>
+              </ConsoleField>
+              <ConsoleField
+                label="Scope value"
+                hint={
+                  scopeKind === "global"
+                    ? "Global channels do not need a value."
+                    : "Tag, provider, or client id."
+                }
+              >
+                <input
+                  aria-label="Notification scope value"
+                  disabled={scopeKind === "global"}
+                  value={scopeValue}
+                  onChange={(event) => setScopeValue(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Minimum severity">
+                <select
+                  aria-label="Minimum severity"
+                  value={minSeverity}
+                  onChange={(event) => setMinSeverity(event.target.value)}
+                >
+                  <option value="critical">critical</option>
+                  <option value="warning">warning</option>
+                  <option value="info">info</option>
+                </select>
+              </ConsoleField>
+              <ConsoleField label="State">
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Route matching alerts</span>
+                </label>
+              </ConsoleField>
+              <ConsoleField
+                label="Categories"
+                className="fieldWide"
+                hint="Comma-separated alert categories. Empty matches all categories."
+              >
+                <input
+                  aria-label="Alert categories"
+                  value={categories}
+                  onChange={(event) => setCategories(event.target.value)}
+                />
+                <TokenPreview empty="all categories" values={categoryTokens} />
+              </ConsoleField>
+              <ConsoleField
+                label="Operator states"
+                className="fieldWide"
+                hint="Comma-separated operator states. Empty matches all states."
+              >
+                <input
+                  aria-label="Operator states"
+                  value={operatorStates}
+                  onChange={(event) => setOperatorStates(event.target.value)}
+                />
+                <TokenPreview empty="all states" values={operatorStateTokens} />
+              </ConsoleField>
+              <ConsoleField label="Delivery kind">
+                <input
+                  aria-label="Delivery kind"
+                  list="alert-delivery-kinds"
+                  value={deliveryKind}
+                  onChange={(event) => setDeliveryKind(event.target.value)}
+                />
+                <datalist id="alert-delivery-kinds">
+                  <option value="audit_log" />
+                  <option value="webhook" />
+                  <option value="email" />
+                  <option value="slack" />
+                </datalist>
+              </ConsoleField>
+              <ConsoleField label="Delivery target" className="fieldWide">
+                <input
+                  aria-label="Delivery target"
+                  value={target}
+                  onChange={(event) => setTarget(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Cooldown seconds">
+                <input
+                  aria-label="Notification cooldown seconds"
+                  value={cooldownSecs}
+                  onChange={(event) => setCooldownSecs(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Notes" className="fieldFull">
+                <textarea
+                  aria-label="Notification channel notes"
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                />
+              </ConsoleField>
+            </div>
+          </ConsoleDetailPanel>
+        ) : (
+          <ConsoleDetailPanel
+            description="Create a channel or select one to inspect and edit it."
+            title="Channel detail"
+          >
+            <div className="emptyState compactEmpty">
+              Select a channel row or create a new routing record.
+            </div>
+          </ConsoleDetailPanel>
+        )}
+      </div>
+      <div className="consoleOperationsBar">
+        <span>
+          <strong>Alert delivery queue</strong>
+          <small>
+            Preview matching or process queued deliveries without leaving the
+            registry.
+          </small>
+        </span>
+        <div className="consoleOperationsActions">
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void dispatch(true)}
+          >
+            Match alerts
+          </button>
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void dispatch(false)}
+          >
+            Queue dispatch
+          </button>
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void process(true)}
+          >
+            Preview queue
+          </button>
+          <button
+            className="primaryAction"
+            type="button"
+            onClick={() => void process(false)}
+          >
+            Deliver queued
+          </button>
+        </div>
+      </div>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConfirmationPrompt
+        confirmLabel="Delete"
+        detail="Deletes selected alert notification channel records. Retained delivery history is not removed."
+        items={[
           {
-            label: "Edit channel",
-            disabled: (rows) => rows.length !== 1,
-            onSelect: (rows) => rows[0] && editChannel(rows[0]),
-          },
-          {
-            label: "Enable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setChannelsEnabled(rows, true),
-          },
-          {
-            label: "Disable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setChannelsEnabled(rows, false),
-          },
-          {
-            label: "Delete",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void deleteChannels(rows),
-            tone: "danger",
+            label: "Channels",
+            value: selectedRecordSummary(
+              deleteRows,
+              "channel",
+              "channels",
+              (row) => row.name,
+              (row) => row.id,
+            ),
           },
         ]}
-        columns={channelColumns}
-        defaultPageSize={10}
-        empty="No notification channels saved."
-        getRowId={(channel) => channel.id}
-        itemLabel="channels"
-        onOpenRow={editChannel}
-        rows={channels}
-        searchPlaceholder="Search channels by name, scope, delivery target, or filters"
-        storageKey="vpsman.grid.fleet.notificationChannels.v1"
-        title="Alert notification channels"
-      />
-      <ConsoleFormGroup
-        title={
-          editingId ? "Edit selected channel" : "Create notification channel"
-        }
-        description="Channels are explicit CRUD records for alert routing. Delivery actions below preview or process the queue."
-        actions={
-          <>
-            <button
-              className="primaryAction"
-              type="button"
-              onClick={() => void submit()}
-            >
-              {editingId ? "Update channel" : "Create channel"}
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={resetForm}
-            >
-              New channel
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={() => void dispatch(true)}
-            >
-              Match alerts
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={() => void dispatch(false)}
-            >
-              Queue dispatch
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={() => void process(true)}
-            >
-              Preview queue
-            </button>
-            <button
-              className="secondaryAction"
-              type="button"
-              onClick={() => void process(false)}
-            >
-              Deliver queued
-            </button>
-          </>
-        }
-      >
-        <ConsoleField label="Channel name" className="fieldWide">
-          <input
-            aria-label="Notification channel name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Scope kind">
-          <select
-            aria-label="Notification scope kind"
-            value={scopeKind}
-            onChange={(event) => setScopeKind(event.target.value)}
-          >
-            <option value="global">global</option>
-            <option value="provider">provider</option>
-            <option value="tag">tag</option>
-            <option value="client">client</option>
-          </select>
-        </ConsoleField>
-        <ConsoleField
-          label="Scope value"
-          hint={
-            scopeKind === "global"
-              ? "Global channels do not need a value."
-              : "Tag, provider, or client id."
-          }
-        >
-          <input
-            aria-label="Notification scope value"
-            disabled={scopeKind === "global"}
-            value={scopeValue}
-            onChange={(event) => setScopeValue(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Minimum severity">
-          <select
-            aria-label="Minimum severity"
-            value={minSeverity}
-            onChange={(event) => setMinSeverity(event.target.value)}
-          >
-            <option value="critical">critical</option>
-            <option value="warning">warning</option>
-            <option value="info">info</option>
-          </select>
-        </ConsoleField>
-        <ConsoleField
-          label="Categories"
-          className="fieldWide"
-          hint="Comma-separated alert categories. Empty matches all categories."
-        >
-          <input
-            aria-label="Alert categories"
-            value={categories}
-            onChange={(event) => setCategories(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField
-          label="Operator states"
-          className="fieldWide"
-          hint="Comma-separated operator states. Empty matches all states."
-        >
-          <input
-            aria-label="Operator states"
-            value={operatorStates}
-            onChange={(event) => setOperatorStates(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Delivery kind">
-          <input
-            aria-label="Delivery kind"
-            value={deliveryKind}
-            onChange={(event) => setDeliveryKind(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Delivery target" className="fieldWide">
-          <input
-            aria-label="Delivery target"
-            value={target}
-            onChange={(event) => setTarget(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Cooldown seconds">
-          <input
-            aria-label="Notification cooldown seconds"
-            value={cooldownSecs}
-            onChange={(event) => setCooldownSecs(event.target.value)}
-          />
-        </ConsoleField>
-        <ConsoleField label="Enabled">
-          <label className="checkboxRow">
-            <input
-              checked={enabled}
-              onChange={(event) => setEnabled(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Route matching alerts</span>
-          </label>
-        </ConsoleField>
-        <ConsoleField label="Notes" className="fieldFull">
-          <textarea
-            aria-label="Notification channel notes"
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-          />
-        </ConsoleField>
-      </ConsoleFormGroup>
-      {status && <small className="fleetPolicyStatus">{status}</small>}
-      <ConsoleDataGrid
-        columns={deliveryColumns}
-        defaultPageSize={8}
-        empty="No notification deliveries retained."
-        getRowId={(delivery) => delivery.id}
-        itemLabel="deliveries"
-        rows={previewDeliveries}
-        searchPlaceholder="Search delivery history"
-        storageKey="vpsman.grid.fleet.notificationDeliveries.v1"
-        title={
-          previewRows.length > 0
-            ? "Notification delivery preview"
-            : "Notification delivery history"
-        }
+        error={deleteError}
+        onCancel={() => {
+          setDeleteError(null);
+          setDeleteRows(null);
+        }}
+        onConfirm={() => void confirmDeleteChannels()}
+        open={deleteRows !== null}
+        pending={deletePending}
+        title="Delete notification channels"
+        tone="danger"
       />
     </div>
   );
 }
 
+function NotificationDeliveryHistoryGrid({
+  deliveries,
+  preview,
+}: {
+  deliveries: FleetAlertNotificationDeliveryRecord[];
+  preview: boolean;
+}) {
+  const columns = useMemo<
+    ConsoleDataGridColumn<FleetAlertNotificationDeliveryRecord>[]
+  >(
+    () => [
+      {
+        id: "channel",
+        header: "Channel",
+        size: 230,
+        minSize: 160,
+        sortValue: (delivery) => delivery.channel_name,
+        searchValue: (delivery) =>
+          `${delivery.channel_name} ${delivery.alert_category}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.channel_name}</strong>
+            <small>{delivery.alert_category}</small>
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        size: 110,
+        minSize: 90,
+        sortValue: (delivery) => delivery.status,
+        searchValue: (delivery) => `${delivery.status} ${delivery.error ?? ""}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <ConsoleStatusBadge tone={deliveryStatusTone(delivery.status)}>
+              {delivery.status}
+            </ConsoleStatusBadge>
+            {delivery.error && (
+              <small className="deliveryErrorText" title={delivery.error}>
+                {shortDeliveryError(delivery.error)}
+              </small>
+            )}
+          </span>
+        ),
+      },
+      {
+        id: "alert",
+        header: "Alert",
+        size: 190,
+        minSize: 140,
+        sortValue: (delivery) => delivery.alert_severity,
+        searchValue: (delivery) =>
+          `${delivery.alert_id} ${delivery.alert_severity}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.alert_severity}</strong>
+            <small>{shortId(delivery.alert_id)}</small>
+          </span>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 260,
+        minSize: 180,
+        sortValue: (delivery) => `${delivery.delivery_kind}:${delivery.target}`,
+        searchValue: (delivery) =>
+          `${delivery.delivery_kind} ${delivery.target}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.delivery_kind}</strong>
+            <small>{delivery.target}</small>
+          </span>
+        ),
+      },
+      {
+        id: "attempts",
+        header: "Attempts",
+        size: 105,
+        minSize: 90,
+        align: "end",
+        sortValue: (delivery) => delivery.attempt_count,
+        cell: (delivery) => (
+          <span className="monoValue">{delivery.attempt_count}</span>
+        ),
+      },
+      {
+        id: "created",
+        header: "Created",
+        size: 140,
+        minSize: 110,
+        sortValue: (delivery) => delivery.created_at,
+        cell: (delivery) => formatCompactTime(delivery.created_at),
+      },
+    ],
+    [],
+  );
+
+  return (
+    <ConsoleDataGrid
+      columns={columns}
+      defaultPageSize={8}
+      empty={
+        preview
+          ? "No notification preview delivery rows."
+          : "No notification deliveries retained."
+      }
+      getRowId={(delivery) => delivery.id}
+      itemLabel="deliveries"
+      renderExpandedRow={(delivery) => (
+        <div className="gridDetailLine">
+          <strong>{delivery.channel_name}</strong>
+          <span>{delivery.status}</span>
+          <span>{delivery.delivery_kind}</span>
+          <span>{delivery.target}</span>
+          <span>{delivery.attempt_count} attempts</span>
+          {delivery.error && (
+            <span className="deliveryErrorText" title={delivery.error}>
+              error: {delivery.error}
+            </span>
+          )}
+        </div>
+      )}
+      rows={deliveries}
+      searchPlaceholder="Search notification deliveries"
+      storageKey="vpsman.grid.fleet.notificationDeliveries.v2"
+      title={
+        preview
+          ? "Notification delivery preview"
+          : "Notification delivery history"
+      }
+    />
+  );
+}
+
 function WebhookRuleManager({
   agents,
-  deliveries,
   onDelete,
   onDispatch,
   onDryRun,
+  onOpenDeliveries,
+  onPreviewDryRun,
+  onPreviewRows,
   onProcess,
-  onRotate,
   onUpsert,
   rules,
 }: {
   agents: AgentView[];
-  deliveries: WebhookRuleDeliveryRecord[];
   onDelete: (ruleId: string) => Promise<void>;
   onDispatch: (
     request: WebhookRuleDispatchRequest,
@@ -3271,39 +3925,50 @@ function WebhookRuleManager({
   onDryRun: (
     request: WebhookRuleDryRunRequest,
   ) => Promise<WebhookRuleDryRunRecord>;
+  onOpenDeliveries: () => void;
+  onPreviewDryRun: (preview: WebhookRuleDryRunRecord | null) => void;
+  onPreviewRows: (rows: WebhookRuleDeliveryRecord[]) => void;
   onProcess: (
     request: WebhookRuleProcessRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
-  onRotate: (
-    request: WebhookDeliveryRotationRequest,
-  ) => Promise<WebhookDeliveryRotationResponse>;
   onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
   rules: WebhookRuleRecord[];
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [deleteRows, setDeleteRows] = useState<WebhookRuleRecord[] | null>(
+    null,
+  );
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [name, setName] = useState("edge-interval-webhook");
   const [enabled, setEnabled] = useState(true);
   const [expression, setExpression] = useState("interval.30sec && tag:edge");
   const [target, setTarget] = useState("https://hooks.example/vpsman");
-  const [bodyTemplate, setBodyTemplate] = useState("{rule.name} {event.kind} {vps.id}");
+  const [bodyTemplate, setBodyTemplate] = useState(
+    "{rule.name} {event.kind} {vps.id}",
+  );
   const [cooldownSecs, setCooldownSecs] = useState("300");
   const [notes, setNotes] = useState("");
   const [eventKind, setEventKind] = useState("interval.30sec");
   const [eventId, setEventId] = useState("");
-  const [rotationDays, setRotationDays] = useState("90");
-  const [rotationStatus, setRotationStatus] = useState("delivered");
   const [status, setStatus] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
-  const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
-  const [rotationPreview, setRotationPreview] = useState<WebhookDeliveryRotationResponse | null>(null);
+
+  const selectedPreviewNames = useMemo(() => {
+    return agents
+      .filter((agent) => agent.tags.some((tag) => expression.includes(tag)))
+      .slice(0, 6)
+      .map((agent) => formatVpsName(agent, "name"))
+      .join(", ");
+  }, [agents, expression]);
 
   const ruleColumns = useMemo<ConsoleDataGridColumn<WebhookRuleRecord>[]>(
     () => [
       {
         id: "name",
         header: "Rule",
-        size: 250,
-        minSize: 180,
+        size: 260,
+        minSize: 190,
         sortValue: (rule) => rule.name,
         searchValue: (rule) => `${rule.name} ${rule.notes ?? ""}`,
         cell: (rule) => (
@@ -3329,7 +3994,7 @@ function WebhookRuleManager({
         minSize: 180,
         sortValue: (rule) => rule.target,
         searchValue: (rule) => rule.target,
-        cell: (rule) => <small>{rule.target}</small>,
+        cell: (rule) => <small title={rule.target}>{rule.target}</small>,
       },
       {
         id: "state",
@@ -3350,7 +4015,9 @@ function WebhookRuleManager({
         size: 110,
         minSize: 90,
         sortValue: (rule) => rule.cooldown_secs,
-        cell: (rule) => <span className="monoValue">{rule.cooldown_secs}s</span>,
+        cell: (rule) => (
+          <span className="monoValue">{rule.cooldown_secs}s</span>
+        ),
       },
       {
         id: "updated",
@@ -3359,80 +4026,6 @@ function WebhookRuleManager({
         minSize: 110,
         sortValue: (rule) => rule.updated_at,
         cell: (rule) => formatCompactTime(rule.updated_at),
-      },
-    ],
-    [],
-  );
-
-  const deliveryColumns = useMemo<ConsoleDataGridColumn<WebhookRuleDeliveryRecord>[]>(
-    () => [
-      {
-        id: "rule",
-        header: "Rule",
-        size: 230,
-        minSize: 160,
-        sortValue: (delivery) => delivery.rule_name,
-        searchValue: (delivery) => `${delivery.rule_name} ${delivery.event_kind}`,
-        cell: (delivery) => (
-          <span className="historyPrimary">
-            <strong>{delivery.rule_name}</strong>
-            <small>{delivery.event_kind}{delivery.event_id ? ` · ${delivery.event_id}` : ""}</small>
-          </span>
-        ),
-      },
-      {
-        id: "status",
-        header: "Status",
-        size: 110,
-        minSize: 90,
-        sortValue: (delivery) => delivery.status,
-        searchValue: (delivery) => delivery.status,
-        cell: (delivery) => (
-          <ConsoleStatusBadge tone={delivery.status === "delivered" ? "ok" : delivery.status === "failed" ? "critical" : "warning"}>
-            {delivery.status}
-          </ConsoleStatusBadge>
-        ),
-      },
-      {
-        id: "target",
-        header: "Target",
-        size: 260,
-        minSize: 180,
-        sortValue: (delivery) => delivery.target,
-        searchValue: (delivery) => delivery.target,
-        cell: (delivery) => <small>{delivery.target}</small>,
-      },
-      {
-        id: "matched",
-        header: "Matched VPSs",
-        size: 180,
-        minSize: 130,
-        searchValue: (delivery) => delivery.matched_vps.map((vps) => vps.display_name || vps.id).join(" "),
-        cell: (delivery) => <span className="monoValue">{delivery.matched_vps.length}</span>,
-      },
-      {
-        id: "attempts",
-        header: "Attempts",
-        size: 100,
-        minSize: 80,
-        sortValue: (delivery) => delivery.attempt_count,
-        cell: (delivery) => <span className="monoValue">{delivery.attempt_count}</span>,
-      },
-      {
-        id: "error",
-        header: "Error",
-        size: 240,
-        minSize: 160,
-        searchValue: (delivery) => delivery.error ?? "",
-        cell: (delivery) => delivery.error ? <small>{delivery.error}</small> : "-",
-      },
-      {
-        id: "created",
-        header: "Created",
-        size: 140,
-        minSize: 110,
-        sortValue: (delivery) => delivery.created_at,
-        cell: (delivery) => formatCompactTime(delivery.created_at),
       },
     ],
     [],
@@ -3450,6 +4043,11 @@ function WebhookRuleManager({
     setStatus(null);
   }
 
+  function createRule() {
+    resetForm();
+    setEditorOpen(true);
+  }
+
   function editRule(rule: WebhookRuleRecord) {
     setEditingId(rule.id);
     setName(rule.name);
@@ -3460,6 +4058,7 @@ function WebhookRuleManager({
     setCooldownSecs(String(rule.cooldown_secs));
     setNotes(rule.notes ?? "");
     setStatus(`editing ${rule.name}`);
+    setEditorOpen(true);
   }
 
   function requestFromRule(
@@ -3495,16 +4094,23 @@ function WebhookRuleManager({
         confirmed: true,
       });
       setEditingId(rule.id);
+      setEditorOpen(true);
       setStatus(`saved ${rule.name}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule save failed");
+      setStatus(error instanceof Error ? error.message : "webhook save failed");
     }
   }
 
-  async function deleteRules(rows: WebhookRuleRecord[]) {
-    if (rows.length === 0) return;
-    const label = rows.length === 1 ? rows[0].name : `${rows.length} webhook rules`;
-    if (!window.confirm(`Delete ${label}?`)) return;
+  function requestDeleteRules(rows: WebhookRuleRecord[]) {
+    setDeleteError(null);
+    setDeleteRows(rows);
+  }
+
+  async function confirmDeleteRules() {
+    const rows = deleteRows ?? [];
+    if (rows.length === 0 || deletePending) return;
+    setDeletePending(true);
+    setDeleteError(null);
     setStatus("deleting webhook rules");
     try {
       for (const rule of rows) {
@@ -3512,250 +4118,763 @@ function WebhookRuleManager({
       }
       if (rows.some((rule) => rule.id === editingId)) {
         resetForm();
+        setEditorOpen(false);
       }
+      setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule delete failed");
+      const message =
+        error instanceof Error ? error.message : "rule delete failed";
+      setDeleteError(message);
+      setStatus(message);
+    } finally {
+      setDeletePending(false);
     }
   }
 
-  async function setRulesEnabled(rows: WebhookRuleRecord[], nextEnabled: boolean) {
+  async function setRulesEnabled(
+    rows: WebhookRuleRecord[],
+    nextEnabled: boolean,
+  ) {
     if (rows.length === 0) return;
-    setStatus(nextEnabled ? "enabling webhook rules" : "disabling webhook rules");
+    setStatus(
+      nextEnabled ? "enabling webhook rules" : "disabling webhook rules",
+    );
     try {
       for (const rule of rows) {
         await onUpsert(requestFromRule(rule, { enabled: nextEnabled }));
       }
       setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule update failed");
+      setStatus(error instanceof Error ? error.message : "rule update failed");
     }
   }
 
-  async function dryRunRule() {
-    setStatus("previewing rule");
+  async function dryRun(rule?: WebhookRuleRecord) {
+    const request = rule
+      ? {
+          name: rule.name,
+          enabled: rule.enabled,
+          expression: rule.expression,
+          target: rule.target,
+          body_template: rule.body_template,
+          cooldown_secs: rule.cooldown_secs,
+          notes: rule.notes,
+          event_kind: eventKind.trim(),
+          event_id: eventId.trim() || null,
+        }
+      : {
+          name: name.trim(),
+          enabled,
+          expression: expression.trim(),
+          target: target.trim(),
+          body_template: bodyTemplate,
+          cooldown_secs: optionalInteger(cooldownSecs),
+          notes: notes.trim() || null,
+          event_kind: eventKind.trim(),
+          event_id: eventId.trim() || null,
+        };
+    setStatus("rendering webhook dry run");
     try {
-      const rows = await onDryRun({
-        name,
-        enabled,
-        expression,
-        target,
-        event_kind: eventKind,
-        event_id: eventId.trim() || null,
-        body_template: bodyTemplate,
-        cooldown_secs: optionalInteger(cooldownSecs),
-        notes: notes.trim() || null,
-      });
-      setDryRunPreview(rows);
-      setPreviewRows(rows.delivery ? [rows.delivery] : []);
-      setStatus(`previewed ${rows.matched_vps.length} matched VPSs`);
+      const preview = await onDryRun(request);
+      onPreviewDryRun(preview);
+      onPreviewRows(preview.delivery ? [preview.delivery] : []);
+      onOpenDeliveries();
+      setStatus(`dry run matched ${preview.matched_vps.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rule preview failed");
+      setStatus(error instanceof Error ? error.message : "dry run failed");
     }
   }
 
-  async function dispatchRules(dryRun: boolean) {
-    setStatus(dryRun ? "matching webhook rules" : "queueing webhook deliveries");
+  async function dispatch(dryRunMode: boolean) {
+    setStatus(dryRunMode ? "matching webhook rules" : "queueing webhooks");
     try {
       const rows = await onDispatch({
-        event_kind: eventKind,
+        event_kind: eventKind.trim(),
         event_id: eventId.trim() || null,
         limit: 50,
-        dry_run: dryRun,
-        confirmed: !dryRun,
+        dry_run: dryRunMode,
+        confirmed: !dryRunMode,
       });
-      if (dryRun) {
-        setPreviewRows(rows);
+      if (dryRunMode) {
+        onPreviewRows(rows);
+        onOpenDeliveries();
       }
-      setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
+      setStatus(`${dryRunMode ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook dispatch failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook dispatch failed",
+      );
     }
   }
 
-  async function process(dryRun: boolean) {
-    setStatus(dryRun ? "previewing webhook queue" : "delivering webhooks");
+  async function process(dryRunMode: boolean) {
+    setStatus(dryRunMode ? "previewing webhook queue" : "delivering webhooks");
     try {
       const rows = await onProcess({
         limit: 50,
         status: "queued",
-        dry_run: dryRun,
-        confirmed: !dryRun,
+        dry_run: dryRunMode,
+        confirmed: !dryRunMode,
       });
-      if (dryRun) {
-        setPreviewRows(rows);
+      if (dryRunMode) {
+        onPreviewRows(rows);
+        onOpenDeliveries();
       }
-      setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
+      setStatus(`${dryRunMode ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook delivery failed");
+      setStatus(
+        error instanceof Error ? error.message : "webhook processing failed",
+      );
     }
   }
-
-  async function rotate(confirmed: boolean) {
-    setStatus(confirmed ? "rotating delivery history" : "previewing delivery history rotation");
-    try {
-      const response = await onRotate({
-        older_than_days: optionalInteger(rotationDays),
-        status: rotationStatus || null,
-        confirmed,
-      });
-      setRotationPreview(response);
-      setStatus(confirmed ? `deleted ${response.deleted_count}` : `matched ${response.matched_count}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook rotation failed");
-    }
-  }
-
-  const deliveryRows = previewRows.length > 0 ? previewRows : deliveries;
-  const previewNames = dryRunPreview?.matched_vps.map((vps) => formatVpsName(vps)).join(", ") ?? "";
 
   return (
     <div className="consoleCrudPanel">
-      <ConsoleDataGrid
-        actions={[
+      <div className="consoleResourceLayout">
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Enable selected",
+              description: (rows) =>
+                `Enable ${rows.length} selected webhook rule records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setRulesEnabled(rows, true),
+            },
+            {
+              label: "Disable selected",
+              description: (rows) =>
+                `Disable ${rows.length} selected webhook rule records.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setRulesEnabled(rows, false),
+            },
+            {
+              label: "Delete selected",
+              description: (rows) =>
+                `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
+              disabled: (rows) => rows.length === 0,
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeleteRules,
+              tone: "danger",
+            },
+          ]}
+          columns={ruleColumns}
+          defaultPageSize={10}
+          empty="No webhook rules saved."
+          getRowId={(rule) => rule.id}
+          itemLabel="rules"
+          onOpenRow={editRule}
+          rowActions={[
+            {
+              label: "Edit",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Edit",
+                  "webhook rule",
+                  rows[0]?.name,
+                  "Opens the side detail editor.",
+                ),
+              icon: <Pencil size={14} />,
+              onSelect: (rows) => rows[0] && editRule(rows[0]),
+            },
+            {
+              label: "Preview",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Preview",
+                  "webhook rule",
+                  rows[0]?.name,
+                  "Runs a dry-run with the current preview event.",
+                ),
+              icon: <Eye size={14} />,
+              onSelect: (rows) => rows[0] && void dryRun(rows[0]),
+            },
+            {
+              label: "Enable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Enable",
+                  "webhook rule",
+                  rows[0]?.name,
+                  "The rule will match future webhook events.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === true,
+              icon: <Power size={14} />,
+              onSelect: (rows) => void setRulesEnabled(rows, true),
+            },
+            {
+              label: "Disable",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Disable",
+                  "webhook rule",
+                  rows[0]?.name,
+                  "The rule will stop matching future webhook events.",
+                ),
+              disabled: (rows) => rows[0]?.enabled === false,
+              icon: <PowerOff size={14} />,
+              onSelect: (rows) => void setRulesEnabled(rows, false),
+            },
+            {
+              label: "Delete",
+              description: (rows) =>
+                actionTargetDescription(
+                  "Delete",
+                  "webhook rule",
+                  rows[0]?.name,
+                  "Retained delivery history is not removed.",
+                ),
+              icon: <Trash2 size={14} />,
+              onSelect: requestDeleteRules,
+              tone: "danger",
+            },
+          ]}
+          rows={rules}
+          searchPlaceholder="Search webhook rules by name, expression, target, or notes"
+          storageKey="vpsman.grid.fleet.webhookRules.v2"
+          title="Webhook rules"
+          toolbarActions={
+            <button
+              className="primaryAction compactAction"
+              onClick={createRule}
+              type="button"
+            >
+              <Plus size={16} />
+              <span>Create rule</span>
+            </button>
+          }
+        />
+        {editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={() => void dryRun()}
+                >
+                  Preview rule
+                </button>
+                <button
+                  className="primaryAction"
+                  type="button"
+                  onClick={() => void submit()}
+                >
+                  {editingId ? "Update rule" : "Create rule"}
+                </button>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={createRule}
+                >
+                  New rule
+                </button>
+              </>
+            }
+            description="Webhook rules are saved expression records with explicit preview and delivery operations."
+            onClose={() => setEditorOpen(false)}
+            title={editingId ? "Edit webhook rule" : "Create webhook rule"}
+          >
+            <div className="consoleFormGrid">
+              <ConsoleField label="Rule name" className="fieldWide">
+                <input
+                  aria-label="Webhook rule name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="State">
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Evaluate rule</span>
+                </label>
+              </ConsoleField>
+              <ConsoleField label="Cooldown seconds">
+                <input
+                  aria-label="Webhook cooldown seconds"
+                  value={cooldownSecs}
+                  onChange={(event) => setCooldownSecs(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField
+                label="Expression"
+                className="fieldFull"
+                hint="Example: interval.30sec && tag:edge"
+              >
+                <input
+                  aria-label="Webhook expression"
+                  value={expression}
+                  onChange={(event) => setExpression(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Target URL" className="fieldFull">
+                <input
+                  aria-label="Webhook target"
+                  value={target}
+                  onChange={(event) => setTarget(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Preview event kind">
+                <input
+                  aria-label="Webhook event kind"
+                  value={eventKind}
+                  onChange={(event) => setEventKind(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Preview event id">
+                <input
+                  aria-label="Webhook event id"
+                  value={eventId}
+                  onChange={(event) => setEventId(event.target.value)}
+                  placeholder="optional"
+                />
+              </ConsoleField>
+              <ConsoleField label="Notes" className="fieldFull">
+                <textarea
+                  aria-label="Webhook rule notes"
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                />
+              </ConsoleField>
+              <ConsoleField label="Body template" className="fieldFull">
+                <WebhookTemplateEditor
+                  value={bodyTemplate}
+                  onChange={setBodyTemplate}
+                />
+              </ConsoleField>
+              <ConsoleField label="Local hint" className="fieldFull">
+                <span className="monoValue">
+                  {selectedPreviewNames ||
+                    "Use server dry-run for exact matches."}
+                </span>
+              </ConsoleField>
+            </div>
+          </ConsoleDetailPanel>
+        ) : (
+          <ConsoleDetailPanel
+            description="Create a rule or select one to inspect, preview, and edit it."
+            title="Webhook rule detail"
+          >
+            <div className="emptyState compactEmpty">
+              Select a webhook rule row or create a new expression webhook.
+            </div>
+          </ConsoleDetailPanel>
+        )}
+      </div>
+      <div className="consoleOperationsBar">
+        <span>
+          <strong>Webhook queue</strong>
+          <small>
+            Use preview first; retained deliveries stay in the Deliveries tab.
+          </small>
+        </span>
+        <div className="consoleOperationsActions">
+          <label className="consoleField">
+            <span>Event kind</span>
+            <input
+              aria-label="Webhook dispatch event kind"
+              value={eventKind}
+              onChange={(event) => setEventKind(event.target.value)}
+            />
+          </label>
+          <label className="consoleField">
+            <span>Event id</span>
+            <input
+              aria-label="Webhook dispatch event id"
+              value={eventId}
+              onChange={(event) => setEventId(event.target.value)}
+              placeholder="optional"
+            />
+          </label>
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void dispatch(true)}
+          >
+            Match rules
+          </button>
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void dispatch(false)}
+          >
+            Queue dispatch
+          </button>
+          <button
+            className="secondaryAction"
+            type="button"
+            onClick={() => void process(true)}
+          >
+            Preview queue
+          </button>
+          <button
+            className="primaryAction"
+            type="button"
+            onClick={() => void process(false)}
+          >
+            Deliver queued
+          </button>
+        </div>
+      </div>
+      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConfirmationPrompt
+        confirmLabel="Delete"
+        detail="Deletes selected webhook rule records. Retained delivery history is not removed."
+        items={[
           {
-            label: "Edit rule",
-            disabled: (rows) => rows.length !== 1,
-            onSelect: (rows) => rows[0] && editRule(rows[0]),
-          },
-          {
-            label: "Enable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setRulesEnabled(rows, true),
-          },
-          {
-            label: "Disable",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void setRulesEnabled(rows, false),
-          },
-          {
-            label: "Delete",
-            disabled: (rows) => rows.length === 0,
-            onSelect: (rows) => void deleteRules(rows),
-            tone: "danger",
+            label: "Rules",
+            value: selectedRecordSummary(
+              deleteRows,
+              "rule",
+              "rules",
+              (row) => row.name,
+              (row) => row.id,
+            ),
           },
         ]}
-        columns={ruleColumns}
-        defaultPageSize={10}
-        empty="No webhook rules saved."
-        getRowId={(rule) => rule.id}
-        itemLabel="rules"
-        onOpenRow={editRule}
-        rows={rules}
-        searchPlaceholder="Search webhook rules by name, expression, target, or notes"
-        storageKey="vpsman.grid.fleet.webhookRules.v1"
-        title="Webhook rules"
-      />
-      <ConsoleFormGroup
-        title={editingId ? "Edit selected webhook rule" : "Create webhook rule"}
-        description={`Rules evaluate against current fleet events and currently visible VPS records (${agents.length} loaded).`}
-        actions={
-          <>
-            <button className="primaryAction" type="button" onClick={() => void submit()}>
-              {editingId ? "Update rule" : "Create rule"}
-            </button>
-            <button className="secondaryAction" type="button" onClick={resetForm}>
-              New rule
-            </button>
-            <button className="secondaryAction" type="button" onClick={() => void dryRunRule()}>
-              Preview rule
-            </button>
-            <button className="secondaryAction" type="button" onClick={() => void dispatchRules(true)}>
-              Match rules
-            </button>
-            <button className="secondaryAction" type="button" onClick={() => void dispatchRules(false)}>
-              Queue dispatch
-            </button>
-            <button className="secondaryAction" type="button" onClick={() => void process(true)}>
-              Preview queue
-            </button>
-            <button className="secondaryAction" type="button" onClick={() => void process(false)}>
-              Deliver queued
-            </button>
-          </>
-        }
-      >
-        <ConsoleField label="Rule name" className="fieldWide">
-          <input aria-label="Webhook rule name" value={name} onChange={(event) => setName(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Enabled">
-          <label className="checkboxRow">
-            <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
-            <span>Evaluate rule</span>
-          </label>
-        </ConsoleField>
-        <ConsoleField label="Event kind">
-          <input aria-label="Webhook event kind" value={eventKind} onChange={(event) => setEventKind(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Event id">
-          <input aria-label="Webhook event id" value={eventId} onChange={(event) => setEventId(event.target.value)} placeholder="optional" />
-        </ConsoleField>
-        <ConsoleField label="Expression" className="fieldWide" hint="Example: interval.30sec && tag:edge">
-          <input aria-label="Webhook expression" value={expression} onChange={(event) => setExpression(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Target URL" className="fieldWide">
-          <input aria-label="Webhook target" value={target} onChange={(event) => setTarget(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Cooldown seconds">
-          <input aria-label="Webhook cooldown seconds" value={cooldownSecs} onChange={(event) => setCooldownSecs(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Notes" className="fieldFull">
-          <textarea aria-label="Webhook rule notes" value={notes} onChange={(event) => setNotes(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Body template" className="fieldFull">
-          <WebhookTemplateEditor value={bodyTemplate} onChange={setBodyTemplate} />
-        </ConsoleField>
-      </ConsoleFormGroup>
-      <ConsoleFormGroup
-        title="Delivery maintenance"
-        description="Preview rotation before deleting retained webhook delivery rows."
-        actions={
-          <>
-            <button className="secondaryAction" type="button" onClick={() => void rotate(false)}>
-              Preview rotation
-            </button>
-            <button className="dangerAction" type="button" onClick={() => void rotate(true)}>
-              Delete matched history
-            </button>
-          </>
-        }
-      >
-        <ConsoleField label="Older than days">
-          <input aria-label="Webhook rotation days" value={rotationDays} onChange={(event) => setRotationDays(event.target.value)} />
-        </ConsoleField>
-        <ConsoleField label="Status">
-          <input aria-label="Webhook rotation status" value={rotationStatus} onChange={(event) => setRotationStatus(event.target.value)} placeholder="delivered" />
-        </ConsoleField>
-        <ConsoleField label="Rotation result" className="fieldWide">
-          <span className="monoValue">
-            {rotationPreview ? `${rotationPreview.matched_count} matched / ${rotationPreview.deleted_count} deleted` : "not previewed"}
-          </span>
-        </ConsoleField>
-      </ConsoleFormGroup>
-      {dryRunPreview && (
-        <div className="consoleInlineNotice">
-          <strong>{dryRunPreview.matched_vps.length} VPSs matched dry run</strong>
-          <small>{previewNames || "No VPSs matched this rule."}</small>
-          {dryRunPreview.validation_errors.length > 0 && (
-            <small>{dryRunPreview.validation_errors.join(" · ")}</small>
-          )}
-          <small>{dryRunPreview.rendered_message}</small>
-        </div>
-      )}
-      {status && <small className="fleetPolicyStatus">{status}</small>}
-      <ConsoleDataGrid
-        columns={deliveryColumns}
-        defaultPageSize={8}
-        empty="No webhook deliveries retained."
-        getRowId={(delivery) => delivery.id}
-        itemLabel="deliveries"
-        rows={deliveryRows}
-        searchPlaceholder="Search webhook deliveries"
-        storageKey="vpsman.grid.fleet.webhookDeliveries.v1"
-        title={previewRows.length > 0 ? "Webhook delivery preview" : "Webhook delivery history"}
+        error={deleteError}
+        onCancel={() => {
+          setDeleteError(null);
+          setDeleteRows(null);
+        }}
+        onConfirm={() => void confirmDeleteRules()}
+        open={deleteRows !== null}
+        pending={deletePending}
+        title="Delete webhook rules"
+        tone="danger"
       />
     </div>
   );
+}
+
+function WebhookDryRunNotice({
+  agents: _agents,
+  preview,
+}: {
+  agents: AgentView[];
+  preview: WebhookRuleDryRunRecord;
+}) {
+  const matchedNames = preview.matched_vps
+    .slice(0, 8)
+    .map((agent) => formatVpsName(agent, "name"))
+    .join(", ");
+  return (
+    <div className="consoleInlineNotice">
+      <strong>{preview.matched_vps.length} VPSs matched webhook dry run</strong>
+      <small>{matchedNames || "No VPSs matched this rule."}</small>
+      {preview.validation_errors.length > 0 && (
+        <small>{preview.validation_errors.join(" · ")}</small>
+      )}
+      <small>{preview.rendered_message}</small>
+    </div>
+  );
+}
+
+function WebhookDeliveryHistoryGrid({
+  deliveries,
+  preview,
+}: {
+  deliveries: WebhookRuleDeliveryRecord[];
+  preview: boolean;
+}) {
+  const columns = useMemo<ConsoleDataGridColumn<WebhookRuleDeliveryRecord>[]>(
+    () => [
+      {
+        id: "rule",
+        header: "Rule",
+        size: 230,
+        minSize: 160,
+        sortValue: (delivery) => delivery.rule_name,
+        searchValue: (delivery) =>
+          `${delivery.rule_name} ${delivery.event_kind}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.rule_name}</strong>
+            <small>
+              {delivery.event_kind}
+              {delivery.event_id ? ` · ${delivery.event_id}` : ""}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        size: 110,
+        minSize: 90,
+        sortValue: (delivery) => delivery.status,
+        searchValue: (delivery) => `${delivery.status} ${delivery.error ?? ""}`,
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <ConsoleStatusBadge tone={deliveryStatusTone(delivery.status)}>
+              {delivery.status}
+            </ConsoleStatusBadge>
+            {delivery.error && (
+              <small className="deliveryErrorText" title={delivery.error}>
+                {shortDeliveryError(delivery.error)}
+              </small>
+            )}
+          </span>
+        ),
+      },
+      {
+        id: "target",
+        header: "Target",
+        size: 260,
+        minSize: 180,
+        sortValue: (delivery) => delivery.target,
+        searchValue: (delivery) => delivery.target,
+        cell: (delivery) => (
+          <small title={delivery.target}>{delivery.target}</small>
+        ),
+      },
+      {
+        id: "matched",
+        header: "Matched VPSs",
+        size: 160,
+        minSize: 130,
+        sortValue: (delivery) => delivery.matched_vps.length,
+        searchValue: (delivery) =>
+          delivery.matched_vps
+            .map((agent) => agent.display_name || agent.id)
+            .join(" "),
+        cell: (delivery) => (
+          <span className="historyPrimary">
+            <strong>{delivery.matched_vps.length}</strong>
+            <small>
+              {delivery.matched_vps
+                .slice(0, 3)
+                .map((agent) => formatVpsName(agent, "name"))
+                .join(", ") || "none"}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "attempts",
+        header: "Attempts",
+        size: 105,
+        minSize: 90,
+        align: "end",
+        sortValue: (delivery) => delivery.attempt_count,
+        cell: (delivery) => (
+          <span className="monoValue">{delivery.attempt_count}</span>
+        ),
+      },
+      {
+        id: "created",
+        header: "Created",
+        size: 140,
+        minSize: 110,
+        sortValue: (delivery) => delivery.created_at,
+        cell: (delivery) => formatCompactTime(delivery.created_at),
+      },
+    ],
+    [],
+  );
+
+  return (
+    <ConsoleDataGrid
+      columns={columns}
+      defaultPageSize={8}
+      empty={
+        preview
+          ? "No webhook preview delivery rows."
+          : "No webhook deliveries retained."
+      }
+      getRowId={(delivery) => delivery.id}
+      itemLabel="deliveries"
+      renderExpandedRow={(delivery) => (
+        <div className="gridDetailLine">
+          <strong>{delivery.rule_name}</strong>
+          <span>{delivery.status}</span>
+          <span>{delivery.event_kind}</span>
+          <span>{delivery.target}</span>
+          <span>{delivery.attempt_count} attempts</span>
+          {delivery.error && (
+            <span className="deliveryErrorText" title={delivery.error}>
+              error: {delivery.error}
+            </span>
+          )}
+        </div>
+      )}
+      rows={deliveries}
+      searchPlaceholder="Search webhook deliveries"
+      storageKey="vpsman.grid.fleet.webhookDeliveries.v2"
+      title={preview ? "Webhook delivery preview" : "Webhook delivery history"}
+    />
+  );
+}
+
+function WebhookDeliveryMaintenancePanel({
+  onRotate,
+  rules,
+}: {
+  onRotate: (
+    request: WebhookDeliveryRotationRequest,
+  ) => Promise<WebhookDeliveryRotationResponse>;
+  rules: WebhookRuleRecord[];
+}) {
+  const [rotationDays, setRotationDays] = useState("90");
+  const [rotationStatus, setRotationStatus] = useState("delivered");
+  const [rotationRuleId, setRotationRuleId] = useState("");
+  const [rotationPreview, setRotationPreview] =
+    useState<WebhookDeliveryRotationResponse | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [rotationPending, setRotationPending] = useState(false);
+  const [rotationError, setRotationError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  async function rotate(confirmed: boolean) {
+    if (rotationPending) {
+      return;
+    }
+    setRotationPending(true);
+    setRotationError(null);
+    setStatus(
+      confirmed ? "deleting matched deliveries" : "previewing rotation",
+    );
+    try {
+      const response = await onRotate({
+        older_than_days: optionalInteger(rotationDays),
+        status: rotationStatus.trim() || null,
+        rule_id: rotationRuleId || null,
+        confirmed,
+      });
+      setRotationPreview(response);
+      setConfirmDelete(false);
+      setStatus(
+        `${response.matched_count} matched / ${response.deleted_count} deleted`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "rotation failed";
+      setRotationError(message);
+      setStatus(message);
+    } finally {
+      setRotationPending(false);
+    }
+  }
+
+  return (
+    <div className="consoleResourceLayout fullWidth">
+      <ConsoleDetailPanel
+        actions={
+          <>
+            <button
+              className="secondaryAction"
+              disabled={rotationPending}
+              type="button"
+              onClick={() => void rotate(false)}
+            >
+              Preview rotation
+            </button>
+            <button
+              className="dangerAction"
+              disabled={
+                rotationPending ||
+                !rotationPreview ||
+                rotationPreview.matched_count === 0
+              }
+              type="button"
+              onClick={() => {
+                setRotationError(null);
+                setConfirmDelete(true);
+              }}
+            >
+              Delete previewed rows
+            </button>
+          </>
+        }
+        description="Rotation is a deliberate maintenance operation: preview first, then confirm deletion."
+        title="Webhook delivery maintenance"
+      >
+        <div className="consoleFormGrid">
+          <ConsoleField label="Older than days">
+            <input
+              aria-label="Webhook rotation days"
+              value={rotationDays}
+              onChange={(event) => setRotationDays(event.target.value)}
+            />
+          </ConsoleField>
+          <ConsoleField label="Status">
+            <input
+              aria-label="Webhook rotation status"
+              value={rotationStatus}
+              onChange={(event) => setRotationStatus(event.target.value)}
+              placeholder="delivered"
+            />
+          </ConsoleField>
+          <ConsoleField label="Rule">
+            <select
+              aria-label="Webhook rotation rule"
+              value={rotationRuleId}
+              onChange={(event) => setRotationRuleId(event.target.value)}
+            >
+              <option value="">all rules</option>
+              {rules.map((rule) => (
+                <option key={rule.id} value={rule.id}>
+                  {rule.name}
+                </option>
+              ))}
+            </select>
+          </ConsoleField>
+          <ConsoleField label="Rotation result" className="fieldWide">
+            <span className="monoValue">
+              {rotationPreview
+                ? `${rotationPreview.matched_count} matched / ${rotationPreview.deleted_count} deleted`
+                : "not previewed"}
+            </span>
+          </ConsoleField>
+        </div>
+        {status && <small className="fleetPolicyStatus">{status}</small>}
+      </ConsoleDetailPanel>
+      <ConfirmationPrompt
+        confirmLabel="Delete retained history"
+        detail="Deletes only the webhook delivery history rows matched by the last preview. Rules are not deleted."
+        items={[
+          {
+            label: "Matched rows",
+            value: rotationPreview?.matched_count ?? 0,
+          },
+          {
+            label: "Status",
+            value: rotationPreview?.status ?? "any",
+          },
+        ]}
+        error={rotationError}
+        onCancel={() => {
+          setRotationError(null);
+          setConfirmDelete(false);
+        }}
+        onConfirm={() => void rotate(true)}
+        open={confirmDelete}
+        pending={rotationPending}
+        title="Delete webhook delivery history"
+        tone="danger"
+      />
+    </div>
+  );
+}
+
+function deliveryStatusTone(
+  status: string,
+): "critical" | "warning" | "ok" | "info" {
+  if (status === "delivered" || status === "sent") {
+    return "ok";
+  }
+  if (status === "failed") {
+    return "critical";
+  }
+  if (status === "queued" || status === "retrying") {
+    return "warning";
+  }
+  return "info";
 }
 
 function WebhookTemplateEditor({
@@ -3863,26 +4982,30 @@ function FleetAlertList({
       {
         id: "target",
         header: "Target",
-        size: 190,
-        minSize: 140,
+        size: 210,
+        minSize: 150,
         sortValue: (alert) =>
           alert.client_id
-            ? nameById.get(alert.client_id) ?? alert.client_id
+            ? (nameById.get(alert.client_id) ?? alert.client_id)
             : alertTargetLabel(alert),
         searchValue: (alert) =>
           `${alert.target_kind} ${alert.target_id} ${alert.client_id ?? ""} ${
-            alert.client_id ? nameById.get(alert.client_id) ?? "" : ""
+            alert.client_id ? (nameById.get(alert.client_id) ?? "") : ""
           }`,
-        cell: (alert) => (
-          <span className="historyPrimary">
-            <strong>
-              {alert.client_id
-                ? nameById.get(alert.client_id) ?? "Unnamed VPS"
-                : alertTargetLabel(alert)}
-            </strong>
-            <small className="monoValue">{alert.client_id ?? alert.target_id}</small>
-          </span>
-        ),
+        cell: (alert) => {
+          const label = alert.client_id
+            ? (nameById.get(alert.client_id) ?? "Unnamed VPS")
+            : alertTargetLabel(alert);
+          return (
+            <span
+              className="historyPrimary"
+              title={`${alert.target_kind}:${alert.target_id}`}
+            >
+              <strong>{label}</strong>
+              <small>{alert.target_kind}</small>
+            </span>
+          );
+        },
       },
       {
         id: "category",
@@ -3899,10 +5022,13 @@ function FleetAlertList({
         size: 150,
         minSize: 120,
         sortValue: (alert) => alert.operator_state,
-        searchValue: (alert) => `${alert.operator_state} ${alert.state_reason ?? ""}`,
+        searchValue: (alert) =>
+          `${alert.operator_state} ${alert.state_reason ?? ""}`,
         cell: (alert) => (
           <span className="historyPrimary">
-            <ConsoleStatusBadge tone={alert.operator_state === "open" ? "warning" : "info"}>
+            <ConsoleStatusBadge
+              tone={alert.operator_state === "open" ? "warning" : "info"}
+            >
               {alert.operator_state}
             </ConsoleStatusBadge>
             {alert.state_reason && <small>{alert.state_reason}</small>}
@@ -3917,52 +5043,8 @@ function FleetAlertList({
         sortValue: (alert) => alert.observed_at,
         cell: (alert) => formatCompactTime(alert.observed_at),
       },
-      {
-        id: "actions",
-        header: "Actions",
-        size: 245,
-        minSize: 220,
-        enableHiding: false,
-        cell: (alert) => (
-          <span className="inlineActions">
-            {alert.operator_state === "open" ? (
-              <>
-                <button
-                  type="button"
-                  disabled={Boolean(pending)}
-                  onClick={() => void updateAlerts([alert], "acknowledge")}
-                >
-                  Ack
-                </button>
-                <button
-                  type="button"
-                  disabled={Boolean(pending)}
-                  onClick={() => void updateAlerts([alert], "mute")}
-                >
-                  Mute
-                </button>
-                <button
-                  type="button"
-                  disabled={Boolean(pending)}
-                  onClick={() => void updateAlerts([alert], "escalate")}
-                >
-                  Escalate
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                disabled={Boolean(pending)}
-                onClick={() => void updateAlerts([alert], "clear")}
-              >
-                Clear
-              </button>
-            )}
-          </span>
-        ),
-      },
     ],
-    [nameById, pending],
+    [nameById],
   );
 
   async function updateAlerts(
@@ -4017,22 +5099,36 @@ function FleetAlertList({
         actions={[
           {
             label: "Acknowledge open",
+            description: (rows) =>
+              `Acknowledge ${openRows(rows).length} selected open fleet alerts.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
-            onSelect: (rows) => void updateAlerts(openRows(rows), "acknowledge"),
+            icon: <Check size={14} />,
+            onSelect: (rows) =>
+              void updateAlerts(openRows(rows), "acknowledge"),
           },
           {
             label: "Mute open 4h",
+            description: (rows) =>
+              `Mute ${openRows(rows).length} selected open fleet alerts for four hours.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
+            icon: <VolumeX size={14} />,
             onSelect: (rows) => void updateAlerts(openRows(rows), "mute"),
           },
           {
             label: "Escalate open",
+            description: (rows) =>
+              `Escalate ${openRows(rows).length} selected open fleet alerts.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
+            icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => void updateAlerts(openRows(rows), "escalate"),
           },
           {
             label: "Clear triaged",
-            disabled: (rows) => pending != null || triagedRows(rows).length === 0,
+            description: (rows) =>
+              `Clear ${triagedRows(rows).length} selected triaged fleet alerts.`,
+            disabled: (rows) =>
+              pending != null || triagedRows(rows).length === 0,
+            icon: <CircleCheck size={14} />,
             onSelect: (rows) => void updateAlerts(triagedRows(rows), "clear"),
           },
         ]}
@@ -4043,21 +5139,89 @@ function FleetAlertList({
         itemLabel="alerts"
         renderExpandedRow={(alert) => (
           <div className="consoleGridDetails">
-            <span><strong>Status:</strong> {alert.status}</span>
-            <span><strong>Target:</strong> {alert.target_kind}:{alert.target_id}</span>
+            <span>
+              <strong>Status:</strong> {alert.status}
+            </span>
+            <span>
+              <strong>Target:</strong> {alert.target_kind}:{alert.target_id}
+            </span>
             {alert.muted_until_unix && (
-              <span><strong>Muted until:</strong> {formatUnixTime(alert.muted_until_unix)}</span>
+              <span>
+                <strong>Muted until:</strong>{" "}
+                {formatUnixTime(alert.muted_until_unix)}
+              </span>
             )}
-            <span><strong>Escalation:</strong> {alert.escalation_level}</span>
+            <span>
+              <strong>Escalation:</strong> {alert.escalation_level}
+            </span>
             <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
           </div>
         )}
+        rowActions={[
+          {
+            label: "Ack",
+            description: (rows) =>
+              actionTargetDescription(
+                "Acknowledge",
+                "fleet alert",
+                rows[0]?.title,
+                "Marks the open alert as acknowledged.",
+              ),
+            disabled: (rows) =>
+              pending != null || rows[0]?.operator_state !== "open",
+            icon: <Check size={14} />,
+            onSelect: (rows) => void updateAlerts(rows, "acknowledge"),
+          },
+          {
+            label: "Mute",
+            description: (rows) =>
+              actionTargetDescription(
+                "Mute",
+                "fleet alert",
+                rows[0]?.title,
+                "Suppresses the open alert for four hours.",
+              ),
+            disabled: (rows) =>
+              pending != null || rows[0]?.operator_state !== "open",
+            icon: <VolumeX size={14} />,
+            onSelect: (rows) => void updateAlerts(rows, "mute"),
+          },
+          {
+            label: "Escalate",
+            description: (rows) =>
+              actionTargetDescription(
+                "Escalate",
+                "fleet alert",
+                rows[0]?.title,
+                "Raises the open alert escalation level.",
+              ),
+            disabled: (rows) =>
+              pending != null || rows[0]?.operator_state !== "open",
+            icon: <ArrowUpCircle size={14} />,
+            onSelect: (rows) => void updateAlerts(rows, "escalate"),
+          },
+          {
+            label: "Clear",
+            description: (rows) =>
+              actionTargetDescription(
+                "Clear",
+                "fleet alert",
+                rows[0]?.title,
+                "Clears a triaged alert.",
+              ),
+            disabled: (rows) =>
+              pending != null || rows[0]?.operator_state === "open",
+            icon: <CircleCheck size={14} />,
+            onSelect: (rows) => void updateAlerts(rows, "clear"),
+          },
+        ]}
         renderSelectionPanel={(rows) => {
           const selectedOpen = openRows(rows).length;
           const selectedTriaged = triagedRows(rows).length;
           return (
             <span>
-              {rows.length} selected · {selectedOpen} open · {selectedTriaged} triaged
+              {rows.length} selected · {selectedOpen} open · {selectedTriaged}{" "}
+              triaged
             </span>
           );
         }}

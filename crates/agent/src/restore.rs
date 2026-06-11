@@ -112,7 +112,6 @@ pub(crate) async fn execute_restore_command(
     .context("restore timed out")?
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn restore_archive(
     job_id: uuid::Uuid,
     source_backup_request_id: uuid::Uuid,

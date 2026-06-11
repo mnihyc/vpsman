@@ -249,7 +249,6 @@ async fn execute_file_read_text(
     status_output(job_id, status)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_file_write_text(
     job_id: uuid::Uuid,
     path: &str,
@@ -499,7 +498,6 @@ async fn execute_file_chmod(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_file_chown(
     job_id: uuid::Uuid,
     path: &str,

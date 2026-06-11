@@ -47,6 +47,99 @@ smoke_agent_config_client_id() {
   sed -n 's/^client_id = "\(.*\)"$/\1/p' "$config_path" | head -n 1
 }
 
+smoke_toml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '"%s"' "$value"
+}
+
+smoke_csv_to_toml_string_array() {
+  local csv="${1:-}"
+  local first=1
+  local item
+  local -a items=()
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ -n "$item" ]] || continue
+    if [[ "$first" -eq 0 ]]; then
+      printf ', '
+    fi
+    smoke_toml_quote "$item"
+    first=0
+  done
+}
+
+smoke_create_direct_agent_config() {
+  local api_url="$1"
+  local access_token="$2"
+  local config_path="$3"
+  local client_id="$4"
+  local display_name="$5"
+  local tags_csv="$6"
+  local gateway_public_hex="$7"
+  local endpoints_csv="$8"
+  local command_timeout_secs="${9:-30}"
+  local keypair private_hex public_hex
+
+  keypair="$(target/debug/vpsctl noise-keygen)"
+  private_hex="$(jq -r '.private_key_hex' <<<"$keypair")"
+  public_hex="$(jq -r '.public_key_hex' <<<"$keypair")"
+
+  local -a upsert_args=(
+    --api-url "$api_url"
+    agent-identity-upsert
+    --client-id "$client_id"
+    --client-public-key-hex "$public_hex"
+    --confirmed
+  )
+  if [[ -n "$display_name" ]]; then
+    upsert_args+=(--display-name "$display_name")
+  fi
+  if [[ -n "$tags_csv" ]]; then
+    upsert_args+=(--tags "$tags_csv")
+  fi
+  VPSMAN_API_TOKEN="$access_token" target/debug/vpsctl "${upsert_args[@]}" >/dev/null
+
+  mkdir -p "$(dirname "$config_path")"
+  {
+    printf 'client_id = %s\n' "$(smoke_toml_quote "$client_id")"
+    printf 'display_name = %s\n' "$(smoke_toml_quote "${display_name:-$client_id}")"
+    printf 'telemetry_light_secs = 15\n'
+    printf 'telemetry_full_secs = 60\n'
+    printf 'tags = [%s]\n' "$(smoke_csv_to_toml_string_array "$tags_csv")"
+    printf '\n[noise]\n'
+    printf 'mode = "enrolled_ik"\n'
+    printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$private_hex")"
+    printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
+    printf '\n[auth]\n'
+    printf 'command_timeout_secs = %s\n' "$command_timeout_secs"
+    printf 'gateway_retry_secs = 1\n'
+    printf 'gateway_connect_timeout_secs = 1\n'
+  } >"$config_path"
+
+  local endpoint
+  local -a endpoints=()
+  IFS=',' read -r -a endpoints <<<"$endpoints_csv"
+  for endpoint in "${endpoints[@]}"; do
+    endpoint="${endpoint//[$'\r\n']/}"
+    [[ -n "${endpoint// /}" ]] || continue
+    local label tcp_addr priority extra
+    IFS='=' read -r label tcp_addr priority extra <<<"$endpoint"
+    [[ -z "${extra:-}" && -n "${label:-}" && -n "${tcp_addr:-}" && -n "${priority:-}" ]] \
+      || smoke_fail "invalid direct agent endpoint spec: $endpoint"
+    {
+      printf '\n[[tcp_endpoints]]\n'
+      printf 'label = %s\n' "$(smoke_toml_quote "$label")"
+      printf 'tcp_addr = %s\n' "$(smoke_toml_quote "$tcp_addr")"
+      printf 'priority = %s\n' "$priority"
+    } >>"$config_path"
+  done
+}
+
 smoke_build_binaries() {
   if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
     cargo build -p vpsman-api -p vpsman-gateway -p vpsman-agent -p vpsctl

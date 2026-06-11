@@ -86,48 +86,22 @@ struct DownloadChunkStep {
     status: TransferClientStatus,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct FileTransferDownloadOptions {
+    pub(crate) plan: FileTransferDownloadPlan,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+}
+
 pub(crate) fn file_transfer_download(
     api_url: &str,
     token: Option<&str>,
-    destination: PathBuf,
-    path: String,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    session_id: Option<Uuid>,
-    resume_token: Option<String>,
-    chunk_size_bytes: u32,
-    rate_limit_kbps: u32,
-    poll_interval_ms: u64,
-    max_polls: u32,
-    multi_target_policy: FileTransferDownloadMultiTargetPolicy,
+    options: FileTransferDownloadOptions,
 ) -> Result<()> {
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let plan = FileTransferDownloadPlan {
-        destination,
-        path,
-        clients,
-        tags,
-        privilege_ttl_secs,
-        timeout_secs,
-        confirmed,
-        session_id,
-        resume_token,
-        chunk_size_bytes,
-        rate_limit_kbps,
-        poll_interval_ms,
-        max_polls,
-        multi_target_policy,
-    };
+    let password = load_super_password(&options.password_env)?;
+    let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
     print!(
         "{}",
-        execute_file_transfer_download(api_url, token, plan, &password, &salt_hex)?
+        execute_file_transfer_download(api_url, token, options.plan, &password, &salt_hex)?
     );
     Ok(())
 }
@@ -376,7 +350,6 @@ fn execute_file_transfer_download_for_target(input: DownloadTargetInput<'_>) -> 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn wait_for_download_chunk(
     api_url: &str,
     token: Option<&str>,

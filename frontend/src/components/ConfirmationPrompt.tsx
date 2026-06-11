@@ -5,6 +5,7 @@ export function ConfirmationPrompt({
   cancelLabel = "Cancel",
   confirmLabel,
   detail,
+  error,
   items = [],
   onCancel,
   onConfirm,
@@ -16,6 +17,7 @@ export function ConfirmationPrompt({
   cancelLabel?: string;
   confirmLabel: string;
   detail: ReactNode;
+  error?: ReactNode;
   items?: Array<{ label: string; value: ReactNode }>;
   onCancel: () => void;
   onConfirm: () => void;
@@ -45,13 +47,23 @@ export function ConfirmationPrompt({
             ))}
           </dl>
         )}
+        {error && <small className="confirmationPromptError">{error}</small>}
       </div>
       <div className="confirmationPromptActions">
-        <button className="secondaryAction compactAction" disabled={pending} onClick={onCancel} type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={pending}
+          onClick={onCancel}
+          type="button"
+        >
           {cancelLabel}
         </button>
         <button
-          className={tone === "danger" ? "primaryAction dangerPrimary compactAction" : "primaryAction compactAction"}
+          className={
+            tone === "danger"
+              ? "primaryAction dangerPrimary compactAction"
+              : "primaryAction compactAction"
+          }
           disabled={pending}
           onClick={onConfirm}
           type="button"

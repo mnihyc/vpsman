@@ -37,7 +37,6 @@ struct FileTransferSessionMetadata {
     resume_token_hash: String,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_file_push(
     job_id: uuid::Uuid,
     path: &str,
@@ -72,7 +71,6 @@ pub(crate) async fn execute_file_push(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_file_push_chunked(
     job_id: uuid::Uuid,
     path: &str,
@@ -107,7 +105,6 @@ pub(crate) async fn execute_file_push_chunked(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_file_transfer_start(
     job_id: uuid::Uuid,
     session_id: Uuid,
@@ -344,7 +341,6 @@ pub(crate) async fn execute_file_transfer_abort(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn write_file_push(
     job_id: uuid::Uuid,
     path: &str,
@@ -470,7 +466,6 @@ async fn write_file_push(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn file_push_status(
     job_id: uuid::Uuid,
     status_type: &'static str,
@@ -911,7 +906,6 @@ async fn write_transfer_metadata(
         .with_context(|| format!("failed to write transfer metadata {}", path.display()))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn ensure_metadata_matches(
     metadata: &FileTransferSessionMetadata,
     path: &str,

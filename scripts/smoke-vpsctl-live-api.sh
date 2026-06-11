@@ -332,12 +332,19 @@ if [[ "$scoped_job_status" != "403" ]]; then
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_job_body" >/dev/null
 
-token_json="$(vpsctl_auth enrollment-token-create --ttl-secs 600 --default-tags edge,bgp)"
-jq -e '.token and ((.default_tags | sort) == ["bgp", "edge"]) and (.expires_at | tonumber) > 0' \
-  <<<"$token_json" >/dev/null
-tokens_json="$(vpsctl_auth enrollment-tokens)"
-jq -e 'length == 1 and ((.[0].default_tags | sort) == ["bgp", "edge"])' \
-  <<<"$tokens_json" >/dev/null
+identity_keys="$(vpsctl_public noise-keygen)"
+identity_public_hex="$(jq -r '.public_key_hex' <<<"$identity_keys")"
+identity_json="$(vpsctl_auth agent-identity-upsert \
+  --client-id cli-direct-agent \
+  --client-public-key-hex "$identity_public_hex" \
+  --display-name cli-direct-agent \
+  --tags edge,bgp \
+  --confirmed)"
+jq -e \
+  '.client_id == "cli-direct-agent" and .display_name == "cli-direct-agent" and (.tags | sort == ["bgp", "edge"])' \
+  <<<"$identity_json" >/dev/null
+key_report_json="$(vpsctl_auth key-lifecycle-report)"
+jq -e '.direct_identity_client_count >= 1' <<<"$key_report_json" >/dev/null
 
 root_capabilities='{"privilege_mode":"root","effective_uid":0,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":true,"can_apply_process_limits":true}'
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"vpsctl smoke agent is running without root"}'
@@ -743,7 +750,7 @@ jq -n \
       "fleet_alert_states",
       "fleet_alert_policies",
       "fleet_alert_notifications",
-      "enrollment_tokens",
+      "direct_agent_identity",
       "agents_summary",
       "data_source_status",
       "data_source_object_store_readiness",

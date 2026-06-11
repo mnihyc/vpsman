@@ -6,7 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    commands_backups::restore_run_with_credentials,
+    commands_backups::{restore_run_with_credentials, RestoreRunWithCredentials},
     http::{http_get, http_post_json},
     privilege::{load_super_password, load_super_salt_hex},
 };
@@ -55,7 +55,6 @@ pub(crate) fn migration_link(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn migration_run(
     api_url: &str,
     token: Option<&str>,
@@ -91,7 +90,6 @@ pub(crate) fn migration_run(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn migration_run_with_credentials(
     api_url: &str,
     token: Option<&str>,
@@ -126,19 +124,21 @@ pub(crate) fn migration_run_with_credentials(
     let restore_job_json = restore_run_with_credentials(
         api_url,
         token,
-        plan.source_backup_request_id,
-        plan.target_client_id,
-        artifact_file,
-        private_key_env,
-        plan.paths,
-        plan.include_config,
-        plan.destination_root,
-        password,
-        salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        true,
-        force_unprivileged,
+        RestoreRunWithCredentials {
+            source_backup_request_id: plan.source_backup_request_id,
+            target_client_id: plan.target_client_id,
+            artifact_file,
+            private_key_env,
+            paths: plan.paths,
+            include_config: plan.include_config,
+            destination_root: plan.destination_root,
+            password,
+            salt_hex,
+            privilege_ttl_secs,
+            timeout_secs,
+            confirmed: true,
+            force_unprivileged,
+        },
     )?;
     Ok(json!({
         "migration_link": parse_json_or_text(&migration_link_json),

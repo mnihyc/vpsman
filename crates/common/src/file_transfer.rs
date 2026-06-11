@@ -202,7 +202,6 @@ pub fn decode_chunked_file_payload(
     Ok(data)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn validate_file_transfer_session(
     session_id: uuid::Uuid,
     path: &str,

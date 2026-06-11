@@ -630,8 +630,6 @@ impl Repository {
             }
         }
     }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_rejected_job(
         &self,
         job_id: Uuid,
@@ -800,8 +798,6 @@ impl Repository {
         )
         .await
     }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_dispatching_job_from_schedule(
         &self,
         job_id: Uuid,
@@ -823,8 +819,6 @@ impl Repository {
         )
         .await
     }
-
-    #[allow(clippy::too_many_arguments)]
     async fn record_dispatching_job_with_source(
         &self,
         job_id: Uuid,

@@ -8,7 +8,30 @@ use crate::{
     jobs::{submit_privileged_operation, PrivilegedOperationRequest},
 };
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct ProcessStartOptions {
+    pub(crate) name: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) env: Vec<String>,
+    pub(crate) restart_policy: String,
+    pub(crate) restart_max_retries: u16,
+    pub(crate) restart_backoff_secs: u64,
+    pub(crate) graceful_stop_secs: u64,
+    pub(crate) memory_max_bytes: Option<u64>,
+    pub(crate) pids_max: Option<u32>,
+    pub(crate) open_files_max: Option<u64>,
+    pub(crate) cpu_shares: Option<u32>,
+    pub(crate) no_new_privileges: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+    pub(crate) force_unprivileged: bool,
+}
+
 pub(crate) fn user_sessions(
     api_url: &str,
     token: Option<&str>,
@@ -40,7 +63,6 @@ pub(crate) fn user_sessions(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_list(
     api_url: &str,
     token: Option<&str>,
@@ -78,57 +100,36 @@ pub(crate) fn process_list(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_start(
     api_url: &str,
     token: Option<&str>,
-    name: String,
-    argv: Vec<String>,
-    cwd: Option<String>,
-    env: Vec<String>,
-    restart_policy: String,
-    restart_max_retries: u16,
-    restart_backoff_secs: u64,
-    graceful_stop_secs: u64,
-    memory_max_bytes: Option<u64>,
-    pids_max: Option<u32>,
-    open_files_max: Option<u64>,
-    cpu_shares: Option<u32>,
-    no_new_privileges: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
+    options: ProcessStartOptions,
 ) -> Result<()> {
     anyhow::ensure!(
-        !argv.is_empty(),
+        !options.argv.is_empty(),
         "process start requires at least one --argv"
     );
     anyhow::ensure!(
-        argv[0].starts_with('/'),
+        options.argv[0].starts_with('/'),
         "process executable must be an absolute path"
     );
     let operation = JobCommand::ProcessStart {
-        name,
-        argv,
-        cwd,
-        env: parse_env_pairs(&env)?,
+        name: options.name,
+        argv: options.argv,
+        cwd: options.cwd,
+        env: parse_env_pairs(&options.env)?,
         policy: ProcessRunPolicy {
-            restart: parse_restart_policy(&restart_policy)?,
-            restart_max_retries,
-            restart_backoff_secs,
-            graceful_stop_secs,
+            restart: parse_restart_policy(&options.restart_policy)?,
+            restart_max_retries: options.restart_max_retries,
+            restart_backoff_secs: options.restart_backoff_secs,
+            graceful_stop_secs: options.graceful_stop_secs,
         },
         limits: ProcessResourceLimits {
-            memory_max_bytes,
-            pids_max,
-            open_files_max,
-            cpu_shares,
-            no_new_privileges,
+            memory_max_bytes: options.memory_max_bytes,
+            pids_max: options.pids_max,
+            open_files_max: options.open_files_max,
+            cpu_shares: options.cpu_shares,
+            no_new_privileges: options.no_new_privileges,
         },
     };
     submit_process_operation(
@@ -136,14 +137,14 @@ pub(crate) fn process_start(
         token,
         &operation,
         "process_start",
-        clients,
-        tags,
-        password_env,
-        super_salt_hex,
-        privilege_ttl_secs,
-        timeout_secs,
-        confirmed,
-        force_unprivileged,
+        options.clients,
+        options.tags,
+        options.password_env,
+        options.super_salt_hex,
+        options.privilege_ttl_secs,
+        options.timeout_secs,
+        options.confirmed,
+        options.force_unprivileged,
     )
 }
 
@@ -156,7 +157,6 @@ fn parse_restart_policy(value: &str) -> Result<ProcessRestartPolicy> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_stop(
     api_url: &str,
     token: Option<&str>,
@@ -186,7 +186,6 @@ pub(crate) fn process_stop(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_restart(
     api_url: &str,
     token: Option<&str>,
@@ -216,7 +215,6 @@ pub(crate) fn process_restart(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_status(
     api_url: &str,
     token: Option<&str>,
@@ -246,7 +244,6 @@ pub(crate) fn process_status(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_logs(
     api_url: &str,
     token: Option<&str>,
@@ -300,7 +297,6 @@ pub(crate) fn process_supervisor_inventory(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn submit_process_operation(
     api_url: &str,
     token: Option<&str>,

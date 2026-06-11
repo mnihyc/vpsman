@@ -610,7 +610,6 @@ fn capability_degraded_outcome(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn reject_job(
     state: &AppState,
     job_id: Uuid,

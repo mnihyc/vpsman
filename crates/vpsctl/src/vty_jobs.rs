@@ -142,7 +142,6 @@ pub(crate) fn vty_submit_operation(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn vty_submit_operation_with_force(
     api_url: &str,
     token: Option<&str>,
