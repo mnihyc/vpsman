@@ -73,6 +73,35 @@
     display: grid;
   }
 
+  .configRuleWorkspace,
+  .configApplyGrid,
+  .bulkTagApplyGrid,
+  .historyRetentionGrid,
+  .managementGrid,
+  .preferenceGroup {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preferenceResetRow,
+  .tagCreateForm .formRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .crudToolbar {
+    align-items: stretch;
+  }
+
+  .crudSearch {
+    grid-template-columns: minmax(0, 1fr);
+    flex-basis: 100%;
+  }
+
+  .crudPageActions,
+  .crudPageSize,
+  .retentionActions {
+    justify-content: flex-start;
+  }
+
   .operationalGrid,
   .dashboardClusterGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -163,6 +192,21 @@
     margin-left: 0;
   }
 
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .search {
+    width: 100%;
+    max-width: none;
+  }
+
+  .mobilePageSelector {
+    display: block;
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
   .topbar,
   .consoleHeader,
   .workspace {
@@ -195,13 +239,9 @@
     min-height: 0;
   }
 
-  .primaryAction span {
-    display: none;
-  }
-
   .sessionButton {
-    width: 40px;
-    padding: 0;
+    width: auto;
+    padding: 0 10px;
   }
 
   .actionDrawer {
@@ -209,12 +249,9 @@
     box-shadow: none;
   }
 
-  .sessionButton span {
-    display: none;
-  }
-
   .topbarActions {
     justify-content: flex-start;
+    width: 100%;
   }
 
   .savedViewControls {
@@ -252,6 +289,7 @@
   }
 
   .gridToolbarActions {
+    flex-wrap: wrap;
     justify-content: flex-start;
   }
 
@@ -294,10 +332,6 @@
     grid-template-columns: minmax(0, 1fr) 44px;
   }
 
-  .sourceArtifactRow > span:nth-child(2) {
-    display: none;
-  }
-
   .handoffBulkBar {
     align-items: stretch;
     flex-direction: column;
@@ -316,13 +350,30 @@
     min-width: min(180px, 55vw);
   }
 
-  .fleetAlertRow > small:not(.fleetAlertReason) {
-    display: none;
-  }
-
   .historyRow {
     min-height: 54px;
     padding: 10px 14px;
+  }
+
+  .historyRetentionGrid,
+  .configApplyGrid,
+  .bulkTagApplyGrid,
+  .managementGrid,
+  .dispatchControls,
+  .templateToolbar,
+  .inlineOpsForm,
+  .sourceArtifactControls,
+  .preferenceGroup,
+  .preferenceInlineControls,
+  .preferenceResetRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preferenceHint,
+  .sectionSubheader,
+  .targetImpactHeader {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .jobHistoryGrid,

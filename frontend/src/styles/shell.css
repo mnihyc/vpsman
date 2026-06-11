@@ -229,9 +229,22 @@ nav {
 .topbarActions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
   min-width: 0;
+}
+
+.mobilePageSelector {
+  display: none;
+  min-width: min(100%, 190px);
+  height: 36px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  outline: 0;
+  padding: 0 10px;
 }
 
 .savedViewControls {
@@ -1014,15 +1027,16 @@ h2 {
 }
 
 .gridSearch {
-  min-width: 180px;
-  max-width: 320px;
-  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
+  flex: 1 1 260px;
 }
 
 .gridToolbarActions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
   gap: 6px;
   min-width: 0;
 }
@@ -1060,13 +1074,13 @@ h2 {
 .gridHeaderGroup,
 .gridBody {
   min-width: 100%;
-  width: max-content;
+  width: 100%;
 }
 
 .gridRow {
   display: flex;
   min-width: 100%;
-  width: max-content;
+  width: 100%;
   border-bottom: 1px solid #eef1f6;
   background: #fff;
 }
@@ -1087,7 +1101,6 @@ h2 {
 .gridHeaderCell,
 .gridCell {
   position: relative;
-  flex: 0 0 auto;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -1183,71 +1196,4 @@ h2 {
 .gridIconButton {
   width: 28px;
   height: 28px;
-}
-
-.gridStickyActions {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  border-left: 1px solid #eef1f6;
-  background: inherit;
-  box-shadow: -8px 0 12px rgba(248, 250, 253, 0.78);
-}
-
-.gridHeaderCell.gridStickyActions {
-  z-index: 4;
-  background: #fff;
-}
-
-.gridRow:hover .gridStickyActions,
-.gridRow.selected .gridStickyActions {
-  background: #f8fafd;
-}
-
-.gridRowActions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  width: 100%;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.gridRowAction {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 30px;
-  border: 1px solid #dfe3eb;
-  border-radius: 6px;
-  background: #fff;
-  color: #3c4043;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 0 9px;
-  white-space: nowrap;
-}
-
-.gridRowActionIcon {
-  display: inline-grid;
-  place-items: center;
-  flex: 0 0 auto;
-  color: currentColor;
-}
-
-.gridRowAction:hover:not(:disabled) {
-  border-color: #c3d5f8;
-  background: #f8fbff;
-  color: #174ea6;
-}
-
-.gridRowAction.danger {
-  color: #b3261e;
-}
-
-.gridRowAction:disabled {
-  cursor: not-allowed;
-  opacity: 0.48;
 }

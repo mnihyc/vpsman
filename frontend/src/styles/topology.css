@@ -1,5 +1,6 @@
 .topologyGraphPanel {
   grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .compactHeader {
@@ -13,8 +14,21 @@
   line-height: 1.3;
 }
 
+.tableWrap {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.tableWrap table {
+  width: max-content;
+  min-width: 100%;
+}
+
 .topologyGraphCanvas {
   display: block;
+  max-width: calc(100% - 36px);
   width: calc(100% - 36px);
   min-height: 260px;
   margin: 0 18px 18px;
@@ -35,7 +49,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: 1 1 280px;
+  flex: 1 1 min(100%, 280px);
   width: min(420px, 100%);
   height: 38px;
   border: 1px solid #dfe3eb;
@@ -54,13 +68,15 @@
 
 .segmentedControl {
   display: inline-flex;
+  flex-wrap: wrap;
   overflow: hidden;
   border: 1px solid #dfe3eb;
   border-radius: 8px;
 }
 
 .segmentedControl button {
-  min-width: 82px;
+  flex: 1 1 82px;
+  min-width: 0;
   height: 38px;
   border: 0;
   border-right: 1px solid #dfe3eb;
@@ -143,13 +159,15 @@
 .topologyGraphSummary {
   display: grid;
   max-height: 360px;
+  min-width: 0;
   overflow: auto;
+  overscroll-behavior-x: contain;
   border-top: 1px solid #eef1f6;
 }
 
 .topologyNodeInspector {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) repeat(2, minmax(140px, 0.55fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   align-items: center;
   gap: 16px;
   min-height: 58px;
@@ -179,15 +197,16 @@
 .topologyGraphEdgeRow {
   display: grid;
   grid-template-columns:
-    minmax(220px, 1fr)
-    minmax(120px, 0.42fr)
-    minmax(150px, 0.62fr)
-    minmax(155px, 0.62fr)
-    minmax(140px, 0.55fr)
-    minmax(120px, 0.45fr)
-    minmax(170px, 0.6fr);
+    minmax(180px, 1fr)
+    minmax(100px, 0.42fr)
+    minmax(130px, 0.62fr)
+    minmax(135px, 0.62fr)
+    minmax(120px, 0.55fr)
+    minmax(100px, 0.45fr)
+    minmax(150px, 0.6fr);
   align-items: center;
   gap: 12px;
+  min-width: max(100%, 920px);
   min-height: 58px;
   padding: 0 18px;
   border-bottom: 1px solid #eef1f6;
@@ -214,7 +233,7 @@
 
 .promotionWorkflow {
   display: grid;
-  grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.35fr);
+  grid-template-columns: minmax(min(100%, 390px), 0.78fr) minmax(min(100%, 560px), 1.22fr);
   gap: 16px;
   align-items: start;
   min-width: 0;
@@ -227,10 +246,13 @@
 
 .promotionStageCard {
   align-content: start;
+  display: grid;
+  gap: 12px;
   min-width: 0;
   border: 1px solid #dfe3eb;
   border-radius: 8px;
   background: #fff;
+  padding: 0;
 }
 
 .promotionStageHeader small {
@@ -246,8 +268,10 @@
   display: grid;
   gap: 3px;
   min-width: 0;
-  border-top: 1px solid #eef1f6;
-  padding-top: 10px;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #f8fafd;
+  padding: 9px 10px;
 }
 
 .promotionGroupLabel strong {
@@ -261,14 +285,71 @@
   line-height: 1.35;
 }
 
-.promotionWorkflow {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 .promotionStageCard {
   width: 100%;
 }
 
 .promotionStageCard .dispatchControls {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.promotionStageCard > label,
+.promotionStageCard > .dispatchControls,
+.promotionStageCard > .primaryAction,
+.promotionStageCard > .confirmationPrompt {
+  margin-inline: 18px;
+}
+
+.promotionStageCard > .primaryAction {
+  margin-bottom: 18px;
+}
+
+.promotionStageCard textarea {
+  min-height: 72px;
+}
+
+.promotionAdapterCard {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.promotionAdapterCard > .sectionHeader,
+.promotionAdapterCard > .dispatchControls,
+.promotionAdapterCard > .promotionGroupLabel,
+.promotionAdapterCard > label,
+.promotionAdapterCard > .primaryAction {
+  grid-column: 1 / -1;
+}
+
+.promotionAdapterCard > label:nth-of-type(1),
+.promotionAdapterCard > label:nth-of-type(2) {
+  grid-column: auto;
+}
+
+.topologyPlanComposer .dispatchForm {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  align-items: start;
+}
+
+.topologyPlanComposer .formSectionNote,
+.topologyPlanComposer .primaryAction {
+  grid-column: 1 / -1;
+}
+
+.topologyPlanComposer textarea {
+  min-height: 72px;
+}
+
+.topologyPlanComposer pre {
+  max-height: 220px;
+  overflow: auto;
+}
+
+@media (max-width: 980px) {
+  .promotionWorkflow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .promotionAdapterCard {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

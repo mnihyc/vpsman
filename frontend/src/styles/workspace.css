@@ -792,15 +792,22 @@
 
 .preferencesForm {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
 }
 
 .preferenceGroup {
   display: grid;
-  grid-template-columns: minmax(200px, 0.32fr) minmax(420px, 1.68fr);
-  gap: 24px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
   align-items: start;
-  padding: 18px;
-  border-bottom: 1px solid #eef1f6;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
 }
 
 .preferenceGroupHeader {
@@ -836,6 +843,7 @@
 .preferenceControls {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .preferenceControls label {
@@ -864,7 +872,7 @@
 }
 
 .preferenceControls textarea {
-  min-height: 120px;
+  min-height: 92px;
   padding: 10px 12px;
   resize: vertical;
 }
@@ -877,7 +885,7 @@
 
 .preferenceInlineControls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
 }
 
@@ -885,7 +893,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
+  min-width: 0;
   min-height: 36px;
   border: 1px solid #eef1f6;
   border-radius: 8px;
@@ -901,9 +911,10 @@
 
 .preferenceResetRow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 10px;
   align-items: center;
+  min-width: 0;
 }
 
 .preferencesNotice {
@@ -914,17 +925,20 @@
 }
 
 .preferencesError {
-  margin: 14px 18px 0;
+  grid-column: 1 / -1;
+  margin: 0;
   color: #b3261e;
   font-size: 13px;
   font-weight: 600;
 }
 
 .preferencesActions {
+  grid-column: 1 / -1;
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
-  padding: 18px;
+  padding: 4px 0 0;
 }
 
 .compactForm input,

@@ -123,7 +123,7 @@ export function TopologyEvidencePanel({
           Refresh evidence
         </button>
       </div>
-      {probePoints.length > 0 && (
+      {probePoints.length > 0 && latencyGroups.length === 0 && (
         <div className="latencyCurve" aria-label="Network probe latency history">
           {probePoints.map((point) => (
             <span

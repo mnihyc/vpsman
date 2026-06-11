@@ -38,6 +38,9 @@ export function TerminalSessionsPanel({
       null,
     [activeKey, sessions],
   );
+  const openSessions = sessions.filter((session) => !session.session_exited && session.state !== "closed").length;
+  const replayableSessions = sessions.filter((session) => session.output_next_seq !== null).length;
+  const retainedBytes = sessions.reduce((total, session) => total + (session.output_retained_bytes ?? 0), 0);
 
   useEffect(() => {
     if (!lastTerminalOutputEvent || !followKey) {
@@ -91,7 +94,7 @@ export function TerminalSessionsPanel({
   }
 
   return (
-    <div className="fleetPanel">
+    <div className="fleetPanel terminalSessionsPanel">
       <div className="sectionHeader">
         <div>
           <h2>Terminal sessions</h2>
@@ -101,6 +104,24 @@ export function TerminalSessionsPanel({
           <RefreshCw size={14} />
           <span>Refresh</span>
         </button>
+      </div>
+      <div className="terminalSummaryStrip">
+        <span>
+          <strong>{openSessions}</strong>
+          <small>Open</small>
+        </span>
+        <span>
+          <strong>{replayableSessions}</strong>
+          <small>Replayable</small>
+        </span>
+        <span>
+          <strong>{formatBytes(retainedBytes)}</strong>
+          <small>Retained output</small>
+        </span>
+        <span>
+          <strong>{followKey ? "Live" : "Idle"}</strong>
+          <small>Follow state</small>
+        </span>
       </div>
       <div className="terminalWorkspace">
         <div className="terminalActiveHeader">

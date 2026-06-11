@@ -236,56 +236,11 @@ export function ConsoleDataGrid<T>({
           </span>
         ),
       })),
-      ...(rowActions.length > 0
-        ? [
-            {
-              id: "__actions",
-              header: "Actions",
-              size: Math.max(136, Math.min(280, rowActions.length * 74 + 26)),
-              minSize: 136,
-              enableHiding: false,
-              cell: ({ row }: { row: Row<T> }) => (
-                <span className="inlineActions gridRowActions">
-                  {rowActions.map((action) => {
-                    const sourceRows = [row.original];
-                    const description = actionDescription(action, sourceRows);
-                    return (
-                      <button
-                        aria-label={description}
-                        className={
-                          action.tone === "danger"
-                            ? "gridRowAction danger"
-                            : "gridRowAction"
-                        }
-                        disabled={action.disabled?.(sourceRows)}
-                        key={action.label}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          invokeAction(action, sourceRows);
-                        }}
-                        title={description}
-                        type="button"
-                      >
-                        {action.icon && (
-                          <span className="gridRowActionIcon" aria-hidden>
-                            {action.icon}
-                          </span>
-                        )}
-                        <span>{action.label}</span>
-                      </button>
-                    );
-                  })}
-                </span>
-              ),
-            } satisfies ColumnDef<T>,
-          ]
-        : []),
     ],
     [
       columns,
       expandedRows,
       renderExpandedRow,
-      rowActions,
       singleExpandedRow,
       title,
     ],
@@ -338,8 +293,7 @@ export function ConsoleDataGrid<T>({
     .rows.map((row) => row.original);
   const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
   const contextRowActions = rowActions.length > 0 ? rowActions : actions;
-  const showContextSelectionActions =
-    rowActions.length > 0 && actions.length > 0;
+  const showContextSelectionActions = false;
   const pageCount = table.getPageCount() || 1;
   const currentPage = table.getState().pagination.pageIndex + 1;
 
@@ -639,14 +593,10 @@ export function ConsoleDataGrid<T>({
                     >
                       {row.getVisibleCells().map((cell) => (
                         <div
-                          className={
-                            cell.column.id === "__actions"
-                              ? "gridCell gridStickyActions"
-                              : "gridCell"
-                          }
+                          className="gridCell"
                           key={cell.id}
                           role="gridcell"
-                          style={{ width: cell.column.getSize() }}
+                          style={gridColumnStyle(cell.column)}
                         >
                           {flexRender(
                             cell.column.columnDef.cell,
@@ -797,7 +747,6 @@ function SortableHeaderCell<T>({
   const headerClassName = [
     "gridHeaderCell",
     isDragging ? "dragging" : "",
-    header.column.id === "__actions" ? "gridStickyActions" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -808,9 +757,9 @@ function SortableHeaderCell<T>({
       ref={setNodeRef}
       role="columnheader"
       style={{
+        ...gridColumnStyle(header.column),
         transform: CSS.Transform.toString(transform),
         transition,
-        width: header.getSize(),
       }}
     >
       {canDrag && (
@@ -856,6 +805,19 @@ function SortableHeaderCell<T>({
       )}
     </div>
   );
+}
+
+function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
+  const size = column.getSize();
+  const minSize = column.columnDef.minSize ?? size;
+  const maxSize = column.columnDef.maxSize;
+  const fixed = maxSize != null && maxSize <= minSize;
+
+  return {
+    flex: fixed ? `0 0 ${size}px` : `1 1 ${size}px`,
+    minWidth: minSize,
+    width: size,
+  };
 }
 
 function reconcileColumnOrder(current: string[], defaults: string[]): string[] {

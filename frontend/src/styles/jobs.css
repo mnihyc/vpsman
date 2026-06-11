@@ -41,7 +41,7 @@
 
 .templateToolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.8fr) minmax(120px, 0.55fr) minmax(150px, 0.7fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   align-items: end;
   gap: 12px;
   border: 1px solid #dfe3eb;
@@ -159,7 +159,7 @@
 
 .targetImpactGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr));
   gap: 8px;
 }
 
@@ -323,7 +323,7 @@
 
 .dispatchControls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
 }
 
@@ -365,7 +365,7 @@
   border-top: 1px solid var(--line);
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(180px, 240px) minmax(160px, 1fr) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   margin-top: 12px;
   padding-top: 12px;
 }
@@ -1359,6 +1359,7 @@
 
 .fileTransferGrid {
   grid-template-columns: 48px minmax(150px, 0.9fr) minmax(120px, 0.7fr) minmax(170px, 0.9fr) minmax(190px, 1.4fr) minmax(130px, 0.75fr) minmax(140px, 0.8fr) minmax(44px, auto);
+  min-width: max(100%, 1040px);
 }
 
 .rowSelectCell {
@@ -1437,7 +1438,7 @@
 .sourceArtifactControls {
   display: grid;
   align-items: end;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
 }
 
@@ -1539,6 +1540,51 @@
     minmax(120px, 0.65fr)
     minmax(340px, 1.2fr)
     minmax(132px, 0.7fr);
+  min-width: max(100%, 1120px);
+}
+
+.terminalSessionsPanel > .crudPager,
+.terminalSessionsPanel > .terminalReplayPreview {
+  border-top: 1px solid #eef1f6;
+}
+
+.terminalSummaryStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #eef1f6;
+  background: #fbfcff;
+}
+
+.terminalSummaryStrip span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px 10px;
+}
+
+.terminalSummaryStrip strong,
+.terminalSummaryStrip small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminalSummaryStrip strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.terminalSummaryStrip small {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .compactRowActions {
@@ -1597,7 +1643,7 @@
 
 .xtermReplay {
   min-width: 0;
-  height: 300px;
+  height: 240px;
   padding: 10px;
   background: #111827;
 }
@@ -1680,6 +1726,17 @@
 
 .latencyCurve span.warn {
   background: #f9ab00;
+}
+
+.topologyEvidence > .latencyCurve {
+  min-height: 38px;
+  gap: 4px;
+  padding: 8px 18px;
+}
+
+.topologyEvidence > .latencyCurve span {
+  width: 10px;
+  border-radius: 3px 3px 0 0;
 }
 
 .latencyCurveGroups {
@@ -1812,6 +1869,28 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.agentReleasesPanel .releaseRecordForm {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  grid-auto-flow: dense;
+  align-items: start;
+  padding: 14px;
+}
+
+.agentReleasesPanel .releaseIdentitySection,
+.agentReleasesPanel .releaseUploadSection {
+  grid-column: 1;
+}
+
+.agentReleasesPanel .releaseArtifactSection {
+  grid-column: 2;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.agentReleasesPanel .releaseFormActions,
+.agentReleasesPanel .inlineError {
+  grid-column: 1 / -1;
+}
+
 .releaseFormSection {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1821,6 +1900,11 @@
   border-radius: 8px;
   background: #fff;
   padding: 14px;
+}
+
+.agentReleasesPanel .releaseFormSection {
+  gap: 10px;
+  padding: 12px;
 }
 
 .releaseFormSectionHeader {
@@ -1901,6 +1985,32 @@
   grid-template-columns: auto minmax(0, 1fr);
 }
 
+.releaseRecordForm > .operationNote > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .agentReleasesPanel .releaseRecordForm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agentReleasesPanel .releaseIdentitySection,
+  .agentReleasesPanel .releaseUploadSection,
+  .agentReleasesPanel .releaseArtifactSection {
+    grid-column: 1;
+  }
+}
+
+@media (max-width: 720px) {
+  .agentReleasesPanel .releaseArtifactSection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .approvalControls input:not([type="checkbox"]),
 .approvalControls select,
 .handoffModeControl select {
@@ -1923,7 +2033,7 @@
 }
 
 .targetImpactGrid {
-  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr));
 }
 
 .targetImpactGroupHeader span {
@@ -1952,4 +2062,5 @@
 
 .fileTransferGrid {
   grid-template-columns: minmax(68px, 0.35fr) minmax(150px, 0.85fr) minmax(120px, 0.7fr) minmax(170px, 0.9fr) minmax(190px, 1.25fr) minmax(130px, 0.75fr) minmax(140px, 0.8fr) minmax(72px, 0.35fr);
+  min-width: max(100%, 1040px);
 }

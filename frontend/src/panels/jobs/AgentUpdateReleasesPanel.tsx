@@ -166,7 +166,7 @@ export function AgentUpdateReleasesPanel({
   }
 
   return (
-    <div className="fleetPanel">
+    <div className="fleetPanel agentReleasesPanel">
       <div className="sectionHeader">
         <div>
           <h2>Agent update releases</h2>
@@ -222,15 +222,15 @@ export function AgentUpdateReleasesPanel({
               value={releaseArtifactUrl}
             />
           </label>
-          <label className="wideField">
+          <label>
             <span>SHA-256</span>
             <input aria-label="Release SHA-256" onChange={(event) => setReleaseSha256Hex(event.target.value)} value={releaseSha256Hex} />
           </label>
-          <label className="wideField">
+          <label>
             <span>Signature</span>
             <input aria-label="Release signature" onChange={(event) => setReleaseSignatureHex(event.target.value)} value={releaseSignatureHex} />
           </label>
-          <label className="wideField">
+          <label>
             <span>Signing key</span>
             <input aria-label="Release signing key" onChange={(event) => setReleaseSigningKeyHex(event.target.value)} value={releaseSigningKeyHex} />
           </label>
@@ -260,11 +260,11 @@ export function AgentUpdateReleasesPanel({
               value={rollbackArtifactUrl}
             />
           </label>
-          <label className="wideField">
+          <label>
             <span>Rollback SHA-256</span>
             <input aria-label="Rollback SHA-256" onChange={(event) => setRollbackSha256Hex(event.target.value)} value={rollbackSha256Hex} />
           </label>
-          <label className="wideField">
+          <label>
             <span>Rollback signature</span>
             <input
               aria-label="Rollback signature"
@@ -272,7 +272,7 @@ export function AgentUpdateReleasesPanel({
               value={rollbackSignatureHex}
             />
           </label>
-          <label className="wideField">
+          <label>
             <span>Rollback signing key</span>
             <input
               aria-label="Rollback signing key"

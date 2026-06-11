@@ -271,7 +271,7 @@ export function TopologyPanel({
       )}
 
       {topologySubpage === "plans" && (
-      <section className="fleetPanel scheduleComposer">
+      <section className="fleetPanel scheduleComposer topologyPlanComposer">
         <div className="sectionHeader">
           <div>
             <h2>Create tunnel plan</h2>

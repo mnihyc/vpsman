@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ConsoleCollapsibleSection } from "../components/ConsoleLayout";
@@ -645,6 +646,131 @@ export function SchedulesPanel({
     writeLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, selectorExpression);
   }, [selectorExpression]);
 
+  const scheduleActions: ConsoleDataGridAction<ScheduleRecord>[] = [
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Edit",
+          "Opens the schedule composer.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Pencil size={14} />,
+      label: "Edit",
+      onSelect: (rows) => rows[0] && editSchedule(rows[0]),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Enable",
+          "Automatic runs will resume.",
+        ),
+      label: "Enable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
+      icon: <Power size={14} />,
+      onSelect: (rows) =>
+        rows[0] &&
+        openScheduleAction({ type: "enable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Disable",
+          "Automatic runs will stop.",
+        ),
+      label: "Disable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === false,
+      icon: <PowerOff size={14} />,
+      onSelect: (rows) =>
+        rows[0] &&
+        openScheduleAction({ type: "disable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Apply",
+          "Dispatches one job from the saved fixed target snapshot.",
+          " now",
+        ),
+      label: "Apply",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled !== true,
+      icon: <Play size={14} />,
+      onSelect: (rows) =>
+        rows[0] &&
+        openScheduleAction({ type: "applyNow", schedule: rows[0] }),
+    },
+    {
+      description: (rows) => describeScheduleTargetUpdate(rows),
+      label: "Update targets",
+      disabled: (rows) =>
+        rows.length !== 1 || !rows[0] || !scheduleTargetDrifted(rows[0]),
+      icon: <Target size={14} />,
+      onSelect: (rows) => {
+        const schedule = rows[0];
+        if (!schedule) return;
+        openScheduleAction({
+          type: "targetUpdate",
+          schedule,
+          selectorExpression: schedule.selector_expression,
+          targetClientIds: resolvedTargetIdsForSchedule(schedule),
+        });
+      },
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Defer",
+          "Opens a defer form before confirmation.",
+        ),
+      label: "Defer",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Clock3 size={14} />,
+      onSelect: (rows) => rows[0] && startDefer(rows[0]),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Delete",
+          "Permanently removes this schedule.",
+        ),
+      label: "Delete",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Trash2 size={14} />,
+      onSelect: (rows) =>
+        rows[0] &&
+        openScheduleAction({ type: "delete", schedule: rows[0] }),
+      tone: "danger",
+    },
+    {
+      label: "Copy schedule IDs",
+      onSelect: (rows) =>
+        void copyText(rows.map((schedule) => schedule.id).join("\n")),
+    },
+    {
+      label: "Copy fixed target IDs",
+      onSelect: (rows) =>
+        void copyText(
+          rows
+            .flatMap((schedule) => fixedTargetIds(schedule))
+            .join("\n"),
+        ),
+    },
+    {
+      label: "Copy audit selectors",
+      onSelect: (rows) =>
+        void copyText(
+          rows
+            .map((schedule) => schedule.selector_expression)
+            .join("\n"),
+        ),
+    },
+  ];
+
   return (
     <div className="workspace singleColumn">
       <section className="fleetPanel">
@@ -664,31 +790,7 @@ export function SchedulesPanel({
           </button>
         </div>
         <ConsoleDataGrid
-          actions={[
-            {
-              label: "Copy schedule IDs",
-              onSelect: (rows) =>
-                void copyText(rows.map((schedule) => schedule.id).join("\n")),
-            },
-            {
-              label: "Copy fixed target IDs",
-              onSelect: (rows) =>
-                void copyText(
-                  rows
-                    .flatMap((schedule) => fixedTargetIds(schedule))
-                    .join("\n"),
-                ),
-            },
-            {
-              label: "Copy audit selectors",
-              onSelect: (rows) =>
-                void copyText(
-                  rows
-                    .map((schedule) => schedule.selector_expression)
-                    .join("\n"),
-                ),
-            },
-          ]}
+          actions={scheduleActions}
           columns={scheduleColumns}
           defaultPageSize={10}
           empty={
@@ -713,104 +815,7 @@ export function SchedulesPanel({
               </span>
             </div>
           )}
-          rowActions={[
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Edit",
-                  "Opens the schedule composer.",
-                ),
-              icon: <Pencil size={14} />,
-              label: "Edit",
-              onSelect: (rows) => rows[0] && editSchedule(rows[0]),
-            },
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Enable",
-                  "Automatic runs will resume.",
-                ),
-              label: "Enable",
-              disabled: (rows) => rows[0]?.enabled === true,
-              icon: <Power size={14} />,
-              onSelect: (rows) =>
-                rows[0] &&
-                openScheduleAction({ type: "enable", schedule: rows[0] }),
-            },
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Disable",
-                  "Automatic runs will stop.",
-                ),
-              label: "Disable",
-              disabled: (rows) => rows[0]?.enabled === false,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) =>
-                rows[0] &&
-                openScheduleAction({ type: "disable", schedule: rows[0] }),
-            },
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Apply",
-                  "Dispatches one job from the saved fixed target snapshot.",
-                  " now",
-                ),
-              label: "Apply",
-              disabled: (rows) => rows[0]?.enabled !== true,
-              icon: <Play size={14} />,
-              onSelect: (rows) =>
-                rows[0] &&
-                openScheduleAction({ type: "applyNow", schedule: rows[0] }),
-            },
-            {
-              description: (rows) =>
-                describeScheduleTargetUpdate(rows),
-              label: "Update targets",
-              disabled: (rows) => !rows[0] || !scheduleTargetDrifted(rows[0]),
-              icon: <Target size={14} />,
-              onSelect: (rows) => {
-                const schedule = rows[0];
-                if (!schedule) return;
-                openScheduleAction({
-                  type: "targetUpdate",
-                  schedule,
-                  selectorExpression: schedule.selector_expression,
-                  targetClientIds: resolvedTargetIdsForSchedule(schedule),
-                });
-              },
-            },
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Defer",
-                  "Opens a defer form before confirmation.",
-                ),
-              label: "Defer",
-              icon: <Clock3 size={14} />,
-              onSelect: (rows) => rows[0] && startDefer(rows[0]),
-            },
-            {
-              description: (rows) =>
-                describeScheduleAction(
-                  rows,
-                  "Delete",
-                  "Permanently removes this schedule.",
-                ),
-              label: "Delete",
-              icon: <Trash2 size={14} />,
-              onSelect: (rows) =>
-                rows[0] &&
-                openScheduleAction({ type: "delete", schedule: rows[0] }),
-              tone: "danger",
-            },
-          ]}
+          rowActions={scheduleActions}
           rows={schedules}
           storageKey="vpsman.grid.schedules"
           title="Schedule records"

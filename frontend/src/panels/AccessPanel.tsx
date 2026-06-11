@@ -529,7 +529,7 @@ export function AccessPanel({
         )}
 
         {activeSubpage === "Operators" && (
-          <div className="workspaceSection">
+          <div className="workspaceSection accessTableStack">
             <section className="controlPanel">
               <div className="sectionHeader compact">
                 <h2>Operators</h2>
@@ -736,7 +736,7 @@ export function AccessPanel({
         )}
 
         {activeSubpage === "VPS keys" && (
-          <div className="workspaceSection">
+          <div className="workspaceSection accessTableStack">
             <section className="controlPanel">
               <div className="sectionHeader compact">
                 <h2>Gateway agent identities</h2>

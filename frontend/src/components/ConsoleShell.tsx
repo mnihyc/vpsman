@@ -44,7 +44,7 @@ type ConsoleShellProps = {
   onLockPrivilege: () => void;
   onSaveFleetView: () => void;
   onSelectSubpage: (subpage: string) => void;
-  onSelectView: (view: ActiveView) => void;
+  onSelectView: (view: ActiveView, subpage?: string) => void;
   onSavedFleetViewNameChange: (name: string) => void;
   operatorPreferencesReady: boolean;
   privilegeUnlocked: boolean;
@@ -92,6 +92,23 @@ export function ConsoleShell({
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
+  const mobilePageValue = `${activeView}::${activeSubpage}`;
+  const selectMobilePage = (value: string) => {
+    const option = navSections
+      .flatMap((section) =>
+        section.items.flatMap((item) =>
+          (viewSubpages[item.view] ?? []).map((subpage) => ({
+            subpage: subpage.id,
+            view: item.view,
+          })),
+        ),
+      )
+      .find((item) => `${item.view}::${item.subpage}` === value);
+    if (!option) {
+      return;
+    }
+    onSelectView(option.view, option.subpage);
+  };
   const isSubpanelExpanded = (view: ActiveView, hasSubpages: boolean) => {
     if (!hasSubpages) {
       return false;
@@ -212,6 +229,24 @@ export function ConsoleShell({
             value={fleetQuery}
           />
           <div className="topbarActions">
+            <select
+              aria-label="Console page"
+              className="mobilePageSelector"
+              onChange={(event) => selectMobilePage(event.target.value)}
+              value={mobilePageValue}
+            >
+              {navSections.map((section) => (
+                <optgroup key={section.label} label={section.label}>
+                  {section.items.flatMap((item) =>
+                    (viewSubpages[item.view] ?? []).map((subpage) => (
+                      <option key={`${item.view}:${subpage.id}`} value={`${item.view}::${subpage.id}`}>
+                        {item.view} / {subpage.label}
+                      </option>
+                    )),
+                  )}
+                </optgroup>
+              ))}
+            </select>
             <div className="savedViewControls" aria-label="Saved fleet views">
               <select
                 aria-label="Saved fleet view"

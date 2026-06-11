@@ -442,6 +442,38 @@ test("supports interactive fleet data grid controls", async ({
   ).toBeVisible();
 });
 
+test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Alert policies");
+
+  const grid = page.getByLabel("Alert policy rules data grid");
+  await expect(grid.getByText("1 of 1 policies")).toBeVisible();
+  await expect(
+    grid.getByRole("columnheader", { name: "Actions" }),
+  ).toHaveCount(0);
+  await expect(page.getByText("Policy detail")).toHaveCount(0);
+
+  const policyRow = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
+    .first();
+  await policyRow.getByLabel("Select Alert policy rules row").check();
+  await grid.getByRole("button", { name: "Selection" }).click();
+  await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Details" }).click();
+  await expect(
+    page.locator(".consoleDetailPanelHeader strong", {
+      hasText: "Edit alert policy",
+    }),
+  ).toBeVisible();
+  await page.getByLabel("Close detail panel").click();
+  await expect(page.getByText("Edit alert policy")).toHaveCount(0);
+
+  await policyRow.click({ button: "right" });
+  await expect(page.getByText("Row actions")).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
+  await page.keyboard.press("Escape");
+});
+
 test("keeps console layout usable on desktop and mobile widths", async ({
   page,
 }, testInfo) => {
@@ -488,6 +520,11 @@ test("keeps console layout usable on desktop and mobile widths", async ({
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();
     await expect(page.locator(".scopeSelector")).toBeHidden();
+    await page.getByRole("combobox", { name: "Console page" }).selectOption("Config::status");
+    await expect(
+      page.getByRole("heading", { name: "Config", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Active source status").first()).toBeVisible();
   }
 });
 

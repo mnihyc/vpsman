@@ -270,6 +270,15 @@ async function navigateAndScreenshot(
 
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(200);
+  const horizontalOverflowPx = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(
+    horizontalOverflowPx,
+    `${label} page-level horizontal overflow`,
+  ).toBeLessThanOrEqual(1);
 
   const filename = `${entry.id}-${projectName}.png`;
   const screenshotPath = join(projectDir, filename);
@@ -280,6 +289,7 @@ async function navigateAndScreenshot(
     view: entry.view,
     subpage: entry.subpage ?? null,
     heading: entry.heading,
+    horizontalOverflowPx,
     screenshot: screenshotPath,
   };
 }

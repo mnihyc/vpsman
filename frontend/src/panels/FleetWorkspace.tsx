@@ -44,6 +44,7 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
@@ -2612,96 +2613,66 @@ function FleetAlertPolicyManager({
     }
   }
 
+  const policyActions: ConsoleDataGridAction<FleetAlertPolicyRecord>[] = [
+    {
+      label: "Details",
+      description: (rows) =>
+        actionTargetDescription(
+          "Open details for",
+          "alert policy",
+          rows[0]?.name,
+          "Opens the policy editor below the table.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Pencil size={14} />,
+      onSelect: (rows) => rows[0] && editPolicy(rows[0]),
+    },
+    {
+      label: "Enable",
+      description: (rows) =>
+        `Enable ${rows.filter((policy) => !policy.enabled).length} disabled selected alert policy records.`,
+      disabled: (rows) => rows.filter((policy) => !policy.enabled).length === 0,
+      icon: <Power size={14} />,
+      onSelect: (rows) =>
+        void setPoliciesEnabled(
+          rows.filter((policy) => !policy.enabled),
+          true,
+        ),
+    },
+    {
+      label: "Disable",
+      description: (rows) =>
+        `Disable ${rows.filter((policy) => policy.enabled).length} enabled selected alert policy records.`,
+      disabled: (rows) => rows.filter((policy) => policy.enabled).length === 0,
+      icon: <PowerOff size={14} />,
+      onSelect: (rows) =>
+        void setPoliciesEnabled(
+          rows.filter((policy) => policy.enabled),
+          false,
+        ),
+    },
+    {
+      label: "Delete",
+      description: (rows) =>
+        `Delete ${rows.length} selected alert policy records. Existing alert states are not changed.`,
+      disabled: (rows) => rows.length === 0,
+      icon: <Trash2 size={14} />,
+      onSelect: requestDeletePolicies,
+      tone: "danger",
+    },
+  ];
+
   return (
     <div className="consoleCrudPanel">
-      <div className="consoleResourceLayout">
+      <div className="consoleResourceLayout fullWidth">
         <ConsoleDataGrid
-          actions={[
-            {
-              label: "Enable selected",
-              description: (rows) =>
-                `Enable ${rows.length} selected alert policy records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setPoliciesEnabled(rows, true),
-            },
-            {
-              label: "Disable selected",
-              description: (rows) =>
-                `Disable ${rows.length} selected alert policy records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setPoliciesEnabled(rows, false),
-            },
-            {
-              label: "Delete selected",
-              description: (rows) =>
-                `Delete ${rows.length} selected alert policy records. Existing alert states are not changed.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeletePolicies,
-              tone: "danger",
-            },
-          ]}
+          actions={policyActions}
           columns={policyColumns}
           defaultPageSize={10}
           empty="No alert policies saved."
           getRowId={(policy) => policy.id}
           itemLabel="policies"
-          onOpenRow={editPolicy}
-          rowActions={[
-            {
-              label: "Edit",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Edit",
-                  "alert policy",
-                  rows[0]?.name,
-                  "Opens the side detail editor.",
-                ),
-              icon: <Pencil size={14} />,
-              onSelect: (rows) => rows[0] && editPolicy(rows[0]),
-            },
-            {
-              label: "Enable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Enable",
-                  "alert policy",
-                  rows[0]?.name,
-                  "The policy will be evaluated.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === true,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setPoliciesEnabled(rows, true),
-            },
-            {
-              label: "Disable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Disable",
-                  "alert policy",
-                  rows[0]?.name,
-                  "The policy will stop evaluating.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === false,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setPoliciesEnabled(rows, false),
-            },
-            {
-              label: "Delete",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Delete",
-                  "alert policy",
-                  rows[0]?.name,
-                  "Existing alert states are not changed.",
-                ),
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeletePolicies,
-              tone: "danger",
-            },
-          ]}
+          rowActions={policyActions}
           rows={policies}
           searchPlaceholder="Search policies by name, scope, thresholds, or notes"
           storageKey="vpsman.grid.fleet.alertPolicies.v2"
@@ -2854,16 +2825,7 @@ function FleetAlertPolicyManager({
               </ConsoleField>
             </div>
           </ConsoleDetailPanel>
-        ) : (
-          <ConsoleDetailPanel
-            description="Create a policy or select a row to inspect and edit it."
-            title="Policy detail"
-          >
-            <div className="emptyState compactEmpty">
-              Select a policy row or create a new scoped threshold.
-            </div>
-          </ConsoleDetailPanel>
-        )}
+        ) : null}
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <ConfirmationPrompt
@@ -3438,96 +3400,69 @@ function FleetAlertNotificationManager({
     }
   }
 
+  const channelActions: ConsoleDataGridAction<FleetAlertNotificationChannelRecord>[] =
+    [
+      {
+        label: "Details",
+        description: (rows) =>
+          actionTargetDescription(
+            "Open details for",
+            "notification channel",
+            rows[0]?.name,
+            "Opens the channel editor below the table.",
+          ),
+        disabled: (rows) => rows.length !== 1,
+        icon: <Pencil size={14} />,
+        onSelect: (rows) => rows[0] && editChannel(rows[0]),
+      },
+      {
+        label: "Enable",
+        description: (rows) =>
+          `Enable ${rows.filter((channel) => !channel.enabled).length} disabled selected notification channel records.`,
+        disabled: (rows) =>
+          rows.filter((channel) => !channel.enabled).length === 0,
+        icon: <Power size={14} />,
+        onSelect: (rows) =>
+          void setChannelsEnabled(
+            rows.filter((channel) => !channel.enabled),
+            true,
+          ),
+      },
+      {
+        label: "Disable",
+        description: (rows) =>
+          `Disable ${rows.filter((channel) => channel.enabled).length} enabled selected notification channel records.`,
+        disabled: (rows) =>
+          rows.filter((channel) => channel.enabled).length === 0,
+        icon: <PowerOff size={14} />,
+        onSelect: (rows) =>
+          void setChannelsEnabled(
+            rows.filter((channel) => channel.enabled),
+            false,
+          ),
+      },
+      {
+        label: "Delete",
+        description: (rows) =>
+          `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
+        disabled: (rows) => rows.length === 0,
+        icon: <Trash2 size={14} />,
+        onSelect: requestDeleteChannels,
+        tone: "danger",
+      },
+    ];
+
   return (
     <div className="consoleCrudPanel">
-      <div className="consoleResourceLayout">
+      <div className="consoleResourceLayout fullWidth">
         <ConsoleDataGrid
-          actions={[
-            {
-              label: "Enable selected",
-              description: (rows) =>
-                `Enable ${rows.length} selected notification channel records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setChannelsEnabled(rows, true),
-            },
-            {
-              label: "Disable selected",
-              description: (rows) =>
-                `Disable ${rows.length} selected notification channel records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setChannelsEnabled(rows, false),
-            },
-            {
-              label: "Delete selected",
-              description: (rows) =>
-                `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeleteChannels,
-              tone: "danger",
-            },
-          ]}
+          actions={channelActions}
           columns={channelColumns}
           defaultPageSize={10}
           empty="No notification channels saved."
           getRowId={(channel) => channel.id}
           itemLabel="channels"
-          onOpenRow={editChannel}
-          rowActions={[
-            {
-              label: "Edit",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Edit",
-                  "notification channel",
-                  rows[0]?.name,
-                  "Opens the side detail editor.",
-                ),
-              icon: <Pencil size={14} />,
-              onSelect: (rows) => rows[0] && editChannel(rows[0]),
-            },
-            {
-              label: "Enable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Enable",
-                  "notification channel",
-                  rows[0]?.name,
-                  "Matching alerts will route through this channel.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === true,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setChannelsEnabled(rows, true),
-            },
-            {
-              label: "Disable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Disable",
-                  "notification channel",
-                  rows[0]?.name,
-                  "Matching alerts will stop routing through this channel.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === false,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setChannelsEnabled(rows, false),
-            },
-            {
-              label: "Delete",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Delete",
-                  "notification channel",
-                  rows[0]?.name,
-                  "Retained delivery history is not removed.",
-                ),
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeleteChannels,
-              tone: "danger",
-            },
-          ]}
+          rowActions={channelActions}
           rows={channels}
           searchPlaceholder="Search channels by name, scope, delivery target, or filters"
           storageKey="vpsman.grid.fleet.notificationChannels.v2"
@@ -3688,16 +3623,7 @@ function FleetAlertNotificationManager({
               </ConsoleField>
             </div>
           </ConsoleDetailPanel>
-        ) : (
-          <ConsoleDetailPanel
-            description="Create a channel or select one to inspect and edit it."
-            title="Channel detail"
-          >
-            <div className="emptyState compactEmpty">
-              Select a channel row or create a new routing record.
-            </div>
-          </ConsoleDetailPanel>
-        )}
+        ) : null}
       </div>
       <div className="consoleOperationsBar">
         <span>
@@ -4229,108 +4155,79 @@ function WebhookRuleManager({
     }
   }
 
+  const ruleActions: ConsoleDataGridAction<WebhookRuleRecord>[] = [
+    {
+      label: "Details",
+      description: (rows) =>
+        actionTargetDescription(
+          "Open details for",
+          "webhook rule",
+          rows[0]?.name,
+          "Opens the rule editor below the table.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Pencil size={14} />,
+      onSelect: (rows) => rows[0] && editRule(rows[0]),
+    },
+    {
+      label: "Preview",
+      description: (rows) =>
+        actionTargetDescription(
+          "Preview",
+          "webhook rule",
+          rows[0]?.name,
+          "Runs a dry-run with the current preview event.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Eye size={14} />,
+      onSelect: (rows) => rows[0] && void dryRun(rows[0]),
+    },
+    {
+      label: "Enable",
+      description: (rows) =>
+        `Enable ${rows.filter((rule) => !rule.enabled).length} disabled selected webhook rule records.`,
+      disabled: (rows) => rows.filter((rule) => !rule.enabled).length === 0,
+      icon: <Power size={14} />,
+      onSelect: (rows) =>
+        void setRulesEnabled(
+          rows.filter((rule) => !rule.enabled),
+          true,
+        ),
+    },
+    {
+      label: "Disable",
+      description: (rows) =>
+        `Disable ${rows.filter((rule) => rule.enabled).length} enabled selected webhook rule records.`,
+      disabled: (rows) => rows.filter((rule) => rule.enabled).length === 0,
+      icon: <PowerOff size={14} />,
+      onSelect: (rows) =>
+        void setRulesEnabled(
+          rows.filter((rule) => rule.enabled),
+          false,
+        ),
+    },
+    {
+      label: "Delete",
+      description: (rows) =>
+        `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
+      disabled: (rows) => rows.length === 0,
+      icon: <Trash2 size={14} />,
+      onSelect: requestDeleteRules,
+      tone: "danger",
+    },
+  ];
+
   return (
     <div className="consoleCrudPanel">
-      <div className="consoleResourceLayout">
+      <div className="consoleResourceLayout fullWidth">
         <ConsoleDataGrid
-          actions={[
-            {
-              label: "Enable selected",
-              description: (rows) =>
-                `Enable ${rows.length} selected webhook rule records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setRulesEnabled(rows, true),
-            },
-            {
-              label: "Disable selected",
-              description: (rows) =>
-                `Disable ${rows.length} selected webhook rule records.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setRulesEnabled(rows, false),
-            },
-            {
-              label: "Delete selected",
-              description: (rows) =>
-                `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
-              disabled: (rows) => rows.length === 0,
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeleteRules,
-              tone: "danger",
-            },
-          ]}
+          actions={ruleActions}
           columns={ruleColumns}
           defaultPageSize={10}
           empty="No webhook rules saved."
           getRowId={(rule) => rule.id}
           itemLabel="rules"
-          onOpenRow={editRule}
-          rowActions={[
-            {
-              label: "Edit",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Edit",
-                  "webhook rule",
-                  rows[0]?.name,
-                  "Opens the side detail editor.",
-                ),
-              icon: <Pencil size={14} />,
-              onSelect: (rows) => rows[0] && editRule(rows[0]),
-            },
-            {
-              label: "Preview",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Preview",
-                  "webhook rule",
-                  rows[0]?.name,
-                  "Runs a dry-run with the current preview event.",
-                ),
-              icon: <Eye size={14} />,
-              onSelect: (rows) => rows[0] && void dryRun(rows[0]),
-            },
-            {
-              label: "Enable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Enable",
-                  "webhook rule",
-                  rows[0]?.name,
-                  "The rule will match future webhook events.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === true,
-              icon: <Power size={14} />,
-              onSelect: (rows) => void setRulesEnabled(rows, true),
-            },
-            {
-              label: "Disable",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Disable",
-                  "webhook rule",
-                  rows[0]?.name,
-                  "The rule will stop matching future webhook events.",
-                ),
-              disabled: (rows) => rows[0]?.enabled === false,
-              icon: <PowerOff size={14} />,
-              onSelect: (rows) => void setRulesEnabled(rows, false),
-            },
-            {
-              label: "Delete",
-              description: (rows) =>
-                actionTargetDescription(
-                  "Delete",
-                  "webhook rule",
-                  rows[0]?.name,
-                  "Retained delivery history is not removed.",
-                ),
-              icon: <Trash2 size={14} />,
-              onSelect: requestDeleteRules,
-              tone: "danger",
-            },
-          ]}
+          rowActions={ruleActions}
           rows={rules}
           searchPlaceholder="Search webhook rules by name, expression, target, or notes"
           storageKey="vpsman.grid.fleet.webhookRules.v2"
@@ -4456,16 +4353,7 @@ function WebhookRuleManager({
               </ConsoleField>
             </div>
           </ConsoleDetailPanel>
-        ) : (
-          <ConsoleDetailPanel
-            description="Create a rule or select one to inspect, preview, and edit it."
-            title="Webhook rule detail"
-          >
-            <div className="emptyState compactEmpty">
-              Select a webhook rule row or create a new expression webhook.
-            </div>
-          </ConsoleDetailPanel>
-        )}
+        ) : null}
       </div>
       <div className="consoleOperationsBar">
         <span>
@@ -5019,21 +4907,24 @@ function FleetAlertList({
       {
         id: "state",
         header: "Operator state",
-        size: 150,
-        minSize: 120,
-        sortValue: (alert) => alert.operator_state,
+        size: 170,
+        minSize: 150,
+        sortValue: alertOperatorState,
         searchValue: (alert) =>
-          `${alert.operator_state} ${alert.state_reason ?? ""}`,
-        cell: (alert) => (
-          <span className="historyPrimary">
-            <ConsoleStatusBadge
-              tone={alert.operator_state === "open" ? "warning" : "info"}
-            >
-              {alert.operator_state}
-            </ConsoleStatusBadge>
-            {alert.state_reason && <small>{alert.state_reason}</small>}
-          </span>
-        ),
+          `${alertOperatorState(alert)} ${alert.state_reason ?? ""}`,
+        cell: (alert) => {
+          const operatorState = alertOperatorState(alert);
+          return (
+            <span className="historyPrimary">
+              <ConsoleStatusBadge
+                tone={operatorState === "open" ? "warning" : "info"}
+              >
+                {operatorState}
+              </ConsoleStatusBadge>
+              {alert.state_reason && <small>{alert.state_reason}</small>}
+            </span>
+          );
+        },
       },
       {
         id: "observed",
@@ -5078,9 +4969,9 @@ function FleetAlertList({
   }
 
   const openRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alert.operator_state === "open");
+    rows.filter((alert) => alertOperatorState(alert) === "open");
   const triagedRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alert.operator_state !== "open");
+    rows.filter((alert) => alertOperatorState(alert) !== "open");
 
   return (
     <div className="fleetAlertList" aria-label="Fleet alerts">
@@ -5152,7 +5043,7 @@ function FleetAlertList({
               </span>
             )}
             <span>
-              <strong>Escalation:</strong> {alert.escalation_level}
+              <strong>Escalation:</strong> {alert.escalation_level ?? 0}
             </span>
             <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
           </div>
@@ -5168,7 +5059,9 @@ function FleetAlertList({
                 "Marks the open alert as acknowledged.",
               ),
             disabled: (rows) =>
-              pending != null || rows[0]?.operator_state !== "open",
+              pending != null ||
+              !rows[0] ||
+              alertOperatorState(rows[0]) !== "open",
             icon: <Check size={14} />,
             onSelect: (rows) => void updateAlerts(rows, "acknowledge"),
           },
@@ -5182,7 +5075,9 @@ function FleetAlertList({
                 "Suppresses the open alert for four hours.",
               ),
             disabled: (rows) =>
-              pending != null || rows[0]?.operator_state !== "open",
+              pending != null ||
+              !rows[0] ||
+              alertOperatorState(rows[0]) !== "open",
             icon: <VolumeX size={14} />,
             onSelect: (rows) => void updateAlerts(rows, "mute"),
           },
@@ -5196,7 +5091,9 @@ function FleetAlertList({
                 "Raises the open alert escalation level.",
               ),
             disabled: (rows) =>
-              pending != null || rows[0]?.operator_state !== "open",
+              pending != null ||
+              !rows[0] ||
+              alertOperatorState(rows[0]) !== "open",
             icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => void updateAlerts(rows, "escalate"),
           },
@@ -5210,7 +5107,9 @@ function FleetAlertList({
                 "Clears a triaged alert.",
               ),
             disabled: (rows) =>
-              pending != null || rows[0]?.operator_state === "open",
+              pending != null ||
+              !rows[0] ||
+              alertOperatorState(rows[0]) === "open",
             icon: <CircleCheck size={14} />,
             onSelect: (rows) => void updateAlerts(rows, "clear"),
           },
@@ -5250,6 +5149,10 @@ function alertTone(severity: string): "critical" | "warning" | "info" {
 
 function alertTargetLabel(alert: FleetAlertRecord) {
   return alert.target_kind === "client" ? "Unknown VPS" : alert.target_id;
+}
+
+function alertOperatorState(alert: FleetAlertRecord): string {
+  return alert.operator_state?.trim() || "open";
 }
 
 function latestTelemetryRollupsByClient(rollups: TelemetryRollupRecord[]) {
