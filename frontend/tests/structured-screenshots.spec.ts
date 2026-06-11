@@ -10,6 +10,7 @@ const SCREENSHOT_DIR = join(
 interface ScreenshotEntry {
   view: string;
   subpage?: string;
+  tab?: string;
   heading: string;
   id: string;
 }
@@ -34,6 +35,27 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Notifications",
     heading: "Notification channels",
     id: "05-fleet-notifications",
+  },
+  {
+    view: "Fleet",
+    subpage: "Notifications",
+    tab: "Webhooks",
+    heading: "Webhook rules",
+    id: "05b-fleet-notification-webhooks",
+  },
+  {
+    view: "Fleet",
+    subpage: "Notifications",
+    tab: "Deliveries",
+    heading: "Notification delivery history",
+    id: "05c-fleet-notification-deliveries",
+  },
+  {
+    view: "Fleet",
+    subpage: "Notifications",
+    tab: "Maintenance",
+    heading: "Webhook delivery maintenance",
+    id: "05d-fleet-notification-maintenance",
   },
   { view: "Config", heading: "Config overview", id: "06-config-overview" },
   {
@@ -232,7 +254,9 @@ async function navigateAndScreenshot(
   projectDir: string,
   projectName: string,
 ) {
-  const label = entry.subpage ? `${entry.view} / ${entry.subpage}` : entry.view;
+  const label = entry.subpage
+    ? `${entry.view} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
+    : entry.view;
 
   const nav = page.getByRole("navigation", {
     name: "Primary console navigation",
@@ -248,6 +272,12 @@ async function navigateAndScreenshot(
     if ((await subpageButton.count()) > 0) {
       await subpageButton.click();
     }
+  }
+
+  if (entry.tab) {
+    const tab = page.getByRole("tab", { name: entry.tab, exact: true });
+    await expect(tab).toBeVisible({ timeout: 5_000 });
+    await tab.click();
   }
 
   // Wait for heading or any main content
@@ -288,6 +318,7 @@ async function navigateAndScreenshot(
     id: entry.id,
     view: entry.view,
     subpage: entry.subpage ?? null,
+    tab: entry.tab ?? null,
     heading: entry.heading,
     horizontalOverflowPx,
     screenshot: screenshotPath,

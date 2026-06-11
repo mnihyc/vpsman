@@ -1296,6 +1296,36 @@
   color: #202124;
 }
 
+.consoleInlineDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.consoleInlineDetailGrid > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px 10px;
+}
+
+.consoleInlineDetailGrid strong {
+  color: #5f6368;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.consoleInlineDetailGrid span span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .historyRow > .jobStatusCell {
   display: grid;
   align-items: center;
@@ -1920,10 +1950,11 @@
   gap: 12px;
   flex-wrap: wrap;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid #cfd7e6;
   border-radius: 8px;
-  background: #fff;
+  background: #f8fafd;
   padding: 10px 12px;
+  box-shadow: inset 3px 0 0 #1a73e8;
 }
 
 .consoleOperationsBar span {

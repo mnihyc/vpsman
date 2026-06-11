@@ -2358,6 +2358,161 @@ function thresholdSummary(policy: FleetAlertPolicyRecord): string {
   return parts.length > 0 ? parts.join(" · ") : "no thresholds";
 }
 
+function scopeSummary(scopeKind: string, scopeValue?: string | null): string {
+  return scopeValue ? `${scopeKind}:${scopeValue}` : scopeKind;
+}
+
+function tokenSummary(values: string[], empty: string): string {
+  return values.length > 0 ? values.join(", ") : empty;
+}
+
+function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>Policy</strong>
+        <span>{policy.name}</span>
+      </span>
+      <span>
+        <strong>ID</strong>
+        <span className="monoValue">{policy.id}</span>
+      </span>
+      <span>
+        <strong>Scope</strong>
+        <span className="monoValue">
+          {scopeSummary(policy.scope_kind, policy.scope_value)}
+        </span>
+      </span>
+      <span>
+        <strong>Priority</strong>
+        <span>{policy.priority}</span>
+      </span>
+      <span>
+        <strong>State</strong>
+        <span>{policy.enabled ? "enabled" : "disabled"}</span>
+      </span>
+      <span>
+        <strong>Thresholds</strong>
+        <span>{thresholdSummary(policy)}</span>
+      </span>
+      <span>
+        <strong>Created</strong>
+        <span>{formatCompactTime(policy.created_at)}</span>
+      </span>
+      <span>
+        <strong>Updated</strong>
+        <span>{formatCompactTime(policy.updated_at)}</span>
+      </span>
+      <span>
+        <strong>Notes</strong>
+        <span>{policy.notes || "none"}</span>
+      </span>
+    </div>
+  );
+}
+
+function ChannelDetailGrid({
+  channel,
+}: {
+  channel: FleetAlertNotificationChannelRecord;
+}) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>Channel</strong>
+        <span>{channel.name}</span>
+      </span>
+      <span>
+        <strong>ID</strong>
+        <span className="monoValue">{channel.id}</span>
+      </span>
+      <span>
+        <strong>Scope</strong>
+        <span className="monoValue">
+          {scopeSummary(channel.scope_kind, channel.scope_value)}
+        </span>
+      </span>
+      <span>
+        <strong>Severity</strong>
+        <span>{channel.min_severity}</span>
+      </span>
+      <span>
+        <strong>State</strong>
+        <span>{channel.enabled ? "enabled" : "disabled"}</span>
+      </span>
+      <span>
+        <strong>Categories</strong>
+        <span>{tokenSummary(channel.categories, "all categories")}</span>
+      </span>
+      <span>
+        <strong>Operator states</strong>
+        <span>{tokenSummary(channel.operator_states, "all states")}</span>
+      </span>
+      <span>
+        <strong>Delivery</strong>
+        <span>
+          {channel.delivery_kind}: {channel.target}
+        </span>
+      </span>
+      <span>
+        <strong>Cooldown</strong>
+        <span>{channel.cooldown_secs}s</span>
+      </span>
+      <span>
+        <strong>Updated</strong>
+        <span>{formatCompactTime(channel.updated_at)}</span>
+      </span>
+      <span>
+        <strong>Notes</strong>
+        <span>{channel.notes || "none"}</span>
+      </span>
+    </div>
+  );
+}
+
+function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>Rule</strong>
+        <span>{rule.name}</span>
+      </span>
+      <span>
+        <strong>ID</strong>
+        <span className="monoValue">{rule.id}</span>
+      </span>
+      <span>
+        <strong>State</strong>
+        <span>{rule.enabled ? "enabled" : "disabled"}</span>
+      </span>
+      <span>
+        <strong>Expression</strong>
+        <span className="monoValue">{rule.expression}</span>
+      </span>
+      <span>
+        <strong>Target</strong>
+        <span>{rule.target}</span>
+      </span>
+      <span>
+        <strong>Cooldown</strong>
+        <span>{rule.cooldown_secs}s</span>
+      </span>
+      <span>
+        <strong>Body template</strong>
+        <span className="monoValue">{rule.body_template}</span>
+      </span>
+      <span>
+        <strong>Updated</strong>
+        <span>{formatCompactTime(rule.updated_at)}</span>
+      </span>
+      <span>
+        <strong>Notes</strong>
+        <span>{rule.notes || "none"}</span>
+      </span>
+    </div>
+  );
+}
+
 function FleetAlertPolicyManager({
   policies,
   onDelete,
@@ -2371,6 +2526,7 @@ function FleetAlertPolicyManager({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [detailPolicyId, setDetailPolicyId] = useState<string | null>(null);
   const [deleteRows, setDeleteRows] = useState<FleetAlertPolicyRecord[] | null>(
     null,
   );
@@ -2489,10 +2645,12 @@ function FleetAlertPolicyManager({
 
   function createPolicy() {
     resetForm();
+    setDetailPolicyId(null);
     setEditorOpen(true);
   }
 
   function editPolicy(policy: FleetAlertPolicyRecord) {
+    setDetailPolicyId(null);
     setEditingId(policy.id);
     setName(policy.name);
     setScopeKind(policy.scope_kind);
@@ -2512,6 +2670,12 @@ function FleetAlertPolicyManager({
     setNotes(policy.notes ?? "");
     setStatus(`editing ${policy.name}`);
     setEditorOpen(true);
+  }
+
+  function openPolicyDetails(policy: FleetAlertPolicyRecord) {
+    setEditorOpen(false);
+    setDetailPolicyId(policy.id);
+    setStatus(`viewing ${policy.name}`);
   }
 
   function requestFromPolicy(
@@ -2583,6 +2747,9 @@ function FleetAlertPolicyManager({
         resetForm();
         setEditorOpen(false);
       }
+      if (rows.some((policy) => policy.id === detailPolicyId)) {
+        setDetailPolicyId(null);
+      }
       setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
     } catch (error) {
@@ -2619,6 +2786,19 @@ function FleetAlertPolicyManager({
       description: (rows) =>
         actionTargetDescription(
           "Open details for",
+          "alert policy",
+          rows[0]?.name,
+          "Opens read-only policy details below the table.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Eye size={14} />,
+      onSelect: (rows) => rows[0] && openPolicyDetails(rows[0]),
+    },
+    {
+      label: "Edit",
+      description: (rows) =>
+        actionTargetDescription(
+          "Edit",
           "alert policy",
           rows[0]?.name,
           "Opens the policy editor below the table.",
@@ -2672,6 +2852,7 @@ function FleetAlertPolicyManager({
           empty="No alert policies saved."
           getRowId={(policy) => policy.id}
           itemLabel="policies"
+          renderExpandedRow={(policy) => <PolicyDetailGrid policy={policy} />}
           rowActions={policyActions}
           rows={policies}
           searchPlaceholder="Search policies by name, scope, thresholds, or notes"
@@ -2688,6 +2869,40 @@ function FleetAlertPolicyManager({
             </button>
           }
         />
+        {detailPolicyId && !editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <button
+                className="secondaryAction"
+                type="button"
+                onClick={() => {
+                  const policy = policies.find(
+                    (candidate) => candidate.id === detailPolicyId,
+                  );
+                  if (policy) {
+                    editPolicy(policy);
+                  }
+                }}
+              >
+                Edit policy
+              </button>
+            }
+            description="Policy metadata and thresholds."
+            onClose={() => setDetailPolicyId(null)}
+            title="Alert policy details"
+          >
+            {(() => {
+              const policy = policies.find(
+                (candidate) => candidate.id === detailPolicyId,
+              );
+              return policy ? (
+                <PolicyDetailGrid policy={policy} />
+              ) : (
+                <span className="mutedText">Policy no longer exists.</span>
+              );
+            })()}
+          </ConsoleDetailPanel>
+        ) : null}
         {editorOpen ? (
           <ConsoleDetailPanel
             actions={
@@ -3094,6 +3309,7 @@ function FleetAlertNotificationManager({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [detailChannelId, setDetailChannelId] = useState<string | null>(null);
   const [deleteRows, setDeleteRows] = useState<
     FleetAlertNotificationChannelRecord[] | null
   >(null);
@@ -3236,10 +3452,12 @@ function FleetAlertNotificationManager({
 
   function createChannel() {
     resetForm();
+    setDetailChannelId(null);
     setEditorOpen(true);
   }
 
   function editChannel(channel: FleetAlertNotificationChannelRecord) {
+    setDetailChannelId(null);
     setEditingId(channel.id);
     setName(channel.name);
     setScopeKind(channel.scope_kind);
@@ -3254,6 +3472,12 @@ function FleetAlertNotificationManager({
     setNotes(channel.notes ?? "");
     setStatus(`editing ${channel.name}`);
     setEditorOpen(true);
+  }
+
+  function openChannelDetails(channel: FleetAlertNotificationChannelRecord) {
+    setEditorOpen(false);
+    setDetailChannelId(channel.id);
+    setStatus(`viewing ${channel.name}`);
   }
 
   function requestFromChannel(
@@ -3324,6 +3548,9 @@ function FleetAlertNotificationManager({
       if (rows.some((channel) => channel.id === editingId)) {
         resetForm();
         setEditorOpen(false);
+      }
+      if (rows.some((channel) => channel.id === detailChannelId)) {
+        setDetailChannelId(null);
       }
       setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
@@ -3409,6 +3636,19 @@ function FleetAlertNotificationManager({
             "Open details for",
             "notification channel",
             rows[0]?.name,
+            "Opens read-only channel details below the table.",
+          ),
+        disabled: (rows) => rows.length !== 1,
+        icon: <Eye size={14} />,
+        onSelect: (rows) => rows[0] && openChannelDetails(rows[0]),
+      },
+      {
+        label: "Edit",
+        description: (rows) =>
+          actionTargetDescription(
+            "Edit",
+            "notification channel",
+            rows[0]?.name,
             "Opens the channel editor below the table.",
           ),
         disabled: (rows) => rows.length !== 1,
@@ -3462,6 +3702,9 @@ function FleetAlertNotificationManager({
           empty="No notification channels saved."
           getRowId={(channel) => channel.id}
           itemLabel="channels"
+          renderExpandedRow={(channel) => (
+            <ChannelDetailGrid channel={channel} />
+          )}
           rowActions={channelActions}
           rows={channels}
           searchPlaceholder="Search channels by name, scope, delivery target, or filters"
@@ -3478,6 +3721,40 @@ function FleetAlertNotificationManager({
             </button>
           }
         />
+        {detailChannelId && !editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <button
+                className="secondaryAction"
+                type="button"
+                onClick={() => {
+                  const channel = channels.find(
+                    (candidate) => candidate.id === detailChannelId,
+                  );
+                  if (channel) {
+                    editChannel(channel);
+                  }
+                }}
+              >
+                Edit channel
+              </button>
+            }
+            description="Routing filters and delivery target."
+            onClose={() => setDetailChannelId(null)}
+            title="Notification channel details"
+          >
+            {(() => {
+              const channel = channels.find(
+                (candidate) => candidate.id === detailChannelId,
+              );
+              return channel ? (
+                <ChannelDetailGrid channel={channel} />
+              ) : (
+                <span className="mutedText">Channel no longer exists.</span>
+              );
+            })()}
+          </ConsoleDetailPanel>
+        ) : null}
         {editorOpen ? (
           <ConsoleDetailPanel
             actions={
@@ -3862,6 +4139,7 @@ function WebhookRuleManager({
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [detailRuleId, setDetailRuleId] = useState<string | null>(null);
   const [deleteRows, setDeleteRows] = useState<WebhookRuleRecord[] | null>(
     null,
   );
@@ -3971,10 +4249,12 @@ function WebhookRuleManager({
 
   function createRule() {
     resetForm();
+    setDetailRuleId(null);
     setEditorOpen(true);
   }
 
   function editRule(rule: WebhookRuleRecord) {
+    setDetailRuleId(null);
     setEditingId(rule.id);
     setName(rule.name);
     setEnabled(rule.enabled);
@@ -3985,6 +4265,12 @@ function WebhookRuleManager({
     setNotes(rule.notes ?? "");
     setStatus(`editing ${rule.name}`);
     setEditorOpen(true);
+  }
+
+  function openRuleDetails(rule: WebhookRuleRecord) {
+    setEditorOpen(false);
+    setDetailRuleId(rule.id);
+    setStatus(`viewing ${rule.name}`);
   }
 
   function requestFromRule(
@@ -4045,6 +4331,9 @@ function WebhookRuleManager({
       if (rows.some((rule) => rule.id === editingId)) {
         resetForm();
         setEditorOpen(false);
+      }
+      if (rows.some((rule) => rule.id === detailRuleId)) {
+        setDetailRuleId(null);
       }
       setDeleteRows(null);
       setStatus(`deleted ${rows.length}`);
@@ -4163,6 +4452,19 @@ function WebhookRuleManager({
           "Open details for",
           "webhook rule",
           rows[0]?.name,
+          "Opens read-only rule details below the table.",
+        ),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Eye size={14} />,
+      onSelect: (rows) => rows[0] && openRuleDetails(rows[0]),
+    },
+    {
+      label: "Edit",
+      description: (rows) =>
+        actionTargetDescription(
+          "Edit",
+          "webhook rule",
+          rows[0]?.name,
           "Opens the rule editor below the table.",
         ),
       disabled: (rows) => rows.length !== 1,
@@ -4227,6 +4529,7 @@ function WebhookRuleManager({
           empty="No webhook rules saved."
           getRowId={(rule) => rule.id}
           itemLabel="rules"
+          renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
           rowActions={ruleActions}
           rows={rules}
           searchPlaceholder="Search webhook rules by name, expression, target, or notes"
@@ -4243,6 +4546,56 @@ function WebhookRuleManager({
             </button>
           }
         />
+        {detailRuleId && !editorOpen ? (
+          <ConsoleDetailPanel
+            actions={
+              <>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={() => {
+                    const rule = rules.find(
+                      (candidate) => candidate.id === detailRuleId,
+                    );
+                    if (rule) {
+                      void dryRun(rule);
+                    }
+                  }}
+                >
+                  Preview rule
+                </button>
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={() => {
+                    const rule = rules.find(
+                      (candidate) => candidate.id === detailRuleId,
+                    );
+                    if (rule) {
+                      editRule(rule);
+                    }
+                  }}
+                >
+                  Edit rule
+                </button>
+              </>
+            }
+            description="Expression, target, and delivery template."
+            onClose={() => setDetailRuleId(null)}
+            title="Webhook rule details"
+          >
+            {(() => {
+              const rule = rules.find(
+                (candidate) => candidate.id === detailRuleId,
+              );
+              return rule ? (
+                <WebhookRuleDetailGrid rule={rule} />
+              ) : (
+                <span className="mutedText">Rule no longer exists.</span>
+              );
+            })()}
+          </ConsoleDetailPanel>
+        ) : null}
         {editorOpen ? (
           <ConsoleDetailPanel
             actions={

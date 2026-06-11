@@ -39,6 +39,7 @@ import {
   ChevronRight as ChevronRightIcon,
   Columns3,
   GripVertical,
+  X,
 } from "lucide-react";
 import { SearchExpressionInput } from "./SearchExpressionInput";
 import {
@@ -402,6 +403,18 @@ export function ConsoleDataGrid<T>({
     });
   }
 
+  function renderEmptyContent() {
+    const emptyContent =
+      empty ?? `No ${itemLabel} match the current view.`;
+    if (
+      typeof emptyContent === "string" ||
+      typeof emptyContent === "number"
+    ) {
+      return <div className="emptyState compactEmpty">{emptyContent}</div>;
+    }
+    return emptyContent;
+  }
+
   return (
     <div className="consoleDataGrid" aria-label={`${title} data grid`}>
       <div className="gridToolbar">
@@ -542,11 +555,7 @@ export function ConsoleDataGrid<T>({
         </div>
       </div>
       {table.getRowModel().rows.length === 0 ? (
-        (empty ?? (
-          <div className="emptyState compactEmpty">
-            No {itemLabel} match the current view.
-          </div>
-        ))
+        renderEmptyContent()
       ) : (
         <div className="gridTable" role="grid">
           <div className="gridHeaderGroup" role="rowgroup">
@@ -607,7 +616,20 @@ export function ConsoleDataGrid<T>({
                     </div>
                     {renderExpandedRow && expandedRows[row.id] && (
                       <div className="gridExpandedRow">
-                        {renderExpandedRow(row.original)}
+                        <button
+                          aria-label={`Close ${title} row details`}
+                          className="iconButton gridExpandedClose"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleExpandedRow(row.id, row.original);
+                          }}
+                          type="button"
+                        >
+                          <X size={15} />
+                        </button>
+                        <div className="gridExpandedContent">
+                          {renderExpandedRow(row.original)}
+                        </div>
                       </div>
                     )}
                   </div>

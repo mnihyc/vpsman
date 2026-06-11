@@ -462,11 +462,21 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.getByRole("menuitem", { name: "Details" }).click();
   await expect(
     page.locator(".consoleDetailPanelHeader strong", {
-      hasText: "Edit alert policy",
+      hasText: "Alert policy details",
     }),
   ).toBeVisible();
+  const belowDetail = page.locator(".consoleDetailPanel");
+  await expect(belowDetail).toContainText("edge-resource-policy");
+  await expect(belowDetail).toContainText("mem warn 0.2");
   await page.getByLabel("Close detail panel").click();
-  await expect(page.getByText("Edit alert policy")).toHaveCount(0);
+  await expect(page.getByText("Alert policy details")).toHaveCount(0);
+
+  await policyRow.getByLabel("Expand Alert policy rules row").click();
+  const inlineDetail = grid.locator(".gridExpandedRow");
+  await expect(inlineDetail).toContainText("edge-resource-policy");
+  await expect(inlineDetail).toContainText("mem warn 0.2");
+  await policyRow.getByLabel("Collapse Alert policy rules row").click();
+  await expect(inlineDetail).toHaveCount(0);
 
   await policyRow.click({ button: "right" });
   await expect(page.getByText("Row actions")).toBeVisible();
