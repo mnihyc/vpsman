@@ -4,8 +4,9 @@ use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
+use vpsman_server_core::{INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES};
 
-use crate::model::{JobOutputView, ProcessSupervisorInventoryView};
+use crate::model::{JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView};
 use crate::object_store::BackupObjectStore;
 use crate::repository::Repository;
 use crate::{output_stream_name, unix_now};
@@ -391,6 +392,29 @@ impl Repository {
                     std::slice::from_ref(output),
                 )
                 .await?;
+                if let Some(artifact) = self
+                    .get_job_output_artifact_ref(job_id, client_id, seq)
+                    .await?
+                {
+                    self.register_server_artifact(NewServerArtifact {
+                        domain: "job_output".to_string(),
+                        object_key: artifact.object_key,
+                        sha256_hex: artifact.sha256_hex,
+                        size_bytes: artifact.size_bytes,
+                        job_id: Some(job_id),
+                        client_id: Some(client_id.to_string()),
+                        stream: Some(output_stream_name(output.stream).to_string()),
+                        seq: Some(seq),
+                        backup_request_id: None,
+                        backup_artifact_id: None,
+                        release_id: None,
+                        metadata: serde_json::json!({}),
+                    })
+                    .await?;
+                }
+                self.refresh_file_transfer_sessions_for_client(client_id)
+                    .await?;
+                self.refresh_terminal_sessions_for_client(client_id).await?;
                 Ok(seq)
             }
         }
@@ -416,8 +440,8 @@ impl Repository {
         let result = match self {
             Self::Memory(memory) => {
                 let mut stored = memory.job_outputs.write().await;
-                for output in persisted {
-                    let view = output.into_view();
+                for output in &persisted {
+                    let view = output.clone().into_view();
                     if let Some(existing) = stored.iter_mut().find(|existing| {
                         existing.job_id == view.job_id
                             && existing.client_id == view.client_id
@@ -488,6 +512,45 @@ impl Repository {
         }
         self.record_network_observations_starting_at(job_id, client_id, start_seq, outputs)
             .await?;
+        self.register_persisted_job_output_artifacts(client_id, &persisted)
+            .await?;
+        self.refresh_file_transfer_sessions_for_client(client_id)
+            .await?;
+        self.refresh_terminal_sessions_for_client(client_id).await?;
+        Ok(())
+    }
+
+    async fn register_persisted_job_output_artifacts(
+        &self,
+        client_id: &str,
+        outputs: &[StoredJobOutput],
+    ) -> Result<()> {
+        for output in outputs {
+            let Some(object_key) = output.artifact_object_key.clone() else {
+                continue;
+            };
+            let Some(sha256_hex) = output.artifact_sha256_hex.clone() else {
+                continue;
+            };
+            let Some(size_bytes) = output.artifact_size_bytes else {
+                continue;
+            };
+            self.register_server_artifact(NewServerArtifact {
+                domain: "job_output".to_string(),
+                object_key,
+                sha256_hex,
+                size_bytes,
+                job_id: Some(output.job_id),
+                client_id: Some(client_id.to_string()),
+                stream: Some(output.stream.clone()),
+                seq: Some(output.seq),
+                backup_request_id: None,
+                backup_artifact_id: None,
+                release_id: None,
+                metadata: serde_json::json!({}),
+            })
+            .await?;
+        }
         Ok(())
     }
 }
@@ -543,6 +606,13 @@ async fn materialize_job_outputs(
             .ok_or_else(|| anyhow::anyhow!("job output sequence overflow"))?;
         let should_externalize = should_externalize_output(output, &config);
         let stream = output_stream_name(output.stream).to_string();
+        if output.stream == OutputStream::Status && output.data.len() > STATUS_OUTPUT_MAX_BYTES {
+            anyhow::bail!(
+                "status output exceeds max bytes: {} > {}",
+                output.data.len(),
+                STATUS_OUTPUT_MAX_BYTES
+            );
+        }
         if should_externalize {
             let sha256_hex = payload_hash(&output.data);
             let object_key = job_output_object_key(job_id, client_id, seq, &stream, &sha256_hex);
@@ -558,7 +628,12 @@ async fn materialize_job_outputs(
                 client_id: client_id.to_string(),
                 seq,
                 stream,
-                data: Vec::new(),
+                data: output
+                    .data
+                    .iter()
+                    .copied()
+                    .take(INLINE_OUTPUT_PREVIEW_BYTES)
+                    .collect(),
                 storage: "object_store".to_string(),
                 artifact_object_key: Some(object_key),
                 created_artifact_object_key,
@@ -777,6 +852,7 @@ mod tests {
         build_process_supervisor_inventory, JobOutputPersistConfig, SupervisorInventoryOutput,
     };
     use crate::{object_store::BackupObjectStore, repository::MemoryState, Repository};
+    use base64::Engine as _;
     use uuid::Uuid;
     use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 
@@ -818,7 +894,7 @@ mod tests {
         let outputs = repo.list_job_outputs(job_id).await.unwrap();
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].storage, "object_store");
-        assert_eq!(outputs[0].data_base64, "");
+        assert_eq!(outputs[0].data_base64, super::BASE64.encode(&data));
         let expected_hash = payload_hash(&data);
         assert_eq!(
             outputs[0].artifact_sha256_hex.as_deref(),
@@ -833,6 +909,35 @@ mod tests {
         assert_eq!(outputs[1].storage, "inline");
         assert!(!outputs[1].data_base64.is_empty());
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_status_output() {
+        let repo = Repository::Memory(MemoryState::default());
+        let job_id = Uuid::new_v4();
+        let output = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: vec![b'x'; vpsman_server_core::STATUS_OUTPUT_MAX_BYTES + 1],
+            exit_code: Some(1),
+            done: true,
+        };
+
+        let error = repo
+            .record_job_outputs_with_config(
+                job_id,
+                "client-a",
+                &[output],
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("status output exceeds max bytes"));
     }
 
     #[tokio::test]

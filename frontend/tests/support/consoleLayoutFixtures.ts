@@ -1731,6 +1731,7 @@ export async function installConsoleApiMock(page: Page) {
           status: string;
         }>
       >();
+      const serverJobsFixture: Array<Record<string, unknown>> = [];
       const commandTypeForOperation = (
         operation: Record<string, unknown> | undefined,
       ): string | null => {
@@ -2805,6 +2806,76 @@ export async function installConsoleApiMock(page: Page) {
         }
         if (pathname === "/api/v1/jobs" && method === "GET") {
           return jsonResponse(jobsFixture);
+        }
+        if (pathname === "/api/v1/server-jobs" && method === "GET") {
+          return jsonResponse(serverJobsFixture);
+        }
+        if (
+          pathname === "/api/v1/server-jobs/artifact-cleanup/preview" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          const request = body as { expression?: string };
+          const matchedBytes = (
+            fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
+          ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
+          return jsonResponse({
+            expression: request.expression ?? "",
+            matched_count: (
+              fileTransferSourceArtifactsFixture as Array<unknown>
+            ).length,
+            matched_bytes: matchedBytes,
+            preview_hash:
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          });
+        }
+        if (
+          pathname === "/api/v1/server-jobs/artifact-cleanup" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          const request = body as {
+            expression?: string;
+            preview_hash?: string;
+          };
+          const matchedBytes = (
+            fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
+          ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
+          const job = {
+            canceled_at: null,
+            completed_at: null,
+            created_at: "2026-06-02T10:15:00Z",
+            created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
+            deleted_bytes: 0,
+            deleted_count: 0,
+            error: null,
+            expression: request.expression ?? "",
+            id: "81818181-2222-4333-8444-555555555555",
+            job_type: "artifact_cleanup",
+            matched_bytes: matchedBytes,
+            matched_count: (
+              fileTransferSourceArtifactsFixture as Array<unknown>
+            ).length,
+            metadata: {},
+            preview_hash: request.preview_hash ?? null,
+            started_at: null,
+            status: "queued",
+          };
+          serverJobsFixture.unshift(job);
+          return jsonResponse(job, 201);
+        }
+        const serverJobCancelMatch = pathname.match(
+          /^\/api\/v1\/server-jobs\/([^/]+)\/cancel$/,
+        );
+        if (serverJobCancelMatch && method === "POST") {
+          const jobId = decodeURIComponent(serverJobCancelMatch[1]);
+          const job = serverJobsFixture.find((record) => record.id === jobId);
+          if (job) {
+            job.status = "canceled";
+            job.canceled_at = "2026-06-02T10:16:00Z";
+            return jsonResponse(job);
+          }
+          return jsonResponse({ error: "server job not found" }, 404);
         }
         if (pathname === "/api/v1/command-templates" && method === "GET") {
           return jsonResponse(commandTemplatesFixture);

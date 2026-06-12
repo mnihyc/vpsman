@@ -671,6 +671,26 @@ pub(crate) enum Command {
         #[arg(long = "output-file")]
         output_file: PathBuf,
     },
+    ServerJobs {
+        #[arg(long, default_value_t = 50)]
+        limit: u16,
+    },
+    ArtifactCleanupPreview {
+        #[arg(long)]
+        expression: String,
+    },
+    ArtifactCleanupCreate {
+        #[arg(long)]
+        expression: String,
+        #[arg(long)]
+        preview_hash: String,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
+    },
+    ServerJobCancel {
+        #[arg(long)]
+        job_id: String,
+    },
     Audit {
         #[arg(long, default_value_t = 50)]
         limit: u16,

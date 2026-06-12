@@ -545,13 +545,13 @@ function BulkTagPanel({
               verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
             />
             <button className="secondaryAction" disabled={pending || !tag.trim() || !selectorExpression.trim()} onClick={previewTargets} type="button">
-              Review mutation
+              Preview targets
             </button>
           </>
         )}
         {action === "delete" && (
           <button className="secondaryAction" disabled={pending || !tag.trim()} onClick={previewTargets} type="button">
-            Review mutation
+            Preview targets
           </button>
         )}
         <div className="privilegeGateBox">

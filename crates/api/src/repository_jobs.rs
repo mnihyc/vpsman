@@ -5,6 +5,9 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::JobCommand;
+use vpsman_server_core::{target_status_counts_as_accepted, target_status_is_pending};
+
+pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
 
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
@@ -54,61 +57,12 @@ fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
         || job.payload_hash.to_ascii_lowercase().contains(needle)
 }
 
-fn target_status_counts_as_accepted(status: &str) -> bool {
-    matches!(status, "accepted" | "completed" | "failed" | "timed_out")
-}
-
-fn target_status_is_pending(status: &str) -> bool {
-    matches!(status, "queued" | "dispatching")
-}
-
 fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str {
     let statuses = targets
         .iter()
         .map(|target| target.status.clone())
         .collect::<Vec<_>>();
     aggregate_job_status_from_statuses(&statuses, targets.len())
-}
-
-pub(crate) fn aggregate_job_status_from_statuses(
-    target_statuses: &[String],
-    target_count: usize,
-) -> &'static str {
-    let completed = target_statuses
-        .iter()
-        .filter(|status| status.as_str() == "completed")
-        .count();
-    if target_count > 0 && completed == target_count {
-        return "completed";
-    }
-    if completed > 0 {
-        return "partially_completed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "degraded_unprivileged")
-    {
-        return "degraded_unprivileged";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "timed_out")
-    {
-        return "timed_out";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
-    {
-        return "failed";
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == "accepted")
-    {
-        return "accepted";
-    }
-    "dispatch_failed"
 }
 
 fn job_history_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -1198,6 +1152,19 @@ impl Repository {
                         )
                         .await?;
                     }
+                    Some(JobCommand::AgentUpdateRollback {
+                        rollback_sha256_hex,
+                    }) if agent_update_activation_failure_status(&outcome.status) => {
+                        self.record_agent_update_rollback_failed(
+                            client_id,
+                            job_id,
+                            rollback_sha256_hex.as_deref(),
+                            &outcome.status,
+                            outcome.exit_code,
+                            &outcome.message,
+                        )
+                        .await?;
+                    }
                     _ => {}
                 }
             }
@@ -1301,6 +1268,19 @@ impl Repository {
                             client_id,
                             job_id,
                             rollback_sha256_hex.as_deref(),
+                        )
+                        .await?;
+                    }
+                    Some(JobCommand::AgentUpdateRollback {
+                        rollback_sha256_hex,
+                    }) if agent_update_activation_failure_status(&outcome.status) => {
+                        self.record_agent_update_rollback_failed(
+                            client_id,
+                            job_id,
+                            rollback_sha256_hex.as_deref(),
+                            &outcome.status,
+                            outcome.exit_code,
+                            &outcome.message,
                         )
                         .await?;
                     }

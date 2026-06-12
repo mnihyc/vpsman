@@ -92,6 +92,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "transfers", label: "Transfer history", description: "Source artifacts, handoffs, and resumable transfer sessions" },
     { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
     { id: "processes", label: "Processes", description: "Process supervisor inventory" },
+    { id: "server_jobs", label: "Server jobs", description: "Server-side artifact cleanup and control-plane work" },
     { id: "approvals", label: "Schedule runs", description: "Due schedule jobs and queued actions" },
   ],
   Schedules: [

@@ -5,6 +5,7 @@ use base64::Engine as _;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
+use vpsman_server_core::is_backup_operation;
 
 use crate::{
     model::{
@@ -541,12 +542,13 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let jobs = memory.jobs.read().await;
+                let operations = memory.job_operations.read().await;
                 let targets = memory.job_targets.read().await;
                 let outputs = memory.job_outputs.read().await;
                 let mut candidates = jobs
                     .iter()
                     .filter(|job| {
-                        job.command_type == "backup"
+                        operations.get(&job.id).is_some_and(is_backup_operation)
                             && job.payload_hash == backup_request.payload_hash
                             && selected_job_id.is_none_or(|job_id| job.id == job_id)
                             && targets.iter().any(|target| {
@@ -592,7 +594,7 @@ impl Repository {
                       ON target.job_id = job.id
                      AND target.client_id = $2
                      AND target.status = 'completed'
-                    WHERE job.command_type = 'backup'
+                    WHERE job.operation->>'type' = 'backup'
                       AND job.payload_hash = $1
                       AND ($3::uuid IS NULL OR job.id = $3)
                       AND EXISTS (

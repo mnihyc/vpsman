@@ -13,6 +13,7 @@ import {
   type BulkJobProgress,
 } from "../../bulkJobProgress";
 import {
+  FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
   buildWriteTextOperation,
   buildUploadOperation,
   decodedText,
@@ -154,7 +155,11 @@ export function MultiFileActionsPanel({
   async function buildOperation(): Promise<JobOperation> {
     const normalizedPath = normalizeAbsolutePath(path);
     if (action === "download_files") {
-      return { type: "file_download", path: normalizedPath, max_bytes: 64 * 1024 * 1024 };
+      return {
+        type: "file_download",
+        path: normalizedPath,
+        max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
+      };
     }
     if (action === "upload_file") {
       if (!uploadFile) {

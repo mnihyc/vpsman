@@ -27,6 +27,33 @@ impl Repository {
         .await
     }
 
+    pub(crate) async fn record_agent_update_rollback_failed(
+        &self,
+        client_id: &str,
+        rollback_job_id: Uuid,
+        rollback_sha256_hex: Option<&str>,
+        outcome_status: &str,
+        exit_code: Option<i32>,
+        message: &str,
+    ) -> Result<()> {
+        let metadata = json!({
+            "rollback_job_id": rollback_job_id,
+            "client_id": client_id,
+            "rollback_sha256_hex": rollback_sha256_hex.map(str::to_ascii_lowercase),
+            "rollback_outcome_status": outcome_status,
+            "exit_code": exit_code,
+            "message": message,
+            "status": "rollback_failed",
+        });
+        self.record_agent_update_lifecycle_audit(
+            "agent_update.rollback_failed",
+            client_id,
+            metadata,
+            None,
+        )
+        .await
+    }
+
     pub(crate) async fn record_agent_update_activation_completed(
         &self,
         client_id: &str,

@@ -4,7 +4,7 @@ import { decodeOutputPreview, isJsonObject } from "./utils";
 
 export const FILE_BROWSER_LIST_LIMIT = 250;
 export const FILE_BROWSER_TEXT_LIMIT_BYTES = 1024 * 1024;
-export const FILE_BROWSER_ARCHIVE_LIMIT_BYTES = 64 * 1024 * 1024;
+export const FILE_BROWSER_ARCHIVE_LIMIT_BYTES = 16 * 1024 * 1024;
 
 export type FileBrowserEntry = {
   name: string;

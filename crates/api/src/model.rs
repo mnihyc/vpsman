@@ -10,6 +10,7 @@ pub(crate) use crate::model_agent_updates::*;
 pub(crate) use crate::model_backups::*;
 pub(crate) use crate::model_dashboard::*;
 pub(crate) use crate::model_data_sources::*;
+pub(crate) use crate::model_server_jobs::*;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSummary {

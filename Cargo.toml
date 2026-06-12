@@ -8,6 +8,7 @@ members = [
     "crates/api",
     "crates/worker",
     "crates/vpsctl",
+    "crates/server-core",
     "crates/server-build-info",
 ]
 

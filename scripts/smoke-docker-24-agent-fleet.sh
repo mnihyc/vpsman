@@ -7,6 +7,9 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools bash curl docker google-chrome jq python3 shuf timeout
 smoke_build_binaries
+if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
+  cargo build -p vpsman-worker >/dev/null
+fi
 smoke_init_tmpdir "vpsman-docker-24-agent-fleet"
 
 agent_count="${VPSMAN_DOCKER_FLEET_AGENT_COUNT:-24}"
@@ -44,6 +47,13 @@ gateway_container="vpsman-$run_id-gateway"
 
 cleanup_docker_fleet_smoke() {
   docker ps -aq --filter "label=$label_key=$run_id" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  if [[ -n "${SMOKE_TMPDIR:-}" && -d "$SMOKE_TMPDIR/object-store" ]]; then
+    docker run --rm \
+      -v "$SMOKE_TMPDIR:$SMOKE_TMPDIR" \
+      -w "$SMOKE_TMPDIR" \
+      "$runtime_image" \
+      sh -c 'rm -rf object-store' >/dev/null 2>&1 || true
+  fi
   smoke_cleanup
 }
 trap cleanup_docker_fleet_smoke EXIT
@@ -120,6 +130,7 @@ gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
 docker run -d \
   --name "$api_container" \
   --network host \
+  --user "$(id -u):$(id -g)" \
   --label "$label_key=$run_id" \
   -e VPSMAN_API_BIND="127.0.0.1:$api_port" \
   -e VPSMAN_POSTGRES_URL="$postgres_url" \
@@ -476,18 +487,74 @@ api_get "/api/v1/audit?limit=100" | jq -e '
   any(.[]; .action == "backup.requested_metadata_only")
 ' >/dev/null
 
+cleanup_expression='artifact.domain = "file_transfer_source"'
+cleanup_source="$SMOKE_TMPDIR/docker-fleet-q2-capacity-reconciliation.csv"
+printf 'account,provider,country,role,instance_count\nacme-network,alpha,US,edge,2\nacme-network,alpha,DE,core,2\nrun,%s,total,%s\n' "$run_id" "$agent_count" >"$cleanup_source"
+cleanup_source_json="$(vpsctl_json file-transfer-source-upload \
+  --source "$cleanup_source" \
+  --name docker-fleet-q2-capacity-reconciliation.csv \
+  --confirmed)"
+cleanup_source_artifact_id="$(jq -r '.id' <<<"$cleanup_source_json")"
+cleanup_source_object_key="$(jq -r '.object_key' <<<"$cleanup_source_json")"
+jq -e '
+  .name == "docker-fleet-q2-capacity-reconciliation.csv" and
+  .size_bytes > 0 and
+  (.object_key | startswith("file-transfer-sources/")) and
+  (.sha256_hex | length) == 64
+' <<<"$cleanup_source_json" >/dev/null
+cleanup_preview_json="$(vpsctl_json artifact-cleanup-preview --expression "$cleanup_expression")"
+jq -e --arg expression "$cleanup_expression" '
+  .expression == $expression and
+  .matched_count >= 1 and
+  .matched_bytes > 0 and
+  (.preview_hash | length) == 64
+' <<<"$cleanup_preview_json" >/dev/null
+
 if ! env \
   VPSMAN_API_PROXY="$api_url" \
   VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
+  VPSMAN_DOCKER_FLEET_CLEANUP_EXPRESSION="$cleanup_expression" \
   VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW="$extended_review" \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
   VPSMAN_DOCKER_FLEET_PASSWORD="$operator_password" \
   VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR="$screenshot_dir" \
   bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run test:ui -- tests/live-docker-fleet.spec.ts --project desktop-chrome --project mobile-chrome'; then
   dump_docker_logs "live Docker fleet UI smoke failed"
+  exit 1
+fi
+
+cleanup_worker_log="$SMOKE_TMPDIR/artifact-cleanup-worker.log"
+if ! env \
+  VPSMAN_POSTGRES_URL="$postgres_url" \
+  VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
+  VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR="$object_store_dir" \
+  target/debug/vpsman-worker --once --worker-id docker-fleet-artifact-cleanup --worker-lease-secs 60 \
+  >"$cleanup_worker_log" 2>&1; then
+  echo "artifact cleanup worker failed" >&2
+  cat "$cleanup_worker_log" >&2 || true
+  dump_docker_logs "artifact cleanup worker failed"
+  exit 1
+fi
+api_get "/api/v1/server-jobs?limit=20" | jq -e '
+  any(.[]; .job_type == "artifact_cleanup" and .status == "completed" and .deleted_count >= 1)
+' >/dev/null
+cleanup_artifact_status="$(docker exec "$pg_container" psql -U vpsman -d vpsman -tAc "SELECT status FROM server_artifacts WHERE object_key = '$cleanup_source_object_key'")"
+if [[ "$cleanup_artifact_status" != "deleted" ]]; then
+  echo "expected server artifact to be marked deleted after cleanup, got: $cleanup_artifact_status" >&2
+  docker exec "$pg_container" psql -U vpsman -d vpsman -c "SELECT id, domain, object_key, status, deleted_at FROM server_artifacts ORDER BY created_at DESC LIMIT 10" >&2 || true
+  exit 1
+fi
+cleanup_source_count="$(docker exec "$pg_container" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM file_transfer_source_artifacts WHERE id = '$cleanup_source_artifact_id'")"
+if [[ "$cleanup_source_count" != "0" ]]; then
+  echo "expected file transfer source artifact row to be removed by cleanup" >&2
+  exit 1
+fi
+if [[ -e "$object_store_dir/$cleanup_source_object_key" ]]; then
+  echo "expected cleanup worker to remove local object store payload $cleanup_source_object_key" >&2
+  find "$object_store_dir" -maxdepth 3 -type f -print >&2 || true
   exit 1
 fi
 
@@ -519,6 +586,7 @@ jq -n \
       "schedule_registry",
       "topology_plan_create",
       "backup_metadata_request",
+      "server_artifact_cleanup_cli_ui_worker",
       "gateway_session_inventory",
       "audit_visibility",
       "desktop_mobile_live_ui_layout",

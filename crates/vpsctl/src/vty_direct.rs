@@ -29,6 +29,11 @@ pub(crate) fn submit_vty_direct_command(
         )?)),
         "tags" => Ok(Some(http_get(api_url, "/api/v1/tags", token)?)),
         "jobs" => Ok(Some(http_get(api_url, "/api/v1/jobs", token)?)),
+        "server-jobs" => Ok(Some(http_get(
+            api_url,
+            "/api/v1/server-jobs?limit=50",
+            token,
+        )?)),
         "schedules" => Ok(Some(http_get(api_url, "/api/v1/schedules", token)?)),
         "audit" => Ok(Some(http_get(api_url, "/api/v1/audit", token)?)),
         "history-retention" => Ok(Some(http_get(
@@ -63,6 +68,18 @@ pub(crate) fn submit_vty_direct_command(
         command if command.starts_with("history-retention-prune") => Ok(Some(
             submit_history_retention_prune(api_url, token, command)?,
         )),
+        command if command.starts_with("server-jobs ") => {
+            Ok(Some(submit_server_jobs(api_url, token, command)?))
+        }
+        command if command.starts_with("artifact-cleanup-preview ") => Ok(Some(
+            submit_artifact_cleanup_preview(api_url, token, command)?,
+        )),
+        command if command.starts_with("artifact-cleanup-create ") => Ok(Some(
+            submit_artifact_cleanup_create(api_url, token, command)?,
+        )),
+        command if command.starts_with("server-job-cancel ") => {
+            Ok(Some(submit_server_job_cancel(api_url, token, command)?))
+        }
         command if command.starts_with("backup-policy-prune") => {
             Ok(Some(submit_backup_policy_prune(api_url, token, command)?))
         }
@@ -316,6 +333,87 @@ fn submit_history_retention_prune(
     )
 }
 
+fn submit_server_jobs(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let mut limit = 50_u16;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--limit" if index + 1 < parts.len() => {
+                limit = parts[index + 1].parse::<u16>()?.clamp(1, 200);
+                index += 2;
+            }
+            value if value.starts_with("--limit=") => {
+                limit = value
+                    .trim_start_matches("--limit=")
+                    .parse::<u16>()?
+                    .clamp(1, 200);
+                index += 1;
+            }
+            _ => return Ok(server_jobs_usage()),
+        }
+    }
+    http_get(
+        api_url,
+        &format!("/api/v1/server-jobs?limit={limit}"),
+        token,
+    )
+}
+
+fn submit_artifact_cleanup_preview(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let Some(expression) = collect_option_value(&parts, "--expression") else {
+        return Ok(artifact_cleanup_preview_usage());
+    };
+    http_post_json(
+        api_url,
+        "/api/v1/server-jobs/artifact-cleanup/preview",
+        token,
+        &serde_json::json!({ "expression": expression }),
+    )
+}
+
+fn submit_artifact_cleanup_create(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let Some(expression) = collect_option_value(&parts, "--expression") else {
+        return Ok(artifact_cleanup_create_usage());
+    };
+    let Some(preview_hash) = option_value(&parts, "--preview-hash") else {
+        return Ok(artifact_cleanup_create_usage());
+    };
+    http_post_json(
+        api_url,
+        "/api/v1/server-jobs/artifact-cleanup",
+        token,
+        &serde_json::json!({
+            "expression": expression,
+            "preview_hash": preview_hash,
+            "confirmed": has_flag(&parts, "--confirmed"),
+        }),
+    )
+}
+
+fn submit_server_job_cancel(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let Some(job_id) = option_value(&parts, "--job-id") else {
+        return Ok(server_job_cancel_usage());
+    };
+    http_post_json(
+        api_url,
+        &format!("/api/v1/server-jobs/{job_id}/cancel"),
+        token,
+        &serde_json::json!({}),
+    )
+}
+
 fn submit_backup_policy_prune(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let mut schedule_id = None::<String>;
@@ -409,6 +507,42 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn option_value(parts: &[&str], name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    let mut index = 1;
+    while index < parts.len() {
+        if parts[index] == name {
+            return parts.get(index + 1).map(|value| (*value).to_string());
+        }
+        if parts[index].starts_with(&prefix) {
+            return Some(parts[index].trim_start_matches(&prefix).to_string());
+        }
+        index += 1;
+    }
+    None
+}
+
+fn collect_option_value(parts: &[&str], name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    let mut index = 1;
+    while index < parts.len() {
+        if parts[index].starts_with(&prefix) {
+            return Some(parts[index].trim_start_matches(&prefix).to_string());
+        }
+        if parts[index] == name {
+            let mut values = Vec::new();
+            index += 1;
+            while index < parts.len() && !parts[index].starts_with("--") {
+                values.push(parts[index]);
+                index += 1;
+            }
+            return (!values.is_empty()).then(|| values.join(" "));
+        }
+        index += 1;
+    }
+    None
+}
+
 fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -427,6 +561,23 @@ fn history_retention_upsert_usage() -> String {
 
 fn history_retention_prune_usage() -> String {
     "usage: history-retention-prune [--domain <domain>] [--dry-run] [--metadata-only true|false] [--confirmed]".to_string()
+}
+
+fn server_jobs_usage() -> String {
+    "usage: server-jobs [--limit <1-200>]".to_string()
+}
+
+fn artifact_cleanup_preview_usage() -> String {
+    "usage: artifact-cleanup-preview --expression <expr>".to_string()
+}
+
+fn artifact_cleanup_create_usage() -> String {
+    "usage: artifact-cleanup-create --expression <expr> --preview-hash <sha256> --confirmed"
+        .to_string()
+}
+
+fn server_job_cancel_usage() -> String {
+    "usage: server-job-cancel --job-id <uuid>".to_string()
 }
 
 fn backup_policy_prune_usage() -> String {

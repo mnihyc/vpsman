@@ -7,9 +7,10 @@ use axum::{
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, payload_hash, AgentPrivilegeMode, CommandOutput, GatewayCommandDispatchResult,
-    JobCommand, OutputStream,
+    encode_json, payload_hash, CommandOutput, GatewayCommandDispatchResult, JobCommand,
+    OutputStream,
 };
+use vpsman_server_core::{CapabilitySkip, TargetCapability};
 
 use crate::{
     error::ApiError,
@@ -447,138 +448,19 @@ fn split_targets_by_capability(
     agents: &[AgentView],
     force_unprivileged: bool,
 ) -> (Vec<String>, Vec<CapabilitySkip>) {
-    if force_unprivileged {
-        return (targets.to_vec(), Vec::new());
-    }
-    let mut dispatch_targets = Vec::new();
-    let mut skipped_targets = Vec::new();
-    for client_id in targets {
-        if let Some(failure) = agents
-            .iter()
-            .find(|agent| agent.id == *client_id)
-            .and_then(|agent| target_capability_failure(command, agent))
-        {
-            skipped_targets.push(CapabilitySkip {
-                client_id: client_id.clone(),
-                failure,
-            });
-        } else {
-            dispatch_targets.push(client_id.clone());
-        }
-    }
-    (dispatch_targets, skipped_targets)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CapabilityFailure {
-    reason: &'static str,
-    hint: &'static str,
-    message: &'static str,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CapabilitySkip {
-    client_id: String,
-    failure: CapabilityFailure,
-}
-
-fn target_capability_failure(command: &JobCommand, agent: &AgentView) -> Option<CapabilityFailure> {
-    if target_lacks_root_network_capability(command, agent) {
-        return Some(CapabilityFailure {
-            reason: "target_agent_lacks_root_runtime_network_capability",
-            hint: "agent reported unprivileged mode or no root runtime network capability; root-only network mutation was not dispatched unless force_unprivileged is set",
-            message: "target agent lacks root runtime network capability",
-        });
-    }
-    if target_lacks_process_limit_capability(command, agent) {
-        return Some(CapabilityFailure {
-            reason: "target_agent_lacks_process_limit_capability",
-            hint: "agent reported unprivileged mode or no process-limit capability; process start with resource limits was not dispatched unless force_unprivileged is set",
-            message: "target agent lacks process limit capability",
-        });
-    }
-    if target_lacks_agent_update_capability(command, agent) {
-        return Some(CapabilityFailure {
-            reason: "target_agent_lacks_agent_update_capability",
-            hint: "agent reported unprivileged mode or no agent-update host-mutation capability; agent update was not dispatched unless force_unprivileged is set",
-            message: "target agent lacks agent update capability",
-        });
-    }
-    if target_lacks_restore_capability(command, agent) {
-        return Some(CapabilityFailure {
-            reason: "target_agent_lacks_restore_capability",
-            hint: "agent reported unprivileged mode or no privileged host-mutation capability; restore mutation was not dispatched unless force_unprivileged is set",
-            message: "target agent lacks restore capability",
-        });
-    }
-    None
-}
-
-fn target_lacks_root_network_capability(command: &JobCommand, agent: &AgentView) -> bool {
-    let root_network_operation = matches!(
+    let capabilities = agents
+        .iter()
+        .map(|agent| TargetCapability {
+            client_id: agent.id.clone(),
+            capabilities: agent.capabilities.clone(),
+        })
+        .collect::<Vec<_>>();
+    vpsman_server_core::split_targets_by_capability(
         command,
-        JobCommand::NetworkApply { .. }
-            | JobCommand::NetworkRollback { .. }
-            | JobCommand::NetworkOspfCostUpdate { .. }
-    );
-    if !root_network_operation {
-        return false;
-    }
-    match agent.capabilities.privilege_mode {
-        AgentPrivilegeMode::Unprivileged => true,
-        AgentPrivilegeMode::Root => !agent.capabilities.can_manage_runtime_tunnels,
-        AgentPrivilegeMode::Unknown => false,
-    }
-}
-
-fn target_lacks_process_limit_capability(command: &JobCommand, agent: &AgentView) -> bool {
-    let JobCommand::ProcessStart { limits, .. } = command else {
-        return false;
-    };
-    if limits.is_default() {
-        return false;
-    }
-    match agent.capabilities.privilege_mode {
-        AgentPrivilegeMode::Unprivileged => true,
-        AgentPrivilegeMode::Root => !agent.capabilities.can_apply_process_limits,
-        AgentPrivilegeMode::Unknown => false,
-    }
-}
-
-fn target_lacks_agent_update_capability(command: &JobCommand, agent: &AgentView) -> bool {
-    let agent_update_operation = matches!(
-        command,
-        JobCommand::ConfigRead
-            | JobCommand::HotConfig { .. }
-            | JobCommand::DataSourceConfigPatch { .. }
-            | JobCommand::UpdateAgent { .. }
-            | JobCommand::AgentUpdateActivate { .. }
-            | JobCommand::AgentUpdateRollback { .. }
-            | JobCommand::AgentUpdateCheck { .. }
-    );
-    if !agent_update_operation {
-        return false;
-    }
-    target_lacks_privileged_host_mutation_capability(agent)
-}
-
-fn target_lacks_restore_capability(command: &JobCommand, agent: &AgentView) -> bool {
-    let restore_operation = matches!(
-        command,
-        JobCommand::Restore { .. } | JobCommand::RestoreRollback { .. }
-    );
-    if !restore_operation {
-        return false;
-    }
-    target_lacks_privileged_host_mutation_capability(agent)
-}
-
-fn target_lacks_privileged_host_mutation_capability(agent: &AgentView) -> bool {
-    match agent.capabilities.privilege_mode {
-        AgentPrivilegeMode::Unprivileged => true,
-        AgentPrivilegeMode::Root => !agent.capabilities.can_attempt_privileged_ops,
-        AgentPrivilegeMode::Unknown => false,
-    }
+        targets,
+        &capabilities,
+        force_unprivileged,
+    )
 }
 
 fn capability_degraded_outcome(

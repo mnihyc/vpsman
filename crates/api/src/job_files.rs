@@ -3,7 +3,8 @@ use vpsman_common::{
     validate_file_mode, validate_file_transfer_chunk_request,
     validate_file_transfer_download_chunk_request, validate_file_transfer_download_session,
     validate_file_transfer_session, validate_file_transfer_session_token, FileOwnershipPolicy,
-    FilePushChunk, FileTransferValidationError, JobCommand, MAX_INLINE_FILE_PUSH_BYTES,
+    FilePushChunk, FileTransferValidationError, JobCommand, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
+    MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 use crate::ApiError;
@@ -96,33 +97,6 @@ pub(crate) fn validate_inline_file_payload(
     decode_inline_file_payload(data_base64, size_bytes, sha256_hex)
         .map(|_| ())
         .map_err(file_transfer_error)
-}
-
-pub(crate) fn file_command_type_label(command: &JobCommand) -> Option<&'static str> {
-    Some(match command {
-        JobCommand::FilePull { .. } => "file_pull",
-        JobCommand::FilePush { .. } => "file_push",
-        JobCommand::FilePushChunked { .. } => "file_push_chunked",
-        JobCommand::FileTransferStart { .. } => "file_transfer_start",
-        JobCommand::FileTransferChunk { .. } => "file_transfer_chunk",
-        JobCommand::FileTransferCommit { .. } => "file_transfer_commit",
-        JobCommand::FileTransferAbort { .. } => "file_transfer_abort",
-        JobCommand::FileTransferDownloadStart { .. } => "file_transfer_download_start",
-        JobCommand::FileTransferDownloadChunk { .. } => "file_transfer_download_chunk",
-        JobCommand::FileStat { .. } => "file_stat",
-        JobCommand::FileListDir { .. } => "file_list_dir",
-        JobCommand::FileReadText { .. } => "file_read_text",
-        JobCommand::FileWriteText { .. } => "file_write_text",
-        JobCommand::FileMkdir { .. } => "file_mkdir",
-        JobCommand::FileRename { .. } => "file_rename",
-        JobCommand::FileDelete { .. } => "file_delete",
-        JobCommand::FileChmod { .. } => "file_chmod",
-        JobCommand::FileChown { .. } => "file_chown",
-        JobCommand::FileCopy { .. } => "file_copy",
-        JobCommand::FileDownload { .. } => "file_download",
-        JobCommand::FileArchiveTar { .. } => "file_archive_tar",
-        _ => return None,
-    })
 }
 
 pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), ApiError>> {
@@ -392,7 +366,7 @@ fn invalid_owner_group_token(value: &str) -> bool {
 
 fn validate_file_download(path: &str, max_bytes: u64) -> Result<(), ApiError> {
     validate_file_path(path)?;
-    if max_bytes == 0 || max_bytes > 1024 * 1024 * 1024 {
+    if max_bytes == 0 || max_bytes > MAX_DIRECT_FILE_DOWNLOAD_BYTES {
         return Err(ApiError::bad_request(
             "file_download_max_bytes_out_of_range",
         ));
@@ -402,7 +376,7 @@ fn validate_file_download(path: &str, max_bytes: u64) -> Result<(), ApiError> {
 
 fn validate_file_archive_tar(path: &str, max_bytes: u64) -> Result<(), ApiError> {
     validate_file_path(path)?;
-    if max_bytes == 0 || max_bytes > 1024 * 1024 * 1024 {
+    if max_bytes == 0 || max_bytes > MAX_DIRECT_FILE_DOWNLOAD_BYTES {
         return Err(ApiError::bad_request("file_archive_max_bytes_out_of_range"));
     }
     Ok(())

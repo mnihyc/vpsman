@@ -17,7 +17,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    job_files::{file_command_type_label, validate_file_command, validate_inline_file_payload},
+    job_files::{validate_file_command, validate_inline_file_payload},
     job_terminal::{
         validate_terminal_close, validate_terminal_input, validate_terminal_open,
         validate_terminal_poll, validate_terminal_resize, TerminalOpenValidation,
@@ -105,66 +105,7 @@ pub(crate) fn fixed_target_selection(raw: &[String]) -> Result<BulkResolveReques
 }
 
 pub(crate) fn job_command_type_label(command: &JobCommand) -> &'static str {
-    if let Some(label) = file_command_type_label(command) {
-        return label;
-    }
-    match command {
-        JobCommand::Shell { pty: true, .. } => "shell_pty",
-        JobCommand::Shell { .. } => "shell_argv",
-        JobCommand::ShellScript { .. } => "shell_script",
-        JobCommand::TerminalOpen { .. } => "terminal_open",
-        JobCommand::TerminalInput { .. } => "terminal_input",
-        JobCommand::TerminalPoll { .. } => "terminal_poll",
-        JobCommand::TerminalResize { .. } => "terminal_resize",
-        JobCommand::TerminalClose { .. } => "terminal_close",
-        JobCommand::FilePull { .. }
-        | JobCommand::FilePush { .. }
-        | JobCommand::FilePushChunked { .. }
-        | JobCommand::FileTransferStart { .. }
-        | JobCommand::FileTransferChunk { .. }
-        | JobCommand::FileTransferCommit { .. }
-        | JobCommand::FileTransferAbort { .. }
-        | JobCommand::FileTransferDownloadStart { .. }
-        | JobCommand::FileTransferDownloadChunk { .. }
-        | JobCommand::FileStat { .. }
-        | JobCommand::FileListDir { .. }
-        | JobCommand::FileReadText { .. }
-        | JobCommand::FileWriteText { .. }
-        | JobCommand::FileMkdir { .. }
-        | JobCommand::FileRename { .. }
-        | JobCommand::FileDelete { .. }
-        | JobCommand::FileChmod { .. }
-        | JobCommand::FileChown { .. }
-        | JobCommand::FileCopy { .. }
-        | JobCommand::FileDownload { .. }
-        | JobCommand::FileArchiveTar { .. } => {
-            unreachable!("file command labels are handled by job_files")
-        }
-        JobCommand::ConfigRead => "config_read",
-        JobCommand::HotConfig { .. } => "hot_config",
-        JobCommand::DataSourceConfigPatch { .. } => "data_source_config_patch",
-        JobCommand::UpdateAgent { .. } => "agent_update",
-        JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
-        JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
-        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
-        JobCommand::UserSessions => "user_sessions",
-        JobCommand::ProcessList { .. } => "process_list",
-        JobCommand::ProcessStart { .. } => "process_start",
-        JobCommand::ProcessStop { .. } => "process_stop",
-        JobCommand::ProcessRestart { .. } => "process_restart",
-        JobCommand::ProcessStatus { .. } => "process_status",
-        JobCommand::ProcessLogs { .. } => "process_logs",
-        JobCommand::Backup { .. } => "backup",
-        JobCommand::Restore { .. } => "restore",
-        JobCommand::RestoreRollback { .. } => "restore_rollback",
-        JobCommand::NetworkApply { .. } => "network_apply",
-        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
-        JobCommand::NetworkRollback { .. } => "network_rollback",
-        JobCommand::NetworkStatus { .. } => "network_status",
-        JobCommand::NetworkInterfaces => "network_interfaces",
-        JobCommand::NetworkProbe { .. } => "network_probe",
-        JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
-    }
+    vpsman_server_core::job_command_type_label(command)
 }
 
 pub(crate) fn job_command_protocol_version(_command: &JobCommand) -> u16 {

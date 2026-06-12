@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     model::{
         AuditLogView, AuthContext, BackupArtifactView, BackupRequestStatus, BackupRequestView,
-        ListQuery, RecordBackupArtifactMetadataRequest,
+        ListQuery, NewServerArtifact, RecordBackupArtifactMetadataRequest,
     },
     repository::Repository,
     unix_now,
@@ -347,9 +347,13 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
+                self.register_server_artifact(backup_server_artifact(backup_request, &persisted))
+                    .await?;
                 return Ok(persisted);
             }
         }
+        self.register_server_artifact(backup_server_artifact(backup_request, &artifact))
+            .await?;
         Ok(artifact)
     }
 }
@@ -364,6 +368,30 @@ pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<Bac
         size_bytes: row.try_get("size_bytes")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn backup_server_artifact(
+    backup_request: &BackupRequestView,
+    artifact: &BackupArtifactView,
+) -> NewServerArtifact {
+    NewServerArtifact {
+        domain: "backup_artifact".to_string(),
+        object_key: artifact.object_key.clone(),
+        sha256_hex: artifact.sha256_hex.clone(),
+        size_bytes: artifact.size_bytes,
+        job_id: backup_request.source_job_id,
+        client_id: Some(artifact.client_id.clone()),
+        stream: None,
+        seq: None,
+        backup_request_id: Some(backup_request.id),
+        backup_artifact_id: Some(artifact.id),
+        release_id: None,
+        metadata: json!({
+            "backup_request_id": backup_request.id,
+            "backup_artifact_id": artifact.id,
+            "encrypted": artifact.encrypted,
+        }),
+    }
 }
 
 fn backup_artifact_audit(

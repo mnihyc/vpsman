@@ -78,6 +78,9 @@ use crate::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
         enable_schedule, list_schedules, update_schedule, update_schedule_targets,
     },
+    routes_server_jobs::{
+        cancel_server_job, create_artifact_cleanup_job, list_server_jobs, preview_artifact_cleanup,
+    },
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
         create_agent_update_release, create_hosted_agent_update_release,
@@ -253,6 +256,19 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
         .route("/api/v1/bulk/resolve", post(resolve_bulk_targets))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
+        .route("/api/v1/server-jobs", get(list_server_jobs))
+        .route(
+            "/api/v1/server-jobs/{job_id}/cancel",
+            post(cancel_server_job),
+        )
+        .route(
+            "/api/v1/server-jobs/artifact-cleanup/preview",
+            post(preview_artifact_cleanup),
+        )
+        .route(
+            "/api/v1/server-jobs/artifact-cleanup",
+            post(create_artifact_cleanup_job),
+        )
         .route(
             "/api/v1/command-templates",
             get(list_command_templates).post(upsert_command_template),

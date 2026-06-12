@@ -1,4 +1,5 @@
 import type { JobOperation } from "./types";
+import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
 
 const encoder = new TextEncoder();
 const SUPER_KEY_DOMAIN = "vpsman-super-key-v1";
@@ -497,9 +498,9 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["policy", operation.policy ?? "fail"],
       ]);
     case "file_download":
-      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? 64 * 1024 * 1024]]);
+      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES]]);
     case "file_archive_tar":
-      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? 64 * 1024 * 1024]]);
+      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES]]);
     case "user_sessions":
       return ordered([["type", operation.type]]);
     case "process_list":

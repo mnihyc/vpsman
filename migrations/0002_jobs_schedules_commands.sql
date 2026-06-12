@@ -139,6 +139,93 @@ CREATE UNIQUE INDEX job_outputs_object_key_unique
     ON job_outputs (object_key)
     WHERE object_key IS NOT NULL;
 
+CREATE TABLE server_artifacts (
+    id UUID PRIMARY KEY,
+    domain TEXT NOT NULL,
+    object_key TEXT NOT NULL UNIQUE,
+    sha256_hex TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    job_id UUID,
+    client_id TEXT,
+    stream TEXT,
+    seq INTEGER,
+    backup_request_id UUID,
+    backup_artifact_id UUID,
+    release_id UUID,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tombstoned_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT server_artifacts_status_check CHECK (status IN ('active', 'tombstoned', 'deleted')),
+    CONSTRAINT server_artifacts_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
+);
+
+CREATE INDEX server_artifacts_domain_status_idx
+    ON server_artifacts (domain, status, created_at DESC);
+
+CREATE INDEX server_artifacts_job_idx
+    ON server_artifacts (job_id, client_id, seq)
+    WHERE job_id IS NOT NULL;
+
+CREATE TABLE server_jobs (
+    id UUID PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    expression TEXT,
+    preview_hash TEXT,
+    matched_count BIGINT NOT NULL DEFAULT 0,
+    matched_bytes BIGINT NOT NULL DEFAULT 0,
+    deleted_count BIGINT NOT NULL DEFAULT 0,
+    deleted_bytes BIGINT NOT NULL DEFAULT 0,
+    error TEXT,
+    created_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    canceled_at TIMESTAMPTZ,
+    CONSTRAINT server_jobs_type_check CHECK (job_type IN ('artifact_cleanup')),
+    CONSTRAINT server_jobs_status_check CHECK (status IN ('queued', 'running', 'completed', 'failed', 'canceled')),
+    CONSTRAINT server_jobs_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
+);
+
+CREATE INDEX server_jobs_status_created_idx
+    ON server_jobs (status, created_at ASC);
+
+CREATE TABLE terminal_sessions (
+    session_id UUID NOT NULL,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    last_status TEXT NOT NULL,
+    argv JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cwd TEXT,
+    cols BIGINT,
+    rows BIGINT,
+    idle_timeout_secs BIGINT,
+    flow_window_bytes BIGINT,
+    output_first_seq BIGINT,
+    output_next_seq BIGINT,
+    output_retained_first_seq BIGINT,
+    output_retained_bytes BIGINT,
+    output_dropped_bytes BIGINT,
+    output_dropped_chunks BIGINT,
+    output_replay_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+    last_input_seq BIGINT,
+    session_exited BOOLEAN NOT NULL DEFAULT FALSE,
+    close_reason TEXT,
+    last_event TEXT NOT NULL,
+    last_job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    last_command_type TEXT NOT NULL,
+    last_seq INTEGER NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (client_id, session_id),
+    CONSTRAINT terminal_sessions_argv_array CHECK (jsonb_typeof(argv) = 'array')
+);
+
+CREATE INDEX terminal_sessions_observed_idx
+    ON terminal_sessions (observed_at DESC, client_id, session_id);
+
 CREATE TABLE worker_leases (
     task_name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,

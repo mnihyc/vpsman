@@ -299,6 +299,74 @@ pub(crate) fn job_output_artifact(
     Ok(())
 }
 
+pub(crate) fn server_jobs(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
+    println!(
+        "{}",
+        http_get(
+            api_url,
+            &format!("/api/v1/server-jobs?limit={}", limit.clamp(1, 200)),
+            token,
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn artifact_cleanup_preview(
+    api_url: &str,
+    token: Option<&str>,
+    expression: String,
+) -> Result<()> {
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            "/api/v1/server-jobs/artifact-cleanup/preview",
+            token,
+            &serde_json::json!({
+                "expression": expression,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn artifact_cleanup_create(
+    api_url: &str,
+    token: Option<&str>,
+    expression: String,
+    preview_hash: String,
+    confirmed: bool,
+) -> Result<()> {
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            "/api/v1/server-jobs/artifact-cleanup",
+            token,
+            &serde_json::json!({
+                "expression": expression,
+                "preview_hash": preview_hash,
+                "confirmed": confirmed,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn server_job_cancel(api_url: &str, token: Option<&str>, job_id: String) -> Result<()> {
+    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/server-jobs/{job_id}/cancel"),
+            token,
+            &serde_json::json!({}),
+        )?
+    );
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct JobHistoryRecord {
     id: Uuid,

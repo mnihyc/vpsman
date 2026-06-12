@@ -1,7 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
-use sqlx::Row;
+use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -27,7 +27,6 @@ impl Repository {
         session_id: Option<Uuid>,
     ) -> Result<Vec<TerminalSessionView>> {
         let limit = limit.clamp(1, 200);
-        let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
         match self {
             Self::Memory(memory) => {
                 let command_types = memory
@@ -78,45 +77,47 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        output.job_id,
-                        output.client_id,
-                        output.seq,
-                        output.data,
-                        output.created_at::text AS created_at,
-                        job.command_type
-                    FROM job_outputs output
-                    JOIN jobs job ON job.id = output.job_id
-                    WHERE output.stream = 'status'
-                      AND job.command_type IN (
-                        'terminal_open',
-                        'terminal_input',
-                        'terminal_poll',
-                        'terminal_resize',
-                        'terminal_close'
-                      )
-                      AND ($2::text IS NULL OR output.client_id = $2)
-                    ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
+                        session_id,
+                        client_id,
+                        state,
+                        last_status,
+                        argv,
+                        cwd,
+                        cols,
+                        rows,
+                        idle_timeout_secs,
+                        flow_window_bytes,
+                        output_first_seq,
+                        output_next_seq,
+                        output_retained_first_seq,
+                        output_retained_bytes,
+                        output_dropped_bytes,
+                        output_dropped_chunks,
+                        output_replay_truncated,
+                        last_input_seq,
+                        session_exited,
+                        close_reason,
+                        last_event,
+                        last_job_id,
+                        last_command_type,
+                        last_seq,
+                        observed_at::text AS observed_at
+                    FROM terminal_sessions
+                    WHERE ($2::text IS NULL OR client_id = $2)
+                      AND ($3::uuid IS NULL OR session_id = $3)
+                    ORDER BY observed_at DESC, client_id ASC, session_id ASC
                     LIMIT $1
                     "#,
                 )
-                .bind(scan_limit)
+                .bind(limit)
                 .bind(client_id)
+                .bind(session_id)
                 .fetch_all(pool)
                 .await?;
-                let outputs = rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok(TerminalStatusOutput {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            data: row.try_get("data")?,
-                            created_at: row.try_get("created_at")?,
-                            command_type: row.try_get("command_type")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-                Ok(build_terminal_sessions(outputs, limit, session_id))
+                rows.into_iter()
+                    .map(terminal_session_from_row)
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+                    .map_err(Into::into)
             }
         }
     }
@@ -256,6 +257,187 @@ impl Repository {
             }
         }
     }
+
+    pub(crate) async fn refresh_terminal_sessions_for_client(&self, client_id: &str) -> Result<()> {
+        let Self::Postgres(pool) = self else {
+            return Ok(());
+        };
+        let sessions = terminal_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
+        for session in sessions {
+            sqlx::query(
+                r#"
+                INSERT INTO terminal_sessions (
+                    session_id,
+                    client_id,
+                    state,
+                    last_status,
+                    argv,
+                    cwd,
+                    cols,
+                    rows,
+                    idle_timeout_secs,
+                    flow_window_bytes,
+                    output_first_seq,
+                    output_next_seq,
+                    output_retained_first_seq,
+                    output_retained_bytes,
+                    output_dropped_bytes,
+                    output_dropped_chunks,
+                    output_replay_truncated,
+                    last_input_seq,
+                    session_exited,
+                    close_reason,
+                    last_event,
+                    last_job_id,
+                    last_command_type,
+                    last_seq,
+                    observed_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                    $20, $21, $22, $23, $24, $25::timestamptz
+                )
+                ON CONFLICT (client_id, session_id)
+                DO UPDATE SET
+                    state = EXCLUDED.state,
+                    last_status = EXCLUDED.last_status,
+                    argv = EXCLUDED.argv,
+                    cwd = EXCLUDED.cwd,
+                    cols = EXCLUDED.cols,
+                    rows = EXCLUDED.rows,
+                    idle_timeout_secs = EXCLUDED.idle_timeout_secs,
+                    flow_window_bytes = EXCLUDED.flow_window_bytes,
+                    output_first_seq = EXCLUDED.output_first_seq,
+                    output_next_seq = EXCLUDED.output_next_seq,
+                    output_retained_first_seq = EXCLUDED.output_retained_first_seq,
+                    output_retained_bytes = EXCLUDED.output_retained_bytes,
+                    output_dropped_bytes = EXCLUDED.output_dropped_bytes,
+                    output_dropped_chunks = EXCLUDED.output_dropped_chunks,
+                    output_replay_truncated = EXCLUDED.output_replay_truncated,
+                    last_input_seq = EXCLUDED.last_input_seq,
+                    session_exited = EXCLUDED.session_exited,
+                    close_reason = EXCLUDED.close_reason,
+                    last_event = EXCLUDED.last_event,
+                    last_job_id = EXCLUDED.last_job_id,
+                    last_command_type = EXCLUDED.last_command_type,
+                    last_seq = EXCLUDED.last_seq,
+                    observed_at = EXCLUDED.observed_at
+                "#,
+            )
+            .bind(session.session_id)
+            .bind(&session.client_id)
+            .bind(&session.state)
+            .bind(&session.last_status)
+            .bind(SqlJson(&session.argv))
+            .bind(&session.cwd)
+            .bind(session.cols)
+            .bind(session.rows)
+            .bind(session.idle_timeout_secs)
+            .bind(session.flow_window_bytes)
+            .bind(session.output_first_seq)
+            .bind(session.output_next_seq)
+            .bind(session.output_retained_first_seq)
+            .bind(session.output_retained_bytes)
+            .bind(session.output_dropped_bytes)
+            .bind(session.output_dropped_chunks)
+            .bind(session.output_replay_truncated)
+            .bind(session.last_input_seq)
+            .bind(session.session_exited)
+            .bind(&session.close_reason)
+            .bind(&session.last_event)
+            .bind(session.last_job_id)
+            .bind(&session.last_command_type)
+            .bind(session.last_seq)
+            .bind(&session.observed_at)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+async fn terminal_sessions_from_outputs(
+    pool: &PgPool,
+    client_id: Option<&str>,
+    session_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<TerminalSessionView>> {
+    let limit = limit.clamp(1, 200);
+    let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            output.job_id,
+            output.client_id,
+            output.seq,
+            output.data,
+            output.created_at::text AS created_at,
+            job.command_type
+        FROM job_outputs output
+        JOIN jobs job ON job.id = output.job_id
+        WHERE output.stream = 'status'
+          AND job.command_type IN (
+            'terminal_open',
+            'terminal_input',
+            'terminal_poll',
+            'terminal_resize',
+            'terminal_close'
+          )
+          AND ($2::text IS NULL OR output.client_id = $2)
+        ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(scan_limit)
+    .bind(client_id)
+    .fetch_all(pool)
+    .await?;
+    let outputs = rows
+        .into_iter()
+        .map(|row| {
+            Ok(TerminalStatusOutput {
+                job_id: row.try_get("job_id")?,
+                client_id: row.try_get("client_id")?,
+                seq: row.try_get("seq")?,
+                data: row.try_get("data")?,
+                created_at: row.try_get("created_at")?,
+                command_type: row.try_get("command_type")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    Ok(build_terminal_sessions(outputs, limit, session_id))
+}
+
+fn terminal_session_from_row(row: PgRow) -> std::result::Result<TerminalSessionView, sqlx::Error> {
+    let argv: SqlJson<Vec<String>> = row.try_get("argv")?;
+    Ok(TerminalSessionView {
+        session_id: row.try_get("session_id")?,
+        client_id: row.try_get("client_id")?,
+        state: row.try_get("state")?,
+        last_status: row.try_get("last_status")?,
+        argv: argv.0,
+        cwd: row.try_get("cwd")?,
+        cols: row.try_get("cols")?,
+        rows: row.try_get("rows")?,
+        idle_timeout_secs: row.try_get("idle_timeout_secs")?,
+        flow_window_bytes: row.try_get("flow_window_bytes")?,
+        output_first_seq: row.try_get("output_first_seq")?,
+        output_next_seq: row.try_get("output_next_seq")?,
+        output_retained_first_seq: row.try_get("output_retained_first_seq")?,
+        output_retained_bytes: row.try_get("output_retained_bytes")?,
+        output_dropped_bytes: row.try_get("output_dropped_bytes")?,
+        output_dropped_chunks: row.try_get("output_dropped_chunks")?,
+        output_replay_truncated: row.try_get("output_replay_truncated")?,
+        last_input_seq: row.try_get("last_input_seq")?,
+        session_exited: row.try_get("session_exited")?,
+        close_reason: row.try_get("close_reason")?,
+        last_event: row.try_get("last_event")?,
+        last_job_id: row.try_get("last_job_id")?,
+        last_command_type: row.try_get("last_command_type")?,
+        last_seq: row.try_get("last_seq")?,
+        observed_at: row.try_get("observed_at")?,
+    })
 }
 
 #[derive(Clone, Debug)]

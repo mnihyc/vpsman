@@ -186,6 +186,32 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
+        Command::ServerJobs { limit } => {
+            commands_jobs::server_jobs(api_url, token, limit)?;
+            Ok(None)
+        }
+        Command::ArtifactCleanupPreview { expression } => {
+            commands_jobs::artifact_cleanup_preview(api_url, token, expression)?;
+            Ok(None)
+        }
+        Command::ArtifactCleanupCreate {
+            expression,
+            preview_hash,
+            confirmed,
+        } => {
+            commands_jobs::artifact_cleanup_create(
+                api_url,
+                token,
+                expression,
+                preview_hash,
+                confirmed,
+            )?;
+            Ok(None)
+        }
+        Command::ServerJobCancel { job_id } => {
+            commands_jobs::server_job_cancel(api_url, token, job_id)?;
+            Ok(None)
+        }
         Command::Audit { limit } => {
             commands_jobs::audit(api_url, token, limit)?;
             Ok(None)

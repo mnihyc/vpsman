@@ -29,6 +29,7 @@ mod model_dashboard;
 mod model_data_sources;
 mod model_file_transfer;
 mod model_history;
+mod model_server_jobs;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
@@ -65,6 +66,7 @@ mod repository_network_recommendations;
 mod repository_operator_totp;
 mod repository_restores;
 mod repository_schedules;
+mod repository_server_jobs;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
 mod repository_topology_graph;
@@ -86,6 +88,7 @@ mod routes_migrations;
 mod routes_network;
 mod routes_restores;
 mod routes_schedules;
+mod routes_server_jobs;
 mod routes_terminal_sessions;
 mod routes_update_releases;
 mod routes_webhook_rules;
@@ -105,7 +108,7 @@ use repository::Repository;
 use routes::build_router;
 use state::{AppState, UpdateReleasePolicy};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::info;
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
@@ -306,13 +309,19 @@ async fn main() -> Result<()> {
         args.gateway_control_url.clone(),
         Some(internal_token.clone()),
     );
-    let backup_object_store = build_backup_object_store(&args)?;
-    if let Some(store) = &backup_object_store {
-        info!(kind = store.kind(), "backup object store enabled");
-    } else {
-        warn!("backup object store is not configured; encrypted artifact upload is disabled");
-    }
-    let update_object_store = build_update_object_store(&args)?;
+    let backup_configured_object_store = build_backup_object_store(&args)?;
+    let update_configured_object_store = build_update_object_store(&args)?;
+    let artifact_object_store = backup_configured_object_store
+        .or(update_configured_object_store)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "artifact object storage must be configured with VPSMAN_BACKUP_OBJECT_STORE_DIR or VPSMAN_OBJECT_* S3 settings"
+            )
+        })?;
+    info!(
+        kind = artifact_object_store.kind(),
+        "artifact object store enabled for backups, transfers, job outputs, and hosted updates"
+    );
     let update_artifact_public_base_url =
         parse_public_update_artifact_base_url(args.update_artifact_public_base_url.as_deref())?;
     let update_release_policy = UpdateReleasePolicy::new(
@@ -332,21 +341,13 @@ async fn main() -> Result<()> {
         trusted_signing_keys = args.agent_update_trusted_signing_keys_hex.len(),
         "agent update release policy configured"
     );
-    if let Some(store) = &update_object_store {
-        info!(
-            kind = store.kind(),
-            "agent update artifact object store enabled"
-        );
-    } else {
-        warn!("agent update artifact object store is not configured; hosted update uploads are disabled");
-    }
     let state = AppState {
         repo,
         events,
         internal_token: Some(internal_token),
         gateway,
-        backup_object_store,
-        update_object_store,
+        backup_object_store: Some(artifact_object_store.clone()),
+        update_object_store: Some(artifact_object_store),
         update_artifact_public_base_url,
         update_release_policy,
         fleet_alert_policy,

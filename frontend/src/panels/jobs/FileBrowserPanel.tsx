@@ -27,6 +27,7 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
+  FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
   FILE_BROWSER_LIST_LIMIT,
   FILE_BROWSER_TEXT_LIMIT_BYTES,
   buildUploadOperation,
@@ -490,7 +491,11 @@ export function FileBrowserPanel({
       return;
     }
     await runPanelAction(setPending, setActionError, async () => {
-      const operation: JobOperation = { type: "file_download", path, max_bytes: 64 * 1024 * 1024 };
+      const operation: JobOperation = {
+        type: "file_download",
+        path,
+        max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
+      };
       const { outputs } = await runFileJob(operation, {
         expectedType: operation.type,
       });

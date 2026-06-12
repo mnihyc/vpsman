@@ -1091,6 +1091,14 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             created_at: unix_now().to_string(),
             completed_at: Some(unix_now().to_string()),
         });
+        memory.job_operations.write().await.insert(
+            source_job_id,
+            JobCommand::Backup {
+                paths: backup.paths.clone(),
+                include_config: backup.include_config,
+                recipient_public_key_hex: None,
+            },
+        );
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
@@ -1183,6 +1191,14 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             created_at: unix_now().to_string(),
             completed_at: Some(unix_now().to_string()),
         });
+        memory.job_operations.write().await.insert(
+            source_job_id,
+            JobCommand::Backup {
+                paths: backup.paths.clone(),
+                include_config: backup.include_config,
+                recipient_public_key_hex: None,
+            },
+        );
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),

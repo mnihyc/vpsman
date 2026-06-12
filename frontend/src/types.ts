@@ -751,6 +751,32 @@ export type JobHistoryRecord = {
   completed_at: string | null;
 };
 
+export type ServerJobRecord = {
+  id: string;
+  job_type: string;
+  status: string;
+  expression: string | null;
+  preview_hash: string | null;
+  matched_count: number;
+  matched_bytes: number;
+  deleted_count: number;
+  deleted_bytes: number;
+  error: string | null;
+  created_by: string | null;
+  metadata: JsonValue;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  canceled_at: string | null;
+};
+
+export type ArtifactCleanupPreviewRecord = {
+  expression: string;
+  preview_hash: string;
+  matched_count: number;
+  matched_bytes: number;
+};
+
 export type CommandTemplateRecord = {
   id: string;
   name: string;

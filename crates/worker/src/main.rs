@@ -1,6 +1,11 @@
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use croner::Cron;
@@ -14,8 +19,15 @@ use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 #[cfg(test)]
-use vpsman_common::{expression_matches, parse_expression, ExpressionContext, VpsMetadata};
-use vpsman_common::{payload_hash, JobCommand};
+use vpsman_common::VpsMetadata;
+use vpsman_common::{
+    expression_matches, parse_expression, payload_hash, AgentCapabilitySnapshot, Expression,
+    ExpressionContext, JobCommand,
+};
+use vpsman_server_core::{
+    job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
+    validate_network_apply_target, CapabilitySkip, TargetCapability,
+};
 
 mod alert_notifications;
 mod backup_policy_retention;
@@ -145,6 +157,12 @@ struct Args {
         default_value_t = 30
     )]
     schedule_command_timeout_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
+        default_value_t = false
+    )]
+    require_registered_agent_updates: bool,
 }
 
 #[tokio::main]
@@ -199,7 +217,10 @@ async fn main() -> Result<()> {
         args.backup_policy_prune_delete_objects,
         args.backup_policy_prune_object_store_dir.clone(),
     );
-    let schedule_dispatch_config = ScheduleDispatchConfig::new(args.schedule_command_timeout_secs);
+    let schedule_dispatch_config = ScheduleDispatchConfig::new(
+        args.schedule_command_timeout_secs,
+        args.require_registered_agent_updates,
+    );
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
         let schedules_processed = process_due_schedules_if_leader(
@@ -231,6 +252,13 @@ async fn main() -> Result<()> {
             args.worker_lease_secs,
         )
         .await?;
+        let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
+            &pool,
+            args.backup_policy_prune_object_store_dir.as_ref(),
+            &worker_id,
+            args.worker_lease_secs,
+        )
+        .await?;
         info!(
             schedules_processed,
             alert_notification_processed = alert_notifications.processed,
@@ -245,6 +273,8 @@ async fn main() -> Result<()> {
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
+            artifact_cleanup_jobs = artifact_cleanup.jobs,
+            artifact_cleanup_deleted = artifact_cleanup.deleted_rows,
             "worker once completed"
         );
         return Ok(());
@@ -371,6 +401,26 @@ async fn main() -> Result<()> {
                 }
             }
             Err(error) => warn!(%error, "failed to process backup policy retention prune"),
+        }
+        match process_artifact_cleanup_jobs_if_leader(
+            &pool,
+            args.backup_policy_prune_object_store_dir.as_ref(),
+            &worker_id,
+            args.worker_lease_secs,
+        )
+        .await
+        {
+            Ok(run) => {
+                if run.jobs > 0 || run.deleted_rows > 0 {
+                    info!(
+                        jobs = run.jobs,
+                        deleted_rows = run.deleted_rows,
+                        deleted_bytes = run.deleted_bytes,
+                        "processed artifact cleanup jobs"
+                    );
+                }
+            }
+            Err(error) => warn!(%error, "failed to process artifact cleanup jobs"),
         }
         if last_offline_check.elapsed() >= Duration::from_secs(60) {
             last_offline_check = tokio::time::Instant::now();
@@ -505,6 +555,467 @@ async fn process_backup_policy_retention_prune_if_leader(
     process_backup_policy_retention_prune(pool, config).await
 }
 
+#[derive(Default)]
+struct ArtifactCleanupRun {
+    jobs: i64,
+    deleted_rows: i64,
+    deleted_bytes: i64,
+    tombstoned_rows: i64,
+    tombstoned_bytes: i64,
+}
+
+struct ArtifactCleanupJob {
+    id: Uuid,
+    expression: String,
+}
+
+struct ArtifactCleanupCandidate {
+    id: Uuid,
+    domain: String,
+    object_key: String,
+    sha256_hex: String,
+    size_bytes: i64,
+    status: String,
+    job_id: Option<Uuid>,
+    client_id: Option<String>,
+    stream: Option<String>,
+    seq: Option<i32>,
+    backup_artifact_id: Option<Uuid>,
+    created_at: String,
+}
+
+async fn process_artifact_cleanup_jobs_if_leader(
+    pool: &PgPool,
+    object_store_dir: Option<&PathBuf>,
+    worker_id: &str,
+    lease_secs: i32,
+) -> Result<ArtifactCleanupRun> {
+    if !acquire_worker_lease(pool, "artifact_cleanup_jobs", worker_id, lease_secs).await? {
+        debug!(
+            worker_id,
+            "skipped artifact cleanup jobs because another worker holds the lease"
+        );
+        return Ok(ArtifactCleanupRun::default());
+    }
+    process_artifact_cleanup_jobs(pool, object_store_dir).await
+}
+
+async fn process_artifact_cleanup_jobs(
+    pool: &PgPool,
+    object_store_dir: Option<&PathBuf>,
+) -> Result<ArtifactCleanupRun> {
+    let Some(job) = claim_artifact_cleanup_job(pool).await? else {
+        return Ok(ArtifactCleanupRun::default());
+    };
+    let result = run_artifact_cleanup_job(pool, object_store_dir, &job).await;
+    match result {
+        Ok(run) => {
+            sqlx::query(
+                r#"
+                UPDATE server_jobs
+                SET
+                    status = 'completed',
+                    deleted_count = $2,
+                    deleted_bytes = $3,
+                    metadata = metadata || jsonb_build_object(
+                        'tombstoned_count', $4::bigint,
+                        'tombstoned_bytes', $5::bigint
+                    ),
+                    completed_at = now(),
+                    error = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(job.id)
+            .bind(run.deleted_rows)
+            .bind(run.deleted_bytes)
+            .bind(run.tombstoned_rows)
+            .bind(run.tombstoned_bytes)
+            .execute(pool)
+            .await?;
+            Ok(ArtifactCleanupRun { jobs: 1, ..run })
+        }
+        Err(error) => {
+            sqlx::query(
+                r#"
+                UPDATE server_jobs
+                SET
+                    status = 'failed',
+                    error = $2,
+                    completed_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(job.id)
+            .bind(error.to_string())
+            .execute(pool)
+            .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactCleanupJob>> {
+    let row = sqlx::query(
+        r#"
+        WITH claimed AS (
+            SELECT id
+            FROM server_jobs
+            WHERE job_type = 'artifact_cleanup'
+              AND status = 'queued'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE server_jobs job
+        SET status = 'running', started_at = now()
+        FROM claimed
+        WHERE job.id = claimed.id
+        RETURNING job.id, job.expression
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        Ok(ArtifactCleanupJob {
+            id: row.try_get("id")?,
+            expression: row
+                .try_get::<Option<String>, _>("expression")?
+                .unwrap_or_default(),
+        })
+    })
+    .transpose()
+}
+
+async fn run_artifact_cleanup_job(
+    pool: &PgPool,
+    object_store_dir: Option<&PathBuf>,
+    job: &ArtifactCleanupJob,
+) -> Result<ArtifactCleanupRun> {
+    let object_store_dir = object_store_dir
+        .context("artifact cleanup requires VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR")?;
+    let parsed = parse_expression(&job.expression).map_err(|error| anyhow::anyhow!(error))?;
+    let candidates = artifact_cleanup_candidates(pool).await?;
+    let mut run = ArtifactCleanupRun::default();
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| artifact_cleanup_candidate_matches(candidate, parsed.as_ref()))
+        .take(1000)
+    {
+        match apply_artifact_cleanup_candidate(pool, object_store_dir, candidate).await? {
+            ArtifactCleanupDisposition::Deleted => {
+                run.deleted_rows += 1;
+                run.deleted_bytes += candidate.size_bytes;
+            }
+            ArtifactCleanupDisposition::Tombstoned => {
+                run.tombstoned_rows += 1;
+                run.tombstoned_bytes += candidate.size_bytes;
+            }
+        }
+    }
+    Ok(run)
+}
+
+enum ArtifactCleanupDisposition {
+    Deleted,
+    Tombstoned,
+}
+
+async fn apply_artifact_cleanup_candidate(
+    pool: &PgPool,
+    object_store_dir: &Path,
+    candidate: &ArtifactCleanupCandidate,
+) -> Result<ArtifactCleanupDisposition> {
+    match candidate.domain.as_str() {
+        "job_output" => delete_job_output_artifact(pool, object_store_dir, candidate).await,
+        "file_transfer_handoff" => {
+            delete_unreferenced_server_artifact(pool, object_store_dir, candidate).await
+        }
+        "file_transfer_source" => {
+            delete_file_transfer_source_artifact(pool, object_store_dir, candidate).await
+        }
+        "agent_update" => {
+            if agent_update_artifact_is_referenced(pool, &candidate.object_key).await? {
+                tombstone_server_artifact(pool, candidate.id).await
+            } else {
+                delete_unreferenced_server_artifact(pool, object_store_dir, candidate).await
+            }
+        }
+        "backup_artifact" => {
+            if backup_artifact_is_referenced(
+                pool,
+                candidate.backup_artifact_id,
+                &candidate.object_key,
+            )
+            .await?
+            {
+                tombstone_server_artifact(pool, candidate.id).await
+            } else {
+                delete_backup_artifact(pool, object_store_dir, candidate).await
+            }
+        }
+        _ => tombstone_server_artifact(pool, candidate.id).await,
+    }
+}
+
+async fn delete_job_output_artifact(
+    pool: &PgPool,
+    object_store_dir: &Path,
+    candidate: &ArtifactCleanupCandidate,
+) -> Result<ArtifactCleanupDisposition> {
+    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE job_outputs
+        SET storage = 'inline', object_key = NULL
+        WHERE object_key = $1
+        "#,
+    )
+    .bind(&candidate.object_key)
+    .execute(&mut *tx)
+    .await?;
+    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+    tx.commit().await?;
+    Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn delete_unreferenced_server_artifact(
+    pool: &PgPool,
+    object_store_dir: &Path,
+    candidate: &ArtifactCleanupCandidate,
+) -> Result<ArtifactCleanupDisposition> {
+    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    let mut tx = pool.begin().await?;
+    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+    tx.commit().await?;
+    Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn delete_file_transfer_source_artifact(
+    pool: &PgPool,
+    object_store_dir: &Path,
+    candidate: &ArtifactCleanupCandidate,
+) -> Result<ArtifactCleanupDisposition> {
+    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        DELETE FROM file_transfer_source_artifacts
+        WHERE object_key = $1
+        "#,
+    )
+    .bind(&candidate.object_key)
+    .execute(&mut *tx)
+    .await?;
+    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+    tx.commit().await?;
+    Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn delete_backup_artifact(
+    pool: &PgPool,
+    object_store_dir: &Path,
+    candidate: &ArtifactCleanupCandidate,
+) -> Result<ArtifactCleanupDisposition> {
+    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    let mut tx = pool.begin().await?;
+    if let Some(backup_artifact_id) = candidate.backup_artifact_id {
+        sqlx::query(
+            r#"
+            DELETE FROM backup_artifacts
+            WHERE id = $1
+            "#,
+        )
+        .bind(backup_artifact_id)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            DELETE FROM backup_artifacts
+            WHERE object_key = $1
+            "#,
+        )
+        .bind(&candidate.object_key)
+        .execute(&mut *tx)
+        .await?;
+    }
+    mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+    tx.commit().await?;
+    Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn mark_server_artifact_deleted(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    artifact_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleted', deleted_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(artifact_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn tombstone_server_artifact(
+    pool: &PgPool,
+    artifact_id: Uuid,
+) -> Result<ArtifactCleanupDisposition> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'tombstoned', tombstoned_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(artifact_id)
+    .execute(pool)
+    .await?;
+    Ok(ArtifactCleanupDisposition::Tombstoned)
+}
+
+async fn agent_update_artifact_is_referenced(pool: &PgPool, object_key: &str) -> Result<bool> {
+    let referenced = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM agent_update_releases
+            WHERE artifact_object_key = $1
+               OR rollback_artifact_object_key = $1
+        )
+        "#,
+    )
+    .bind(object_key)
+    .fetch_one(pool)
+    .await?;
+    Ok(referenced)
+}
+
+async fn backup_artifact_is_referenced(
+    pool: &PgPool,
+    backup_artifact_id: Option<Uuid>,
+    object_key: &str,
+) -> Result<bool> {
+    let referenced = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM backup_requests requests
+            JOIN backup_artifacts artifacts ON artifacts.id = requests.artifact_id
+            WHERE ($1::uuid IS NOT NULL AND artifacts.id = $1)
+               OR artifacts.object_key = $2
+        )
+        "#,
+    )
+    .bind(backup_artifact_id)
+    .bind(object_key)
+    .fetch_one(pool)
+    .await?;
+    Ok(referenced)
+}
+
+async fn artifact_cleanup_candidates(pool: &PgPool) -> Result<Vec<ArtifactCleanupCandidate>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            domain,
+            object_key,
+            sha256_hex,
+            size_bytes,
+            status,
+            job_id,
+            client_id,
+            stream,
+            seq,
+            backup_artifact_id,
+            created_at::text AS created_at
+        FROM server_artifacts
+        WHERE status = 'active'
+        ORDER BY created_at DESC, object_key ASC
+        LIMIT 10000
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ArtifactCleanupCandidate {
+                id: row.try_get("id")?,
+                domain: row.try_get("domain")?,
+                object_key: row.try_get("object_key")?,
+                sha256_hex: row.try_get("sha256_hex")?,
+                size_bytes: row.try_get("size_bytes")?,
+                status: row.try_get("status")?,
+                job_id: row.try_get("job_id")?,
+                client_id: row.try_get("client_id")?,
+                stream: row.try_get("stream")?,
+                seq: row.try_get("seq")?,
+                backup_artifact_id: row.try_get("backup_artifact_id")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
+fn artifact_cleanup_candidate_matches(
+    candidate: &ArtifactCleanupCandidate,
+    expression: Option<&Expression>,
+) -> bool {
+    let Some(expression) = expression else {
+        return true;
+    };
+    let mut objects = BTreeMap::new();
+    objects.insert(
+        "artifact".to_string(),
+        serde_json::json!({
+            "domain": &candidate.domain,
+            "object": &candidate.object_key,
+            "size": candidate.size_bytes,
+            "status": &candidate.status,
+            "job": candidate.job_id.map(|id| id.to_string()),
+            "client": candidate.client_id.as_deref(),
+            "stream": candidate.stream.as_deref(),
+            "seq": candidate.seq,
+            "sha256": &candidate.sha256_hex,
+            "created_at": &candidate.created_at,
+        }),
+    );
+    expression_matches(
+        &ExpressionContext {
+            objects,
+            ..ExpressionContext::default()
+        },
+        expression,
+    )
+}
+
+async fn delete_object_key_best_effort(root: &Path, object_key: &str) {
+    if object_key.starts_with('/')
+        || object_key.contains('\\')
+        || object_key.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || segment.as_bytes().contains(&0)
+        })
+    {
+        return;
+    }
+    let mut path = root.to_path_buf();
+    for segment in object_key.split('/') {
+        path.push(segment);
+    }
+    let _ = tokio::fs::remove_file(path).await;
+}
+
 async fn process_due_schedules_if_leader(
     pool: &PgPool,
     limit: i64,
@@ -633,14 +1144,8 @@ async fn process_due_schedule(
         let due_occurrences = calculate_due_occurrences(&schedule, Utc::now())?;
         let run_count = catch_up_run_count(&schedule, due_occurrences);
         for run_index in 0..run_count {
-            materialize_due_schedule(
-                &mut tx,
-                &schedule,
-                run_index,
-                run_count,
-                dispatch_config.timeout_secs,
-            )
-            .await?;
+            materialize_due_schedule(&mut tx, &schedule, run_index, run_count, dispatch_config)
+                .await?;
         }
         advance_schedule_after_success(&mut tx, &schedule, run_count).await?;
         tx.commit().await?;
@@ -677,12 +1182,14 @@ struct DueSchedule {
 #[derive(Clone)]
 struct ScheduleDispatchConfig {
     timeout_secs: u64,
+    require_registered_agent_updates: bool,
 }
 
 impl ScheduleDispatchConfig {
-    fn new(timeout_secs: u64) -> Self {
+    fn new(timeout_secs: u64, require_registered_agent_updates: bool) -> Self {
         Self {
             timeout_secs: timeout_secs.clamp(1, 3600),
+            require_registered_agent_updates,
         }
     }
 }
@@ -702,8 +1209,9 @@ async fn materialize_due_schedule(
     schedule: &DueSchedule,
     run_index: i64,
     run_count: i64,
-    timeout_secs: u64,
+    dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<bool> {
+    let timeout_secs = dispatch_config.timeout_secs;
     let mut targets = schedule
         .target_client_ids
         .iter()
@@ -717,6 +1225,20 @@ async fn materialize_due_schedule(
     let command_hash = payload_hash(&operation_bytes);
     let operation: JobCommand = serde_json::from_value(schedule.operation.clone())
         .context("scheduled operation is not a valid job command")?;
+    validate_network_apply_target(&operation, &targets)
+        .map_err(|error| anyhow::anyhow!(error.code()))?;
+    if !scheduled_agent_update_release_policy_allows(
+        tx,
+        &operation,
+        dispatch_config.require_registered_agent_updates,
+    )
+    .await?
+    {
+        bail!("registered agent update release missing");
+    }
+    let target_capabilities = load_schedule_target_capabilities(tx, &targets).await?;
+    let (dispatch_targets, capability_skips) =
+        split_targets_by_capability(&operation, &targets, &target_capabilities, false);
     let operation_type = schedule
         .operation
         .get("type")
@@ -725,6 +1247,8 @@ async fn materialize_due_schedule(
     let job_id = Uuid::new_v4();
     let status = if targets.is_empty() {
         "schedule_no_targets"
+    } else if dispatch_targets.is_empty() && !capability_skips.is_empty() {
+        "degraded_unprivileged"
     } else {
         "dispatching"
     };
@@ -769,18 +1293,45 @@ async fn materialize_due_schedule(
     .await?;
 
     for client_id in &targets {
+        let skip = capability_skips
+            .iter()
+            .find(|skip| skip.client_id == *client_id);
         sqlx::query(
             r#"
-            INSERT INTO job_targets (job_id, client_id, status, message)
-            VALUES ($1, $2, $3, NULL)
+            INSERT INTO job_targets (
+                job_id,
+                client_id,
+                status,
+                message,
+                exit_code,
+                started_at,
+                completed_at
+            )
+            VALUES (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                CASE WHEN $3 = 'degraded_unprivileged' THEN now() ELSE NULL END,
+                CASE WHEN $3 = 'degraded_unprivileged' THEN now() ELSE NULL END
+            )
             "#,
         )
         .bind(job_id)
         .bind(client_id)
-        .bind("queued")
+        .bind(if skip.is_some() {
+            "degraded_unprivileged"
+        } else {
+            "queued"
+        })
+        .bind(skip.map(|skip| skip.failure.message))
+        .bind(skip.map(|_| 1_i32))
         .execute(&mut **tx)
         .await?;
     }
+
+    record_schedule_capability_skip_outputs(tx, job_id, &operation, &capability_skips).await?;
 
     sqlx::query(
         r#"
@@ -833,6 +1384,157 @@ async fn materialize_due_schedule(
     .await?;
 
     Ok(!targets.is_empty())
+}
+
+async fn load_schedule_target_capabilities(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    targets: &[String],
+) -> Result<Vec<TargetCapability>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT id, capabilities
+        FROM clients
+        WHERE hidden_at IS NULL
+          AND id = ANY($1)
+        "#,
+    )
+    .bind(targets.to_vec())
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut capabilities = Vec::with_capacity(rows.len());
+    for row in rows {
+        let client_id: String = row.try_get("id")?;
+        let snapshot: SqlJson<AgentCapabilitySnapshot> = row.try_get("capabilities")?;
+        capabilities.push(TargetCapability {
+            client_id,
+            capabilities: snapshot.0,
+        });
+    }
+    for target in targets {
+        if !capabilities
+            .iter()
+            .any(|capability| capability.client_id == *target)
+        {
+            bail!("fixed_target_not_found");
+        }
+    }
+    Ok(capabilities)
+}
+
+async fn scheduled_agent_update_release_policy_allows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &JobCommand,
+    require_registered_agent_updates: bool,
+) -> Result<bool> {
+    if !require_registered_agent_updates {
+        return Ok(true);
+    }
+    let JobCommand::UpdateAgent {
+        sha256_hex,
+        artifact_signing_key_hex,
+        ..
+    } = command
+    else {
+        return Ok(true);
+    };
+    let Some(signing_key_hex) = artifact_signing_key_hex else {
+        return Ok(false);
+    };
+    let artifact_sha256_hex = sha256_hex.to_ascii_lowercase();
+    let signing_key_sha256_hex = payload_hash(signing_key_hex.to_ascii_lowercase().as_bytes());
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM agent_update_releases
+            WHERE status IN ('published_metadata_only', 'artifact_hosted')
+              AND artifact_sha256_hex = $1
+              AND artifact_signing_key_sha256_hex = $2
+        )
+        "#,
+    )
+    .bind(artifact_sha256_hex)
+    .bind(signing_key_sha256_hex)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(exists)
+}
+
+async fn record_schedule_capability_skip_outputs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    command: &JobCommand,
+    skips: &[CapabilitySkip],
+) -> Result<()> {
+    for skip in skips {
+        let status = serde_json::json!({
+            "type": "capability_degraded",
+            "status": "degraded_unprivileged",
+            "client_id": skip.client_id,
+            "command_type": job_command_type_label(command),
+            "reason": skip.failure.reason,
+            "hint": skip.failure.hint,
+        });
+        let data = serde_json::to_vec(&status)?;
+        sqlx::query(
+            r#"
+            INSERT INTO job_outputs (
+                job_id,
+                client_id,
+                seq,
+                stream,
+                data,
+                storage,
+                object_key,
+                data_sha256_hex,
+                data_size_bytes,
+                exit_code,
+                done
+            )
+            VALUES ($1, $2, 0, 'status', $3, 'inline', NULL, $4, $5, 1, TRUE)
+            ON CONFLICT (job_id, client_id, seq)
+            DO UPDATE SET
+                stream = EXCLUDED.stream,
+                data = EXCLUDED.data,
+                storage = EXCLUDED.storage,
+                object_key = EXCLUDED.object_key,
+                data_sha256_hex = EXCLUDED.data_sha256_hex,
+                data_size_bytes = EXCLUDED.data_size_bytes,
+                exit_code = EXCLUDED.exit_code,
+                done = EXCLUDED.done
+            "#,
+        )
+        .bind(job_id)
+        .bind(&skip.client_id)
+        .bind(&data)
+        .bind(payload_hash(&data))
+        .bind(data.len() as i64)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("client:{}", skip.client_id))
+        .bind(serde_json::json!({
+            "job_id": job_id,
+            "status": "degraded_unprivileged",
+            "exit_code": 1,
+            "accepted": false,
+            "message": skip.failure.message,
+        }))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn record_schedule_due_webhook_event(
@@ -901,30 +1603,6 @@ fn schedule_job_predicates(
     predicates.sort();
     predicates.dedup();
     predicates
-}
-
-fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
-    match command {
-        JobCommand::Shell { pty: true, .. } => "shell_pty",
-        JobCommand::Shell { .. } => "shell_argv",
-        JobCommand::ShellScript { .. } => "shell_script",
-        JobCommand::Backup { .. } => "backup",
-        JobCommand::Restore { .. } => "restore",
-        JobCommand::RestoreRollback { .. } => "restore_rollback",
-        JobCommand::NetworkApply { .. } => "network_apply",
-        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
-        JobCommand::NetworkRollback { .. } => "network_rollback",
-        JobCommand::NetworkStatus { .. } => "network_status",
-        JobCommand::NetworkInterfaces => "network_interfaces",
-        JobCommand::NetworkProbe { .. } => "network_probe",
-        JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
-        JobCommand::UpdateAgent { .. } => "agent_update",
-        JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
-        JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
-        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
-        _ => fallback,
-    }
-    .to_string()
 }
 
 async fn advance_schedule_after_success(

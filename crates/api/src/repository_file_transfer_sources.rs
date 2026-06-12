@@ -3,8 +3,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    auth_model::AuthContext, model_file_transfer::FileTransferSourceArtifactView,
-    repository::Repository, unix_now,
+    auth_model::AuthContext, model::NewServerArtifact,
+    model_file_transfer::FileTransferSourceArtifactView, repository::Repository, unix_now,
 };
 
 impl Repository {
@@ -93,7 +93,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<FileTransferSourceArtifactView> {
         let artifact_id = Uuid::new_v4();
-        match self {
+        let artifact = match self {
             Self::Memory(memory) => {
                 let artifact = FileTransferSourceArtifactView {
                     id: artifact_id,
@@ -110,7 +110,7 @@ impl Repository {
                     .write()
                     .await
                     .push(artifact.clone());
-                Ok(artifact)
+                artifact
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
@@ -137,9 +137,29 @@ impl Repository {
                 .bind(operator.operator.id)
                 .fetch_one(pool)
                 .await?;
-                file_transfer_source_artifact_from_row(row)
+                file_transfer_source_artifact_from_row(row)?
             }
-        }
+        };
+        self.register_server_artifact(NewServerArtifact {
+            domain: "file_transfer_source".to_string(),
+            object_key: artifact.object_key.clone(),
+            sha256_hex: artifact.sha256_hex.clone(),
+            size_bytes: artifact.size_bytes,
+            job_id: None,
+            client_id: None,
+            stream: None,
+            seq: None,
+            backup_request_id: None,
+            backup_artifact_id: None,
+            release_id: None,
+            metadata: serde_json::json!({
+                "source_artifact_id": artifact.id,
+                "name": &artifact.name,
+                "created_by": artifact.created_by,
+            }),
+        })
+        .await?;
+        Ok(artifact)
     }
 }
 

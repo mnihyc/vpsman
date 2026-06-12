@@ -3140,6 +3140,7 @@ dependencies = [
  "uuid",
  "vpsman-common",
  "vpsman-server-build-info",
+ "vpsman-server-core",
  "x25519-dalek",
 ]
 
@@ -3196,6 +3197,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vpsman-server-core"
+version = "0.1.0"
+dependencies = [
+ "vpsman-common",
+]
+
+[[package]]
 name = "vpsman-worker"
 version = "0.1.0"
 dependencies = [
@@ -3215,6 +3223,7 @@ dependencies = [
  "uuid",
  "vpsman-common",
  "vpsman-server-build-info",
+ "vpsman-server-core",
 ]
 
 [[package]]

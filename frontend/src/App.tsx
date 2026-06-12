@@ -45,6 +45,8 @@ function getScopedHeroTitle(view: ActiveView, subpage: string): string {
       return "Terminal sessions";
     case "processes":
       return "Process supervisor";
+    case "server_jobs":
+      return "Server jobs";
     case "approvals":
       return "Schedule runs";
     default:
@@ -361,6 +363,7 @@ export function App() {
                   dashboard.createFileTransferHandoff
                 }
                 onCreateJob={dashboard.createJob}
+                onCreateArtifactCleanupJob={dashboard.createArtifactCleanupJob}
                 onCreateAgentUpdateRelease={dashboard.createAgentUpdateRelease}
                 onUploadAgentUpdateArtifact={
                   dashboard.uploadAgentUpdateArtifact
@@ -376,7 +379,9 @@ export function App() {
                 onLoadOutputComparison={dashboard.loadJobOutputComparison}
                 onLoadTargets={dashboard.loadJobTargets}
                 onLoadTerminalReplay={dashboard.loadTerminalReplay}
+                onCancelServerJob={dashboard.cancelServerJob}
                 onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}
+                onPreviewArtifactCleanup={dashboard.previewArtifactCleanup}
                 onRefresh={dashboard.loadJobs}
                 onResolveTargets={dashboard.resolveJobTargets}
                 onSelectSubpage={selectSubpage}
@@ -387,6 +392,7 @@ export function App() {
                 processSupervisorInventory={
                   dashboard.processSupervisorInventory
                 }
+                serverJobs={dashboard.serverJobs}
                 setPrivilegeMaterial={setPrivilegeMaterial}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 terminalSessions={dashboard.terminalSessions}

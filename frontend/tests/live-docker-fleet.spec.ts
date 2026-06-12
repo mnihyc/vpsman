@@ -17,6 +17,9 @@ const password =
   process.env.VPSMAN_DOCKER_FLEET_PASSWORD ?? "docker-fleet-password";
 const screenshotDir = process.env.VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR;
 const extendedReview = process.env.VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW === "1";
+const cleanupExpression =
+  process.env.VPSMAN_DOCKER_FLEET_CLEANUP_EXPRESSION ??
+  'artifact.domain = "file_transfer_source"';
 
 type ScreenshotManifestEntry = {
   description: string | null;
@@ -201,7 +204,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Review mutation" }).click();
+  await page.getByRole("button", { name: "Preview targets" }).click();
   await expect(page.getByText("2/24")).toBeVisible();
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
@@ -216,6 +219,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await exerciseAlertPolicyReview(page, testInfo.project.name);
   await exerciseAlertNotificationChannels(page, testInfo.project.name);
   await exerciseExpressionWebhooks(page, testInfo.project.name);
+  await exerciseServerJobsCleanup(page, testInfo.project.name);
 
   await verifyDesktopSubpages(page, testInfo.project.name);
   await openConsoleSubpage(page, "Preferences", "Operator");
@@ -585,6 +589,56 @@ async function exerciseAlertNotificationChannels(
   );
 }
 
+async function exerciseServerJobsCleanup(page: Page, projectName: string) {
+  await openConsoleSubpage(page, "Jobs", "Server jobs");
+  const cleanupPanel = page.locator(".fleetPanel").filter({
+    has: page.getByRole("heading", { name: "Artifact cleanup" }),
+  });
+  await expect(cleanupPanel).toBeVisible();
+  await cleanupPanel.getByLabel("Expression").fill(cleanupExpression);
+  await cleanupPanel.getByRole("button", { name: "Preview" }).click();
+  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
+    /^[0-9a-f]{64}$/,
+  );
+  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue(
+    /^[1-9][0-9]* \//,
+  );
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "server-jobs-artifact-cleanup-preview",
+    "Server jobs page after previewing a cleanup expression against a real uploaded source artifact.",
+  );
+
+  await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
+  const prompt = cleanupPanel.locator(".confirmationPrompt", {
+    hasText: "Confirm artifact cleanup",
+  });
+  await expect(prompt).toBeVisible();
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "server-jobs-artifact-cleanup-confirm",
+    "Server jobs page showing the destructive cleanup confirmation prompt with matched artifact count and preview hash.",
+  );
+  await prompt.getByRole("button", { name: "Queue cleanup" }).click();
+
+  const serverJobsPanel = page.locator(".fleetPanel").filter({
+    has: page.getByRole("heading", { name: "Server jobs" }),
+  });
+  await expect(serverJobsPanel).toContainText("artifact cleanup", {
+    timeout: 15_000,
+  });
+  await expect(serverJobsPanel).toContainText("queued");
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "server-jobs-artifact-cleanup-queued",
+    "Server jobs page after queueing artifact cleanup from the browser.",
+  );
+  await expectCleanLayout(page);
+}
+
 async function fillWebhookTemplate(manager: Locator, value: string) {
   const editor = manager.locator(".webhookCodeMirror .cm-content").first();
   await expect(editor).toBeVisible();
@@ -723,6 +777,12 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       subpage: "Processes",
       marker: "Process supervisor inventory",
       screenshot: "page-jobs-processes",
+    },
+    {
+      view: "Jobs",
+      subpage: "Server jobs",
+      marker: "Artifact cleanup",
+      screenshot: "page-jobs-server-jobs",
     },
     {
       view: "Jobs",

@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    model::JobOutputView,
+    model::{JobOutputView, NewServerArtifact},
     model_file_transfer::{
         FileTransferHandoffRequest, FileTransferHandoffView, FileTransferSessionView,
         FileTransferSourceArtifactView, UploadFileTransferSourceArtifactRequest,
@@ -221,6 +221,27 @@ pub(crate) async fn create_file_transfer_handoff(
             return Err(ApiError::from(error));
         }
     }
+    state
+        .repo
+        .register_server_artifact(NewServerArtifact {
+            domain: "file_transfer_handoff".to_string(),
+            object_key: object_key.clone(),
+            sha256_hex: sha256_hex.to_string(),
+            size_bytes,
+            job_id: Some(session.last_job_id),
+            client_id: Some(client_id.clone()),
+            stream: None,
+            seq: None,
+            backup_request_id: None,
+            backup_artifact_id: None,
+            release_id: None,
+            metadata: serde_json::json!({
+                "session_id": session_id,
+                "path": &session.path,
+                "chunk_count": chunk_count,
+            }),
+        })
+        .await?;
     Ok(Json(FileTransferHandoffView {
         client_id,
         session_id,

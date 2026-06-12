@@ -14,6 +14,8 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
   ProcessSupervisorInventoryRecord,
+  ArtifactCleanupPreviewRecord,
+  ServerJobRecord,
   StreamedAgentUpdateArtifactRecord,
   UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
@@ -38,6 +40,7 @@ export function useJobsData(
   const [fileTransfers, setFileTransfers] = useState<FileTransferSessionRecord[]>([]);
   const [fileTransferSources, setFileTransferSources] = useState<FileTransferSourceArtifactRecord[]>([]);
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionRecord[]>([]);
+  const [serverJobs, setServerJobs] = useState<ServerJobRecord[]>([]);
   const [commandTemplates, setCommandTemplates] = useState<CommandTemplateRecord[]>([]);
   const [jobsError, setJobsError] = useState<string | null>(null);
   const [jobsLoading, setJobsLoading] = useState(false);
@@ -53,6 +56,7 @@ export function useJobsData(
         fileTransfersResult,
         fileTransferSourcesResult,
         terminalSessionsResult,
+        serverJobsResult,
         commandTemplatesResult,
       ] = await Promise.allSettled([
         apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
@@ -61,6 +65,7 @@ export function useJobsData(
         apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
         apiGet<FileTransferSourceArtifactRecord[]>("/api/v1/file-transfer-sources?limit=200", apiToken),
         apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken),
+        apiGet<ServerJobRecord[]>("/api/v1/server-jobs?limit=200", apiToken),
         apiGet<CommandTemplateRecord[]>("/api/v1/command-templates?limit=1000", apiToken),
       ]);
       const settledResults = [
@@ -70,6 +75,7 @@ export function useJobsData(
         fileTransfersResult,
         fileTransferSourcesResult,
         terminalSessionsResult,
+        serverJobsResult,
         commandTemplatesResult,
       ];
       const unauthorized = settledResults.some(
@@ -83,6 +89,7 @@ export function useJobsData(
         setFileTransfers([]);
         setFileTransferSources([]);
         setTerminalSessions([]);
+        setServerJobs([]);
         setCommandTemplates([]);
         setJobsError("Operator login required");
         return;
@@ -95,6 +102,7 @@ export function useJobsData(
       if (fileTransfersResult.status === "fulfilled") setFileTransfers(fileTransfersResult.value);
       if (fileTransferSourcesResult.status === "fulfilled") setFileTransferSources(fileTransferSourcesResult.value);
       if (terminalSessionsResult.status === "fulfilled") setTerminalSessions(terminalSessionsResult.value);
+      if (serverJobsResult.status === "fulfilled") setServerJobs(serverJobsResult.value);
       if (commandTemplatesResult.status === "fulfilled") setCommandTemplates(commandTemplatesResult.value);
       const firstFailure = settledResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (firstFailure) {
@@ -121,6 +129,16 @@ export function useJobsData(
   const loadTerminalSessions = useCallback(async () => {
     try {
       setTerminalSessions(await apiGet<TerminalSessionRecord[]>("/api/v1/terminal-sessions?limit=200", apiToken));
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+      }
+    }
+  }, [apiToken, onUnauthorized]);
+
+  const loadServerJobs = useCallback(async () => {
+    try {
+      setServerJobs(await apiGet<ServerJobRecord[]>("/api/v1/server-jobs?limit=200", apiToken));
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
@@ -378,6 +396,67 @@ export function useJobsData(
     [apiToken, loadJobs, onAuditChanged, onFleetChanged],
   );
 
+  const previewArtifactCleanup = useCallback(
+    async (expression: string) => {
+      try {
+        return await apiPost<ArtifactCleanupPreviewRecord>("/api/v1/server-jobs/artifact-cleanup/preview", apiToken, {
+          expression,
+        });
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const createArtifactCleanupJob = useCallback(
+    async (expression: string, previewHash: string) => {
+      try {
+        const response = await apiPost<ServerJobRecord>("/api/v1/server-jobs/artifact-cleanup", apiToken, {
+          expression,
+          preview_hash: previewHash,
+          confirmed: true,
+        });
+        await loadServerJobs();
+        void onAuditChanged();
+        return response;
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, loadServerJobs, onAuditChanged, onUnauthorized],
+  );
+
+  const cancelServerJob = useCallback(
+    async (jobId: string) => {
+      try {
+        const response = await apiPost<ServerJobRecord>(
+          `/api/v1/server-jobs/${encodeURIComponent(jobId)}/cancel`,
+          apiToken,
+          {},
+        );
+        await loadServerJobs();
+        void onAuditChanged();
+        return response;
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, loadServerJobs, onAuditChanged, onUnauthorized],
+  );
+
   const createAgentUpdateRelease = useCallback(
     async (request: CreateAgentUpdateReleaseRequest) => {
       const response = await apiPost<AgentUpdateReleaseRecord>("/api/v1/agent-update-releases", apiToken, request);
@@ -447,9 +526,13 @@ export function useJobsData(
     jobsError,
     jobsLoading,
     processSupervisorInventory,
+    serverJobs,
     terminalSessions,
+    cancelServerJob,
     loadJob,
+    createArtifactCleanupJob,
     createFileTransferHandoff,
+    previewArtifactCleanup,
     uploadFileTransferSource,
     downloadJobOutputArtifact,
     downloadFileTransferHandoff,
@@ -461,6 +544,7 @@ export function useJobsData(
     loadJobTargets,
     loadJobs,
     loadAgentUpdateReleases,
+    loadServerJobs,
     loadTerminalReplay,
     loadTerminalSessions,
     upsertCommandTemplate,

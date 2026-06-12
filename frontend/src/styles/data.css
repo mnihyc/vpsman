@@ -277,14 +277,25 @@
 }
 
 .historyRetentionGrid input,
-.historyRetentionGrid select {
+.historyRetentionGrid select,
+.historyRetentionGrid textarea {
   min-width: 0;
-  height: 38px;
   border: 1px solid #dfe3eb;
   border-radius: 8px;
-  padding: 0 10px;
   background: #fff;
   color: #202124;
+}
+
+.historyRetentionGrid input,
+.historyRetentionGrid select {
+  height: 38px;
+  padding: 0 10px;
+}
+
+.historyRetentionGrid textarea {
+  min-height: 72px;
+  padding: 10px;
+  resize: vertical;
 }
 
 .historyRetentionGrid .checkControl {
@@ -910,6 +921,13 @@
       0.8fr
     )
     minmax(150px, 0.8fr) minmax(160px, 0.8fr);
+  min-width: max(100%, 910px);
+}
+
+.serverJobGrid {
+  grid-template-columns:
+    minmax(170px, 0.9fr) minmax(180px, 1.2fr) minmax(100px, 0.5fr)
+    minmax(100px, 0.5fr) minmax(160px, 0.8fr) minmax(130px, 0.6fr);
   min-width: max(100%, 910px);
 }
 

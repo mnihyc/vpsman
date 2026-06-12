@@ -17,7 +17,7 @@ use uuid::Uuid;
 use vpsman_common::{
     payload_hash, validate_absolute_file_path, validate_file_transfer_download_chunk_request,
     validate_file_transfer_download_session, CommandOutput, OutputStream,
-    FILE_TRANSFER_CHUNK_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
+    FILE_TRANSFER_CHUNK_BYTES, MAX_DIRECT_FILE_DOWNLOAD_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
 
 use crate::file_pull::{
@@ -86,7 +86,7 @@ pub(crate) async fn execute_file_download(
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let max_bytes = max_bytes.clamp(1, 1024 * 1024 * 1024);
+    let max_bytes = max_bytes.clamp(1, MAX_DIRECT_FILE_DOWNLOAD_BYTES);
     let metadata = tokio::fs::symlink_metadata(path)
         .await
         .with_context(|| format!("failed to stat download source {path}"))?;

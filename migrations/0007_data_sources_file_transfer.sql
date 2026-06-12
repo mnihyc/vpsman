@@ -44,6 +44,35 @@ CREATE TABLE client_data_source_preset_assignments (
 CREATE INDEX client_data_source_preset_assignments_preset_idx
     ON client_data_source_preset_assignments (preset_id);
 
+CREATE TABLE file_transfer_sessions (
+    session_id UUID NOT NULL,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    direction TEXT NOT NULL,
+    status TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size_bytes BIGINT,
+    progress_bytes BIGINT NOT NULL DEFAULT 0,
+    progress_ratio DOUBLE PRECISION,
+    sha256_hex TEXT,
+    chunk_size_bytes BIGINT,
+    last_chunk_size_bytes BIGINT,
+    last_chunk_sha256_hex TEXT,
+    rate_limit_kbps BIGINT,
+    resumed BOOLEAN,
+    last_event TEXT NOT NULL,
+    last_job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    last_command_type TEXT NOT NULL,
+    last_seq INTEGER NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    handoff_available BOOLEAN NOT NULL DEFAULT FALSE,
+    handoff_object_key TEXT,
+    handoff_download_path TEXT,
+    PRIMARY KEY (client_id, session_id)
+);
+
+CREATE INDEX file_transfer_sessions_observed_idx
+    ON file_transfer_sessions (observed_at DESC, client_id, session_id);
+
 INSERT INTO data_source_presets (
     id, domain, name, scope, built_in, is_default, description, definition
 ) VALUES

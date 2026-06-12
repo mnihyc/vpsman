@@ -7,7 +7,7 @@ use vpsman_common::payload_hash;
 use crate::{
     model::{
         AgentUpdateReleaseView, AuditLogView, AuthContext, CreateAgentUpdateReleaseRequest,
-        UploadAgentUpdateArtifactRequest,
+        NewServerArtifact, UploadAgentUpdateArtifactRequest,
     },
     repository::Repository,
     unix_now,
@@ -276,6 +276,9 @@ impl Repository {
                     operator,
                     release.created_at.clone(),
                 ));
+                for artifact in agent_update_server_artifacts(&release) {
+                    self.register_server_artifact(artifact).await?;
+                }
                 Ok(release)
             }
             Self::Postgres(pool) => {
@@ -360,6 +363,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
+                for artifact in agent_update_server_artifacts(&persisted) {
+                    self.register_server_artifact(artifact).await?;
+                }
                 Ok(persisted)
             }
         }
@@ -528,6 +534,8 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 memory.audits.write().await.push(audit);
+                self.register_server_artifact(streamed_agent_update_server_artifact(artifact))
+                    .await?;
                 Ok(())
             }
             Self::Postgres(pool) => {
@@ -546,6 +554,8 @@ impl Repository {
                 .bind(&audit.metadata)
                 .execute(pool)
                 .await?;
+                self.register_server_artifact(streamed_agent_update_server_artifact(artifact))
+                    .await?;
                 Ok(())
             }
         }
@@ -855,4 +865,82 @@ fn upload_release_metadata(
         "rollback_artifact_signature_stored": false,
         "rollback_artifact_signing_key_stored": false,
     })
+}
+
+fn agent_update_server_artifacts(release: &AgentUpdateReleaseView) -> Vec<NewServerArtifact> {
+    let mut artifacts = Vec::new();
+    if let (Some(object_key), Some(size_bytes)) =
+        (release.artifact_object_key.as_ref(), release.size_bytes)
+    {
+        artifacts.push(NewServerArtifact {
+            domain: "agent_update".to_string(),
+            object_key: object_key.clone(),
+            sha256_hex: release.artifact_sha256_hex.clone(),
+            size_bytes,
+            job_id: None,
+            client_id: None,
+            stream: None,
+            seq: None,
+            backup_request_id: None,
+            backup_artifact_id: None,
+            release_id: Some(release.id),
+            metadata: json!({
+                "release_id": release.id,
+                "name": &release.name,
+                "version": &release.version,
+                "channel": &release.channel,
+                "role": "primary",
+            }),
+        });
+    }
+    if let (Some(object_key), Some(sha256_hex), Some(size_bytes)) = (
+        release.rollback_artifact_object_key.as_ref(),
+        release.rollback_artifact_sha256_hex.as_ref(),
+        release.rollback_size_bytes,
+    ) {
+        artifacts.push(NewServerArtifact {
+            domain: "agent_update".to_string(),
+            object_key: object_key.clone(),
+            sha256_hex: sha256_hex.clone(),
+            size_bytes,
+            job_id: None,
+            client_id: None,
+            stream: None,
+            seq: None,
+            backup_request_id: None,
+            backup_artifact_id: None,
+            release_id: Some(release.id),
+            metadata: json!({
+                "release_id": release.id,
+                "name": &release.name,
+                "version": &release.version,
+                "channel": &release.channel,
+                "role": "rollback",
+            }),
+        });
+    }
+    artifacts
+}
+
+fn streamed_agent_update_server_artifact(
+    artifact: &UploadedAgentUpdateArtifactRef,
+) -> NewServerArtifact {
+    NewServerArtifact {
+        domain: "agent_update".to_string(),
+        object_key: artifact.artifact_object_key.clone(),
+        sha256_hex: artifact.artifact_sha256_hex.clone(),
+        size_bytes: artifact.size_bytes,
+        job_id: None,
+        client_id: None,
+        stream: None,
+        seq: None,
+        backup_request_id: None,
+        backup_artifact_id: None,
+        release_id: None,
+        metadata: json!({
+            "artifact_sha256_hex": &artifact.artifact_sha256_hex,
+            "artifact_download_path": &artifact.artifact_download_path,
+            "artifact_ingestion_mode": "raw_body_stream",
+        }),
+    }
 }

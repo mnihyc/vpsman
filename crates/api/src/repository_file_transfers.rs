@@ -1,7 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
-use sqlx::Row;
+use sqlx::{postgres::PgRow, PgPool, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -26,7 +26,6 @@ impl Repository {
         session_id: Option<Uuid>,
     ) -> Result<Vec<FileTransferSessionView>> {
         let limit = limit.clamp(1, 200);
-        let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
         match self {
             Self::Memory(memory) => {
                 let command_types = memory
@@ -77,48 +76,139 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        output.job_id,
-                        output.client_id,
-                        output.seq,
-                        output.data,
-                        output.created_at::text AS created_at,
-                        job.command_type
-                    FROM job_outputs output
-                    JOIN jobs job ON job.id = output.job_id
-                    WHERE output.stream = 'status'
-                      AND job.command_type IN (
-                        'file_transfer_start',
-                        'file_transfer_chunk',
-                        'file_transfer_commit',
-                        'file_transfer_abort',
-                        'file_transfer_download_start',
-                        'file_transfer_download_chunk'
-                      )
-                      AND ($2::text IS NULL OR output.client_id = $2)
-                    ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
+                        session_id,
+                        client_id,
+                        direction,
+                        status,
+                        path,
+                        size_bytes,
+                        progress_bytes,
+                        progress_ratio,
+                        sha256_hex,
+                        chunk_size_bytes,
+                        last_chunk_size_bytes,
+                        last_chunk_sha256_hex,
+                        rate_limit_kbps,
+                        resumed,
+                        last_event,
+                        last_job_id,
+                        last_command_type,
+                        last_seq,
+                        observed_at::text AS observed_at,
+                        handoff_available,
+                        handoff_object_key,
+                        handoff_download_path
+                    FROM file_transfer_sessions
+                    WHERE ($2::text IS NULL OR client_id = $2)
+                      AND ($3::uuid IS NULL OR session_id = $3)
+                    ORDER BY observed_at DESC, client_id ASC, session_id ASC
                     LIMIT $1
                     "#,
                 )
-                .bind(scan_limit)
+                .bind(limit)
                 .bind(client_id)
+                .bind(session_id)
                 .fetch_all(pool)
                 .await?;
-                let outputs = rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok(FileTransferStatusOutput {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            data: row.try_get("data")?,
-                            created_at: row.try_get("created_at")?,
-                            command_type: row.try_get("command_type")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-                Ok(build_file_transfer_sessions(outputs, limit, session_id))
+                rows.into_iter()
+                    .map(file_transfer_session_from_row)
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+                    .map_err(Into::into)
             }
         }
+    }
+
+    pub(crate) async fn refresh_file_transfer_sessions_for_client(
+        &self,
+        client_id: &str,
+    ) -> Result<()> {
+        let Self::Postgres(pool) = self else {
+            return Ok(());
+        };
+        let sessions =
+            file_transfer_sessions_from_outputs(pool, Some(client_id), None, 200).await?;
+        for session in sessions {
+            sqlx::query(
+                r#"
+                INSERT INTO file_transfer_sessions (
+                    session_id,
+                    client_id,
+                    direction,
+                    status,
+                    path,
+                    size_bytes,
+                    progress_bytes,
+                    progress_ratio,
+                    sha256_hex,
+                    chunk_size_bytes,
+                    last_chunk_size_bytes,
+                    last_chunk_sha256_hex,
+                    rate_limit_kbps,
+                    resumed,
+                    last_event,
+                    last_job_id,
+                    last_command_type,
+                    last_seq,
+                    observed_at,
+                    handoff_available,
+                    handoff_object_key,
+                    handoff_download_path
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                    $12, $13, $14, $15, $16, $17, $18, $19::timestamptz,
+                    $20, $21, $22
+                )
+                ON CONFLICT (client_id, session_id)
+                DO UPDATE SET
+                    direction = EXCLUDED.direction,
+                    status = EXCLUDED.status,
+                    path = EXCLUDED.path,
+                    size_bytes = EXCLUDED.size_bytes,
+                    progress_bytes = EXCLUDED.progress_bytes,
+                    progress_ratio = EXCLUDED.progress_ratio,
+                    sha256_hex = EXCLUDED.sha256_hex,
+                    chunk_size_bytes = EXCLUDED.chunk_size_bytes,
+                    last_chunk_size_bytes = EXCLUDED.last_chunk_size_bytes,
+                    last_chunk_sha256_hex = EXCLUDED.last_chunk_sha256_hex,
+                    rate_limit_kbps = EXCLUDED.rate_limit_kbps,
+                    resumed = EXCLUDED.resumed,
+                    last_event = EXCLUDED.last_event,
+                    last_job_id = EXCLUDED.last_job_id,
+                    last_command_type = EXCLUDED.last_command_type,
+                    last_seq = EXCLUDED.last_seq,
+                    observed_at = EXCLUDED.observed_at,
+                    handoff_available = EXCLUDED.handoff_available,
+                    handoff_object_key = EXCLUDED.handoff_object_key,
+                    handoff_download_path = EXCLUDED.handoff_download_path
+                "#,
+            )
+            .bind(session.session_id)
+            .bind(&session.client_id)
+            .bind(&session.direction)
+            .bind(&session.status)
+            .bind(&session.path)
+            .bind(session.size_bytes)
+            .bind(session.progress_bytes)
+            .bind(session.progress_ratio)
+            .bind(&session.sha256_hex)
+            .bind(session.chunk_size_bytes)
+            .bind(session.last_chunk_size_bytes)
+            .bind(&session.last_chunk_sha256_hex)
+            .bind(session.rate_limit_kbps)
+            .bind(session.resumed)
+            .bind(&session.last_event)
+            .bind(session.last_job_id)
+            .bind(&session.last_command_type)
+            .bind(session.last_seq)
+            .bind(&session.observed_at)
+            .bind(session.handoff_available)
+            .bind(&session.handoff_object_key)
+            .bind(&session.handoff_download_path)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_file_transfer_download_handoff_chunks(
@@ -224,6 +314,88 @@ impl Repository {
             }
         }
     }
+}
+
+async fn file_transfer_sessions_from_outputs(
+    pool: &PgPool,
+    client_id: Option<&str>,
+    session_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<FileTransferSessionView>> {
+    let limit = limit.clamp(1, 200);
+    let scan_limit = limit.saturating_mul(64).clamp(100, 10_000);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            output.job_id,
+            output.client_id,
+            output.seq,
+            output.data,
+            output.created_at::text AS created_at,
+            job.command_type
+        FROM job_outputs output
+        JOIN jobs job ON job.id = output.job_id
+        WHERE output.stream = 'status'
+          AND job.command_type IN (
+            'file_transfer_start',
+            'file_transfer_chunk',
+            'file_transfer_commit',
+            'file_transfer_abort',
+            'file_transfer_download_start',
+            'file_transfer_download_chunk'
+          )
+          AND ($2::text IS NULL OR output.client_id = $2)
+        ORDER BY output.created_at DESC, output.job_id DESC, output.seq DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(scan_limit)
+    .bind(client_id)
+    .fetch_all(pool)
+    .await?;
+    let outputs = rows
+        .into_iter()
+        .map(|row| {
+            Ok(FileTransferStatusOutput {
+                job_id: row.try_get("job_id")?,
+                client_id: row.try_get("client_id")?,
+                seq: row.try_get("seq")?,
+                data: row.try_get("data")?,
+                created_at: row.try_get("created_at")?,
+                command_type: row.try_get("command_type")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    Ok(build_file_transfer_sessions(outputs, limit, session_id))
+}
+
+fn file_transfer_session_from_row(
+    row: PgRow,
+) -> std::result::Result<FileTransferSessionView, sqlx::Error> {
+    Ok(FileTransferSessionView {
+        session_id: row.try_get("session_id")?,
+        client_id: row.try_get("client_id")?,
+        direction: row.try_get("direction")?,
+        status: row.try_get("status")?,
+        path: row.try_get("path")?,
+        size_bytes: row.try_get("size_bytes")?,
+        progress_bytes: row.try_get("progress_bytes")?,
+        progress_ratio: row.try_get("progress_ratio")?,
+        sha256_hex: row.try_get("sha256_hex")?,
+        chunk_size_bytes: row.try_get("chunk_size_bytes")?,
+        last_chunk_size_bytes: row.try_get("last_chunk_size_bytes")?,
+        last_chunk_sha256_hex: row.try_get("last_chunk_sha256_hex")?,
+        rate_limit_kbps: row.try_get("rate_limit_kbps")?,
+        resumed: row.try_get("resumed")?,
+        last_event: row.try_get("last_event")?,
+        last_job_id: row.try_get("last_job_id")?,
+        last_command_type: row.try_get("last_command_type")?,
+        last_seq: row.try_get("last_seq")?,
+        observed_at: row.try_get("observed_at")?,
+        handoff_available: row.try_get("handoff_available")?,
+        handoff_object_key: row.try_get("handoff_object_key")?,
+        handoff_download_path: row.try_get("handoff_download_path")?,
+    })
 }
 
 #[derive(Clone, Debug)]

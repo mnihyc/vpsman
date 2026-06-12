@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     AgentMetrics, FilePushChunk, PrivilegeAssertion, ProtocolError, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelPlan,
+    TunnelEndpointSide, TunnelPlan, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
 pub const NETWORK_SPEED_TEST_MIN_DURATION_SECS: u8 = 1;
@@ -834,11 +834,11 @@ fn default_file_read_max_bytes() -> u64 {
 }
 
 fn default_file_archive_max_bytes() -> u64 {
-    64 * 1024 * 1024
+    MAX_DIRECT_FILE_DOWNLOAD_BYTES
 }
 
 fn default_file_download_max_bytes() -> u64 {
-    64 * 1024 * 1024
+    MAX_DIRECT_FILE_DOWNLOAD_BYTES
 }
 
 fn default_agent_update_check_activate() -> bool {

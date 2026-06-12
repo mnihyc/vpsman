@@ -399,6 +399,26 @@ fn capability_split_skips_agent_update_for_unprivileged_targets() {
 }
 
 #[test]
+fn capability_split_allows_config_read_for_unprivileged_targets() {
+    let command = JobCommand::ConfigRead;
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_attempt_privileged_ops: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
 fn capability_split_skips_restore_for_unprivileged_targets() {
     let command = restore_rollback_command();
     let targets = vec!["user-b".to_string()];

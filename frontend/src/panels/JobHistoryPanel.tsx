@@ -23,6 +23,8 @@ import type {
   JobTargetRecord,
   JobTargetSelection,
   ProcessSupervisorInventoryRecord,
+  ArtifactCleanupPreviewRecord,
+  ServerJobRecord,
   UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
   WsJobOutputEvent,
@@ -57,6 +59,7 @@ import { FileBrowserPanel } from "./jobs/FileBrowserPanel";
 import { FileTransferSessionsPanel } from "./jobs/FileTransferSessionsPanel";
 import { MultiFileActionsPanel } from "./jobs/MultiFileActionsPanel";
 import { ProcessSupervisorInventoryPanel } from "./jobs/ProcessSupervisorInventoryPanel";
+import { ServerJobsPanel } from "./jobs/ServerJobsPanel";
 import { TerminalSessionsPanel } from "./jobs/TerminalSessionsPanel";
 
 function displayToken(value: string): string {
@@ -79,7 +82,9 @@ export function JobHistoryPanel({
   lastJobOutputEvent,
   lastTerminalOutputEvent,
   loading,
+  onCancelServerJob,
   onCreateAgentUpdateRelease,
+  onCreateArtifactCleanupJob,
   onCreateFileTransferHandoff,
   onUploadAgentUpdateArtifact,
   onCreateJob,
@@ -92,6 +97,7 @@ export function JobHistoryPanel({
   onLoadTerminalReplay,
   onLoadTargets,
   onOpenPrivilegeUnlock,
+  onPreviewArtifactCleanup,
   onRefresh,
   onResolveTargets,
   onSaveFileTransferHandoff,
@@ -102,6 +108,7 @@ export function JobHistoryPanel({
   pendingSelectedJobId,
   privilegeMaterial,
   processSupervisorInventory,
+  serverJobs,
   setPrivilegeMaterial,
   terminalSessions,
 }: {
@@ -116,9 +123,14 @@ export function JobHistoryPanel({
   lastJobOutputEvent: WsJobOutputEvent | null;
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
+  onCancelServerJob: (jobId: string) => Promise<ServerJobRecord>;
   onCreateAgentUpdateRelease: (
     request: CreateAgentUpdateReleaseRequest,
   ) => Promise<AgentUpdateReleaseRecord>;
+  onCreateArtifactCleanupJob: (
+    expression: string,
+    previewHash: string,
+  ) => Promise<ServerJobRecord>;
   onCreateFileTransferHandoff: (
     clientId: string,
     sessionId: string,
@@ -147,6 +159,9 @@ export function JobHistoryPanel({
   ) => Promise<TerminalReplayRecord>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenPrivilegeUnlock: () => void;
+  onPreviewArtifactCleanup: (
+    expression: string,
+  ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefresh: () => void;
   onResolveTargets: (
     selection: JobTargetSelection,
@@ -171,6 +186,7 @@ export function JobHistoryPanel({
   pendingSelectedJobId?: string | null;
   privilegeMaterial: PrivilegeMaterial | null;
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
+  serverJobs: ServerJobRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   terminalSessions: TerminalSessionRecord[];
 }) {
@@ -204,6 +220,7 @@ export function JobHistoryPanel({
     "transfers",
     "terminal",
     "processes",
+    "server_jobs",
     "approvals",
   ].includes(activeSubpage)
     ? activeSubpage
@@ -526,6 +543,16 @@ export function JobHistoryPanel({
           clientLabel={clientLabel}
           inventory={processSupervisorInventory}
           loading={loading}
+          onRefresh={onRefresh}
+        />
+      )}
+      {jobSubpage === "server_jobs" && (
+        <ServerJobsPanel
+          jobs={serverJobs}
+          loading={loading}
+          onCancelJob={onCancelServerJob}
+          onCreateCleanupJob={onCreateArtifactCleanupJob}
+          onPreviewCleanup={onPreviewArtifactCleanup}
           onRefresh={onRefresh}
         />
       )}
