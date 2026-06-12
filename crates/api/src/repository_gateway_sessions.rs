@@ -102,7 +102,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 if prior_status != "stale" && prior_status != "online" {
-                    crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                    crate::repository_ingest::record_client_status_transition_in_tx(
                         &mut tx,
                         &event.client_id,
                         Some(&prior_status),
@@ -131,7 +131,7 @@ impl Repository {
                     if let Some(from_status) = set_memory_agent_status(
                         memory,
                         &event.client_id,
-                        "offline",
+                        "disconnected",
                         event.remote_ip.as_deref(),
                         false,
                     )
@@ -140,7 +140,7 @@ impl Repository {
                         self.record_client_status_webhook_event(
                             &event.client_id,
                             Some(&from_status),
-                            "offline",
+                            "disconnected",
                             "gateway_session_ended",
                             gateway_status_metadata(event),
                         )
@@ -189,7 +189,7 @@ impl Repository {
                     r#"
                     UPDATE clients
                     SET
-                        status = CASE WHEN status = 'stale' THEN status ELSE 'offline' END,
+                        status = CASE WHEN status = 'stale' THEN status ELSE 'disconnected' END,
                         registration_ip = COALESCE(registration_ip, $3::inet),
                         last_ip = COALESCE($3::inet, last_ip),
                         last_seen_at = now()
@@ -211,12 +211,12 @@ impl Repository {
                 .await?;
                 if update.rows_affected() > 0 {
                     if let Some(prior_status) = prior_status.as_deref() {
-                        if prior_status != "stale" && prior_status != "offline" {
-                            crate::repository_ingest::insert_client_status_webhook_event_in_tx(
+                        if prior_status != "stale" && prior_status != "disconnected" {
+                            crate::repository_ingest::record_client_status_transition_in_tx(
                                 &mut tx,
                                 &event.client_id,
                                 Some(prior_status),
-                                "offline",
+                                "disconnected",
                                 "gateway_session_ended",
                                 gateway_status_metadata(event),
                             )
@@ -445,6 +445,9 @@ mod tests {
         repo.record_gateway_session_ended(&session_event("client-a", newer))
             .await
             .unwrap();
-        assert_eq!(memory.agents.read().await[0].status.as_str(), "offline");
+        assert_eq!(
+            memory.agents.read().await[0].status.as_str(),
+            "disconnected"
+        );
     }
 }

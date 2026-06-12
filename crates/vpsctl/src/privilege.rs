@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use vpsman_common::{
     derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_assertion,
     JobCommand, PrivilegeAssertion,
@@ -95,11 +95,15 @@ pub(crate) fn build_privilege_assertion(
     salt_hex: &str,
     ttl_secs: u64,
 ) -> Result<PrivilegeAssertion> {
+    ensure!(
+        (15..=300).contains(&ttl_secs),
+        "privilege TTL must be between 15 and 300 seconds"
+    );
     let salt = decode_super_salt(salt_hex)?;
     let verifier_key = derive_super_key(password, &salt);
     let intent_hash_hex = payload_hash(intent.as_bytes());
     let issued_unix = unix_now();
-    let expires_unix = issued_unix.saturating_add(ttl_secs.clamp(15, 300));
+    let expires_unix = issued_unix.saturating_add(ttl_secs);
     Ok(sign_privilege_assertion(
         &verifier_key,
         &intent_hash_hex,
@@ -331,7 +335,7 @@ mod tests {
             "id:client-a || id:client-b",
             "correct horse",
             "01020304",
-            600,
+            300,
             30,
             false,
             true,

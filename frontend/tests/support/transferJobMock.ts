@@ -222,7 +222,7 @@ export async function installTransferJobApiMock(page: Page) {
       transferJobCounter += 1;
       return id;
     };
-    const createDynamicJob = (jobId: string, command: string, targetCount: number, status = "completed") => {
+    const createDynamicJob = (jobId: string, command: string, targetCount: number, status = "succeeded") => {
       dynamicJobs[jobId] = {
         actor_id: null,
         command_type: command,

@@ -296,7 +296,6 @@ async fn memory_repository_routes_require_bearer_tokens() {
                 force_unprivileged: false,
                 privileged: false,
                 privilege_assertion: None,
-                reconnect_policy: None,
             }),
         )
         .await
@@ -464,6 +463,7 @@ fn internal_gateway_token_requires_matching_bearer() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let missing = HeaderMap::new();
     let mut wrong = HeaderMap::new();
@@ -522,6 +522,7 @@ fn internal_gateway_token_is_mandatory_for_memory_repository() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
 
     assert_eq!(
@@ -549,5 +550,6 @@ fn memory_test_state() -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }

@@ -260,7 +260,6 @@ async fn backup_job_dispatch_requires_confirmation() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let state = test_state(Repository::Memory(MemoryState::default()));
@@ -307,7 +306,6 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let headers = crate::test_auth_headers(&state).await;
@@ -315,9 +313,9 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         .await
         .unwrap();
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.status, "dispatching");
+    assert_eq!(response.status, "pending");
     let dispatch = gateway_task.await.unwrap();
-    wait_for_job_status(&repo, response.job_id, "completed").await;
+    wait_for_job_status(&repo, response.job_id, "succeeded").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
@@ -404,15 +402,14 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let (_status, Json(response)) = create_job(State(state), headers, Json(job_request))
         .await
         .unwrap();
-    assert_eq!(response.status, "dispatching");
+    assert_eq!(response.status, "pending");
     let _dispatch = gateway_task.await.unwrap();
-    wait_for_job_status(&repo, response.job_id, "completed").await;
+    wait_for_job_status(&repo, response.job_id, "succeeded").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
 
     assert_eq!(backups.len(), 1);
@@ -1085,7 +1082,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             privileged: true,
-            status: "completed".to_string(),
+            status: "succeeded".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
             created_at: unix_now().to_string(),
@@ -1102,7 +1099,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
-            status: "completed".to_string(),
+            status: "succeeded".to_string(),
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
@@ -1120,6 +1117,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             artifact_size_bytes: Some(artifact_bytes.len() as i64),
             exit_code: Some(0),
             done: true,
+            received_at: None,
             created_at: unix_now().to_string(),
         });
     }
@@ -1185,7 +1183,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             privileged: true,
-            status: "completed".to_string(),
+            status: "succeeded".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
             created_at: unix_now().to_string(),
@@ -1202,7 +1200,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
-            status: "completed".to_string(),
+            status: "succeeded".to_string(),
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
@@ -1220,6 +1218,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             artifact_size_bytes: Some(artifact_bytes.len() as i64),
             exit_code: Some(0),
             done: true,
+            received_at: None,
             created_at: unix_now().to_string(),
         });
     }
@@ -1351,6 +1350,7 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }
 

@@ -51,7 +51,6 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "process_start");
@@ -108,7 +107,6 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     request.job_command().unwrap();
@@ -139,7 +137,6 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let error = request.job_command().unwrap_err();
@@ -169,7 +166,6 @@ fn process_supervisor_job_commands_reject_bad_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(
@@ -203,6 +199,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
+                    command_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
@@ -237,7 +234,6 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let state = test_state_with_privilege_auto_approve(repo.clone());
@@ -245,7 +241,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
     let (status, Json(response)) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
+    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
     let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
@@ -253,8 +249,8 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "dispatching");
-    assert_eq!(targets[0].status, "degraded_unprivileged");
+    assert_eq!(response.status, "succeeded_with_skips");
+    assert_eq!(targets[0].status, "skipped");
     assert_eq!(
         status_output["reason"],
         "target_agent_lacks_process_limit_capability"
@@ -279,6 +275,7 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }
 

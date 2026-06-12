@@ -42,10 +42,12 @@ start_api() {
   local log_file="$1"
   VPSMAN_API_BIND="127.0.0.1:$api_port" \
   VPSMAN_POSTGRES_URL="$postgres_url" \
+  VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
   VPSMAN_INTERNAL_TOKEN="$internal_token" \
   VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
   VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+  VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
   RUST_LOG="vpsman_api=warn" \
     target/debug/vpsman-api >"$log_file" 2>&1 &
   api_pid="$!"

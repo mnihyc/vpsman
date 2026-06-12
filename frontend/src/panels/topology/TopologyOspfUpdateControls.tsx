@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Gauge, ShieldCheck } from "lucide-react";
 import {
   acceptedDispatchTargetCount,
+  bulkProgressTimeoutMs,
   formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -78,7 +79,7 @@ export function TopologyOspfUpdateControls({
     (visibleJobProgress
       ? `OSPF result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
-        ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
+        ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : privilegeMaterial
         ? "Ready"
         : "Locked");
@@ -189,6 +190,7 @@ export function TopologyOspfUpdateControls({
         acceptedTargets: job.target_count,
         onProgress: setJobProgress,
         targets,
+        timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });
       setLastJobProgress(result.progress);
     } finally {

@@ -46,7 +46,7 @@ CREATE TABLE clients (
     hidden_by UUID REFERENCES operators(id) ON DELETE SET NULL,
     hidden_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT clients_status_check CHECK (status IN ('never', 'online', 'offline', 'stale', 'revoked', 'deleted')),
+    CONSTRAINT clients_status_check CHECK (status IN ('never', 'online', 'disconnected', 'offline', 'stale', 'revoked', 'deleted')),
     CONSTRAINT clients_internal_build_number_check CHECK (internal_build_number >= 1),
     CONSTRAINT clients_stale_build_number_check CHECK (stale_build_number IS NULL OR stale_build_number >= 1)
 );
@@ -68,9 +68,9 @@ CREATE TABLE client_status_history (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT client_status_history_from_check
-        CHECK (from_status IS NULL OR from_status IN ('never', 'online', 'offline', 'stale', 'revoked', 'deleted')),
+        CHECK (from_status IS NULL OR from_status IN ('never', 'online', 'disconnected', 'offline', 'stale', 'revoked', 'deleted')),
     CONSTRAINT client_status_history_to_check
-        CHECK (to_status IN ('never', 'online', 'offline', 'stale', 'revoked', 'deleted')),
+        CHECK (to_status IN ('never', 'online', 'disconnected', 'offline', 'stale', 'revoked', 'deleted')),
     CONSTRAINT client_status_history_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
 );
 

@@ -16,6 +16,12 @@ agent_count="${VPSMAN_DOCKER_FLEET_AGENT_COUNT:-24}"
 if ((agent_count < 20)); then
   smoke_fail "VPSMAN_DOCKER_FLEET_AGENT_COUNT must be at least 20"
 fi
+long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
+simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
+agent_command_timeout_secs=30
+if ((long_running_secs > 0)); then
+  agent_command_timeout_secs=$((long_running_secs + 120))
+fi
 rollup_bucket_secs=60
 
 run_id="docker-fleet-$(date +%s%N)"
@@ -69,6 +75,15 @@ dump_docker_logs() {
   done < <(docker ps -a --filter "label=$label_key=$run_id" --format '{{.Names}}' | sort)
   docker ps -a --filter "label=$label_key=$run_id" >&2 || true
 }
+
+docker_fleet_smoke_err() {
+  local line="$1"
+  local status="$2"
+  trap - ERR
+  dump_docker_logs "Docker fleet smoke failed at line $line with status $status"
+  exit "$status"
+}
+trap 'docker_fleet_smoke_err "$LINENO" "$?"' ERR
 
 api_get() {
   local path="$1"
@@ -190,6 +205,28 @@ fi
 providers=(alpha beta gamma)
 countries=(US DE SG NL)
 roles=(edge core backup batch)
+provider_alpha_count=0
+country_us_count=0
+provider_alpha_country_us_count=0
+role_edge_count=0
+for ((i = 1; i <= agent_count; i += 1)); do
+  index=$((i - 1))
+  provider="${providers[$((index % ${#providers[@]}))]}"
+  country="${countries[$((index % ${#countries[@]}))]}"
+  role="${roles[$((index % ${#roles[@]}))]}"
+  if [[ "$provider" == "alpha" ]]; then
+    provider_alpha_count=$((provider_alpha_count + 1))
+  fi
+  if [[ "$country" == "US" ]]; then
+    country_us_count=$((country_us_count + 1))
+  fi
+  if [[ "$provider" == "alpha" && "$country" == "US" ]]; then
+    provider_alpha_country_us_count=$((provider_alpha_country_us_count + 1))
+  fi
+  if [[ "$role" == "edge" ]]; then
+    role_edge_count=$((role_edge_count + 1))
+  fi
+done
 first_client_id=""
 second_client_id=""
 
@@ -213,7 +250,8 @@ for ((i = 1; i <= agent_count; i += 1)); do
     "$display_name" \
     "$tag_csv" \
     "$gateway_public_hex" \
-    "primary=$gateway_addr=10"
+    "primary=$gateway_addr=10" \
+    "$agent_command_timeout_secs"
   enrolled_client_id="$logical_client_id"
   [[ -n "$first_client_id" ]] || first_client_id="$enrolled_client_id"
   if [[ -z "$second_client_id" && "$enrolled_client_id" != "$first_client_id" ]]; then
@@ -263,11 +301,14 @@ done
 telemetry_rollup_count="$(docker exec "$pg_container" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM telemetry_rollups WHERE bucket_secs = $rollup_bucket_secs")"
 
 agents_json="$(api_get "/api/v1/agents")"
-jq -e --argjson expected "$agent_count" '
+jq -e \
+  --argjson expected "$agent_count" \
+  --argjson alpha_count "$provider_alpha_count" \
+  --argjson us_count "$country_us_count" '
   length == $expected and
   all(.[]; .status == "online") and
-  ([.[] | select(.tags | index("provider:alpha"))] | length == 8) and
-  ([.[] | select(.tags | index("country:US"))] | length == 6) and
+  ([.[] | select(.tags | index("provider:alpha"))] | length == $alpha_count) and
+  ([.[] | select(.tags | index("country:US"))] | length == $us_count) and
   ([.[] | select(.tags | index("audit:docker-fleet"))] | length == $expected)
 ' <<<"$agents_json" >/dev/null
 
@@ -275,9 +316,12 @@ api_get "/api/v1/fleet/summary" | jq -e --argjson expected "$agent_count" '
   .total == $expected and .online == $expected
 ' >/dev/null
 
-api_get "/api/v1/tags" | jq -e --argjson expected "$agent_count" '
-  any(.[]; .name == "provider:alpha" and (.clients | length) == 8) and
-  any(.[]; .name == "country:US" and (.clients | length) == 6) and
+api_get "/api/v1/tags" | jq -e \
+  --argjson expected "$agent_count" \
+  --argjson alpha_count "$provider_alpha_count" \
+  --argjson us_count "$country_us_count" '
+  any(.[]; .name == "provider:alpha" and (.clients | length) == $alpha_count) and
+  any(.[]; .name == "country:US" and (.clients | length) == $us_count) and
   any(.[]; .name == "audit:docker-fleet" and (.clients | length) == $expected)
 ' >/dev/null
 
@@ -291,12 +335,14 @@ api_get "/api/v1/telemetry/network-rates?limit=200" | jq -e --argjson expected "
 ' >/dev/null
 
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"provider:alpha"}' \
-  | jq -e '.target_count == 8' >/dev/null
+  | jq -e --argjson alpha_count "$provider_alpha_count" '.target_count == $alpha_count' >/dev/null
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"provider:alpha && country:US"}' \
-  | jq -e '.target_count == 2' >/dev/null
+  | jq -e --argjson alpha_us_count "$provider_alpha_country_us_count" '.target_count == $alpha_us_count' >/dev/null
 
 dashboard_json="$(api_get "/api/v1/dashboard/overview?window=1h&group_by=providers")"
-jq -e --argjson expected "$agent_count" '
+jq -e \
+  --argjson expected "$agent_count" \
+  --argjson alpha_count "$provider_alpha_count" '
   .summary.total == $expected and
   .summary.online == $expected and
   .resources.sampled_clients >= 20 and
@@ -309,10 +355,24 @@ jq -e --argjson expected "$agent_count" '
   (.network.top_clients | length) > 0 and
   all(.network.top_clients[]; (.interfaces | length) > 0) and
   all(.network.traffic_series[]; (.points | length) >= 1 and (.interfaces | length) > 0) and
-  any(.available_filters.providers[]; .value == "alpha" and .count == 8) and
+  any(.available_filters.providers[]; .value == "alpha" and .count == $alpha_count) and
   any(.available_filters.windows[]; .value == "all") and
-  any(.label_clusters[]; .label == "provider:alpha" and .total == 8)
+  any(.label_clusters[]; .label == "provider:alpha" and .total == $alpha_count)
 ' <<<"$dashboard_json" >/dev/null
+
+server_dashboard_json="$(api_get "/api/v1/dashboard/server")"
+jq -e '
+  .db_pool.max_connections >= 1 and
+  .db_pool.open_connections >= 1 and
+  .dispatch.active_jobs >= 0 and
+  .dispatch.queue_depth >= 0 and
+  .targets.active >= 0 and
+  .targets.deadline_expired_active >= 0 and
+  .cancellations.acked >= 0 and
+  .gateway_events.status == "live" and
+  (.gateway_events.queued_events // 0) >= (.gateway_events.delivered_events // 0) and
+  (.gateway_events.retry_attempts // 0) >= 0
+' <<<"$server_dashboard_json" >/dev/null
 
 api_get "/api/v1/dashboard/overview?window=all&group_by=providers" \
   | jq -e --argjson expected "$agent_count" '
@@ -323,10 +383,12 @@ api_get "/api/v1/dashboard/overview?window=all&group_by=providers" \
   ' >/dev/null
 
 api_get "/api/v1/dashboard/overview?window=1h&scope_kind=country&scope_value=US&group_by=providers" \
-  | jq -e '
+  | jq -e \
+    --argjson us_count "$country_us_count" \
+    --argjson alpha_us_count "$provider_alpha_country_us_count" '
     .scope.label == "country:US" and
-    .scope.matched_clients == 6 and
-    any(.label_clusters[]; .label == "provider:alpha" and .total == 2)
+    .scope.matched_clients == $us_count and
+    any(.label_clusters[]; .label == "provider:alpha" and .total == $alpha_us_count)
   ' >/dev/null
 
 alert_policy_json="$(vpsctl_json fleet-alert-policy-upsert \
@@ -421,7 +483,13 @@ schedule_json="$(vpsctl_json schedule-create \
   --catch-up-policy skip_missed \
   --retry-delay-secs 120 \
   --max-failures 5)"
-jq -e '.name == "docker-provider-alpha-hourly" and .enabled == false and .selector_expression == "provider:alpha" and (.target_client_ids | length) == 8 and .cron_expr == "0 * * * *"' \
+jq -e --argjson alpha_count "$provider_alpha_count" '
+  .name == "docker-provider-alpha-hourly" and
+  .enabled == false and
+  .selector_expression == "provider:alpha" and
+  (.target_client_ids | length) == $alpha_count and
+  .cron_expr == "0 * * * *"
+' \
   <<<"$schedule_json" >/dev/null
 
 api_post "/api/v1/tunnel-plans" "$(jq -n \
@@ -466,19 +534,81 @@ job_json="$(vpsctl_json job-shell \
   --timeout-secs 45 \
   --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$job_json")"
-smoke_assert_job_create_queued "$job_json" 8
+jq -e --argjson alpha_count "$provider_alpha_count" '
+  .target_counts.total == $alpha_count and
+  .target_counts.runnable == $alpha_count and
+  .target_counts.skipped == 0 and
+  .target_counts.rejected_unavailable == 0
+' <<<"$job_json" >/dev/null
+smoke_assert_job_create_queued "$job_json" "$provider_alpha_count"
 
 vpsctl_json job-follow --job-id "$job_id" --interval-ms 250 --max-polls 240 --json >"$SMOKE_TMPDIR/job-follow.jsonl"
-api_get "/api/v1/jobs/$job_id" | jq -e '.status == "completed" and .target_count == 8' >/dev/null
-api_get "/api/v1/jobs/$job_id/targets" | jq -e '
-  length == 8 and all(.[]; .status == "completed" and .exit_code == 0)
+api_get "/api/v1/jobs/$job_id" | jq -e \
+  --argjson alpha_count "$provider_alpha_count" '
+  .status == "succeeded" and .target_count == $alpha_count
 ' >/dev/null
-api_get "/api/v1/jobs/$job_id/outputs" | jq -e '
-  ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-bulk-ok\n")) | length) == 8
+api_get "/api/v1/jobs/$job_id/targets" | jq -e \
+  --argjson alpha_count "$provider_alpha_count" '
+  length == $alpha_count and all(.[]; .status == "succeeded" and .exit_code == 0)
+' >/dev/null
+api_get "/api/v1/jobs/$job_id/outputs" | jq -e \
+  --argjson alpha_count "$provider_alpha_count" '
+  ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-bulk-ok\n")) | length) == $alpha_count
 ' >/dev/null
 
-api_get "/api/v1/gateway-sessions?limit=50" | jq -e --argjson expected "$agent_count" '
-  ([.[] | select(.gateway_id == "docker-fleet-gateway" and .status == "active")] | length) == $expected
+long_job_id=""
+if ((long_running_secs > 0)); then
+  long_timeout=$((long_running_secs + 120))
+  long_job_json="$(vpsctl_json job-shell \
+    --script "printf 'docker-long-start\n'; sleep $long_running_secs; printf 'docker-long-done\n'" \
+    --tags bulk-target \
+    --timeout-secs "$long_timeout" \
+    --confirmed)"
+  long_job_id="$(jq -r '.job_id' <<<"$long_job_json")"
+  smoke_assert_job_create_queued "$long_job_json" "$agent_count"
+  sleep 2
+  if [[ "$simulate_api_backlog" == "1" ]]; then
+    docker pause "$api_container" >/dev/null
+    sleep 6
+    docker unpause "$api_container" >/dev/null
+    if ! smoke_wait_http "$api_url/health"; then
+      dump_docker_logs "API did not recover after backlog pause"
+      exit 1
+    fi
+  fi
+  vpsctl_json job-follow --job-id "$long_job_id" --interval-ms 500 --max-polls "$((long_timeout * 2))" --json >"$SMOKE_TMPDIR/long-job-follow.jsonl"
+  long_job_status_json="$(api_get "/api/v1/jobs/$long_job_id")"
+  if ! jq -e --argjson expected "$agent_count" '
+    .status == "succeeded" and .target_count == $expected
+  ' <<<"$long_job_status_json" >/dev/null; then
+    echo "long-running job did not finish succeeded:" >&2
+    jq . <<<"$long_job_status_json" >&2 || true
+    echo "long-running target status counts:" >&2
+    api_get "/api/v1/jobs/$long_job_id/targets" \
+      | jq 'group_by(.status) | map({status: .[0].status, count: length, clients: map(.client_id)})' >&2 || true
+    echo "long-running output summary:" >&2
+    api_get "/api/v1/jobs/$long_job_id/outputs" \
+      | jq 'group_by(.client_id) | map({client_id: .[0].client_id, streams: map(.stream), done: map(select(.done)) | length})' >&2 || true
+    echo "long-running job follow tail:" >&2
+    tail -n 20 "$SMOKE_TMPDIR/long-job-follow.jsonl" >&2 || true
+    exit 1
+  fi
+  api_get "/api/v1/jobs/$long_job_id/targets" | jq -e --argjson expected "$agent_count" '
+    length == $expected and all(.[]; .status == "succeeded" and .exit_code == 0)
+  ' >/dev/null
+  api_get "/api/v1/jobs/$long_job_id/outputs" | jq -e --argjson expected "$agent_count" '
+    ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-long-done\n")) | length) == $expected
+  ' >/dev/null
+  api_get "/api/v1/dashboard/server" | jq -e --argjson expected "$agent_count" '
+    .dispatch.total_dispatch_attempts >= $expected and
+    .targets.deadline_expired_active == 0 and
+    .gateway_events.status == "live"
+  ' >/dev/null
+fi
+
+gateway_session_limit=$((agent_count * 4))
+api_get "/api/v1/gateway-sessions?limit=$gateway_session_limit" | jq -e --argjson expected "$agent_count" '
+  ([.[] | select(.gateway_id == "docker-fleet-gateway" and .status == "active") | .client_id] | unique | length) == $expected
 ' >/dev/null
 
 api_get "/api/v1/audit?limit=100" | jq -e '
@@ -516,6 +646,10 @@ if ! env \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
+  VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNT="$provider_alpha_count" \
+  VPSMAN_DOCKER_FLEET_COUNTRY_US_COUNT="$country_us_count" \
+  VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNTRY_US_COUNT="$provider_alpha_country_us_count" \
+  VPSMAN_DOCKER_FLEET_ROLE_EDGE_COUNT="$role_edge_count" \
   VPSMAN_DOCKER_FLEET_CLEANUP_EXPRESSION="$cleanup_expression" \
   VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW="$extended_review" \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
@@ -566,6 +700,7 @@ jq -n \
   --argjson agent_count "$agent_count" \
   --argjson telemetry_rollups "$telemetry_rollup_count" \
   --arg job_id "$job_id" \
+  --arg long_job_id "$long_job_id" \
   '{
     docker_24_agent_fleet_smoke: "ok",
     api_url: $api_url,
@@ -573,14 +708,16 @@ jq -n \
     agent_count: $agent_count,
     telemetry_rollups: $telemetry_rollups,
     bulk_job_id: $job_id,
+    long_running_job_id: ($long_job_id | if length > 0 then . else null end),
     screenshot_dir: $screenshot_dir,
     extended_review_screenshots: ($extended_review == "1"),
-    checks: [
+    checks: ([
       "docker_postgres_api_gateway",
       "twenty_plus_docker_agents_online",
       "operator_auth_and_preferences",
       "tag_registry_and_bulk_resolve_any_all",
       "dashboard_scope_filter_and_group_by",
+      "server_dashboard_queue_pool_cancel_gateway_counters",
       "telemetry_rollups_network_speed_and_traffic",
       "durable_bulk_job_dispatch_outputs",
       "schedule_registry",
@@ -593,5 +730,5 @@ jq -n \
       "live_extended_review_action_screenshots",
       "grid_multiselect_expand_context_column_controls",
       "sidebar_preferences_and_dashboard_customization"
-    ]
+    ] + (if ($long_job_id | length) > 0 then ["long_running_bulk_job_with_api_backlog"] else [] end))
   }'

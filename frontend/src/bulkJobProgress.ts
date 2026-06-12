@@ -19,6 +19,14 @@ export type BulkJobProgress = {
 
 export const DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS = 500;
 export const DEFAULT_BULK_PROGRESS_TIMEOUT_MS = 90_000;
+export const BULK_PROGRESS_TIMEOUT_MARGIN_MS = 35_000;
+
+export function bulkProgressTimeoutMs(timeoutSecs: number | undefined): number {
+  if (!Number.isFinite(timeoutSecs ?? NaN)) {
+    return DEFAULT_BULK_PROGRESS_TIMEOUT_MS;
+  }
+  return Math.max(DEFAULT_BULK_PROGRESS_TIMEOUT_MS, Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000 + BULK_PROGRESS_TIMEOUT_MARGIN_MS);
+}
 
 export function buildBulkJobProgress({
   acceptedTargets,
@@ -124,7 +132,7 @@ export async function waitForBulkJobTargets(
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {
   return [
-    `queued ${progress.accepted}/${progress.expected}`,
+    `active ${progress.accepted}/${progress.expected}`,
     `doing ${progress.doing}`,
     `retrieved ${progress.retrieved}`,
     `done ${progress.completed}`,
@@ -136,7 +144,7 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
 }
 
 export function targetPreflightUnavailable(target: AgentView): boolean {
-  return target.status === "offline";
+  return ["deleted", "disconnected", "never", "offline", "revoked"].includes(target.status);
 }
 
 export function targetAvailabilityCounts(targets: AgentView[]): { online: number; stale: number; unavailable: number } {
@@ -192,19 +200,19 @@ function vpsCountLabel(count: number): string {
 }
 
 export function targetRecordSucceeded(status: string | undefined): boolean {
-  return ["completed", "done", "ok", "skipped", "succeeded", "unchanged"].includes((status ?? "").toLowerCase());
+  return ["completed", "degraded_unprivileged", "done", "ok", "skipped", "succeeded", "unchanged"].includes((status ?? "").toLowerCase());
 }
 
 export function targetRecordFailed(status: string | undefined): boolean {
   return [
-    "accepted",
-    "degraded_unprivileged",
+    "agent_timed_out",
+    "canceled",
+    "control_timed_out",
     "dispatch_failed",
     "failed",
     "rejected",
     "rejected_authorization_required",
     "rejected_by_agent",
-    "schedule_no_targets",
     "timed_out",
   ].includes((status ?? "").toLowerCase());
 }

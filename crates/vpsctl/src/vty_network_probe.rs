@@ -76,8 +76,8 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 2;
             }
@@ -108,8 +108,8 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 privilege_ttl_secs = parse_bounded_u64(
                     flag_value(value, "--privilege-ttl="),
                     "--privilege-ttl",
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }
@@ -117,8 +117,8 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 privilege_ttl_secs = parse_bounded_u64(
                     flag_value(value, "--privilege-ttl-secs="),
                     "--privilege-ttl-secs",
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }

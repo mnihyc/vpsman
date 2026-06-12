@@ -8,6 +8,7 @@ import type {
   DashboardPreferences,
   DashboardRefreshIntervalSecs,
   DashboardResourceMetric,
+  DashboardServerRecord,
   DashboardScopeKind,
   DashboardTrafficSort,
   DashboardWindow,
@@ -34,6 +35,7 @@ export function useDashboardOverviewData(
   onUnauthorized: () => void,
 ) {
   const [dashboardOverview, setDashboardOverview] = useState<DashboardOverviewRecord | null>(null);
+  const [dashboardServer, setDashboardServer] = useState<DashboardServerRecord | null>(null);
   const [dashboardPreferences, setDashboardPreferencesState] = useState(readDashboardPreferences);
   const [dashboardOverviewLoading, setDashboardOverviewLoading] = useState(false);
   const [dashboardOverviewError, setDashboardOverviewError] = useState<string | null>(null);
@@ -52,15 +54,16 @@ export function useDashboardOverviewData(
         const params = dashboardPreferencesToParams(requestPreferences);
         const requestKey = params.toString();
         desiredRequestKey.current = requestKey;
-        const overview = await apiGet<DashboardOverviewRecord>(
-          `/api/v1/dashboard/overview?${requestKey}`,
-          apiToken,
-        );
+        const [overview, server] = await Promise.all([
+          apiGet<DashboardOverviewRecord>(`/api/v1/dashboard/overview?${requestKey}`, apiToken),
+          apiGet<DashboardServerRecord>("/api/v1/dashboard/server", apiToken),
+        ]);
         if (requestKey !== desiredRequestKey.current) {
           return;
         }
         dashboardOverviewRef.current = overview;
         setDashboardOverview(overview);
+        setDashboardServer(server);
         setDashboardOverviewError(null);
       } catch (error) {
         if (sequence !== loadSequence.current) {
@@ -69,6 +72,7 @@ export function useDashboardOverviewData(
         if (isApiUnauthorized(error)) {
           onUnauthorized();
           setDashboardOverview(null);
+          setDashboardServer(null);
           setDashboardOverviewError("Operator login required");
           return;
         }
@@ -120,6 +124,7 @@ export function useDashboardOverviewData(
   const clearDashboardOverview = useCallback(() => {
     dashboardOverviewRef.current = null;
     setDashboardOverview(null);
+    setDashboardServer(null);
     setDashboardOverviewError(null);
   }, []);
 
@@ -129,6 +134,7 @@ export function useDashboardOverviewData(
     dashboardOverviewError,
     dashboardOverviewLoading,
     dashboardOverviewWindow: dashboardPreferences.window,
+    dashboardServer,
     dashboardPreferences,
     loadDashboardOverview,
     setDashboardOverviewWindow,

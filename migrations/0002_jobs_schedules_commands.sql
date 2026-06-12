@@ -16,6 +16,10 @@ CREATE TABLE schedules (
     retry_delay_secs BIGINT NOT NULL DEFAULT 300,
     max_failures INTEGER NOT NULL DEFAULT 3,
     failure_count INTEGER NOT NULL DEFAULT 0,
+    last_job_id UUID,
+    last_job_status TEXT,
+    last_job_completed_at TIMESTAMPTZ,
+    last_job_error TEXT,
     last_error TEXT,
     deleted_at TIMESTAMPTZ,
     deleted_by UUID REFERENCES operators(id) ON DELETE SET NULL,
@@ -60,7 +64,6 @@ CREATE TABLE jobs (
     source_schedule_id UUID REFERENCES schedules(id),
     request_fingerprint TEXT NOT NULL,
     timeout_secs BIGINT NOT NULL DEFAULT 30,
-    reconnect_policy JSONB NOT NULL DEFAULT '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ
 );
@@ -71,18 +74,17 @@ CREATE INDEX jobs_scheduled_source_idx
 
 ALTER TABLE jobs
   ADD CONSTRAINT jobs_status_common_check CHECK (status IN (
-    'queued',
+    'pending',
     'running',
-    'dispatching',
-    'completed',
-    'partially_completed',
+    'succeeded',
+    'succeeded_with_skips',
+    'partial_success',
     'failed',
-    'timed_out',
-    'dispatch_failed',
-    'degraded_unprivileged',
-    'accepted',
-    'rejected_authorization_required',
-    'schedule_no_targets'
+    'agent_timed_out',
+    'control_timed_out',
+    'skipped',
+    'rejected',
+    'canceled'
   ));
 
 CREATE TABLE job_targets (
@@ -95,6 +97,13 @@ CREATE TABLE job_targets (
     completed_at TIMESTAMPTZ,
     dispatch_attempts INTEGER NOT NULL DEFAULT 0,
     dispatch_lease_until TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    acked_at TIMESTAMPTZ,
+    deadline_at TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    cancel_sent_at TIMESTAMPTZ,
+    cancel_acked_at TIMESTAMPTZ,
+    result_received_at TIMESTAMPTZ,
     last_dispatch_error TEXT,
     PRIMARY KEY (job_id, client_id)
 );
@@ -102,20 +111,25 @@ CREATE TABLE job_targets (
 CREATE INDEX job_targets_dispatch_due_idx
     ON job_targets (status, dispatch_lease_until, job_id, client_id)
     WHERE completed_at IS NULL
-      AND status IN ('queued', 'dispatching');
+      AND status IN ('pending', 'delivering');
+
+CREATE INDEX job_targets_deadline_due_idx
+    ON job_targets (deadline_at, job_id, client_id)
+    WHERE completed_at IS NULL
+      AND status IN ('delivering', 'running');
 
 ALTER TABLE job_targets
   ADD CONSTRAINT job_targets_status_common_check CHECK (status IN (
-    'queued',
-    'dispatching',
-    'accepted',
-    'completed',
+    'pending',
+    'delivering',
+    'running',
+    'succeeded',
     'failed',
-    'timed_out',
-    'dispatch_failed',
-    'degraded_unprivileged',
-    'rejected_by_agent',
-    'rejected_authorization_required'
+    'agent_timed_out',
+    'control_timed_out',
+    'skipped',
+    'rejected',
+    'canceled'
   ));
 
 CREATE TABLE job_outputs (
@@ -130,6 +144,7 @@ CREATE TABLE job_outputs (
     object_key TEXT,
     data_sha256_hex TEXT,
     data_size_bytes BIGINT,
+    received_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (job_id, client_id, seq),
     FOREIGN KEY (job_id, client_id) REFERENCES job_targets(job_id, client_id) ON DELETE CASCADE

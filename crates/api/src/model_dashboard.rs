@@ -229,3 +229,61 @@ pub(crate) struct DashboardDrilldownView {
     pub(crate) subpage: String,
     pub(crate) query: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardServerView {
+    pub(crate) generated_at: String,
+    pub(crate) db_pool: DashboardServerDbPoolView,
+    pub(crate) dispatch: DashboardServerDispatchView,
+    pub(crate) targets: DashboardServerTargetsView,
+    pub(crate) cancellations: DashboardServerCancellationsView,
+    pub(crate) gateway_events: DashboardServerGatewayEventsView,
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct DashboardServerDbPoolView {
+    pub(crate) max_connections: u32,
+    pub(crate) open_connections: u32,
+    pub(crate) idle_connections: u32,
+    pub(crate) in_use_connections: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct DashboardServerDispatchView {
+    pub(crate) active_jobs: i64,
+    pub(crate) pending_jobs: i64,
+    pub(crate) running_jobs: i64,
+    pub(crate) queue_depth: i64,
+    pub(crate) total_dispatch_attempts: i64,
+    pub(crate) retried_targets: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct DashboardServerTargetsView {
+    pub(crate) pending: i64,
+    pub(crate) delivering: i64,
+    pub(crate) running: i64,
+    pub(crate) active: i64,
+    pub(crate) deadline_expired_active: i64,
+    pub(crate) control_timed_out_last_24h: i64,
+    pub(crate) agent_timed_out_last_24h: i64,
+    pub(crate) canceled_last_24h: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct DashboardServerCancellationsView {
+    pub(crate) requested: i64,
+    pub(crate) sent: i64,
+    pub(crate) acked: i64,
+    pub(crate) awaiting_ack: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct DashboardServerGatewayEventsView {
+    pub(crate) queued_events: Option<u64>,
+    pub(crate) delivered_events: Option<u64>,
+    pub(crate) retry_attempts: Option<u64>,
+    pub(crate) active_queues: Option<u64>,
+    pub(crate) status: String,
+}

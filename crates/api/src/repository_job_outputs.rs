@@ -1,5 +1,6 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::Utc;
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -50,6 +51,7 @@ impl Repository {
                         object_key,
                         data_sha256_hex,
                         data_size_bytes,
+                        received_at::text AS received_at,
                         exit_code,
                         done,
                         created_at::text AS created_at
@@ -76,6 +78,7 @@ impl Repository {
                             artifact_size_bytes: row.try_get("data_size_bytes")?,
                             exit_code: row.try_get("exit_code")?,
                             done: row.try_get("done")?,
+                            received_at: row.try_get("received_at")?,
                             created_at: row.try_get("created_at")?,
                         })
                     })
@@ -257,7 +260,7 @@ impl Repository {
         if outputs.is_empty() {
             return Ok(());
         }
-        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, config)
+        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
             .await
     }
 
@@ -267,6 +270,7 @@ impl Repository {
         client_id: &str,
         seq: i32,
         output: &CommandOutput,
+        received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
     ) -> Result<()> {
         self.record_job_outputs_starting_at(
@@ -274,6 +278,7 @@ impl Repository {
             client_id,
             seq,
             std::slice::from_ref(output),
+            received_at,
             config,
         )
         .await
@@ -298,8 +303,10 @@ impl Repository {
                     .max()
                     .unwrap_or(-1)
                     .saturating_add(1);
-                self.record_job_output_chunk_with_config(job_id, client_id, seq, output, config)
-                    .await?;
+                self.record_job_output_chunk_with_config(
+                    job_id, client_id, seq, output, None, config,
+                )
+                .await?;
                 Ok(seq)
             }
             Self::Postgres(pool) => {
@@ -328,6 +335,7 @@ impl Repository {
                         client_id,
                         seq,
                         std::slice::from_ref(output),
+                        None,
                         config,
                     )
                     .await?;
@@ -352,9 +360,10 @@ impl Repository {
                             data_sha256_hex,
                             data_size_bytes,
                             exit_code,
-                            done
+                            done,
+                            received_at
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
                         "#,
                     )
                     .bind(output.job_id)
@@ -368,6 +377,7 @@ impl Repository {
                     .bind(output.artifact_size_bytes)
                     .bind(output.exit_code)
                     .bind(output.done)
+                    .bind(&output.received_at)
                     .execute(&mut *tx)
                     .await?;
                     tx.commit().await?;
@@ -426,13 +436,15 @@ impl Repository {
         client_id: &str,
         start_seq: i32,
         outputs: &[CommandOutput],
+        received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
     ) -> Result<()> {
         if outputs.is_empty() {
             return Ok(());
         }
         let persisted =
-            materialize_job_outputs(job_id, client_id, start_seq, outputs, config).await?;
+            materialize_job_outputs(job_id, client_id, start_seq, outputs, received_at, config)
+                .await?;
         let object_keys = persisted
             .iter()
             .filter_map(|output| output.created_artifact_object_key.clone())
@@ -470,9 +482,10 @@ impl Repository {
                             data_sha256_hex,
                             data_size_bytes,
                             exit_code,
-                            done
+                            done,
+                            received_at
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
                         ON CONFLICT (job_id, client_id, seq)
                         DO UPDATE SET
                             stream = EXCLUDED.stream,
@@ -482,7 +495,8 @@ impl Repository {
                             data_sha256_hex = EXCLUDED.data_sha256_hex,
                             data_size_bytes = EXCLUDED.data_size_bytes,
                             exit_code = EXCLUDED.exit_code,
-                            done = EXCLUDED.done
+                            done = EXCLUDED.done,
+                            received_at = EXCLUDED.received_at
                         "#,
                     )
                     .bind(output.job_id)
@@ -496,6 +510,7 @@ impl Repository {
                     .bind(output.artifact_size_bytes)
                     .bind(output.exit_code)
                     .bind(output.done)
+                    .bind(&output.received_at)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -569,6 +584,7 @@ struct StoredJobOutput {
     artifact_size_bytes: Option<i64>,
     exit_code: Option<i32>,
     done: bool,
+    received_at: String,
     created_at: String,
 }
 
@@ -586,6 +602,7 @@ impl StoredJobOutput {
             artifact_size_bytes: self.artifact_size_bytes,
             exit_code: self.exit_code,
             done: self.done,
+            received_at: Some(self.received_at),
             created_at: self.created_at,
         }
     }
@@ -596,9 +613,11 @@ async fn materialize_job_outputs(
     client_id: &str,
     start_seq: i32,
     outputs: &[CommandOutput],
+    received_at: Option<String>,
     config: JobOutputPersistConfig<'_>,
 ) -> Result<Vec<StoredJobOutput>> {
     let created_at = unix_now().to_string();
+    let received_at = received_at.unwrap_or_else(|| Utc::now().to_rfc3339());
     let mut persisted = Vec::with_capacity(outputs.len());
     for (index, output) in outputs.iter().enumerate() {
         let seq = start_seq
@@ -641,6 +660,7 @@ async fn materialize_job_outputs(
                 artifact_size_bytes: Some(output.data.len() as i64),
                 exit_code: output.exit_code,
                 done: output.done,
+                received_at: received_at.clone(),
                 created_at: created_at.clone(),
             });
         } else {
@@ -657,6 +677,7 @@ async fn materialize_job_outputs(
                 artifact_size_bytes: Some(output.data.len() as i64),
                 exit_code: output.exit_code,
                 done: output.done,
+                received_at: received_at.clone(),
                 created_at: created_at.clone(),
             });
         }
@@ -964,6 +985,7 @@ mod tests {
             "client-a",
             0,
             &first,
+            None,
             JobOutputPersistConfig {
                 object_store: None,
                 artifact_min_bytes: usize::MAX,

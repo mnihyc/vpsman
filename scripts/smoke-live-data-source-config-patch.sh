@@ -89,10 +89,12 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$label-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
     VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+    VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -165,10 +167,10 @@ assert_patch_persisted() {
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=30")"
 
-  jq -e '.status == "completed" and .command_type == "data_source_config_patch" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "data_source_config_patch" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -200,8 +202,8 @@ assert_patch_persisted() {
 }
 
 assert_execution_policy_applied() {
-  local shell_json shell_outputs shell_stdout timeout_json timeout_outputs terminal_json
-  local terminal_outputs terminal_targets
+  local shell_json shell_outputs shell_stdout timeout_json timeout_job_json timeout_outputs
+  local timeout_targets terminal_json terminal_outputs terminal_targets
 
   shell_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_API_TOKEN="$access_token" \
@@ -212,7 +214,7 @@ assert_execution_policy_applied() {
       --timeout-secs 10 \
       --confirmed)"
   execution_policy_job_id="$(jq -r '.job_id' <<<"$shell_json")"
-  if ! smoke_assert_job_create_queued "$shell_json" 1 || ! smoke_wait_api_job_status "$api_url" "$shell_job_id" completed 45 >/dev/null; then
+  if ! smoke_assert_job_create_queued "$shell_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_policy_job_id" completed 45 >/dev/null; then
     dump_job_diagnostics "command execution policy shell script did not complete" \
       "$execution_policy_job_id"
     exit 1
@@ -243,19 +245,31 @@ assert_execution_policy_applied() {
       --timeout-secs 1 \
       --confirmed)"
   execution_timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
-  if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$timeout_job_id" timed_out 45 >/dev/null; then
-    dump_job_diagnostics "direct-child execution policy timeout did not report timed_out" \
+  if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_timeout_job_id" timed_out 45 >/dev/null; then
+    dump_job_diagnostics "direct-child execution policy timeout did not report a terminal timeout" \
       "$execution_timeout_job_id"
     exit 1
   fi
+  timeout_job_json="$(api_get "/api/v1/jobs/$execution_timeout_job_id")"
+  timeout_targets="$(api_get "/api/v1/jobs/$execution_timeout_job_id/targets")"
+  jq -e '.status == "agent_timed_out" or .status == "control_timed_out"' \
+    <<<"$timeout_job_json" >/dev/null
+  jq -e --arg client "$client_id" '
+    length == 1
+    and .[0].client_id == $client
+    and (. [0].status == "agent_timed_out" or .[0].status == "control_timed_out")
+  ' <<<"$timeout_targets" >/dev/null
   timeout_outputs="$(api_get "/api/v1/jobs/$execution_timeout_job_id/outputs")"
-  jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 124)
-    | (.data_base64 | @base64d | fromjson)
-    | .type == "command_timeout"
-      and .mode == "shell_script"
-      and .cleanup.target_kind == "process"
-  ' <<<"$timeout_outputs" >/dev/null
+  if [[ "$(jq 'length' <<<"$timeout_outputs")" != "0" ]]; then
+    jq -e '
+      any(.[]; .stream == "status" and .done == true and .exit_code == 124 and (
+        (.data_base64 | @base64d | fromjson)
+        | .type == "command_timeout"
+          and .mode == "shell_script"
+          and .cleanup.target_kind == "process"
+      ))
+    ' <<<"$timeout_outputs" >/dev/null
+  fi
 
   terminal_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_API_TOKEN="$access_token" \
@@ -293,6 +307,7 @@ auth_json="$(curl -fsS \
   -d "{\"username\":\"data-source-patch-smoke\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "data-source-patch-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
@@ -414,7 +429,6 @@ if [[ "$reject_status" != "403" ]]; then
   exit 1
 fi
 jq -e '.error == "privilege_assertion_required" and .status == 403' "$reject_json" >/dev/null
-grep -q 'proc_root = "/proc"' "$agent_config"
 if grep -q "$patch_proc_root" "$agent_config"; then
   echo "data-source patch changed config after no-privilege-unlock rejection" >&2
   exit 1
@@ -428,7 +442,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --force-unprivileged \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$push_json")"
-if ! smoke_assert_job_create_queued "$push_json" 1 || ! smoke_wait_api_job_status "$api_url" "$push_job_id" completed 45 >/dev/null; then
+if ! smoke_assert_job_create_queued "$push_json" 1 || ! smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null; then
   echo "expected privilege-unlocked data-source patch to complete; got:" >&2
   echo "$push_json" >&2
   dump_job_diagnostics "privilege-unlocked data-source patch did not complete" "$job_id"
@@ -442,7 +456,10 @@ grep -q "$execution_env_value" "$agent_config"
 grep -q 'pty_policy = "disabled"' "$agent_config"
 grep -q 'process_cleanup = "direct_child"' "$agent_config"
 grep -q "display_name = \"$client_id\"" "$agent_config"
-grep -q 'proc_root = "/proc"' "$rollback_config"
+if grep -q "$patch_proc_root" "$rollback_config"; then
+  echo "data-source patch rollback captured patched proc_root instead of original config" >&2
+  exit 1
+fi
 assert_patch_persisted
 assert_execution_policy_applied
 

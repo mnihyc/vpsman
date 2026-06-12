@@ -5,6 +5,7 @@ auth_json="$(curl -fsS \
   -d '{"username":"postgres-live-job","password":"postgres-live-job-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "postgres-live-job" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
@@ -163,7 +164,7 @@ until outputs_json="$(api_get "/api/v1/jobs/$live_stream_job_id/outputs")" \
   fi
   sleep 0.2
 done
-api_get "/api/v1/jobs/$live_stream_job_id" | jq -e '.status == "dispatching"' >/dev/null
+api_get "/api/v1/jobs/$live_stream_job_id" | jq -e '.status == "running"' >/dev/null
 wait "$live_stream_pid"
 jq -e --arg job_id "$live_stream_job_id" '
   .job_id == $job_id and .target_count == 1

@@ -1,13 +1,22 @@
+use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    time,
 };
 use vpsman_common::{
-    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationResult, JobRequest, PrivilegeAssertion,
+    GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
+    GatewayCommandDispatchResult, GatewayForwardMetricsSnapshot, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationResult, JobCancelRequest, JobRequest, PrivilegeAssertion,
 };
+
+const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GatewayDispatchClient {
@@ -88,6 +97,27 @@ impl GatewayDispatchClient {
         .await
     }
 
+    pub(crate) async fn cancel(
+        &self,
+        client_id: &str,
+        request: JobCancelRequest,
+    ) -> Result<GatewayCommandCancelResult> {
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/command/cancel",
+            &GatewayCommandCancel {
+                client_id: client_id.to_string(),
+                request,
+            },
+            self.internal_token.as_deref(),
+        )
+        .await
+    }
+
     pub(crate) async fn verify_privilege(
         &self,
         intent: String,
@@ -110,6 +140,20 @@ impl GatewayDispatchClient {
             control_url,
             "/internal/v1/gateway/privilege/verify",
             &GatewayPrivilegeVerification { intent, assertion },
+            self.internal_token.as_deref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn forward_metrics(&self) -> Result<GatewayForwardMetricsSnapshot> {
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/metrics",
+            &serde_json::json!({}),
             self.internal_token.as_deref(),
         )
         .await
@@ -151,18 +195,28 @@ where
     let body = serde_json::to_vec(body_value)?;
     let token = internal_token.context("gateway internal token is not configured")?;
     let auth_header = format!("Authorization: Bearer {token}\r\n");
-    let mut stream = TcpStream::connect(host_port)
+    let mut stream = time::timeout(CONTROL_CONNECT_TIMEOUT, TcpStream::connect(host_port))
         .await
+        .context("gateway control connect timed out")?
         .with_context(|| format!("failed to connect gateway control at {host_port}"))?;
     let request = format!(
         "POST {request_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(&body).await?;
+    time::timeout(CONTROL_WRITE_TIMEOUT, stream.write_all(request.as_bytes()))
+        .await
+        .context("gateway control request header write timed out")??;
+    time::timeout(CONTROL_WRITE_TIMEOUT, stream.write_all(&body))
+        .await
+        .context("gateway control request body write timed out")??;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
+    time::timeout(CONTROL_READ_TIMEOUT, stream.read_to_end(&mut response))
+        .await
+        .context("gateway control response read timed out")??;
+    if response.len() > CONTROL_MAX_RESPONSE_BYTES {
+        return Err(anyhow!("gateway control response too large"));
+    }
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")

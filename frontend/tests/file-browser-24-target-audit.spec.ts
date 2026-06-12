@@ -28,7 +28,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "queued" }).filter({ hasText: "23/24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "active" }).filter({ hasText: "23/24" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "doing" }).filter({ hasText: "0" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "22" })).toBeVisible();
 

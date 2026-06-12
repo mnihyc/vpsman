@@ -295,7 +295,7 @@ impl Repository {
         operation: &JobCommand,
         job_status: &str,
     ) -> Result<()> {
-        if job_status != "completed" {
+        if job_status != "succeeded" {
             return Ok(());
         }
         let Some(update) = tunnel_plan_status_update(job_id, operation) else {

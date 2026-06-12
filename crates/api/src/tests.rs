@@ -315,7 +315,6 @@ async fn rejected_job_records_frozen_target_results() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let job_id = repo
@@ -389,7 +388,6 @@ async fn rejected_job_freezes_tag_targets() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let job_id = repo
@@ -428,7 +426,6 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "file_pull");
@@ -456,7 +453,6 @@ fn shell_pty_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let command = request.job_command().unwrap();
@@ -487,7 +483,6 @@ fn file_pull_job_command_requires_absolute_path() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let error = request.job_command().unwrap_err();
@@ -514,7 +509,6 @@ fn file_browser_job_commands_use_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "file_list_dir");
@@ -547,7 +541,6 @@ fn file_browser_job_commands_validate_paths_and_limits() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     assert_eq!(
         request.job_command().unwrap_err().code,
@@ -583,7 +576,6 @@ fn shell_script_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "shell_script");
@@ -610,7 +602,6 @@ fn shell_script_job_command_rejects_empty_and_control_payloads() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let error = request.job_command().unwrap_err();
@@ -638,7 +629,6 @@ fn user_sessions_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "user_sessions");
@@ -663,7 +653,6 @@ fn process_list_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "process_list");
@@ -688,7 +677,6 @@ fn process_list_job_command_bounds_limit() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     let error = request.job_command().unwrap_err();
@@ -722,7 +710,6 @@ async fn dispatching_job_records_and_updates_target_results() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
@@ -746,6 +733,7 @@ async fn dispatching_job_records_and_updates_target_results() {
             command_version: Some(1),
             accepted: true,
             message: "ok".to_string(),
+            received_at: None,
             outputs: vec![
                 CommandOutput {
                     job_id,
@@ -983,6 +971,7 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
                 command_version: Some(1),
                 accepted: true,
                 message: "ok".to_string(),
+                received_at: None,
                 outputs: outputs.clone(),
             },
         )
@@ -1011,6 +1000,7 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
                 artifact_size_bytes: Some(100),
                 exit_code: None,
                 done: false,
+                received_at: None,
                 created_at: "2026-06-05T00:00:00Z".to_string(),
             });
         }
@@ -1054,7 +1044,6 @@ fn test_job_request(clients: &[&str]) -> CreateJobRequest {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     }
 }
 
@@ -1092,6 +1081,7 @@ async fn record_test_output(
             command_version: Some(1),
             accepted: true,
             message: status.to_string(),
+            received_at: None,
             outputs: outputs.clone(),
         },
     )

@@ -252,12 +252,8 @@ export function MultiFileActionsPanel({
         argv: [],
         operation: confirmation.operation,
         timeout_secs: BULK_JOB_TIMEOUT_SECS,
-            force_unprivileged: false,
+        force_unprivileged: false,
         privileged: true,
-          reconnect_policy: {
-          duplicate_delivery: "ignore_completed",
-          resume_outputs: true,
-          },
         privilege_assertion: built.privilegeAssertion,
       });
       let outputs: JobOutputRecord[] = [];

@@ -311,8 +311,8 @@ fn parse_vty_tunnel_change(
                 timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 2;
             }
@@ -343,8 +343,8 @@ fn parse_vty_tunnel_change(
                 privilege_ttl_secs = parse_bounded_u64(
                     flag_value(value, "--privilege-ttl="),
                     "--privilege-ttl",
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }
@@ -352,8 +352,8 @@ fn parse_vty_tunnel_change(
                 privilege_ttl_secs = parse_bounded_u64(
                     flag_value(value, "--privilege-ttl-secs="),
                     "--privilege-ttl-secs",
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }

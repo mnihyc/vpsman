@@ -1,0 +1,310 @@
+use std::{fs, path::Path};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteConfig {
+    pub version: u32,
+    pub api: SuiteApiConfig,
+    pub gateway: SuiteGatewayConfig,
+    pub worker: SuiteWorkerConfig,
+    pub database: SuiteDatabaseConfig,
+    pub storage: SuiteStorageConfig,
+    pub capacity: SuiteCapacityConfig,
+    pub timeout: SuiteTimeoutConfig,
+    pub secrets: SuiteSecretRefs,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteApiConfig {
+    pub bind: Option<String>,
+    pub gateway_control_url: Option<String>,
+    pub update_artifact_public_base_url: Option<String>,
+    pub require_registered_agent_updates: Option<bool>,
+    pub job_output_artifact_min_bytes: Option<usize>,
+    pub alert_memory_available_warning_ratio: Option<f64>,
+    pub alert_memory_available_critical_ratio: Option<f64>,
+    pub alert_disk_available_warning_ratio: Option<f64>,
+    pub alert_disk_available_critical_ratio: Option<f64>,
+    pub alert_cpu_load_warning: Option<f64>,
+    pub alert_cpu_load_critical: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteGatewayConfig {
+    pub bind: Option<String>,
+    pub control_bind: Option<String>,
+    pub api_url: Option<String>,
+    pub gateway_id: Option<String>,
+    pub reconnect_grace_secs: Option<u64>,
+    pub expect_client_public_key_hex: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteWorkerConfig {
+    pub tick_secs: Option<u64>,
+    pub once: Option<bool>,
+    pub worker_id: Option<String>,
+    pub worker_lease_secs: Option<i32>,
+    pub agent_offline_timeout_secs: Option<i64>,
+    pub notification_delivery_limit: Option<i64>,
+    pub notification_retention_days: Option<i64>,
+    pub notification_retention_prune_limit: Option<i64>,
+    pub notification_webhook_timeout_secs: Option<u64>,
+    pub webhook_rule_delivery_limit: Option<i64>,
+    pub webhook_rule_materialize_limit: Option<i64>,
+    pub webhook_rule_retention_days: Option<i64>,
+    pub webhook_rule_retention_prune_limit: Option<i64>,
+    pub webhook_rule_timeout_secs: Option<u64>,
+    pub backup_policy_prune_enabled: Option<bool>,
+    pub backup_policy_prune_limit: Option<i64>,
+    pub backup_policy_prune_dry_run: Option<bool>,
+    pub backup_policy_prune_include_disabled: Option<bool>,
+    pub backup_policy_prune_delete_objects: Option<bool>,
+    pub backup_policy_prune_object_store_dir: Option<String>,
+    pub schedule_command_timeout_secs: Option<u64>,
+    pub require_registered_agent_updates: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteDatabaseConfig {
+    pub postgres_url: Option<String>,
+    pub migrations_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteStorageConfig {
+    pub object_store_dir: Option<String>,
+    pub backup_object_store_dir: Option<String>,
+    pub update_object_store_dir: Option<String>,
+    pub object_endpoint: Option<String>,
+    pub object_bucket: Option<String>,
+    pub object_region: Option<String>,
+    pub object_create_bucket: Option<bool>,
+    pub update_object_endpoint: Option<String>,
+    pub update_object_bucket: Option<String>,
+    pub update_object_region: Option<String>,
+    pub update_object_create_bucket: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteCapacityConfig {
+    pub api_db_pool: Option<u32>,
+    pub worker_db_pool: Option<u32>,
+    pub dispatcher_batch: Option<i64>,
+    pub dispatcher_in_flight: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteTimeoutConfig {
+    pub worker_schedule_command_secs: Option<u64>,
+    pub agent_offline_secs: Option<i64>,
+    pub gateway_reconnect_grace_secs: Option<u64>,
+    pub internal_http_connect_secs: Option<u64>,
+    pub internal_http_write_secs: Option<u64>,
+    pub internal_http_read_secs: Option<u64>,
+    pub dispatch_ack_secs: Option<u64>,
+    pub event_post_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteSecretRefs {
+    pub internal_token_file: Option<String>,
+    pub gateway_private_key_file: Option<String>,
+    pub privilege_verifier_key_file: Option<String>,
+    pub object_access_key_file: Option<String>,
+    pub object_secret_key_file: Option<String>,
+    pub update_object_access_key_file: Option<String>,
+    pub update_object_secret_key_file: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SuiteConfigValidation {
+    pub valid: bool,
+    pub version: u32,
+    pub restart_required_fields: Vec<String>,
+    pub hot_reload_fields: Vec<String>,
+}
+
+impl SuiteConfig {
+    pub fn load_optional(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self {
+                version: 1,
+                ..Self::default()
+            });
+        }
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("suite_config_read_failed:{error}"))?;
+        Self::parse(&text)
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let config: Self =
+            toml::from_str(text).map_err(|error| format!("suite_config_invalid_toml:{error}"))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err("suite_config_version_unsupported".to_string());
+        }
+        if let Some(value) = self.capacity.api_db_pool {
+            validate_u32_range(value, 1, 256, "capacity.api_db_pool")?;
+        }
+        if let Some(value) = self.capacity.worker_db_pool {
+            validate_u32_range(value, 1, 256, "capacity.worker_db_pool")?;
+        }
+        if let Some(value) = self.capacity.dispatcher_batch {
+            validate_i64_range(value, 1, 500, "capacity.dispatcher_batch")?;
+        }
+        if let Some(value) = self.capacity.dispatcher_in_flight {
+            if !(1..=512).contains(&value) {
+                return Err("capacity.dispatcher_in_flight_out_of_range".to_string());
+            }
+        }
+        validate_optional_u64(self.worker.tick_secs, 1, 3600, "worker.tick_secs")?;
+        validate_optional_u64(
+            self.worker.schedule_command_timeout_secs,
+            1,
+            3600,
+            "worker.schedule_command_timeout_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.worker_schedule_command_secs,
+            1,
+            3600,
+            "timeout.worker_schedule_command_secs",
+        )?;
+        validate_optional_i64(
+            self.worker.agent_offline_timeout_secs,
+            1,
+            86_400,
+            "worker.agent_offline_timeout_secs",
+        )?;
+        validate_optional_i64(
+            self.timeout.agent_offline_secs,
+            1,
+            86_400,
+            "timeout.agent_offline_secs",
+        )?;
+        validate_optional_u64(
+            self.gateway.reconnect_grace_secs,
+            0,
+            3600,
+            "gateway.reconnect_grace_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.gateway_reconnect_grace_secs,
+            0,
+            3600,
+            "timeout.gateway_reconnect_grace_secs",
+        )?;
+        Ok(())
+    }
+
+    pub fn validation_summary(&self) -> SuiteConfigValidation {
+        SuiteConfigValidation {
+            valid: true,
+            version: self.version,
+            restart_required_fields: vec![
+                "api.bind".to_string(),
+                "gateway.bind".to_string(),
+                "gateway.control_bind".to_string(),
+                "database.postgres_url".to_string(),
+                "secrets.*".to_string(),
+                "storage.object_endpoint".to_string(),
+                "storage.update_object_endpoint".to_string(),
+            ],
+            hot_reload_fields: vec![
+                "capacity.api_db_pool".to_string(),
+                "capacity.worker_db_pool".to_string(),
+                "capacity.dispatcher_batch".to_string(),
+                "capacity.dispatcher_in_flight".to_string(),
+                "timeout.*".to_string(),
+                "worker.schedule_command_timeout_secs".to_string(),
+                "api.alert_*".to_string(),
+            ],
+        }
+    }
+}
+
+pub fn read_secret_file_ref(path: Option<&str>) -> Result<Option<String>, String> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let value = fs::read_to_string(path)
+        .map_err(|error| format!("secret_ref_read_failed:{path}:{error}"))?;
+    Ok(Some(value.trim().to_string()))
+}
+
+pub fn redact_suite_config_value(value: serde_json::Value) -> serde_json::Value {
+    redact_value(value)
+}
+
+fn redact_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(child_key, child_value)| {
+                    let lowered = child_key.to_ascii_lowercase();
+                    let redact = lowered.contains("secret")
+                        || lowered.ends_with("_key")
+                        || lowered.ends_with("_key_hex")
+                        || lowered.contains("token")
+                        || lowered.contains("password");
+                    let next = if redact && !lowered.ends_with("_file") {
+                        serde_json::Value::String("<redacted>".to_string())
+                    } else {
+                        redact_value(child_value)
+                    };
+                    (child_key, next)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(redact_value).collect())
+        }
+        other => other,
+    }
+}
+
+fn validate_optional_u64(value: Option<u64>, min: u64, max: u64, name: &str) -> Result<(), String> {
+    if let Some(value) = value {
+        if !(min..=max).contains(&value) {
+            return Err(format!("{name}_out_of_range"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_i64(value: Option<i64>, min: i64, max: i64, name: &str) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_i64_range(value, min, max, name)?;
+    }
+    Ok(())
+}
+
+fn validate_u32_range(value: u32, min: u32, max: u32, name: &str) -> Result<(), String> {
+    if !(min..=max).contains(&value) {
+        return Err(format!("{name}_out_of_range"));
+    }
+    Ok(())
+}
+
+fn validate_i64_range(value: i64, min: i64, max: i64, name: &str) -> Result<(), String> {
+    if !(min..=max).contains(&value) {
+        return Err(format!("{name}_out_of_range"));
+    }
+    Ok(())
+}

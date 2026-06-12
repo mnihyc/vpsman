@@ -313,6 +313,7 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: usize::MAX,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }
 
@@ -344,7 +345,6 @@ fn file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "file_push");
@@ -433,7 +433,6 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
 
     assert_eq!(request.command_type_label(), "file_push_chunked");

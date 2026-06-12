@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
@@ -31,6 +33,7 @@ pub(crate) struct AppState {
     pub(crate) fleet_alert_policy: FleetAlertPolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
     pub(crate) require_registered_agent_updates: bool,
+    pub(crate) suite_config_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]

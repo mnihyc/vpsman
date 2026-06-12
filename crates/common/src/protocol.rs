@@ -161,6 +161,8 @@ pub struct AgentCapabilitySnapshot {
     pub privilege_mode: AgentPrivilegeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_uid: Option<u32>,
+    #[serde(default = "default_agent_command_timeout_secs")]
+    pub command_timeout_secs: u64,
     #[serde(default)]
     pub can_attempt_privileged_ops: bool,
     #[serde(default)]
@@ -176,12 +178,17 @@ impl Default for AgentCapabilitySnapshot {
         Self {
             privilege_mode: AgentPrivilegeMode::Unknown,
             effective_uid: None,
+            command_timeout_secs: default_agent_command_timeout_secs(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
             unprivileged_hint: None,
         }
     }
+}
+
+fn default_agent_command_timeout_secs() -> u64 {
+    3600
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -239,6 +246,8 @@ pub struct GatewayCommandOutputIngest {
     pub client_id: String,
     pub job_id: Uuid,
     pub seq: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_unix: Option<u64>,
     pub output: CommandOutput,
 }
 
@@ -267,6 +276,12 @@ pub struct GatewayCommandDispatch {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayCommandCancel {
+    pub client_id: String,
+    pub request: JobCancelRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayPrivilegeVerification {
     pub intent: String,
     pub assertion: PrivilegeAssertion,
@@ -291,6 +306,24 @@ pub struct GatewayCommandDispatchResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayCommandCancelResult {
+    pub client_id: String,
+    pub job_id: Uuid,
+    pub acked: bool,
+    pub accepted: bool,
+    pub applied: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayForwardMetricsSnapshot {
+    pub queued_events: u64,
+    pub delivered_events: u64,
+    pub retry_attempts: u64,
+    pub active_queues: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobRequest {
     pub job_id: Uuid,
     #[serde(default = "default_command_protocol_version")]
@@ -299,12 +332,112 @@ pub struct JobRequest {
     pub timeout_secs: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JobCancelRequest {
+    pub job_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 pub fn default_command_protocol_version() -> u16 {
     CURRENT_COMMAND_PROTOCOL_VERSION
 }
 
 pub fn default_internal_build_number() -> u64 {
     1
+}
+
+pub fn job_command_variant_names() -> &'static [&'static str] {
+    &[
+        "shell",
+        "shell_script",
+        "terminal_open",
+        "terminal_input",
+        "terminal_poll",
+        "terminal_resize",
+        "terminal_close",
+        "config_read",
+        "hot_config",
+        "data_source_config_patch",
+        "agent_update",
+        "agent_update_activate",
+        "agent_update_rollback",
+        "agent_update_check",
+        "file_pull",
+        "file_push",
+        "file_push_chunked",
+        "file_transfer_start",
+        "file_transfer_chunk",
+        "file_transfer_commit",
+        "file_transfer_abort",
+        "file_transfer_download_start",
+        "file_transfer_download_chunk",
+        "file_stat",
+        "file_list_dir",
+        "file_read_text",
+        "file_mkdir",
+        "file_write_text",
+        "file_rename",
+        "file_delete",
+        "file_chmod",
+        "file_chown",
+        "file_copy",
+        "file_download",
+        "file_archive_tar",
+        "user_sessions",
+        "process_list",
+        "process_start",
+        "process_stop",
+        "process_restart",
+        "process_status",
+        "process_logs",
+        "backup",
+        "restore",
+        "restore_rollback",
+        "network_apply",
+        "network_ospf_cost_update",
+        "network_rollback",
+        "network_status",
+        "network_interfaces",
+        "network_probe",
+        "network_speed_test",
+    ]
+}
+
+pub fn job_privilege_intent_fields() -> &'static [&'static str] {
+    &[
+        "version",
+        "action",
+        "selector_expression",
+        "command_type",
+        "operation_payload_hash",
+        "resolved_targets",
+        "timeout_secs",
+        "force_unprivileged",
+        "privileged",
+    ]
+}
+
+pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
+    &[
+        "version",
+        "action",
+        "schedule_id",
+        "name",
+        "command_type",
+        "operation_payload_hash",
+        "selector_expression",
+        "resolved_targets",
+        "cron_expr",
+        "timezone",
+        "enabled",
+        "catch_up_policy",
+        "catch_up_limit",
+        "retry_delay_secs",
+        "max_failures",
+        "deferred_until",
+        "deleted",
+    ]
 }
 
 pub fn parse_build_number(value: Option<&str>) -> u64 {
@@ -853,6 +986,14 @@ fn default_agent_update_check_restart_agent() -> bool {
 pub struct JobAck {
     pub job_id: Uuid,
     pub accepted: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JobCancelAck {
+    pub job_id: Uuid,
+    pub accepted: bool,
+    pub applied: bool,
     pub message: String,
 }
 

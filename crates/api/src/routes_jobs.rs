@@ -1,21 +1,30 @@
 use anyhow::anyhow;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, payload_hash, CommandOutput, GatewayCommandDispatchResult, JobCommand,
-    OutputStream,
+    encode_json, payload_hash, CommandOutput, GatewayCommandDispatchResult,
+    JobCancelRequest as GatewayJobCancelRequest, JobCommand, OutputStream,
 };
-use vpsman_server_core::{CapabilitySkip, TargetCapability};
+use vpsman_server_core::{
+    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_PENDING, JOB_STATUS_REJECTED,
+    JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_CANCELED,
+    TARGET_STATUS_CONTROL_TIMED_OUT, TARGET_STATUS_DELIVERING, TARGET_STATUS_FAILED,
+    TARGET_STATUS_PENDING, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
+    TARGET_STATUS_SUCCEEDED,
+};
 
 use crate::{
     error::ApiError,
     job_target_validation::validate_network_apply_target,
-    model::{AgentView, AuthContext, CreateJobRequest, CreateJobResponse, WsEvent},
+    model::{
+        AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
+        CreateJobRequest, CreateJobResponse, CreateJobTargetCounts, WsEvent,
+    },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_job_outputs::JobOutputPersistConfig,
     selector_expression::parse_selector_expression,
@@ -31,6 +40,102 @@ pub(crate) async fn create_job(
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
     create_job_with_operator(&state, &operator, request).await
+}
+
+pub(crate) async fn cancel_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<Uuid>,
+    Json(request): Json<CancelJobRequest>,
+) -> Result<(StatusCode, Json<CancelJobResponse>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .await?;
+    if state.repo.get_job(job_id).await?.is_none() {
+        return Err(ApiError::not_found("job_not_found"));
+    }
+    let reason = bounded_cancel_reason(request.reason.as_deref());
+    let plan = state
+        .repo
+        .request_job_cancel(job_id, operator.operator.id, reason.as_deref())
+        .await?;
+    let mut cancel_acks = Vec::with_capacity(plan.cancel_targets.len());
+    for client_id in &plan.cancel_targets {
+        state
+            .repo
+            .record_job_target_cancel_sent(job_id, client_id)
+            .await?;
+        let result = state
+            .gateway
+            .cancel(
+                client_id,
+                GatewayJobCancelRequest {
+                    job_id,
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+        match result {
+            Ok(cancel) => {
+                state
+                    .repo
+                    .record_job_target_cancel_result(
+                        job_id,
+                        client_id,
+                        cancel.accepted,
+                        cancel.acked,
+                        cancel.applied,
+                        &cancel.message,
+                    )
+                    .await?;
+                cancel_acks.push(CancelJobTargetResult {
+                    client_id: client_id.clone(),
+                    acked: cancel.acked,
+                    accepted: cancel.accepted,
+                    applied: cancel.applied,
+                    message: cancel.message,
+                });
+            }
+            Err(error) => {
+                let message = format!("cancel delivery failed: {error}");
+                warn!(%error, %job_id, client_id, "job cancel delivery failed");
+                state
+                    .repo
+                    .record_job_target_cancel_result(
+                        job_id, client_id, false, false, false, &message,
+                    )
+                    .await?;
+                cancel_acks.push(CancelJobTargetResult {
+                    client_id: client_id.clone(),
+                    acked: false,
+                    accepted: false,
+                    applied: false,
+                    message,
+                });
+            }
+        }
+    }
+    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
+    if let Some((status, accepted_targets)) = &refreshed {
+        if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
+            state.publish(WsEvent::JobFinished {
+                job_id,
+                accepted_targets: *accepted_targets,
+                status: status.clone(),
+            });
+        }
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CancelJobResponse {
+            job_id,
+            requested_targets: plan.cancel_targets.len() + plan.pending_canceled,
+            pending_canceled: plan.pending_canceled,
+            cancel_acks,
+            status: refreshed.as_ref().map(|(status, _)| status.clone()),
+            accepted_targets: refreshed.map(|(_, accepted_targets)| accepted_targets),
+        }),
+    ))
 }
 
 pub(crate) async fn create_job_with_operator(
@@ -73,7 +178,6 @@ async fn create_job_inner(
     request: CreateJobRequest,
     privilege_source: JobPrivilegeSource,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
-    validate_job_reconnect_metadata(&request)?;
     validate_selector_expression(&request.selector_expression)?;
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
@@ -152,7 +256,7 @@ async fn create_job_inner(
             &command_hash,
             &request_fingerprint,
             operator,
-            "rejected_authorization_required",
+            JOB_STATUS_REJECTED,
             "all non-telemetry jobs require privilege unlock",
         )
         .await;
@@ -165,12 +269,17 @@ async fn create_job_inner(
             &command_hash,
             &request_fingerprint,
             operator,
-            "dispatch_failed",
+            JOB_STATUS_FAILED,
             "job has no resolved targets",
         )
         .await;
     }
     validate_network_apply_target(&job_command, &resolved_targets)?;
+    validate_agent_command_timeout_cap(
+        request.timeout_secs.unwrap_or(30),
+        &resolved_targets,
+        &resolved_agents,
+    )?;
     if !agent_update_release_policy_allows(state, &job_command).await? {
         return reject_job(
             state,
@@ -215,7 +324,7 @@ async fn create_job_inner(
             &command_hash,
             &request_fingerprint,
             operator,
-            "dispatch_failed",
+            JOB_STATUS_FAILED,
             "gateway control URL missing",
         )
         .await;
@@ -248,32 +357,25 @@ async fn create_job_inner(
             .await?
     };
     precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
-    let _ = state.repo.refresh_job_status_from_targets(job_id).await?;
+    let status = state
+        .repo
+        .refresh_job_status_from_targets(job_id)
+        .await?
+        .map(|(status, _)| status)
+        .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
+    let accepted_targets = state.repo.count_job_accepted_targets(job_id).await?;
+    let target_counts = create_job_target_counts(state, job_id).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
             job_id,
             target_count: resolved_targets.len(),
-            accepted_targets: 0,
-            status: "dispatching".to_string(),
+            accepted_targets,
+            status,
+            target_counts,
         }),
     ))
-}
-
-fn validate_job_reconnect_metadata(request: &CreateJobRequest) -> Result<(), ApiError> {
-    if let Some(policy) = request.reconnect_policy.as_ref() {
-        if !policy.is_object() {
-            return Err(ApiError::bad_request("job_reconnect_policy_invalid"));
-        }
-        if serde_json::to_vec(policy)
-            .map(|bytes| bytes.len() > 4096)
-            .unwrap_or(true)
-        {
-            return Err(ApiError::bad_request("job_reconnect_policy_too_large"));
-        }
-    }
-    Ok(())
 }
 
 fn request_fingerprint_for_job(
@@ -323,7 +425,54 @@ async fn existing_job_response_for_id(
         target_count: existing.target_count.max(0) as usize,
         accepted_targets: state.repo.count_job_accepted_targets(existing.id).await?,
         status: existing.status,
+        target_counts: create_job_target_counts(state, existing.id).await?,
     }))
+}
+
+async fn create_job_target_counts(
+    state: &AppState,
+    job_id: Uuid,
+) -> Result<CreateJobTargetCounts, ApiError> {
+    let targets = state.repo.list_job_targets(job_id).await?;
+    let mut counts = CreateJobTargetCounts {
+        total: targets.len(),
+        runnable: 0,
+        skipped: 0,
+        rejected_unavailable: 0,
+        pending: 0,
+        delivering: 0,
+        running: 0,
+        succeeded: 0,
+        failed: 0,
+        agent_timed_out: 0,
+        control_timed_out: 0,
+        canceled: 0,
+    };
+    for target in targets {
+        match target.status.as_str() {
+            TARGET_STATUS_PENDING => {
+                counts.pending += 1;
+                counts.runnable += 1;
+            }
+            TARGET_STATUS_DELIVERING => {
+                counts.delivering += 1;
+                counts.runnable += 1;
+            }
+            TARGET_STATUS_RUNNING => {
+                counts.running += 1;
+                counts.runnable += 1;
+            }
+            TARGET_STATUS_SUCCEEDED => counts.succeeded += 1,
+            TARGET_STATUS_SKIPPED => counts.skipped += 1,
+            TARGET_STATUS_REJECTED => counts.rejected_unavailable += 1,
+            TARGET_STATUS_FAILED => counts.failed += 1,
+            TARGET_STATUS_AGENT_TIMED_OUT => counts.agent_timed_out += 1,
+            TARGET_STATUS_CONTROL_TIMED_OUT => counts.control_timed_out += 1,
+            TARGET_STATUS_CANCELED => counts.canceled += 1,
+            _ => counts.failed += 1,
+        }
+    }
+    Ok(counts)
 }
 
 async fn agent_update_release_policy_allows(
@@ -384,6 +533,7 @@ async fn precomplete_capability_skips(
     Ok(precompleted_statuses)
 }
 
+#[cfg(test)]
 pub(crate) fn stale_target_message(message: &str, reason: &str) -> String {
     let trimmed = message.trim();
     if trimmed.to_ascii_lowercase().contains("stale") {
@@ -396,7 +546,7 @@ pub(crate) fn stale_target_message(message: &str, reason: &str) -> String {
 }
 
 fn target_status_needs_reason(status: &str) -> bool {
-    !matches!(status, "accepted" | "completed")
+    !matches!(status, TARGET_STATUS_RUNNING | TARGET_STATUS_SUCCEEDED)
 }
 
 fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status: &str) -> String {
@@ -404,7 +554,7 @@ fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status
         return message;
     }
     let trimmed = fallback.trim();
-    if trimmed.is_empty() || trimmed == "accepted" {
+    if trimmed.is_empty() || trimmed == TARGET_STATUS_RUNNING {
         status.to_string()
     } else {
         trimmed.to_string()
@@ -470,18 +620,20 @@ fn capability_degraded_outcome(
 ) -> Result<TargetDispatchOutcome, ApiError> {
     let status = serde_json::json!({
         "type": "capability_degraded",
-        "status": "degraded_unprivileged",
+        "status": TARGET_STATUS_SKIPPED,
         "client_id": skip.client_id,
         "command_type": crate::job_request::job_command_type_label(command),
         "reason": skip.failure.reason,
         "hint": skip.failure.hint,
     });
     Ok(TargetDispatchOutcome {
-        status: "degraded_unprivileged".to_string(),
-        exit_code: Some(1),
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
         command_version: None,
         accepted: false,
         message: skip.failure.message.to_string(),
+        received_at: None,
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
@@ -533,6 +685,7 @@ async fn reject_job(
         accepted_targets: 0,
         status: status.clone(),
     });
+    let target_counts = create_job_target_counts(state, job_id).await?;
     Ok((
         StatusCode::FORBIDDEN,
         Json(CreateJobResponse {
@@ -540,6 +693,7 @@ async fn reject_job(
             target_count,
             accepted_targets: 0,
             status,
+            target_counts,
         }),
     ))
 }
@@ -554,13 +708,40 @@ fn validate_selector_expression(selector_expression: &str) -> Result<(), ApiErro
     Ok(())
 }
 
+fn validate_agent_command_timeout_cap(
+    requested_timeout_secs: u64,
+    resolved_targets: &[String],
+    resolved_agents: &[AgentView],
+) -> Result<(), ApiError> {
+    let requested_timeout_secs = requested_timeout_secs.clamp(1, 3600);
+    let timeout_too_low = resolved_targets.iter().any(|client_id| {
+        resolved_agents
+            .iter()
+            .find(|agent| agent.id == *client_id)
+            .is_some_and(|agent| agent.capabilities.command_timeout_secs < requested_timeout_secs)
+    });
+    if timeout_too_low {
+        return Err(ApiError::conflict("agent_command_timeout_too_low"));
+    }
+    Ok(())
+}
+
+fn bounded_cancel_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(512).collect())
+}
+
 #[derive(Debug)]
 pub(crate) struct TargetDispatchOutcome {
     pub(crate) status: String,
     pub(crate) exit_code: Option<i32>,
+    #[cfg(test)]
     pub(crate) command_version: Option<u16>,
     pub(crate) accepted: bool,
     pub(crate) message: String,
+    pub(crate) received_at: Option<String>,
     pub(crate) outputs: Vec<CommandOutput>,
 }
 
@@ -569,25 +750,27 @@ pub(crate) fn target_outcome_from_gateway(
 ) -> TargetDispatchOutcome {
     if !result.accepted {
         let message =
-            target_message_from_outputs(&result.outputs, &result.message, "rejected_by_agent");
+            target_message_from_outputs(&result.outputs, &result.message, TARGET_STATUS_REJECTED);
         return TargetDispatchOutcome {
-            status: "rejected_by_agent".to_string(),
+            status: TARGET_STATUS_REJECTED.to_string(),
             exit_code: None,
+            #[cfg(test)]
             command_version: Some(result.command_version),
             accepted: false,
             message,
+            received_at: None,
             outputs: result.outputs,
         };
     }
     let final_output = result.outputs.iter().rev().find(|output| output.done);
     let exit_code = final_output.and_then(|output| output.exit_code);
     let status = if final_output.is_some_and(output_indicates_timeout) {
-        "timed_out"
+        TARGET_STATUS_AGENT_TIMED_OUT
     } else {
         match exit_code {
-            Some(0) => "completed",
-            Some(_) => "failed",
-            None => "accepted",
+            Some(0) => TARGET_STATUS_SUCCEEDED,
+            Some(_) => TARGET_STATUS_FAILED,
+            None => TARGET_STATUS_RUNNING,
         }
     };
     let message = if target_status_needs_reason(status) {
@@ -598,13 +781,16 @@ pub(crate) fn target_outcome_from_gateway(
     TargetDispatchOutcome {
         status: status.to_string(),
         exit_code,
+        #[cfg(test)]
         command_version: Some(result.command_version),
         accepted: true,
         message,
+        received_at: None,
         outputs: result.outputs,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn protocol_mismatch_reason(
     outcome: &TargetDispatchOutcome,
     expected_command_version: u16,

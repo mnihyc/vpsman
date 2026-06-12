@@ -22,11 +22,13 @@ use uuid::Uuid;
 use vpsman_common::VpsMetadata;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, AgentCapabilitySnapshot, Expression,
-    ExpressionContext, JobCommand,
+    ExpressionContext, JobCommand, SuiteConfig,
 };
 use vpsman_server_core::{
     job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
-    validate_network_apply_target, CapabilitySkip, TargetCapability,
+    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_PENDING,
+    JOB_STATUS_SKIPPED, JOB_STATUS_SUCCEEDED_WITH_SKIPS, TARGET_STATUS_PENDING,
+    TARGET_STATUS_SKIPPED,
 };
 
 mod alert_notifications;
@@ -51,12 +53,20 @@ use worker_leases::acquire_worker_lease;
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-worker", about = "Background scheduler for vpsman")]
 struct Args {
+    #[arg(
+        long,
+        env = "VPSMAN_SUITE_CONFIG",
+        default_value = "config/vpsman.toml"
+    )]
+    suite_config: PathBuf,
     #[arg(long, env = "VPSMAN_WORKER_TICK_SECS", default_value_t = 30)]
     tick_secs: u64,
     #[arg(long, env = "VPSMAN_POSTGRES_URL")]
     postgres_url: Option<String>,
     #[arg(long, env = "VPSMAN_MIGRATIONS_DIR", default_value = "migrations")]
     migrations_dir: PathBuf,
+    #[arg(long, env = "VPSMAN_WORKER_DB_MAX_CONNECTIONS", default_value_t = 8)]
+    db_max_connections: u32,
     #[arg(long, env = "VPSMAN_WORKER_ONCE", default_value_t = false)]
     once: bool,
     #[arg(long, env = "VPSMAN_WORKER_ID")]
@@ -165,6 +175,211 @@ struct Args {
     require_registered_agent_updates: bool,
 }
 
+impl Args {
+    fn apply_suite_config(&mut self, config: &SuiteConfig) -> std::result::Result<(), String> {
+        apply_opt_string(
+            &mut self.postgres_url,
+            "VPSMAN_POSTGRES_URL",
+            config.database.postgres_url.as_deref(),
+        );
+        apply_path_default(
+            &mut self.migrations_dir,
+            "VPSMAN_MIGRATIONS_DIR",
+            config.database.migrations_dir.as_deref(),
+        );
+        apply_u32_default(
+            &mut self.db_max_connections,
+            "VPSMAN_WORKER_DB_MAX_CONNECTIONS",
+            config.capacity.worker_db_pool,
+        );
+        apply_u64_default(
+            &mut self.tick_secs,
+            "VPSMAN_WORKER_TICK_SECS",
+            config.worker.tick_secs,
+        );
+        apply_bool_default(&mut self.once, "VPSMAN_WORKER_ONCE", config.worker.once);
+        apply_opt_string(
+            &mut self.worker_id,
+            "VPSMAN_WORKER_ID",
+            config.worker.worker_id.as_deref(),
+        );
+        apply_i32_default(
+            &mut self.worker_lease_secs,
+            "VPSMAN_WORKER_LEASE_SECS",
+            config.worker.worker_lease_secs,
+        );
+        apply_i64_default(
+            &mut self.agent_offline_timeout_secs,
+            "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
+            config
+                .worker
+                .agent_offline_timeout_secs
+                .or(config.timeout.agent_offline_secs),
+        );
+        apply_i64_default(
+            &mut self.notification_delivery_limit,
+            "VPSMAN_WORKER_NOTIFICATION_DELIVERY_LIMIT",
+            config.worker.notification_delivery_limit,
+        );
+        apply_i64_default(
+            &mut self.notification_retention_days,
+            "VPSMAN_WORKER_NOTIFICATION_RETENTION_DAYS",
+            config.worker.notification_retention_days,
+        );
+        apply_i64_default(
+            &mut self.notification_retention_prune_limit,
+            "VPSMAN_WORKER_NOTIFICATION_RETENTION_PRUNE_LIMIT",
+            config.worker.notification_retention_prune_limit,
+        );
+        apply_u64_default(
+            &mut self.notification_webhook_timeout_secs,
+            "VPSMAN_WORKER_NOTIFICATION_WEBHOOK_TIMEOUT_SECS",
+            config.worker.notification_webhook_timeout_secs,
+        );
+        apply_i64_default(
+            &mut self.webhook_rule_delivery_limit,
+            "VPSMAN_WORKER_WEBHOOK_RULE_DELIVERY_LIMIT",
+            config.worker.webhook_rule_delivery_limit,
+        );
+        apply_i64_default(
+            &mut self.webhook_rule_materialize_limit,
+            "VPSMAN_WORKER_WEBHOOK_RULE_MATERIALIZE_LIMIT",
+            config.worker.webhook_rule_materialize_limit,
+        );
+        apply_i64_default(
+            &mut self.webhook_rule_retention_days,
+            "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_DAYS",
+            config.worker.webhook_rule_retention_days,
+        );
+        apply_i64_default(
+            &mut self.webhook_rule_retention_prune_limit,
+            "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_PRUNE_LIMIT",
+            config.worker.webhook_rule_retention_prune_limit,
+        );
+        apply_u64_default(
+            &mut self.webhook_rule_timeout_secs,
+            "VPSMAN_WORKER_WEBHOOK_RULE_TIMEOUT_SECS",
+            config.worker.webhook_rule_timeout_secs,
+        );
+        apply_bool_default(
+            &mut self.backup_policy_prune_enabled,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_ENABLED",
+            config.worker.backup_policy_prune_enabled,
+        );
+        apply_i64_default(
+            &mut self.backup_policy_prune_limit,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_LIMIT",
+            config.worker.backup_policy_prune_limit,
+        );
+        apply_bool_default(
+            &mut self.backup_policy_prune_dry_run,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DRY_RUN",
+            config.worker.backup_policy_prune_dry_run,
+        );
+        apply_bool_default(
+            &mut self.backup_policy_prune_include_disabled,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_INCLUDE_DISABLED",
+            config.worker.backup_policy_prune_include_disabled,
+        );
+        apply_bool_default(
+            &mut self.backup_policy_prune_delete_objects,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DELETE_OBJECTS",
+            config.worker.backup_policy_prune_delete_objects,
+        );
+        apply_opt_path(
+            &mut self.backup_policy_prune_object_store_dir,
+            "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR",
+            config
+                .worker
+                .backup_policy_prune_object_store_dir
+                .as_deref()
+                .or(config.storage.object_store_dir.as_deref()),
+        );
+        apply_u64_default(
+            &mut self.schedule_command_timeout_secs,
+            "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
+            config
+                .worker
+                .schedule_command_timeout_secs
+                .or(config.timeout.worker_schedule_command_secs),
+        );
+        apply_bool_default(
+            &mut self.require_registered_agent_updates,
+            "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
+            config.worker.require_registered_agent_updates,
+        );
+        Ok(())
+    }
+}
+
+fn env_absent(name: &str) -> bool {
+    std::env::var_os(name).is_none()
+}
+
+fn apply_opt_string(target: &mut Option<String>, env_name: &str, value: Option<&str>) {
+    if target.is_none() && env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = Some(value.to_string());
+        }
+    }
+}
+
+fn apply_opt_path(target: &mut Option<PathBuf>, env_name: &str, value: Option<&str>) {
+    if target.is_none() && env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = Some(PathBuf::from(value));
+        }
+    }
+}
+
+fn apply_path_default(target: &mut PathBuf, env_name: &str, value: Option<&str>) {
+    if env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = PathBuf::from(value);
+        }
+    }
+}
+
+fn apply_u32_default(target: &mut u32, env_name: &str, value: Option<u32>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_u64_default(target: &mut u64, env_name: &str, value: Option<u64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_i64_default(target: &mut i64, env_name: &str, value: Option<i64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_i32_default(target: &mut i32, env_name: &str, value: Option<i32>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -174,7 +389,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    let suite_config =
+        SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    args.apply_suite_config(&suite_config)
+        .map_err(anyhow::Error::msg)?;
     info!(
         version = env!("CARGO_PKG_VERSION"),
         server_build_number = build_info::server_build_number(),
@@ -191,7 +410,12 @@ async fn main() -> Result<()> {
             warn!("worker tick skipped: PostgreSQL is not configured");
         }
     };
-    let pool = connect_postgres(postgres_url, &args.migrations_dir).await?;
+    let pool = connect_postgres(
+        postgres_url,
+        &args.migrations_dir,
+        args.db_max_connections.clamp(1, 256),
+    )
+    .await?;
     let worker_id = args
         .worker_id
         .clone()
@@ -437,44 +661,93 @@ async fn main() -> Result<()> {
 }
 
 async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
-    let result = sqlx::query(
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
         r#"
-        WITH updated AS (
-            UPDATE clients
-            SET status = 'offline'
-            WHERE status = 'online'
-              AND last_seen_at < now() - make_interval(secs => $1)
-            RETURNING id
-        ),
-        inserted AS (
-            INSERT INTO webhook_events (id, event_type, client_id, metadata, created_at)
-            SELECT gen_random_uuid(), 'agent.status_offline', id,
-                jsonb_build_object(
-                    'from_status', 'online',
-                    'to_status', 'offline',
-                    'reason', 'agent_offline_timeout'
-                ),
-                now()
-            FROM updated
-        )
-        SELECT count(*) AS client_count FROM updated
+        UPDATE clients
+        SET status = 'offline'
+        WHERE status = 'online'
+          AND last_seen_at < now() - make_interval(secs => $1)
+        RETURNING id
         "#,
     )
     .bind(timeout_secs as f64)
-    .fetch_one(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    let count: i64 = result.try_get("client_count")?;
-    if count > 0 {
-        let _ = sqlx::query("SELECT pg_notify('webhook_events', 'offline_detection')")
-            .execute(pool)
-            .await;
+    for row in &rows {
+        let client_id: String = row.try_get("id")?;
+        let metadata = serde_json::json!({
+            "from_status": "online",
+            "to_status": "offline",
+            "reason": "agent_offline_timeout",
+            "offline_timeout_secs": timeout_secs,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO client_status_history (
+                id, client_id, from_status, to_status, reason, metadata
+            )
+            VALUES ($1, $2, 'online', 'offline', 'agent_offline_timeout', $3)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&client_id)
+        .bind(SqlJson(&metadata))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, 'agent.status_offline', $2, NULL, $3)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("client:{client_id}"))
+        .bind(SqlJson(&metadata))
+        .execute(&mut *tx)
+        .await?;
+        let event_id = format!("vps.status_changed:{client_id}:offline:{}", Uuid::new_v4());
+        let predicates = vec![
+            "vps.status.offline".to_string(),
+            "vps.status.become_offline".to_string(),
+        ];
+        insert_webhook_event_in_tx(
+            &mut tx,
+            "vps.status_changed",
+            &event_id,
+            &predicates,
+            std::slice::from_ref(&client_id),
+            serde_json::json!({
+                "event": {
+                    "kind": "vps.status_changed",
+                    "from_status": "online",
+                    "to_status": "offline",
+                    "reason": "agent_offline_timeout",
+                },
+                "vps_status": {
+                    "client_id": client_id,
+                    "from_status": "online",
+                    "to_status": "offline",
+                    "reason": "agent_offline_timeout",
+                    "metadata": metadata,
+                }
+            }),
+        )
+        .await?;
     }
-    Ok(count as u64)
+    tx.commit().await?;
+    Ok(rows.len() as u64)
 }
 
-async fn connect_postgres(postgres_url: &str, migrations_dir: &std::path::Path) -> Result<PgPool> {
+async fn connect_postgres(
+    postgres_url: &str,
+    migrations_dir: &std::path::Path,
+    max_connections: u32,
+) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
-        .max_connections(3)
+        .max_connections(max_connections)
         .connect(postgres_url)
         .await
         .context("failed to connect to PostgreSQL")?;
@@ -1246,12 +1519,14 @@ async fn materialize_due_schedule(
         .unwrap_or("unknown");
     let job_id = Uuid::new_v4();
     let status = if targets.is_empty() {
-        "schedule_no_targets"
+        JOB_STATUS_SKIPPED
     } else if dispatch_targets.is_empty() && !capability_skips.is_empty() {
-        "degraded_unprivileged"
+        JOB_STATUS_SUCCEEDED_WITH_SKIPS
     } else {
-        "dispatching"
+        JOB_STATUS_PENDING
     };
+    let job_completed_immediately =
+        matches!(status, JOB_STATUS_SKIPPED | JOB_STATUS_SUCCEEDED_WITH_SKIPS);
     let command_type = format!(
         "scheduled_{}",
         scheduled_command_type_label(&operation, operation_type)
@@ -1276,7 +1551,7 @@ async fn materialize_due_schedule(
             timeout_secs, completed_at
         )
         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10,
-            CASE WHEN $4 = 'schedule_no_targets' THEN now() ELSE NULL END)
+            CASE WHEN $11 THEN now() ELSE NULL END)
         "#,
     )
     .bind(job_id)
@@ -1289,6 +1564,7 @@ async fn materialize_due_schedule(
     .bind(schedule.id)
     .bind(&request_fingerprint)
     .bind(timeout_secs.clamp(1, 3600) as i64)
+    .bind(job_completed_immediately)
     .execute(&mut **tx)
     .await?;
 
@@ -1296,6 +1572,11 @@ async fn materialize_due_schedule(
         let skip = capability_skips
             .iter()
             .find(|skip| skip.client_id == *client_id);
+        let target_status = if skip.is_some() {
+            TARGET_STATUS_SKIPPED
+        } else {
+            TARGET_STATUS_PENDING
+        };
         sqlx::query(
             r#"
             INSERT INTO job_targets (
@@ -1313,20 +1594,16 @@ async fn materialize_due_schedule(
                 $3,
                 $4,
                 $5,
-                CASE WHEN $3 = 'degraded_unprivileged' THEN now() ELSE NULL END,
-                CASE WHEN $3 = 'degraded_unprivileged' THEN now() ELSE NULL END
+                CASE WHEN $3 = 'skipped' THEN now() ELSE NULL END,
+                CASE WHEN $3 = 'skipped' THEN now() ELSE NULL END
             )
             "#,
         )
         .bind(job_id)
         .bind(client_id)
-        .bind(if skip.is_some() {
-            "degraded_unprivileged"
-        } else {
-            "queued"
-        })
+        .bind(target_status)
         .bind(skip.map(|skip| skip.failure.message))
-        .bind(skip.map(|_| 1_i32))
+        .bind(skip.map(|_| 0_i32))
         .execute(&mut **tx)
         .await?;
     }
@@ -1346,7 +1623,7 @@ async fn materialize_due_schedule(
     .bind(if targets.is_empty() {
         "schedule.due_no_targets"
     } else {
-        "schedule.due_dispatching"
+        "schedule.due_materialized"
     })
     .bind(format!("schedule:{}", schedule.id))
     .bind(&command_hash)
@@ -1364,8 +1641,30 @@ async fn materialize_due_schedule(
         "max_failures": schedule.max_failures,
         "failure_count_before_run": schedule.failure_count,
         "last_error_before_run": &schedule.last_error,
-        "reason": "saved schedule intent was previously privilege-unlocked; worker materialized a durable queued job from the fixed target snapshot",
+        "reason": "saved schedule intent was previously privilege-unlocked; worker materialized a durable job from the fixed target snapshot",
     }))
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE schedules
+        SET
+            last_job_id = $2,
+            last_job_status = $3,
+            last_job_completed_at = CASE WHEN $4 THEN now() ELSE NULL END,
+            last_job_error = CASE
+                WHEN $3 IN ('succeeded', 'succeeded_with_skips', 'skipped') THEN NULL
+                ELSE $3
+            END,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(schedule.id)
+    .bind(job_id)
+    .bind(status)
+    .bind(job_completed_immediately)
     .execute(&mut **tx)
     .await?;
 
@@ -1382,6 +1681,17 @@ async fn materialize_due_schedule(
         },
     )
     .await?;
+    if job_completed_immediately {
+        record_schedule_job_finished_webhook_event(
+            tx,
+            schedule,
+            job_id,
+            &command_type,
+            status,
+            &targets,
+        )
+        .await?;
+    }
 
     Ok(!targets.is_empty())
 }
@@ -1472,7 +1782,7 @@ async fn record_schedule_capability_skip_outputs(
     for skip in skips {
         let status = serde_json::json!({
             "type": "capability_degraded",
-            "status": "degraded_unprivileged",
+            "status": TARGET_STATUS_SKIPPED,
             "client_id": skip.client_id,
             "command_type": job_command_type_label(command),
             "reason": skip.failure.reason,
@@ -1494,7 +1804,7 @@ async fn record_schedule_capability_skip_outputs(
                 exit_code,
                 done
             )
-            VALUES ($1, $2, 0, 'status', $3, 'inline', NULL, $4, $5, 1, TRUE)
+            VALUES ($1, $2, 0, 'status', $3, 'inline', NULL, $4, $5, 0, TRUE)
             ON CONFLICT (job_id, client_id, seq)
             DO UPDATE SET
                 stream = EXCLUDED.stream,
@@ -1526,8 +1836,8 @@ async fn record_schedule_capability_skip_outputs(
         .bind(format!("client:{}", skip.client_id))
         .bind(serde_json::json!({
             "job_id": job_id,
-            "status": "degraded_unprivileged",
-            "exit_code": 1,
+            "status": TARGET_STATUS_SKIPPED,
+            "exit_code": 0,
             "accepted": false,
             "message": skip.failure.message,
         }))
@@ -1578,6 +1888,58 @@ async fn record_schedule_due_webhook_event(
                 "type": input.command_type,
                 "source_schedule_id": schedule.id,
                 "target_count": input.targets.len(),
+            },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn record_schedule_job_finished_webhook_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule: &DueSchedule,
+    job_id: Uuid,
+    command_type: &str,
+    job_status: &str,
+    targets: &[String],
+) -> Result<()> {
+    let event_id = format!("schedule:{}:job:{}:finished", schedule.id, job_id);
+    let mut predicates = vec![
+        "schedule.job_finished".to_string(),
+        format!("schedule.id:{}", schedule.id),
+        format!("schedule.name:{}", schedule.name),
+        format!("job.status:{job_status}"),
+        format!("job.status.become_{job_status}"),
+        format!("job.type:{command_type}"),
+    ];
+    predicates.sort();
+    predicates.dedup();
+    insert_webhook_event_in_tx(
+        tx,
+        "schedule.job_finished",
+        &event_id,
+        &predicates,
+        targets,
+        serde_json::json!({
+            "event": {
+                "kind": "schedule.job_finished",
+                "id": event_id,
+                "predicates": &predicates,
+            },
+            "schedule": {
+                "id": schedule.id,
+                "name": &schedule.name,
+                "last_job_id": job_id,
+                "last_job_status": job_status,
+                "last_job_error": null,
+            },
+            "job": {
+                "id": job_id,
+                "status": job_status,
+                "type": command_type,
+                "source_schedule_id": schedule.id,
+                "target_count": targets.len(),
+                "target_ids": targets,
             },
         }),
     )

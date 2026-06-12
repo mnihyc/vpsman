@@ -5,6 +5,12 @@ export async function activate(locator: Locator) {
 }
 
 export async function openConsoleSubpage(page: Page, view: string, subpage: string) {
+  const mobilePageSelector = page.getByRole("combobox", { name: "Console page" });
+  if (await mobilePageSelector.isVisible()) {
+    await mobilePageSelector.selectOption({ label: `${view} / ${subpage}` });
+    return;
+  }
+
   const nav = page.getByRole("navigation", { name: "Primary console navigation" });
   await activate(nav.getByRole("button", { name: view, exact: true }));
   const subpageGroup = nav.getByLabel(`${view} sections`);

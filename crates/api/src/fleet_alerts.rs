@@ -557,7 +557,7 @@ async fn append_job_alerts(
 ) -> Result<()> {
     for job in jobs {
         if failed_status(&job.status) {
-            let severity = if job.status == "partially_completed" {
+            let severity = if job.status == "partial_success" {
                 "warning"
             } else {
                 "critical"
@@ -692,12 +692,11 @@ fn failed_status(status: &str) -> bool {
     matches!(
         status,
         "failed"
-            | "timed_out"
-            | "dispatch_failed"
-            | "partially_completed"
-            | "degraded_unprivileged"
-            | "rejected_authorization_required"
-            | "schedule_no_targets"
+            | "agent_timed_out"
+            | "control_timed_out"
+            | "partial_success"
+            | "rejected"
+            | "canceled"
     ) || status.contains("failed")
         || status.contains("rejected")
         || status.contains("timeout")

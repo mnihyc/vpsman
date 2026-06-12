@@ -415,7 +415,15 @@ fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "completed"
+        "succeeded"
+            | "succeeded_with_skips"
+            | "partial_success"
+            | "agent_timed_out"
+            | "control_timed_out"
+            | "skipped"
+            | "rejected"
+            | "canceled"
+            | "completed"
             | "partially_completed"
             | "failed"
             | "timed_out"
@@ -683,6 +691,14 @@ mod tests {
     #[test]
     fn classifies_terminal_follow_statuses() {
         for status in [
+            "succeeded",
+            "succeeded_with_skips",
+            "partial_success",
+            "agent_timed_out",
+            "control_timed_out",
+            "skipped",
+            "rejected",
+            "canceled",
             "completed",
             "partially_completed",
             "failed",
@@ -696,7 +712,7 @@ mod tests {
         ] {
             assert!(is_terminal_job_status(status));
         }
-        for status in ["dispatching", "running"] {
+        for status in ["dispatching", "pending", "running"] {
             assert!(!is_terminal_job_status(status));
         }
     }

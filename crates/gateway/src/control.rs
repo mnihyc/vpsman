@@ -9,12 +9,13 @@ use tokio::{
 };
 use tracing::{info, warn};
 use vpsman_common::{
-    verify_privilege_assertion, GatewayCommandDispatch, GatewayCommandDispatchResult,
-    GatewayPrivilegeVerification, GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
+    verify_privilege_assertion, GatewayCommandCancel, GatewayCommandCancelResult,
+    GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
+    GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
 };
 
 use crate::{
-    state::{GatewayCommand, GatewayState},
+    state::{GatewayCancelCommand, GatewayCommand, GatewaySessionMessage, GatewayState},
     Args,
 };
 
@@ -52,7 +53,10 @@ async fn handle_control_connection(
     if request.method != "POST"
         || !matches!(
             request.path.as_str(),
-            "/internal/v1/gateway/command" | "/internal/v1/gateway/privilege/verify"
+            "/internal/v1/gateway/command"
+                | "/internal/v1/gateway/command/cancel"
+                | "/internal/v1/gateway/metrics"
+                | "/internal/v1/gateway/privilege/verify"
         )
     {
         write_http_json(
@@ -90,6 +94,25 @@ async fn handle_control_connection(
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
+    } else if request.path == "/internal/v1/gateway/command/cancel" {
+        let cancel: GatewayCommandCancel = match serde_json::from_slice(&request.body) {
+            Ok(cancel) => cancel,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": format!("invalid_command_cancel:{error}")}),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match cancel_gateway_command(&state, cancel).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_gateway_error(&mut stream, error).await?,
+        }
+    } else if request.path == "/internal/v1/gateway/metrics" {
+        write_http_json(&mut stream, "200 OK", &state.forward_metrics.snapshot()).await?;
     } else {
         let verification: GatewayPrivilegeVerification = match serde_json::from_slice(&request.body)
         {
@@ -177,20 +200,14 @@ async fn dispatch_gateway_command(
         {
             let (response_tx, response_rx) = oneshot::channel();
             sender
-                .send(GatewayCommand {
+                .send(GatewaySessionMessage::Command(GatewayCommand {
                     request: dispatch.request.clone(),
                     response: response_tx,
-                })
-                .await
+                }))
                 .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
-            let wait_secs = dispatch
-                .request
-                .timeout_secs
-                .clamp(1, 3600)
-                .saturating_add(30);
-            return time::timeout(Duration::from_secs(wait_secs), response_rx)
+            return time::timeout(Duration::from_secs(30), response_rx)
                 .await
-                .context("gateway command timed out")?
+                .context("gateway command ack timed out")?
                 .context("gateway command response dropped");
         }
         match grace_deadline {
@@ -203,6 +220,39 @@ async fn dispatch_gateway_command(
             }
         }
     }
+}
+
+async fn cancel_gateway_command(
+    state: &GatewayState,
+    cancel: GatewayCommandCancel,
+) -> Result<GatewayCommandCancelResult> {
+    let Some(sender) = state
+        .sessions
+        .read()
+        .await
+        .get(&cancel.client_id)
+        .map(|session| session.sender.clone())
+    else {
+        return Ok(GatewayCommandCancelResult {
+            client_id: cancel.client_id,
+            job_id: cancel.request.job_id,
+            acked: false,
+            accepted: false,
+            applied: false,
+            message: "agent_not_online".to_string(),
+        });
+    };
+    let (response_tx, response_rx) = oneshot::channel();
+    sender
+        .send(GatewaySessionMessage::Cancel(GatewayCancelCommand {
+            request: cancel.request.clone(),
+            response: response_tx,
+        }))
+        .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
+    time::timeout(Duration::from_secs(30), response_rx)
+        .await
+        .context("gateway command cancel timed out")?
+        .context("gateway command cancel response dropped")
 }
 
 async fn write_gateway_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {

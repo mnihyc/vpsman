@@ -521,7 +521,7 @@ async function waitForTransferStatus(
     }
     const job = await request.loadJob(jobId);
     if (isTerminalJobStatus(job.status)) {
-      if (job.status !== "completed") {
+      if (job.status !== "succeeded") {
         throw new Error(`${expectedType} job ${jobId} ended ${job.status}`);
       }
       if (statuses.size !== expectedStatusCount) {
@@ -666,8 +666,12 @@ function normalizeTransferAbsolutePath(path: string, label: string): string {
 
 function isTerminalJobStatus(status: string): boolean {
   return [
+    "agent_timed_out",
+    "canceled",
     "completed",
+    "control_timed_out",
     "partially_completed",
+    "partial_success",
     "failed",
     "timed_out",
     "dispatch_failed",
@@ -676,6 +680,10 @@ function isTerminalJobStatus(status: string): boolean {
     "rejected_authorization_required",
     "schedule_no_targets",
     "rejected_by_agent",
+    "rejected",
+    "skipped",
+    "succeeded",
+    "succeeded_with_skips",
   ].includes(status);
 }
 

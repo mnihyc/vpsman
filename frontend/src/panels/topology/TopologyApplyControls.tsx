@@ -2,6 +2,7 @@ import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
 import {
   acceptedDispatchTargetCount,
+  bulkProgressTimeoutMs,
   formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -89,7 +90,7 @@ export function TopologyApplyControls({
     (visibleJobProgress
       ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
-        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
+        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : privilegeMaterial
         ? "Ready"
         : "Locked");
@@ -242,6 +243,7 @@ export function TopologyApplyControls({
         acceptedTargets: job.target_count,
         onProgress: setJobProgress,
         targets,
+        timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });
       setLastJobProgress(result.progress);
     } finally {

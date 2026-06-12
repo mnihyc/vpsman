@@ -439,6 +439,7 @@ impl Repository {
                             "artifact_size_bytes": row.artifact_size_bytes,
                             "exit_code": row.exit_code,
                             "done": row.done,
+                            "received_at": &row.received_at,
                             "created_at": &row.created_at,
                         })
                     })
@@ -461,6 +462,7 @@ impl Repository {
                         data_size_bytes,
                         exit_code,
                         done,
+                        received_at::text AS received_at,
                         created_at::text AS created_at
                     FROM job_outputs
                     WHERE ($1::TEXT IS NULL OR client_id = $1)
@@ -489,6 +491,7 @@ impl Repository {
                             "artifact_size_bytes": row.try_get::<Option<i64>, _>("data_size_bytes")?,
                             "exit_code": row.try_get::<Option<i32>, _>("exit_code")?,
                             "done": row.try_get::<bool, _>("done")?,
+                            "received_at": row.try_get::<Option<String>, _>("received_at")?,
                             "created_at": row.try_get::<String, _>("created_at")?,
                         }))
                     })

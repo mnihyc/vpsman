@@ -25,6 +25,7 @@ artifact_url="https://localhost:$artifact_port/vpsman-agent-new"
 container_name="vpsman-live-agent-update-$(date +%s%N)"
 internal_token="agent-update-internal-$(date +%s%N)"
 postgres_url="postgres://vpsman:vpsman@127.0.0.1:$pg_port/vpsman"
+client_id="agent-update-smoke-$(date +%s)"
 super_password="agent-update-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -164,10 +165,12 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$label-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
     VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+    VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="${VPSMAN_SMOKE_API_RUST_LOG:-vpsman_api=warn}" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -243,7 +246,7 @@ wait_job_terminal() {
     job_json="$(api_get "/api/v1/jobs/$job_id")"
     status="$(jq -r '.status' <<<"$job_json")"
     case "$status" in
-      completed|partially_completed|failed|timed_out|dispatch_failed|degraded_unprivileged|rejected_authorization_required)
+      succeeded|succeeded_with_skips|partial_success|failed|agent_timed_out|control_timed_out|skipped|rejected|canceled)
         printf '%s' "$job_json"
         return
         ;;
@@ -274,10 +277,10 @@ assert_single_target_completed() {
   job_json="$(wait_job_terminal "$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   jq -e --arg command_type "$command_type" '
-    .status == "completed" and .command_type == $command_type and .target_count == 1
+    .status == "succeeded" and .command_type == $command_type and .target_count == 1
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
 }
 
@@ -310,6 +313,7 @@ auth_json="$(curl -fsS \
   -d '{"username":"agent-update-smoke","password":"agent-update-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "agent-update-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
@@ -403,7 +407,7 @@ jq -e --arg sha "$artifact_sha" '
   .type == "agent_update"
   and .status == "staged"
   and .sha256_hex == $sha
-  and .signature.status == "verified"
+  and (.signature == "verified" or .signature.status == "verified")
   and .activation == "manual_restart_required"
   and (.staged_path | endswith(".next"))
   and (.rollback_path | endswith(".rollback"))
@@ -499,9 +503,9 @@ api_get "/api/v1/audit?limit=100" | jq -e \
 stop_api
 start_api "restart"
 api_get "/api/v1/auth/me" | jq -e '.username == "agent-update-smoke"' >/dev/null
-api_get "/api/v1/jobs/$stage_job_id" | jq -e '.status == "completed"' >/dev/null
-api_get "/api/v1/jobs/$activate_job_id" | jq -e '.status == "completed"' >/dev/null
-api_get "/api/v1/jobs/$rollback_job_id" | jq -e '.status == "completed"' >/dev/null
+api_get "/api/v1/jobs/$stage_job_id" | jq -e '.status == "succeeded"' >/dev/null
+api_get "/api/v1/jobs/$activate_job_id" | jq -e '.status == "succeeded"' >/dev/null
+api_get "/api/v1/jobs/$rollback_job_id" | jq -e '.status == "succeeded"' >/dev/null
 
 if grep -F "agent update heartbeat timeout reconciliation failed" "$SMOKE_TMPDIR"/api-*.log >/dev/null 2>&1; then
   smoke_dump_logs "agent update heartbeat timeout reconciler failed during live smoke" \

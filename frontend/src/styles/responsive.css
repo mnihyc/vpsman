@@ -281,6 +281,7 @@
   }
 
   .gridSearch {
+    flex: 0 0 auto;
     width: 100%;
     max-width: none;
     min-width: 0;

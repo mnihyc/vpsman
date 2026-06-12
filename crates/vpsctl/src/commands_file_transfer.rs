@@ -585,7 +585,7 @@ pub(crate) fn wait_for_transfer_status(
             serde_json::from_str::<JobRecord>(&job_json).context("failed to parse transfer job")?;
         if is_terminal_job_status(&job.status) {
             anyhow::ensure!(
-                job.status == "completed",
+                job.status == "succeeded",
                 "{expected_status_type} job {job_id} ended with status {}; outputs: {}",
                 job.status,
                 summarize_outputs(&outputs)
@@ -876,7 +876,15 @@ pub(crate) fn push_event(events: &mut String, event: serde_json::Value) -> Resul
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "completed"
+        "succeeded"
+            | "succeeded_with_skips"
+            | "partial_success"
+            | "agent_timed_out"
+            | "control_timed_out"
+            | "skipped"
+            | "rejected"
+            | "canceled"
+            | "completed"
             | "partially_completed"
             | "failed"
             | "timed_out"

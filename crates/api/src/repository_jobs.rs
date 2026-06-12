@@ -5,7 +5,13 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::JobCommand;
-use vpsman_server_core::{target_status_counts_as_accepted, target_status_is_pending};
+use vpsman_server_core::{
+    target_status_counts_as_accepted, target_status_is_pending, JOB_STATUS_PENDING,
+    JOB_STATUS_SKIPPED, JOB_STATUS_SUCCEEDED, JOB_STATUS_SUCCEEDED_WITH_SKIPS,
+    TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_CANCELED, TARGET_STATUS_CONTROL_TIMED_OUT,
+    TARGET_STATUS_DELIVERING, TARGET_STATUS_FAILED, TARGET_STATUS_PENDING, TARGET_STATUS_REJECTED,
+    TARGET_STATUS_RUNNING, TARGET_STATUS_SUCCEEDED,
+};
 
 pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
 
@@ -18,8 +24,23 @@ use crate::{unix_now, TargetDispatchOutcome};
 fn agent_update_activation_failure_status(status: &str) -> bool {
     matches!(
         status,
-        "failed" | "dispatch_failed" | "rejected_by_agent" | "timed_out"
+        TARGET_STATUS_FAILED
+            | TARGET_STATUS_REJECTED
+            | TARGET_STATUS_AGENT_TIMED_OUT
+            | TARGET_STATUS_CONTROL_TIMED_OUT
+            | TARGET_STATUS_CANCELED
     )
+}
+
+fn schedule_job_outcome_error(status: &str) -> Option<&str> {
+    if matches!(
+        status,
+        JOB_STATUS_SUCCEEDED | JOB_STATUS_SUCCEEDED_WITH_SKIPS | JOB_STATUS_SKIPPED
+    ) {
+        None
+    } else {
+        Some(status)
+    }
 }
 
 fn compare_text_or_number(left: &str, right: &str) -> Ordering {
@@ -149,16 +170,47 @@ struct JobCreatedWebhookEvent<'a> {
     operation: Option<&'a JobCommand>,
 }
 
+struct ScheduleJobOutcome {
+    schedule_id: Uuid,
+    schedule_name: String,
+    job_id: Uuid,
+    status: String,
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedJobTarget {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) actor_id: Option<Uuid>,
+    #[expect(
+        dead_code,
+        reason = "retained for dispatch diagnostics and event context"
+    )]
     pub(crate) command_type: String,
     pub(crate) payload_hash: String,
     pub(crate) operation: JobCommand,
     pub(crate) source_schedule_id: Option<Uuid>,
     pub(crate) timeout_secs: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeadlineExpiredJobTarget {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct JobCancelPlan {
+    pub(crate) cancel_targets: Vec<String>,
+    pub(crate) pending_canceled: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct JobCompletionContext {
+    pub(crate) actor_id: Option<Uuid>,
+    pub(crate) payload_hash: String,
+    pub(crate) operation: JobCommand,
 }
 
 fn job_webhook_predicates(command_type: &str, status: &str, include_created: bool) -> Vec<String> {
@@ -223,6 +275,56 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn get_job_completion_context(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<JobCompletionContext>> {
+        match self {
+            Self::Memory(memory) => {
+                let Some(job) = memory
+                    .jobs
+                    .read()
+                    .await
+                    .iter()
+                    .find(|job| job.id == job_id)
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                let Some(operation) = memory.job_operations.read().await.get(&job_id).cloned()
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(JobCompletionContext {
+                    actor_id: job.actor_id,
+                    payload_hash: job.payload_hash,
+                    operation,
+                }))
+            }
+            Self::Postgres(pool) => {
+                let Some(row) = sqlx::query(
+                    r#"
+                    SELECT actor_id, payload_hash, operation
+                    FROM jobs
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                Ok(Some(JobCompletionContext {
+                    actor_id: row.try_get("actor_id")?,
+                    payload_hash: row.try_get("payload_hash")?,
+                    operation: operation.0,
+                }))
+            }
+        }
+    }
+
     pub(crate) async fn get_job_request_fingerprint(&self, job_id: Uuid) -> Result<Option<String>> {
         match self {
             Self::Memory(memory) => Ok(memory
@@ -262,7 +364,7 @@ impl Repository {
                     SELECT count(*)
                     FROM job_targets
                     WHERE job_id = $1
-                      AND status IN ('accepted', 'completed', 'failed', 'timed_out')
+                      AND status IN ('running', 'succeeded', 'failed', 'agent_timed_out', 'control_timed_out', 'canceled')
                     "#,
                 )
                 .bind(job_id)
@@ -602,7 +704,6 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
-            "reconnect_policy": request.reconnect_policy,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
             "operator_role": operator.operator.role,
@@ -664,9 +765,9 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, request_fingerprint,
-                        timeout_secs, reconnect_policy, completed_at
+                        timeout_secs, completed_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb), now())
+	                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
                     "#,
                 )
                 .bind(job_id)
@@ -679,7 +780,6 @@ impl Repository {
                 .bind(operation.clone().map(sqlx::types::Json))
                 .bind(request_fingerprint)
                 .bind(request.timeout_secs.unwrap_or(30) as i64)
-                .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
                 .await?;
                 for client_id in &resolved_targets {
@@ -791,7 +891,6 @@ impl Repository {
             "confirmed": request.confirmed,
             "privileged": request.privileged,
             "force_unprivileged": request.force_unprivileged,
-            "reconnect_policy": request.reconnect_policy,
             "source_schedule_id": source_schedule_id,
             "operator_id": operator.operator.id,
             "operator_username": operator.operator.username,
@@ -809,7 +908,7 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     command_type: command_type.clone(),
                     privileged: request.privileged,
-                    status: "dispatching".to_string(),
+                    status: JOB_STATUS_PENDING.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
                     created_at: created_at.clone(),
@@ -836,7 +935,7 @@ impl Repository {
                             .map(|client_id| JobTargetView {
                                 job_id,
                                 client_id,
-                                status: "queued".to_string(),
+                                status: TARGET_STATUS_PENDING.to_string(),
                                 message: None,
                                 exit_code: None,
                                 started_at: None,
@@ -860,23 +959,22 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, source_schedule_id, request_fingerprint,
-                        timeout_secs, reconnect_policy
+                        timeout_secs
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, '{"duplicate_delivery":"ignore_completed","resume_outputs":true}'::jsonb))
+	                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     "#,
                 )
                 .bind(job_id)
                 .bind(operator.operator.id)
                 .bind(&command_type)
                 .bind(request.privileged)
-                .bind("dispatching")
+                    .bind(JOB_STATUS_PENDING)
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
                 .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
                 .bind(request_fingerprint)
                 .bind(request.timeout_secs.unwrap_or(30) as i64)
-                .bind(request.reconnect_policy.as_ref().map(sqlx::types::Json))
                 .execute(&mut *tx)
                 .await?;
                 for client_id in resolved_targets {
@@ -890,7 +988,7 @@ impl Repository {
                     )
                     .bind(job_id)
                     .bind(client_id)
-                    .bind("queued")
+                    .bind(TARGET_STATUS_PENDING)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -916,7 +1014,7 @@ impl Repository {
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
             command_type: &command_type,
-            status: "dispatching",
+            status: JOB_STATUS_PENDING,
             privileged: request.privileged,
             command_hash,
             resolved_targets,
@@ -940,10 +1038,9 @@ impl Repository {
                 let jobs = memory.jobs.read().await.clone();
                 let mut targets = memory.job_targets.write().await;
                 let mut claimed = Vec::new();
-                for target in targets
-                    .iter_mut()
-                    .filter(|target| target.completed_at.is_none() && target.status == "queued")
-                {
+                for target in targets.iter_mut().filter(|target| {
+                    target.completed_at.is_none() && target.status == TARGET_STATUS_PENDING
+                }) {
                     if claimed.len() >= limit.clamp(1, 100) as usize {
                         break;
                     }
@@ -953,7 +1050,7 @@ impl Repository {
                     let Some(operation) = operations.get(&target.job_id).cloned() else {
                         continue;
                     };
-                    target.status = "dispatching".to_string();
+                    target.status = TARGET_STATUS_DELIVERING.to_string();
                     target.started_at.get_or_insert_with(|| now.clone());
                     claimed.push(ClaimedJobTarget {
                         job_id: target.job_id,
@@ -983,26 +1080,32 @@ impl Repository {
                             job.timeout_secs
                         FROM job_targets target
                         JOIN jobs job ON job.id = target.job_id
-                        WHERE target.completed_at IS NULL
-                          AND target.status IN ('queued', 'dispatching')
-                          AND job.completed_at IS NULL
-                          AND job.status IN ('queued', 'dispatching', 'running')
-                          AND (
-                            target.status = 'queued'
-                            OR target.dispatch_lease_until IS NULL
-                            OR target.dispatch_lease_until < now()
-                          )
+	                        WHERE target.completed_at IS NULL
+                              AND target.cancel_requested_at IS NULL
+	                          AND target.status IN ('pending', 'delivering')
+	                          AND job.completed_at IS NULL
+	                          AND job.status IN ('pending', 'running')
+                              AND (
+                                target.deadline_at IS NULL
+                                OR target.deadline_at > now()
+                              )
+	                          AND (
+	                            target.status = 'pending'
+	                            OR target.dispatch_lease_until IS NULL
+	                            OR target.dispatch_lease_until < now()
+	                          )
                         ORDER BY job.created_at ASC, target.client_id ASC
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE job_targets target
                     SET
-                        status = 'dispatching',
-                        started_at = COALESCE(target.started_at, now()),
-                        dispatch_attempts = target.dispatch_attempts + 1,
-                        dispatch_lease_until = now() + make_interval(secs => $2::integer),
-                        last_dispatch_error = NULL
+	                        status = 'delivering',
+	                        started_at = COALESCE(target.started_at, now()),
+	                        dispatch_attempts = target.dispatch_attempts + 1,
+	                        dispatch_lease_until = now() + make_interval(secs => $2::integer),
+                            deadline_at = COALESCE(target.deadline_at, now() + make_interval(secs => due.timeout_secs::integer)),
+	                        last_dispatch_error = NULL
                     FROM due
                     WHERE target.job_id = due.job_id
                       AND target.client_id = due.client_id
@@ -1066,6 +1169,363 @@ impl Repository {
         Ok(Some((status.to_string(), accepted_targets)))
     }
 
+    pub(crate) async fn mark_job_target_running(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                if let Some(job) = memory
+                    .jobs
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|job| job.id == job_id)
+                {
+                    job.status = "running".to_string();
+                }
+                if let Some(target) = memory
+                    .job_targets
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|target| target.job_id == job_id && target.client_id == client_id)
+                {
+                    target.status = TARGET_STATUS_RUNNING.to_string();
+                    target.message = Some(message.to_string());
+                    target
+                        .started_at
+                        .get_or_insert_with(|| unix_now().to_string());
+                }
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'running',
+                        message = $3,
+                        delivered_at = COALESCE(delivered_at, now()),
+                        acked_at = COALESCE(acked_at, now()),
+                        started_at = COALESCE(started_at, now()),
+                        dispatch_lease_until = NULL,
+                        last_dispatch_error = NULL
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(message)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE jobs
+                    SET status = 'running'
+                    WHERE id = $1
+                      AND completed_at IS NULL
+                      AND status = 'pending'
+                    "#,
+                )
+                .bind(job_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_job_target_delivery_error(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(_) => {}
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET last_dispatch_error = $3
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(message)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn expire_control_timed_out_targets(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<DeadlineExpiredJobTarget>> {
+        match self {
+            Self::Memory(_) => Ok(Vec::new()),
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH expired AS (
+                        SELECT job_id, client_id
+                        FROM job_targets
+                        WHERE completed_at IS NULL
+                          AND status IN ('delivering', 'running')
+                          AND deadline_at IS NOT NULL
+                          AND deadline_at <= now()
+                        ORDER BY deadline_at ASC, job_id, client_id
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE job_targets target
+                    SET status = 'control_timed_out',
+                        message = COALESCE(target.last_dispatch_error, 'control deadline elapsed before final command output'),
+                        completed_at = now(),
+                        dispatch_lease_until = NULL,
+                        cancel_requested_at = COALESCE(cancel_requested_at, now())
+                    FROM expired
+                    WHERE target.job_id = expired.job_id
+                      AND target.client_id = expired.client_id
+                    RETURNING target.job_id, target.client_id
+                    "#,
+                )
+                .bind(limit.clamp(1, 500))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(DeadlineExpiredJobTarget {
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn request_job_cancel(
+        &self,
+        job_id: Uuid,
+        actor_id: Uuid,
+        reason: Option<&str>,
+    ) -> Result<JobCancelPlan> {
+        let message = reason
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("operator_cancel_requested");
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let mut pending_canceled = 0_usize;
+                let mut cancel_targets = Vec::new();
+                for target in memory
+                    .job_targets
+                    .write()
+                    .await
+                    .iter_mut()
+                    .filter(|target| target.job_id == job_id && target.completed_at.is_none())
+                {
+                    match target.status.as_str() {
+                        TARGET_STATUS_PENDING => {
+                            target.status = TARGET_STATUS_CANCELED.to_string();
+                            target.message = Some(message.to_string());
+                            target.completed_at = Some(now.clone());
+                            pending_canceled += 1;
+                        }
+                        TARGET_STATUS_DELIVERING | TARGET_STATUS_RUNNING => {
+                            cancel_targets.push(target.client_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor_id),
+                    action: "job.cancel_requested".to_string(),
+                    target: format!("job:{job_id}"),
+                    command_hash: None,
+                    metadata: json!({
+                        "job_id": job_id,
+                        "reason": message,
+                        "pending_canceled": pending_canceled,
+                        "cancel_targets": cancel_targets,
+                    }),
+                    created_at: now,
+                });
+                Ok(JobCancelPlan {
+                    cancel_targets,
+                    pending_canceled,
+                })
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let pending_rows = sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET
+                        status = 'canceled',
+                        message = $2,
+                        completed_at = now(),
+                        dispatch_lease_until = NULL,
+                        cancel_requested_at = COALESCE(cancel_requested_at, now())
+                    WHERE job_id = $1
+                      AND completed_at IS NULL
+                      AND status = 'pending'
+                    RETURNING client_id
+                    "#,
+                )
+                .bind(job_id)
+                .bind(message)
+                .fetch_all(&mut *tx)
+                .await?;
+                let active_rows = sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET
+                        cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                        message = COALESCE(message, $2)
+                    WHERE job_id = $1
+                      AND completed_at IS NULL
+                      AND status IN ('delivering', 'running')
+                    RETURNING client_id
+                    "#,
+                )
+                .bind(job_id)
+                .bind(message)
+                .fetch_all(&mut *tx)
+                .await?;
+                let pending_canceled = pending_rows.len();
+                let cancel_targets = active_rows
+                    .into_iter()
+                    .map(|row| row.try_get("client_id").map_err(Into::into))
+                    .collect::<Result<Vec<String>>>()?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, 'job.cancel_requested', $3, NULL, $4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(actor_id)
+                .bind(format!("job:{job_id}"))
+                .bind(json!({
+                    "job_id": job_id,
+                    "reason": message,
+                    "pending_canceled": pending_canceled,
+                    "cancel_targets": &cancel_targets,
+                }))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(JobCancelPlan {
+                    cancel_targets,
+                    pending_canceled,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn record_job_target_cancel_result(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        _accepted: bool,
+        acked: bool,
+        applied: bool,
+        message: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                if applied {
+                    let now = unix_now().to_string();
+                    if let Some(target) =
+                        memory.job_targets.write().await.iter_mut().find(|target| {
+                            target.job_id == job_id
+                                && target.client_id == client_id
+                                && target.completed_at.is_none()
+                        })
+                    {
+                        target.status = TARGET_STATUS_CANCELED.to_string();
+                        target.message = Some(message.to_string());
+                        target.completed_at = Some(now);
+                    }
+                }
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET
+                        cancel_sent_at = COALESCE(cancel_sent_at, now()),
+                        cancel_acked_at = CASE WHEN $3 THEN COALESCE(cancel_acked_at, now()) ELSE cancel_acked_at END,
+                        status = CASE WHEN $4 AND completed_at IS NULL THEN 'canceled' ELSE status END,
+                        completed_at = CASE WHEN $4 AND completed_at IS NULL THEN now() ELSE completed_at END,
+                        dispatch_lease_until = CASE WHEN $4 AND completed_at IS NULL THEN NULL ELSE dispatch_lease_until END,
+                        message = CASE WHEN $4 AND completed_at IS NULL THEN $5 ELSE COALESCE(message, $5) END,
+                        last_dispatch_error = CASE WHEN $4 THEN NULL ELSE $5 END
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND (
+                        completed_at IS NULL
+                        OR status IN ('control_timed_out', 'canceled')
+                      )
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(acked)
+                .bind(applied)
+                .bind(message)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_job_target_cancel_sent(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(_) => {}
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET cancel_sent_at = COALESCE(cancel_sent_at, now())
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND (
+                        completed_at IS NULL
+                        OR status IN ('control_timed_out', 'canceled')
+                      )
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn update_job_target_result(
         &self,
         job_id: Uuid,
@@ -1102,10 +1562,11 @@ impl Repository {
                         "exit_code": outcome.exit_code,
                         "accepted": outcome.accepted,
                         "message": outcome.message,
+                        "received_at": outcome.received_at,
                     }),
                     created_at: completed_at,
                 });
-                let update_lifecycle_operation = if outcome.status == "completed"
+                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_SUCCEEDED
                     || agent_update_activation_failure_status(&outcome.status)
                 {
                     match memory.job_operations.read().await.get(&job_id).cloned() {
@@ -1121,7 +1582,7 @@ impl Repository {
                 match update_lifecycle_operation {
                     Some(JobCommand::AgentUpdateActivate {
                         staged_sha256_hex, ..
-                    }) if outcome.status == "completed" => {
+                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
                         self.record_agent_update_activation_completed(
                             client_id,
                             job_id,
@@ -1144,7 +1605,7 @@ impl Repository {
                     }
                     Some(JobCommand::AgentUpdateRollback {
                         rollback_sha256_hex,
-                    }) if outcome.status == "completed" => {
+                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
                         self.record_agent_update_rollback_completed(
                             client_id,
                             job_id,
@@ -1169,7 +1630,7 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
-                sqlx::query(
+                let updated = sqlx::query(
                     r#"
                     UPDATE job_targets
                     SET status = $3,
@@ -1177,9 +1638,19 @@ impl Repository {
                         exit_code = $5,
                         started_at = COALESCE(started_at, now()),
                         completed_at = now(),
+                        result_received_at = COALESCE($6::timestamptz, now()),
                         dispatch_lease_until = NULL,
-                        last_dispatch_error = CASE WHEN $3 = 'dispatch_failed' THEN $4 ELSE NULL END
-                    WHERE job_id = $1 AND client_id = $2
+                        last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timed_out') THEN $4 ELSE NULL END
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND (
+                        cancel_acked_at IS NULL
+                        OR COALESCE($6::timestamptz, now()) < cancel_acked_at
+                      )
+                      AND (
+                        completed_at IS NULL
+                        OR status = 'control_timed_out'
+                      )
                     "#,
                 )
                 .bind(job_id)
@@ -1187,8 +1658,12 @@ impl Repository {
                 .bind(&outcome.status)
                 .bind(&outcome.message)
                 .bind(outcome.exit_code)
+                .bind(outcome.received_at.as_deref())
                 .execute(pool)
                 .await?;
+                if updated.rows_affected() == 0 {
+                    return Ok(());
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -1206,10 +1681,11 @@ impl Repository {
                     "exit_code": outcome.exit_code,
                     "accepted": outcome.accepted,
                     "message": outcome.message,
+                    "received_at": outcome.received_at,
                 }))
                 .execute(pool)
                 .await?;
-                let update_lifecycle_operation = if outcome.status == "completed"
+                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_SUCCEEDED
                     || agent_update_activation_failure_status(&outcome.status)
                 {
                     let row = sqlx::query(
@@ -1240,7 +1716,7 @@ impl Repository {
                 match update_lifecycle_operation {
                     Some(JobCommand::AgentUpdateActivate {
                         staged_sha256_hex, ..
-                    }) if outcome.status == "completed" => {
+                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
                         self.record_agent_update_activation_completed(
                             client_id,
                             job_id,
@@ -1263,7 +1739,7 @@ impl Repository {
                     }
                     Some(JobCommand::AgentUpdateRollback {
                         rollback_sha256_hex,
-                    }) if outcome.status == "completed" => {
+                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
                         self.record_agent_update_rollback_completed(
                             client_id,
                             job_id,
@@ -1307,7 +1783,7 @@ impl Repository {
                     job.status = status.to_string();
                     job.completed_at = Some(completed_at);
                 }
-                if status == "completed" {
+                if status == JOB_STATUS_SUCCEEDED {
                     memory.job_operations.read().await.get(&job_id).cloned()
                 } else {
                     None
@@ -1325,7 +1801,7 @@ impl Repository {
                 .bind(status)
                 .execute(pool)
                 .await?;
-                if status == "completed" {
+                if status == JOB_STATUS_SUCCEEDED {
                     let row = sqlx::query(
                         r#"
                         SELECT operation
@@ -1354,6 +1830,99 @@ impl Repository {
                 .await?;
         }
         self.record_job_status_webhook_event(job_id, status).await?;
+        self.record_schedule_job_outcome(job_id, status).await?;
+        Ok(())
+    }
+
+    async fn record_schedule_job_outcome(&self, job_id: Uuid, status: &str) -> Result<()> {
+        let Some(summary) = self.webhook_job_summary(job_id).await? else {
+            return Ok(());
+        };
+        let Some(schedule_id) = summary.source_schedule_id else {
+            return Ok(());
+        };
+        let outcome_error = schedule_job_outcome_error(status);
+        let schedule_outcome = match self {
+            Self::Memory(_) => None,
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    UPDATE schedules
+                    SET
+                        last_job_id = $2,
+                        last_job_status = $3,
+                        last_job_completed_at = now(),
+                        last_job_error = $4,
+                        updated_at = now()
+                    WHERE id = $1
+                    RETURNING name
+                    "#,
+                )
+                .bind(schedule_id)
+                .bind(job_id)
+                .bind(status)
+                .bind(outcome_error)
+                .fetch_optional(pool)
+                .await?;
+                row.map(|row| {
+                    let schedule_name: String = row.try_get("name")?;
+                    Ok::<_, sqlx::Error>(ScheduleJobOutcome {
+                        schedule_id,
+                        schedule_name,
+                        job_id,
+                        status: status.to_string(),
+                        error: outcome_error.map(ToOwned::to_owned),
+                    })
+                })
+                .transpose()?
+            }
+        };
+        let Some(schedule_outcome) = schedule_outcome else {
+            return Ok(());
+        };
+        let event_id = format!("schedule:{}:job:{}:finished", schedule_id, job_id);
+        let mut predicates = vec![
+            "schedule.job_finished".to_string(),
+            format!("schedule.id:{}", schedule_outcome.schedule_id),
+            format!("schedule.name:{}", schedule_outcome.schedule_name),
+            format!("job.status:{}", schedule_outcome.status),
+            format!("job.status.become_{}", schedule_outcome.status),
+            format!("job.type:{}", summary.command_type),
+        ];
+        predicates.sort();
+        predicates.dedup();
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "schedule.job_finished".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: summary.targets.clone(),
+            actor_id: summary.actor_id,
+            payload: json!({
+                "event": {
+                    "kind": "schedule.job_finished",
+                    "id": &event_id,
+                    "predicates": &predicates,
+                },
+                "schedule": {
+                    "id": schedule_outcome.schedule_id,
+                    "name": &schedule_outcome.schedule_name,
+                    "last_job_id": schedule_outcome.job_id,
+                    "last_job_status": &schedule_outcome.status,
+                    "last_job_error": &schedule_outcome.error,
+                },
+                "job": {
+                    "id": job_id,
+                    "status": status,
+                    "type": &summary.command_type,
+                    "privileged": summary.privileged,
+                    "payload_hash": &summary.payload_hash,
+                    "source_schedule_id": schedule_id,
+                    "target_count": summary.target_count,
+                    "target_ids": &summary.targets,
+                },
+            }),
+        })
+        .await?;
         Ok(())
     }
 

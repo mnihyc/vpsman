@@ -1,5 +1,6 @@
 import type { JobOperation } from "./types";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
+import { JOB_PRIVILEGE_INTENT_FIELDS, SCHEDULE_PRIVILEGE_INTENT_FIELDS } from "./generated/protocolContracts";
 
 const encoder = new TextEncoder();
 const SUPER_KEY_DOMAIN = "vpsman-super-key-v1";
@@ -224,7 +225,10 @@ export async function buildPrivilegeAssertion({
   const superKey = await deriveSuperHmacKey(privilegeMaterial.superPassword, privilegeMaterial.superSaltHex);
   const intentHashHex = await sha256Hex(encoder.encode(intent));
   const issuedUnix = Math.floor(Date.now() / 1000);
-  const expiresUnix = issuedUnix + clampInteger(ttlSecs, 15, 300);
+  if (!Number.isFinite(ttlSecs) || !Number.isInteger(ttlSecs) || ttlSecs < 15 || ttlSecs > 300) {
+    throw new Error("Privilege TTL must be between 15 and 300 seconds");
+  }
+  const expiresUnix = issuedUnix + ttlSecs;
   const nonce = randomBytes(16);
   const payload = concatBytes([
     encoder.encode(PRIVILEGE_ASSERTION_DOMAIN),
@@ -243,43 +247,43 @@ export async function buildPrivilegeAssertion({
 }
 
 export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): string {
-  return JSON.stringify(
-    ordered([
-      ["version", 1],
-      ["action", "job.dispatch"],
-      ["selector_expression", input.selectorExpression.trim()],
-      ["command_type", input.commandType],
-      ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
-      ["resolved_targets", [...input.resolvedTargets].sort()],
-      ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
-      ["force_unprivileged", input.forceUnprivileged],
-      ["privileged", input.privileged],
-    ]),
-  );
+  const entries: Array<[string, JsonValue]> = [
+    ["version", 1],
+    ["action", "job.dispatch"],
+    ["selector_expression", input.selectorExpression.trim()],
+    ["command_type", input.commandType],
+    ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
+    ["resolved_targets", [...input.resolvedTargets].sort()],
+    ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
+    ["force_unprivileged", input.forceUnprivileged],
+    ["privileged", input.privileged],
+  ];
+  assertGeneratedFieldOrder("job privilege", entries, JOB_PRIVILEGE_INTENT_FIELDS);
+  return JSON.stringify(ordered(entries));
 }
 
 export function canonicalSchedulePrivilegeIntent(input: SchedulePrivilegeIntentInput): string {
-  return JSON.stringify(
-    ordered([
-      ["version", 1],
-      ["action", input.action],
-      ["schedule_id", input.scheduleId ?? null],
-      ["name", input.name.trim()],
-      ["command_type", input.commandType],
-      ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
-      ["selector_expression", input.selectorExpression.trim()],
-      ["resolved_targets", [...input.resolvedTargets].sort()],
-      ["cron_expr", input.cronExpr.trim()],
-      ["timezone", input.timezone],
-      ["enabled", input.enabled],
-      ["catch_up_policy", input.catchUpPolicy],
-      ["catch_up_limit", input.catchUpLimit],
-      ["retry_delay_secs", input.retryDelaySecs],
-      ["max_failures", input.maxFailures],
-      ["deferred_until", input.deferredUntil ?? null],
-      ["deleted", input.deleted],
-    ]),
-  );
+  const entries: Array<[string, JsonValue]> = [
+    ["version", 1],
+    ["action", input.action],
+    ["schedule_id", input.scheduleId ?? null],
+    ["name", input.name.trim()],
+    ["command_type", input.commandType],
+    ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
+    ["selector_expression", input.selectorExpression.trim()],
+    ["resolved_targets", [...input.resolvedTargets].sort()],
+    ["cron_expr", input.cronExpr.trim()],
+    ["timezone", input.timezone],
+    ["enabled", input.enabled],
+    ["catch_up_policy", input.catchUpPolicy],
+    ["catch_up_limit", input.catchUpLimit],
+    ["retry_delay_secs", input.retryDelaySecs],
+    ["max_failures", input.maxFailures],
+    ["deferred_until", input.deferredUntil ?? null],
+    ["deleted", input.deleted],
+  ];
+  assertGeneratedFieldOrder("schedule privilege", entries, SCHEDULE_PRIVILEGE_INTENT_FIELDS);
+  return JSON.stringify(ordered(entries));
 }
 
 export function canonicalDbPrivilegeIntent(input: DbPrivilegeIntentInput): string {
@@ -597,6 +601,17 @@ function ordered(entries: Array<[string, JsonValue | undefined]>): JsonValue {
     }
   }
   return value;
+}
+
+function assertGeneratedFieldOrder(
+  label: string,
+  entries: Array<[string, JsonValue | undefined]>,
+  expected: readonly string[],
+) {
+  const actual = entries.map(([key]) => key);
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`${label} contract drift; run npm run generate:contracts`);
+  }
 }
 
 function optional(value: JsonValue | null | undefined): JsonValue | undefined {

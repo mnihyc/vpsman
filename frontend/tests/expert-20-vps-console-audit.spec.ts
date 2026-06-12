@@ -307,7 +307,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     resultPanel
       .locator(".executionResultStats span")
-      .filter({ hasText: "queued" })
+      .filter({ hasText: "active" })
       .filter({ hasText: "22/24" }),
   ).toBeVisible();
   await expect(

@@ -116,6 +116,7 @@ fi
 
 if [[ "${VPSMAN_RELEASE_SKIP_FRONTEND:-0}" == "1" ]]; then
   skip_step frontend-npm-install "VPSMAN_RELEASE_SKIP_FRONTEND=1"
+  skip_step check-frontend-contracts "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-build "VPSMAN_RELEASE_SKIP_FRONTEND=1"
   skip_step frontend-audit "VPSMAN_RELEASE_SKIP_FRONTEND=1"
 else
@@ -124,6 +125,7 @@ else
   else
     run_shell_step frontend-npm-install "cd frontend && npm install"
   fi
+  run_step check-frontend-contracts bash scripts/check-frontend-contracts.sh
   run_shell_step frontend-build "cd frontend && npm run build"
   run_shell_step frontend-audit "cd frontend && npm audit --audit-level=moderate"
   run_step frontend-console-layout bash scripts/smoke-frontend-console-layout.sh
@@ -162,6 +164,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-live-network-apply "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-network-preset-container "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-bird2-topology-convergence "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-docker-50-agent-long-running-fleet "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-final-e2e "VPSMAN_RELEASE_SKIP_SMOKES=1"
 else
   run_step cargo-build-smoke-binaries \
@@ -219,6 +222,8 @@ else
     bash scripts/smoke-network-preset-container.sh
   run_step smoke-bird2-topology-convergence \
     bash scripts/smoke-bird2-topology-convergence.sh
+  run_step smoke-docker-50-agent-long-running-fleet \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-docker-50-agent-long-running-fleet.sh
   run_step smoke-final-e2e \
     env VPSMAN_FINAL_E2E_LOG_DIR="$log_dir" bash scripts/smoke-final-e2e.sh
 fi

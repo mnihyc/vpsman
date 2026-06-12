@@ -91,8 +91,11 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
+    VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
+    VPSMAN_UPDATE_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -375,15 +378,15 @@ backup_source_status_json="$(vpsctl_auth data-source-status --domain backup_obje
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "backup_object_store" and .preset_name == "builtin:local_filesystem" and .status == "selected_no_store") and
-  all($live[]; .evidence.server_object_store_configured == false and (.evidence.artifact_count | type == "number"))
+  all($live[]; .domain == "backup_object_store" and .preset_name == "builtin:local_filesystem" and .status == "ready") and
+  all($live[]; .evidence.server_object_store_configured == true and .evidence.server_object_store_kind == "filesystem" and (.evidence.artifact_count | type == "number"))
 ' <<<"$backup_source_status_json" >/dev/null
 update_source_status_json="$(vpsctl_auth data-source-status --domain update_artifact_source)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "update_artifact_source" and .preset_name == "builtin:local_filesystem_or_https" and .status == "selected_no_artifacts") and
-  all($live[]; .evidence.server_object_store_configured == false and .evidence.release_count == 0)
+  all($live[]; .domain == "update_artifact_source" and .preset_name == "builtin:local_filesystem_or_https" and .status == "ready") and
+  all($live[]; .evidence.server_object_store_configured == true and .evidence.server_object_store_kind == "filesystem" and .evidence.release_count == 0)
 ' <<<"$update_source_status_json" >/dev/null
 workflow_source_status_json="$(vpsctl_auth data-source-status)"
 jq -e '
@@ -400,10 +403,59 @@ jq -e '
   any(.[]; .client_id == "cli-agent-a" and .domain == "speed_test_provider" and .status == "ready_on_demand" and .evidence.requires_two_endpoints == true) and
   any(.[]; .client_id == "cli-agent-a" and .domain == "command_execution_policy" and .status == "ready_on_demand" and .evidence.environment_policy == "inherit" and .evidence.pty_policy == "native_pty" and .evidence.process_cleanup == "process_group")
 ' <<<"$workflow_source_status_json" >/dev/null
+network_status_seed_job_json="$(vpsctl_auth job-shell \
+  --script "printf '%s\n' vpsctl-live-api-network-readiness-seed" \
+  --clients cli-agent-a \
+  --timeout-secs 5 \
+  --privilege-ttl-secs 60 \
+  --confirmed)"
+network_status_seed_job_id="$(jq -r '.job_id' <<<"$network_status_seed_job_json")"
+network_status_seed_data="$(python3 -c 'import json,sys; print(json.dumps(list(json.dumps({
+  "type": "network_status",
+  "plan": "cli-edge-a-cli-edge-b-gre",
+  "interface": "gre-bgp-a",
+  "peer_client_id": "cli-agent-b",
+  "runtime": {
+    "summary": {
+      "healthy": False,
+      "state": "bird2_neighbor_down",
+      "message": "BIRD2 OSPF neighbor is down on the GRE transit segment"
+    },
+    "bird2": {
+      "healthy": False,
+      "neighbors": [
+        {
+          "peer": "cli-edge-b",
+          "state": "down",
+          "last_error": "OSPF hello timeout"
+        }
+      ]
+    }
+  },
+  "applied": False
+}).encode())))')"
+curl -fsS \
+  -H "Authorization: Bearer $internal_token" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"gateway_id\": \"vpsctl-live-api-gateway\",
+    \"client_id\": \"cli-agent-a\",
+    \"job_id\": \"$network_status_seed_job_id\",
+    \"seq\": 0,
+    \"received_unix\": $(date +%s),
+    \"output\": {
+      \"job_id\": \"$network_status_seed_job_id\",
+      \"stream\": \"status\",
+      \"data\": $network_status_seed_data,
+      \"exit_code\": 0,
+      \"done\": true
+    }
+  }" \
+  "$api_url/internal/v1/gateway/command-output" >/dev/null
 fleet_alerts_json="$(vpsctl_auth fleet-alerts --limit 20)"
 jq -e '
-  any(.[]; .category == "source_readiness" and .severity == "warning" and .status == "selected_no_store" and .client_id == "cli-agent-a") and
-  any(.[]; .category == "source_readiness" and .severity == "info" and .status == "selected_no_artifacts" and .client_id == "cli-agent-b")
+  any(.[]; .category == "source_readiness" and .severity == "warning" and .status == "degraded" and .client_id == "cli-agent-a") and
+  any(.[]; .category == "source_readiness" and .severity == "warning" and .status == "degraded" and .client_id == "cli-agent-b")
 ' <<<"$fleet_alerts_json" >/dev/null
 fleet_alerts_filtered_json="$(vpsctl_auth fleet-alerts --client-id cli-agent-a --severity warning --limit 10)"
 jq -e '

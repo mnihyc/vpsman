@@ -182,11 +182,13 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
         index += 1;
     }
     let selection = VtyJobSelection::parse(&targets)?;
+    let input_seq = input_seq.context("terminal-input requires --input-seq")?;
+    anyhow::ensure!(input_seq >= 1, "--input-seq must be at least 1");
     Ok(VtyTerminalRequest {
         command_label: "terminal_input",
         operation: JobCommand::TerminalInput {
             session_id: session_id.context("terminal-input requires --session-id")?,
-            input_seq: input_seq.context("terminal-input requires --input-seq")?,
+            input_seq,
             data_base64: data_base64.context("terminal-input requires --text or --data-base64")?,
         },
         selection,

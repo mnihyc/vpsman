@@ -1,3 +1,5 @@
+import type { GeneratedJobOperationType } from "./generated/protocolContracts";
+
 export type FleetSummary = {
   total: number;
   online: number;
@@ -79,6 +81,58 @@ export type DashboardOverviewRecord = {
   network: DashboardNetworkRecord;
   label_clusters: DashboardLabelClusterRecord[];
   drilldowns: DashboardDrilldownRecord[];
+};
+
+export type DashboardServerRecord = {
+  generated_at: string;
+  db_pool: DashboardServerDbPoolRecord;
+  dispatch: DashboardServerDispatchRecord;
+  targets: DashboardServerTargetsRecord;
+  cancellations: DashboardServerCancellationsRecord;
+  gateway_events: DashboardServerGatewayEventsRecord;
+  notes: string[];
+};
+
+export type DashboardServerDbPoolRecord = {
+  max_connections: number;
+  open_connections: number;
+  idle_connections: number;
+  in_use_connections: number;
+};
+
+export type DashboardServerDispatchRecord = {
+  active_jobs: number;
+  pending_jobs: number;
+  running_jobs: number;
+  queue_depth: number;
+  total_dispatch_attempts: number;
+  retried_targets: number;
+};
+
+export type DashboardServerTargetsRecord = {
+  pending: number;
+  delivering: number;
+  running: number;
+  active: number;
+  deadline_expired_active: number;
+  control_timed_out_last_24h: number;
+  agent_timed_out_last_24h: number;
+  canceled_last_24h: number;
+};
+
+export type DashboardServerCancellationsRecord = {
+  requested: number;
+  sent: number;
+  acked: number;
+  awaiting_ack: number;
+};
+
+export type DashboardServerGatewayEventsRecord = {
+  queued_events: number | null;
+  delivered_events: number | null;
+  retry_attempts: number | null;
+  active_queues: number | null;
+  status: "live" | "unavailable" | string;
 };
 
 export type DashboardScopeRecord = {
@@ -536,6 +590,7 @@ export type DeleteAgentResponse = {
 export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
+  command_timeout_secs: number;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
@@ -1082,6 +1137,7 @@ export type JobOutputRecord = {
   artifact_size_bytes?: number | null;
   exit_code: number | null;
   done: boolean;
+  received_at?: string | null;
   created_at: string;
 };
 
@@ -1610,6 +1666,10 @@ export type FileActionPolicy = "fail" | "ensure" | "ignore";
 export type FileExistingPolicy = "skip" | "replace";
 export type FileOwnershipPolicy = "fail" | "ignore";
 
+type AssertNever<T extends never> = T;
+type _FrontendOperationTypesMissingFromGenerated = AssertNever<Exclude<JobOperation["type"], GeneratedJobOperationType>>;
+type _GeneratedOperationTypesMissingFromFrontend = AssertNever<Exclude<GeneratedJobOperationType, JobOperation["type"]>>;
+
 export type CreateJobRequest = {
   job_id?: string;
   selector_expression: string;
@@ -1624,7 +1684,6 @@ export type CreateJobRequest = {
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
-  reconnect_policy?: JsonValue | null;
 };
 
 export type CreateJobResponse = {
@@ -1632,6 +1691,20 @@ export type CreateJobResponse = {
   target_count: number;
   accepted_targets: number;
   status: string;
+  target_counts?: {
+    total: number;
+    runnable: number;
+    skipped: number;
+    rejected_unavailable: number;
+    pending: number;
+    delivering: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    agent_timed_out: number;
+    control_timed_out: number;
+    canceled: number;
+  };
 };
 
 export type CreateScheduleRequest = {

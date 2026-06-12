@@ -93,7 +93,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-apply --plan-file <plan.json> --side <left|right> [--backend <ifupdown|netplan|systemd-networkd>] [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-apply --plan-file <plan.json> --side <left|right> [--backend <ifupdown|netplan|systemd-networkd>] [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
@@ -112,7 +112,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-ospf-cost-update --plan-file <plan.json> --side <left|right> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-ospf-cost-update --plan-file <plan.json> --side <left|right> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
@@ -131,7 +131,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-rollback --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                        "usage: tunnel-rollback --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
                     );
                     return Ok(());
                 }
@@ -150,7 +150,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-status --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
+                        "usage: tunnel-status --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <15-300>]"
                     );
                     return Ok(());
                 }
@@ -169,7 +169,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-probe --plan-file <plan.json> --side <left|right> [--count <1-20>] [--interval-ms <200-10000>] [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
+                        "usage: tunnel-probe --plan-file <plan.json> --side <left|right> [--count <1-20>] [--interval-ms <200-10000>] [--timeout <1-3600>] [--privilege-ttl <15-300>]"
                     );
                     return Ok(());
                 }
@@ -188,7 +188,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <1-3600>]"
+                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <15-300>]"
                     );
                     return Ok(());
                 }

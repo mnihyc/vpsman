@@ -612,7 +612,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   const policyRow = grid
     .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
     .first();
-  await policyRow.getByLabel("Select Alert policy rules row").check();
+  await checkControl(policyRow.getByLabel("Select Alert policy rules row"));
   await grid.getByRole("button", { name: "Selection" }).click();
   await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Details" }).click();
@@ -894,7 +894,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(
     page.getByText(/2 fixed targets from current confirmation; edge-health-check/),
   ).toBeVisible();
-  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await activate(page.getByRole("button", { name: "Review save", exact: true }));
   await expect(page.getByText("Confirm schedule")).toBeVisible();
   await activate(
     page
@@ -1289,7 +1289,7 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({
   await adapterForm
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
-  await activate(adapterForm.getByRole("button", { name: "Promote adapter" }));
+  await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
   await expect(
     promotionPanel.getByText("Promote tunnel adapter"),
   ).toBeVisible();

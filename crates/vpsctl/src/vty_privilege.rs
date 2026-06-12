@@ -139,12 +139,12 @@ pub(crate) fn render_vty_capabilities() -> String {
 
 pub(crate) fn render_vty_degraded_policy() -> String {
     pretty_json(serde_json::json!({
-        "default_result_when_agent_lacks_capability": "degraded_unprivileged",
+        "default_result_when_agent_lacks_capability": "target_skipped_job_succeeded_with_skips",
         "force_flag": "--force-unprivileged",
         "policy": [
-            "root-only mutations are reported as degraded by default on normal-user agents",
+            "root-only mutations are skipped by default on normal-user agents",
             "force-unprivileged is an explicit operator best-effort request where the command supports it",
-            "unsupported capabilities should return typed degraded or unsupported status, not silent success",
+            "unsupported capabilities should return typed skipped or unsupported status, not silent success",
             "observation commands remain useful on unprivileged agents and should include capability hints"
         ],
         "frequent_use_guidance": [
@@ -192,7 +192,7 @@ mod tests {
         assert!(capabilities.contains("force_unprivileged_supported"));
         assert!(capabilities.contains("tunnel-apply"));
         assert!(capabilities.contains("plaintext super password"));
-        assert!(degraded.contains("degraded_unprivileged"));
+        assert!(degraded.contains("target_skipped_job_succeeded_with_skips"));
         assert!(degraded.contains("--force-unprivileged"));
     }
 

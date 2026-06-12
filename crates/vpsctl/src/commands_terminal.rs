@@ -48,7 +48,7 @@ pub(crate) struct TerminalOpenCommand {
 pub(crate) struct TerminalInputCommand {
     #[arg(long)]
     pub(crate) session_id: Uuid,
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) input_seq: u64,
     #[arg(long)]
     pub(crate) text: Option<String>,

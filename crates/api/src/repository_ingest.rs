@@ -455,6 +455,7 @@ impl Repository {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn mark_agent_stale(
         &self,
         client_id: &str,
@@ -1100,7 +1101,7 @@ fn u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
-async fn record_client_status_transition_in_tx(
+pub(crate) async fn record_client_status_transition_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     client_id: &str,
     from_status: Option<&str>,

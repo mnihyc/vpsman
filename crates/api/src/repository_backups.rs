@@ -554,7 +554,7 @@ impl Repository {
                             && targets.iter().any(|target| {
                                 target.job_id == job.id
                                     && target.client_id == backup_request.client_id
-                                    && target.status == "completed"
+                                    && target.status == "succeeded"
                             })
                     })
                     .map(|job| {
@@ -593,7 +593,7 @@ impl Repository {
                     JOIN job_targets target
                       ON target.job_id = job.id
                      AND target.client_id = $2
-                     AND target.status = 'completed'
+                     AND target.status = 'succeeded'
                     WHERE job.operation->>'type' = 'backup'
                       AND job.payload_hash = $1
                       AND ($3::uuid IS NULL OR job.id = $3)
@@ -659,6 +659,7 @@ impl Repository {
                             artifact_size_bytes: row.try_get("data_size_bytes")?,
                             exit_code: row.try_get("exit_code")?,
                             done: row.try_get("done")?,
+                            received_at: None,
                             created_at: row.try_get("created_at")?,
                         })
                     })

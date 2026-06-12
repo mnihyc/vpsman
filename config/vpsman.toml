@@ -1,0 +1,74 @@
+version = 1
+
+[api]
+bind = "0.0.0.0:8080"
+gateway_control_url = "http://gateway:9444"
+job_output_artifact_min_bytes = 32768
+require_registered_agent_updates = false
+alert_memory_available_warning_ratio = 0.20
+alert_memory_available_critical_ratio = 0.10
+alert_disk_available_warning_ratio = 0.20
+alert_disk_available_critical_ratio = 0.10
+alert_cpu_load_warning = 2.0
+alert_cpu_load_critical = 4.0
+
+[gateway]
+bind = "0.0.0.0:9443"
+control_bind = "0.0.0.0:9444"
+api_url = "http://api:8080"
+gateway_id = "compose-gateway"
+reconnect_grace_secs = 60
+
+[worker]
+tick_secs = 30
+worker_lease_secs = 60
+agent_offline_timeout_secs = 300
+notification_delivery_limit = 25
+notification_retention_days = 90
+notification_retention_prune_limit = 1000
+notification_webhook_timeout_secs = 5
+webhook_rule_delivery_limit = 25
+webhook_rule_materialize_limit = 100
+webhook_rule_retention_days = 90
+webhook_rule_retention_prune_limit = 1000
+webhook_rule_timeout_secs = 5
+backup_policy_prune_enabled = false
+backup_policy_prune_limit = 50
+backup_policy_prune_dry_run = false
+backup_policy_prune_include_disabled = false
+backup_policy_prune_delete_objects = false
+backup_policy_prune_object_store_dir = "/var/lib/vpsman/objects"
+schedule_command_timeout_secs = 30
+require_registered_agent_updates = false
+
+[database]
+postgres_url = "postgres://vpsman:vpsman@postgres:5432/vpsman"
+migrations_dir = "/opt/vpsman/migrations"
+
+[storage]
+object_store_dir = "/var/lib/vpsman/objects"
+object_region = "us-east-1"
+object_create_bucket = false
+update_object_region = "us-east-1"
+update_object_create_bucket = false
+
+[capacity]
+api_db_pool = 32
+worker_db_pool = 8
+dispatcher_batch = 128
+dispatcher_in_flight = 64
+
+[timeout]
+worker_schedule_command_secs = 30
+agent_offline_secs = 300
+gateway_reconnect_grace_secs = 60
+internal_http_connect_secs = 10
+internal_http_write_secs = 10
+internal_http_read_secs = 15
+dispatch_ack_secs = 30
+event_post_secs = 15
+
+[secrets]
+internal_token_file = "/run/secrets/vpsman_internal_token"
+gateway_private_key_file = "/run/secrets/vpsman_gateway_private_key_hex"
+privilege_verifier_key_file = "/run/secrets/vpsman_privilege_verifier_key_hex"

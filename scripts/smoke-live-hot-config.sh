@@ -82,10 +82,12 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$label-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
     VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+    VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -140,10 +142,10 @@ assert_hot_config_persisted() {
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=20")"
 
-  jq -e '.status == "completed" and .command_type == "hot_config" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "hot_config" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -181,6 +183,7 @@ auth_json="$(curl -fsS \
   -d "{\"username\":\"hot-config-smoke\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "hot-config-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 

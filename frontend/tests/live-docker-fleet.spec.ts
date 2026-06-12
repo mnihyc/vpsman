@@ -11,6 +11,21 @@ test.skip(
 const expectedTotal = Number(
   process.env.VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL ?? "24",
 );
+const providerAlphaCount = Number(
+  process.env.VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNT ??
+    String(Math.ceil(expectedTotal / 3)),
+);
+const countryUsCount = Number(
+  process.env.VPSMAN_DOCKER_FLEET_COUNTRY_US_COUNT ??
+    String(Math.ceil(expectedTotal / 4)),
+);
+const providerAlphaCountryUsCount = Number(
+  process.env.VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNTRY_US_COUNT ??
+    String(Math.ceil(expectedTotal / 12)),
+);
+const roleEdgeCount = Number(
+  process.env.VPSMAN_DOCKER_FLEET_ROLE_EDGE_COUNT ?? String(countryUsCount),
+);
 const username =
   process.env.VPSMAN_DOCKER_FLEET_USERNAME ?? "docker-fleet-admin";
 const password =
@@ -128,15 +143,17 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page,
     testInfo.project.name,
     "page-fleet-instances",
-    "Fleet / Instances page with the live 24-agent inventory table before filtering.",
+    "Fleet / Instances page with the live inventory table before filtering.",
   );
   await grid.getByLabel("VPS instance records search").fill("provider:alpha");
-  await expect(grid.getByText(`8 of ${expectedTotal} instances`)).toBeVisible();
+  await expect(
+    grid.getByText(`${providerAlphaCount} of ${expectedTotal} instances`),
+  ).toBeVisible();
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
     "fleet-search-provider-alpha",
-    "Fleet table after operator filters the 24-agent live fleet to provider alpha.",
+    "Fleet table after operator filters the live fleet to provider alpha.",
   );
   await grid.getByLabel("VPS instance records search").fill("");
 
@@ -205,7 +222,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Preview targets" }).click();
-  await expect(page.getByText("2/24")).toBeVisible();
+  await expect(
+    page.getByText(`${providerAlphaCountryUsCount}/${expectedTotal}`),
+  ).toBeVisible();
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
   await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
   await maybeExtendedScreenshot(
@@ -275,6 +294,16 @@ async function expectCleanLayout(page: Page) {
 }
 
 async function expectLiveDashboardTelemetry(page: Page) {
+  const operationalHealth = page.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Operational Health" }),
+  });
+  await expect(operationalHealth).toContainText("DB pool");
+  await expect(operationalHealth).toContainText("Dispatch queue");
+  await expect(operationalHealth).toContainText("Deadline timeouts");
+  await expect(operationalHealth).toContainText("Cancel acks");
+  await expect(operationalHealth).toContainText("Gateway events");
+  await expect(operationalHealth).not.toContainText(/No data|Gateway metrics unavailable/i);
+
   const resourceUsage = page.locator(".dashboardSection").filter({
     has: page.getByRole("heading", { name: "Resource Usage" }),
   });
@@ -366,7 +395,7 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
   await grid.getByLabel("VPS instance records page size").selectOption("25");
-  await expect(grid.getByText(`1 / 1`)).toBeVisible();
+  await expect(grid.getByText(`1 / ${Math.ceil(expectedTotal / 25)}`)).toBeVisible();
 }
 
 async function exerciseExpressionWebhooks(page: Page, projectName: string) {
@@ -428,10 +457,10 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     }),
   ).toBeVisible();
   await expect(notifications).toContainText(
-    "6 VPSs matched webhook dry run",
+    `${roleEdgeCount} VPSs matched webhook dry run`,
   );
   await expect(notifications).toContainText(
-    "docker-fleet-q2-capacity interval.30sec count=6",
+    `docker-fleet-q2-capacity interval.30sec count=${roleEdgeCount}`,
   );
   await expect(notifications).toContainText("df-alpha-US-01");
   await maybeExtendedScreenshot(

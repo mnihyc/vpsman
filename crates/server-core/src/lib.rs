@@ -3,6 +3,29 @@ use vpsman_common::{
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
+pub const JOB_STATUS_PENDING: &str = "pending";
+pub const JOB_STATUS_RUNNING: &str = "running";
+pub const JOB_STATUS_SUCCEEDED: &str = "succeeded";
+pub const JOB_STATUS_SUCCEEDED_WITH_SKIPS: &str = "succeeded_with_skips";
+pub const JOB_STATUS_PARTIAL_SUCCESS: &str = "partial_success";
+pub const JOB_STATUS_FAILED: &str = "failed";
+pub const JOB_STATUS_AGENT_TIMED_OUT: &str = "agent_timed_out";
+pub const JOB_STATUS_CONTROL_TIMED_OUT: &str = "control_timed_out";
+pub const JOB_STATUS_SKIPPED: &str = "skipped";
+pub const JOB_STATUS_REJECTED: &str = "rejected";
+pub const JOB_STATUS_CANCELED: &str = "canceled";
+
+pub const TARGET_STATUS_PENDING: &str = "pending";
+pub const TARGET_STATUS_DELIVERING: &str = "delivering";
+pub const TARGET_STATUS_RUNNING: &str = "running";
+pub const TARGET_STATUS_SUCCEEDED: &str = "succeeded";
+pub const TARGET_STATUS_FAILED: &str = "failed";
+pub const TARGET_STATUS_AGENT_TIMED_OUT: &str = "agent_timed_out";
+pub const TARGET_STATUS_CONTROL_TIMED_OUT: &str = "control_timed_out";
+pub const TARGET_STATUS_SKIPPED: &str = "skipped";
+pub const TARGET_STATUS_REJECTED: &str = "rejected";
+pub const TARGET_STATUS_CANCELED: &str = "canceled";
+
 pub const STATUS_OUTPUT_MAX_BYTES: usize = 32 * 1024;
 pub const INLINE_OUTPUT_PREVIEW_BYTES: usize = 32 * 1024;
 pub const DIRECT_STDOUT_MAX_BYTES: u64 = MAX_DIRECT_FILE_DOWNLOAD_BYTES;
@@ -298,52 +321,89 @@ pub fn target_lacks_privileged_host_mutation_capability(
 }
 
 pub fn target_status_counts_as_accepted(status: &str) -> bool {
-    matches!(status, "accepted" | "completed" | "failed" | "timed_out")
+    matches!(
+        status,
+        TARGET_STATUS_RUNNING
+            | TARGET_STATUS_SUCCEEDED
+            | TARGET_STATUS_FAILED
+            | TARGET_STATUS_AGENT_TIMED_OUT
+            | TARGET_STATUS_CONTROL_TIMED_OUT
+            | TARGET_STATUS_CANCELED
+    )
 }
 
 pub fn target_status_is_pending(status: &str) -> bool {
-    matches!(status, "queued" | "dispatching")
+    matches!(
+        status,
+        TARGET_STATUS_PENDING | TARGET_STATUS_DELIVERING | TARGET_STATUS_RUNNING
+    )
 }
 
 pub fn aggregate_job_status_from_statuses(
     target_statuses: &[String],
     target_count: usize,
 ) -> &'static str {
-    let completed = target_statuses
+    if target_count == 0 {
+        return JOB_STATUS_SKIPPED;
+    }
+    if target_statuses
         .iter()
-        .filter(|status| status.as_str() == "completed")
+        .any(|status| target_status_is_pending(status))
+    {
+        return JOB_STATUS_RUNNING;
+    }
+
+    let succeeded = target_statuses
+        .iter()
+        .filter(|status| status.as_str() == TARGET_STATUS_SUCCEEDED)
         .count();
-    if target_count > 0 && completed == target_count {
-        return "completed";
+    let skipped = target_statuses
+        .iter()
+        .filter(|status| status.as_str() == TARGET_STATUS_SKIPPED)
+        .count();
+    if succeeded == target_count {
+        return JOB_STATUS_SUCCEEDED;
     }
-    if completed > 0 {
-        return "partially_completed";
+    if succeeded > 0 && succeeded + skipped == target_count {
+        return JOB_STATUS_SUCCEEDED_WITH_SKIPS;
+    }
+    if succeeded > 0 {
+        return JOB_STATUS_PARTIAL_SUCCESS;
+    }
+    if skipped == target_count {
+        return JOB_STATUS_SUCCEEDED_WITH_SKIPS;
     }
     if target_statuses
         .iter()
-        .any(|status| status.as_str() == "degraded_unprivileged")
+        .any(|status| matches!(status.as_str(), TARGET_STATUS_CONTROL_TIMED_OUT))
     {
-        return "degraded_unprivileged";
+        return JOB_STATUS_CONTROL_TIMED_OUT;
     }
     if target_statuses
         .iter()
-        .any(|status| status.as_str() == "timed_out")
+        .any(|status| matches!(status.as_str(), TARGET_STATUS_AGENT_TIMED_OUT))
     {
-        return "timed_out";
+        return JOB_STATUS_AGENT_TIMED_OUT;
     }
     if target_statuses
         .iter()
-        .any(|status| matches!(status.as_str(), "failed" | "rejected_by_agent"))
+        .any(|status| status.as_str() == TARGET_STATUS_FAILED)
     {
-        return "failed";
+        return JOB_STATUS_FAILED;
     }
     if target_statuses
         .iter()
-        .any(|status| status.as_str() == "accepted")
+        .any(|status| status.as_str() == TARGET_STATUS_CANCELED)
     {
-        return "accepted";
+        return JOB_STATUS_CANCELED;
     }
-    "dispatch_failed"
+    if target_statuses
+        .iter()
+        .any(|status| status.as_str() == TARGET_STATUS_REJECTED)
+    {
+        return JOB_STATUS_REJECTED;
+    }
+    JOB_STATUS_FAILED
 }
 
 pub fn is_backup_operation(command: &JobCommand) -> bool {
@@ -444,19 +504,16 @@ mod tests {
     #[test]
     fn aggregate_status_preserves_existing_ordering() {
         assert_eq!(
-            aggregate_job_status_from_statuses(&["completed".to_string()], 1),
-            "completed"
+            aggregate_job_status_from_statuses(&["succeeded".to_string()], 1),
+            "succeeded"
         );
         assert_eq!(
-            aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2,),
-            "partially_completed"
+            aggregate_job_status_from_statuses(&["succeeded".to_string(), "failed".to_string()], 2,),
+            "partial_success"
         );
         assert_eq!(
-            aggregate_job_status_from_statuses(
-                &["degraded_unprivileged".to_string(), "failed".to_string()],
-                2,
-            ),
-            "degraded_unprivileged"
+            aggregate_job_status_from_statuses(&["skipped".to_string(), "skipped".to_string()], 2,),
+            "succeeded_with_skips"
         );
     }
 }

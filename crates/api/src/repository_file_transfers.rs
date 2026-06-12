@@ -305,6 +305,7 @@ impl Repository {
                                 artifact_size_bytes: row.try_get("data_size_bytes")?,
                                 exit_code: row.try_get("exit_code")?,
                                 done: row.try_get("done")?,
+                                received_at: None,
                                 created_at: row.try_get("created_at")?,
                             },
                         })

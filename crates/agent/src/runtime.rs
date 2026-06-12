@@ -14,9 +14,9 @@ use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
-    AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput, Frame, JobAck, JobCommand,
-    JobRequest, MessageKind, NoiseFrameStream, OutputStream, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput,
+    AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput, Frame, JobAck, JobCancelAck,
+    JobCancelRequest, JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
+    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
@@ -117,7 +117,7 @@ async fn connect_and_stream(
             warn!(%error, "failed to read update activation heartbeat marker");
             None
         }),
-        capabilities: agent_capabilities(),
+        capabilities: agent_capabilities(config),
     };
     send_json_frame(&mut stream, MessageKind::ClientHello, 0, 1, &hello).await?;
 
@@ -176,6 +176,16 @@ async fn connect_and_stream(
                             unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                             unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                         }
+                    }
+                    MessageKind::CommandCancel => {
+                        let request: JobCancelRequest = decode_json(&frame.decoded_payload()?)?;
+                        handle_command_cancel_frame(
+                            &mut stream,
+                            &mut seq,
+                            &mut active_commands,
+                            request,
+                        )
+                        .await?;
                     }
                     MessageKind::Keepalive => {
                         debug!("gateway keepalive");
@@ -371,7 +381,7 @@ fn unmanaged_update_jitter(config: &AgentConfig) -> Duration {
     Duration::from_secs(u64::from_le_bytes(first) % jitter_secs)
 }
 
-fn agent_capabilities() -> AgentCapabilitySnapshot {
+fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
     let effective_uid = unsafe { libc::geteuid() } as u32;
     let root = effective_uid == 0;
     AgentCapabilitySnapshot {
@@ -381,6 +391,7 @@ fn agent_capabilities() -> AgentCapabilitySnapshot {
             AgentPrivilegeMode::Unprivileged
         },
         effective_uid: Some(effective_uid),
+        command_timeout_secs: config.auth.command_timeout_secs.clamp(1, 3600),
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -393,6 +404,7 @@ fn agent_capabilities() -> AgentCapabilitySnapshot {
 struct ActiveCommand {
     payload_hash: String,
     stream_id: u32,
+    task: tokio::task::JoinHandle<()>,
 }
 
 struct CommandExecutionResult {
@@ -537,14 +549,15 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         return Ok(false);
     }
     if let Some(active) = active_commands.get(&request.job_id) {
-        let message = if active.payload_hash == request_payload_hash {
+        let same_payload = active.payload_hash == request_payload_hash;
+        let message = if same_payload {
             "duplicate job already active"
         } else {
             "duplicate job id is active with different payload"
         };
         let ack = JobAck {
             job_id: request.job_id,
-            accepted: false,
+            accepted: same_payload,
             message: message.to_string(),
         };
         send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
@@ -642,7 +655,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let task_config_path = config_path.to_path_buf();
     let event_tx = command_event_tx.clone();
     let terminal_stream_tx = terminal_stream_tx.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (output_tx, mut output_rx) = mpsc::channel::<CommandOutput>(16);
         let output_event_tx = event_tx.clone();
         let output_forwarder = tokio::spawn(async move {
@@ -679,9 +692,38 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         ActiveCommand {
             payload_hash: request_payload_hash,
             stream_id,
+            task,
         },
     );
     Ok(false)
+}
+
+async fn handle_command_cancel_frame(
+    stream: &mut NoiseFrameStream<TcpStream>,
+    seq: &mut u64,
+    active_commands: &mut HashMap<uuid::Uuid, ActiveCommand>,
+    request: JobCancelRequest,
+) -> Result<()> {
+    let (accepted, applied, message) = match active_commands.remove(&request.job_id) {
+        Some(active) => {
+            active.task.abort();
+            (
+                true,
+                true,
+                request.reason.unwrap_or_else(|| "canceled".to_string()),
+            )
+        }
+        None => (true, false, "command_not_active".to_string()),
+    };
+    let ack = JobCancelAck {
+        job_id: request.job_id,
+        accepted,
+        applied,
+        message,
+    };
+    send_json_frame(stream, MessageKind::CommandCancelAck, 1, *seq, &ack).await?;
+    *seq += 1;
+    Ok(())
 }
 
 fn command_supports_requested_protocol(command: &JobCommand, command_version: u16) -> bool {

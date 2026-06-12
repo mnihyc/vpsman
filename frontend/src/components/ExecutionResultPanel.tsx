@@ -51,7 +51,7 @@ export function ExecutionResultPanel({
         </span>
         <span>
           <strong>{progress.accepted}/{progress.expected}</strong>
-          queued
+          active
         </span>
         <span>
           <strong>{progress.doing}</strong>

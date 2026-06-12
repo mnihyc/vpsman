@@ -127,8 +127,8 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
         "hot-config --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&privilege_ttl_secs),
-        "hot-config --privilege-ttl must be between 1 and 3600"
+        (15..=300).contains(&privilege_ttl_secs),
+        "hot-config --privilege-ttl must be between 15 and 300"
     );
     let selection = VtyJobSelection::parse(&target_tokens)?;
     anyhow::ensure!(
@@ -298,8 +298,8 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         "agent-update --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&privilege_ttl_secs),
-        "agent-update --privilege-ttl must be between 1 and 3600"
+        (15..=300).contains(&privilege_ttl_secs),
+        "agent-update --privilege-ttl must be between 15 and 300"
     );
     let artifact_url = artifact_url.context("agent-update requires --artifact-url <https-url>")?;
     let sha256_hex = sha256_hex.context("agent-update requires --sha256-hex <sha256>")?;
@@ -643,8 +643,8 @@ fn validate_config_dispatch_bounds(
         "{command} --timeout must be between 1 and 3600"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&privilege_ttl_secs),
-        "{command} --privilege-ttl must be between 1 and 3600"
+        (15..=300).contains(&privilege_ttl_secs),
+        "{command} --privilege-ttl must be between 15 and 300"
     );
     Ok(())
 }

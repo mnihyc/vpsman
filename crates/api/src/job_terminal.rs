@@ -68,9 +68,13 @@ fn validate_terminal_user(user: &str) -> Result<(), ApiError> {
 
 pub(crate) fn validate_terminal_input(
     session_id: uuid::Uuid,
+    input_seq: u64,
     data_base64: &str,
 ) -> Result<(), ApiError> {
     validate_terminal_session_id(session_id)?;
+    if input_seq == 0 {
+        return Err(ApiError::bad_request("terminal_input_seq_out_of_range"));
+    }
     if data_base64.is_empty() || data_base64.len() > MAX_TERMINAL_INPUT_BYTES.div_ceil(3) * 4 + 16 {
         return Err(ApiError::bad_request("terminal_input_size_invalid"));
     }

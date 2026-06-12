@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   acceptedDispatchTargetCount,
+  bulkProgressTimeoutMs,
   formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -410,7 +411,7 @@ export function JobDispatchPanel({
     (visibleDispatchProgress
       ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
       : lastJob
-        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} queued`
+        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : preview
         ? `${preview.target_count} resolved targets`
         : privilegeMaterial
@@ -767,10 +768,6 @@ export function JobDispatchPanel({
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
         privileged: true,
         privilege_assertion: privilegeAssertion,
-        reconnect_policy: {
-          duplicate_delivery: "ignore_completed",
-          resume_outputs: true,
-        },
       });
       setLastJob(nextJob);
       setLastPayloadHash(payloadHashHex);
@@ -796,6 +793,7 @@ export function JobDispatchPanel({
         acceptedTargets: job.target_count,
         onProgress: setDispatchProgress,
         targets,
+        timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });
       setLastDispatchProgress(result.progress);
     } finally {

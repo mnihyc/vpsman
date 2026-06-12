@@ -1,16 +1,24 @@
 use std::net::IpAddr;
 
 use axum::{extract::State, http::HeaderMap, Json};
+use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use vpsman_common::{
     CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
-    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest,
+    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
     OutputStream,
+};
+use vpsman_server_core::{
+    JOB_STATUS_PENDING, JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_FAILED,
+    TARGET_STATUS_RUNNING, TARGET_STATUS_SUCCEEDED,
 };
 
 use crate::{
+    backup_auto_artifacts::try_auto_record_backup_artifact,
     error::ApiError,
-    model::{GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent},
+    model::{
+        AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
+    },
     repository_job_outputs::JobOutputPersistConfig,
     state::AppState,
     TargetDispatchOutcome,
@@ -126,6 +134,7 @@ pub(crate) async fn ingest_command_output(
     {
         return Err(ApiError::not_found("job_target_not_found"));
     }
+    let received_at = command_output_received_at(event.received_unix);
     state
         .repo
         .record_job_output_chunk_with_config(
@@ -133,6 +142,7 @@ pub(crate) async fn ingest_command_output(
             &event.client_id,
             event.seq,
             &event.output,
+            Some(received_at.clone()),
             JobOutputPersistConfig {
                 object_store: state.backup_object_store.as_ref(),
                 artifact_min_bytes: state.job_output_artifact_min_bytes,
@@ -146,17 +156,20 @@ pub(crate) async fn ingest_command_output(
         done: event.output.done,
     });
     if event.output.done {
-        let outcome = target_outcome_from_done_output(event.job_id, &event.output);
+        let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
         state
             .repo
             .update_job_target_result(event.job_id, &event.client_id, &outcome)
             .await?;
+        if outcome.status == TARGET_STATUS_SUCCEEDED {
+            try_auto_record_backup_artifact_from_ingest(&state, &event).await?;
+        }
         if let Some((status, accepted_targets)) = state
             .repo
             .refresh_job_status_from_targets(event.job_id)
             .await?
         {
-            if !matches!(status.as_str(), "queued" | "dispatching" | "running") {
+            if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
                 state.publish(WsEvent::JobFinished {
                     job_id: event.job_id,
                     accepted_targets,
@@ -164,6 +177,13 @@ pub(crate) async fn ingest_command_output(
                 });
             }
         }
+    } else {
+        let message = status_output_message(&event.output)
+            .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
+        state
+            .repo
+            .mark_job_target_running(event.job_id, &event.client_id, &message)
+            .await?;
     }
     Ok(Json(IngestResponse {
         accepted: true,
@@ -171,25 +191,64 @@ pub(crate) async fn ingest_command_output(
     }))
 }
 
+async fn try_auto_record_backup_artifact_from_ingest(
+    state: &AppState,
+    event: &GatewayCommandOutputIngest,
+) -> Result<(), ApiError> {
+    let Some(context) = state.repo.get_job_completion_context(event.job_id).await? else {
+        return Ok(());
+    };
+    if !matches!(context.operation, JobCommand::Backup { .. }) {
+        return Ok(());
+    }
+    let Some(actor_id) = context.actor_id else {
+        return Ok(());
+    };
+    if actor_id.is_nil() {
+        return Ok(());
+    }
+    let Some(operator) = state.repo.operator_by_id(actor_id).await? else {
+        return Ok(());
+    };
+    let operator = AuthContext {
+        operator: operator.view(),
+        session_id: uuid::Uuid::nil(),
+    };
+    try_auto_record_backup_artifact(
+        state,
+        &operator,
+        &event.client_id,
+        &context.payload_hash,
+        event.job_id,
+        &[],
+    )
+    .await
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
 fn target_outcome_from_done_output(
     job_id: uuid::Uuid,
     output: &CommandOutput,
+    received_at: String,
 ) -> TargetDispatchOutcome {
     let timed_out = crate::routes_jobs::output_indicates_timeout(output);
     let exit_code = output.exit_code;
     let status = if timed_out {
-        "timed_out"
+        TARGET_STATUS_AGENT_TIMED_OUT
     } else if exit_code.unwrap_or(0) == 0 {
-        "completed"
+        TARGET_STATUS_SUCCEEDED
     } else {
-        "failed"
+        TARGET_STATUS_FAILED
     };
     TargetDispatchOutcome {
         status: status.to_string(),
         exit_code,
+        #[cfg(test)]
         command_version: None,
         accepted: true,
         message: status_output_message(output).unwrap_or_else(|| status.to_string()),
+        received_at: Some(received_at),
         outputs: vec![CommandOutput {
             job_id,
             stream: output.stream,
@@ -198,6 +257,23 @@ fn target_outcome_from_done_output(
             done: output.done,
         }],
     }
+}
+
+fn command_output_received_at(received_unix: Option<u64>) -> String {
+    let now = Utc::now();
+    let Some(received_unix) = received_unix else {
+        return now.to_rfc3339();
+    };
+    if received_unix > i64::MAX as u64 {
+        return now.to_rfc3339();
+    }
+    let Some(received_at) = Utc.timestamp_opt(received_unix as i64, 0).single() else {
+        return now.to_rfc3339();
+    };
+    if received_at > now + chrono::Duration::seconds(300) {
+        return now.to_rfc3339();
+    }
+    received_at.to_rfc3339()
 }
 
 fn status_output_message(output: &CommandOutput) -> Option<String> {

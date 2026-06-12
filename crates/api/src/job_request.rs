@@ -155,9 +155,9 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         }),
         JobCommand::TerminalInput {
             session_id,
-            input_seq: _,
+            input_seq,
             data_base64,
-        } => validate_terminal_input(*session_id, data_base64),
+        } => validate_terminal_input(*session_id, *input_seq, data_base64),
         JobCommand::TerminalPoll { session_id, .. } => validate_terminal_poll(*session_id),
         JobCommand::TerminalResize {
             session_id,

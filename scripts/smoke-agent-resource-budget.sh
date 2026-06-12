@@ -78,6 +78,7 @@ VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX="$client_public_hex" \
+VPSMAN_SUITE_CONFIG="$SMOKE_TMPDIR/no-suite.toml" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
 RUST_LOG="vpsman_gateway=warn" \

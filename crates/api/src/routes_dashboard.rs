@@ -18,10 +18,11 @@ use crate::{
         DashboardNetworkClientView, DashboardNetworkPointView, DashboardNetworkView,
         DashboardOperationsView, DashboardOverviewView, DashboardResourceCurveView,
         DashboardResourcePointView, DashboardResourceSeriesView, DashboardResourcesView,
-        DashboardScopeView, DashboardSummaryView, DashboardTimeRangeView,
-        DashboardTrafficClientView, DashboardTrafficPointView, DashboardTrafficSeriesView,
-        DashboardWindowOptionView, FleetAlertQuery, FleetAlertView, JobHistoryView,
-        OperatorPreferences, TelemetryNetworkRateView, TelemetryRollupView,
+        DashboardScopeView, DashboardServerGatewayEventsView, DashboardServerView,
+        DashboardSummaryView, DashboardTimeRangeView, DashboardTrafficClientView,
+        DashboardTrafficPointView, DashboardTrafficSeriesView, DashboardWindowOptionView,
+        FleetAlertQuery, FleetAlertView, JobHistoryView, OperatorPreferences,
+        TelemetryNetworkRateView, TelemetryRollupView,
     },
     model_alert_policies::FleetAlertPolicyOverrideView,
     state::AppState,
@@ -349,6 +350,40 @@ pub(crate) async fn dashboard_overview(
         )
         .await?,
     ))
+}
+
+pub(crate) async fn dashboard_server(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DashboardServerView>, ApiError> {
+    state.require_operator_scope(&headers, "fleet:read").await?;
+    let snapshot = state.repo.dashboard_server_snapshot().await?;
+    let mut notes = Vec::new();
+    let gateway_events = match state.gateway.forward_metrics().await {
+        Ok(metrics) => DashboardServerGatewayEventsView {
+            queued_events: Some(metrics.queued_events),
+            delivered_events: Some(metrics.delivered_events),
+            retry_attempts: Some(metrics.retry_attempts),
+            active_queues: Some(metrics.active_queues),
+            status: "live".to_string(),
+        },
+        Err(error) => {
+            notes.push(format!("gateway event metrics unavailable: {error}"));
+            DashboardServerGatewayEventsView {
+                status: "unavailable".to_string(),
+                ..DashboardServerGatewayEventsView::default()
+            }
+        }
+    };
+    Ok(Json(DashboardServerView {
+        generated_at: Utc::now().to_rfc3339(),
+        db_pool: snapshot.db_pool,
+        dispatch: snapshot.dispatch,
+        targets: snapshot.targets,
+        cancellations: snapshot.cancellations,
+        gateway_events,
+        notes,
+    }))
 }
 
 async fn build_dashboard_overview(
@@ -1843,7 +1878,7 @@ fn tag_matches(tags: &[String], expected: &str) -> bool {
 }
 
 fn is_running_job_status(status: &str) -> bool {
-    matches!(status, "queued" | "running" | "dispatching")
+    matches!(status, "pending" | "running")
 }
 
 fn is_degraded_agent_status(status: &str) -> bool {

@@ -123,6 +123,7 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$label-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
@@ -219,7 +220,7 @@ assert_gateway_session_ended() {
   done
   agents_json="$(api_get "/api/v1/agents")"
   jq -e --arg client "$expected_client" '
-    any(.[]; .id == $client and .status == "offline")
+    any(.[]; .id == $client and .status == "disconnected")
   ' <<<"$agents_json" >/dev/null
 }
 
@@ -230,10 +231,10 @@ assert_persisted_job_state() {
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=20")"
 
-  jq -e '.status == "completed" and .command_type == "file_push" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "file_push" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg path "$destination_file" --arg sha "$payload_sha" '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -390,10 +391,10 @@ assert_shell_job_output() {
   outputs_json="$(api_get "/api/v1/jobs/$shell_job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=30")"
 
-  jq -e '.status == "completed" and .command_type == "shell_argv" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "shell_argv" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '.[] | select(.stream == "status" and .done == true and .exit_code == 0)' \
     <<<"$outputs_json" >/dev/null
@@ -413,10 +414,10 @@ assert_shell_pty_job_output() {
   targets_json="$(api_get "/api/v1/jobs/$shell_pty_job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$shell_pty_job_id/outputs")"
 
-  jq -e '.status == "completed" and .command_type == "shell_pty" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "shell_pty" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -435,10 +436,10 @@ assert_shell_script_job_output() {
   outputs_json="$(api_get "/api/v1/jobs/$shell_script_job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=30")"
 
-  jq -e '.status == "completed" and .command_type == "shell_script" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "shell_script" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -463,7 +464,7 @@ assert_job_follow_output() {
       --interval-ms 100 \
       --max-polls 3)"
   grep -F "[$client_id stdout" <<<"$cli_follow" | grep -F "$shell_payload" >/dev/null
-  grep -F "status=completed" <<<"$cli_follow" >/dev/null
+  grep -F "status=succeeded" <<<"$cli_follow" >/dev/null
 
   json_follow="$(VPSMAN_API_TOKEN="$access_token" \
     target/debug/vpsctl --api-url "$api_url" job-follow \
@@ -478,14 +479,14 @@ assert_job_follow_output() {
       and (.data_base64 | @base64d) == $payload)
     and any(.[]; .event == "job_follow_complete"
       and .job_id == $job
-      and .status == "completed"
+      and .status == "succeeded"
       and .outputs >= 1)
   ' <<<"$json_follow" >/dev/null
 
   vty_follow="$(printf 'job-follow %s --interval-ms 100 --max-polls 3\nexit\n' "$shell_script_job_id" \
     | VPSMAN_API_TOKEN="$access_token" target/debug/vpsctl --api-url "$api_url" vty)"
   grep -F "[$client_id stdout" <<<"$vty_follow" | grep -F "$shell_script_payload" >/dev/null
-  grep -F "status=completed" <<<"$vty_follow" >/dev/null
+  grep -F "status=succeeded" <<<"$vty_follow" >/dev/null
 }
 
 assert_live_streaming_job_output() {
@@ -494,10 +495,10 @@ assert_live_streaming_job_output() {
   targets_json="$(api_get "/api/v1/jobs/$live_stream_job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$live_stream_job_id/outputs")"
 
-  jq -e '.status == "completed" and .command_type == "shell_script" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "shell_script" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -552,10 +553,10 @@ assert_timed_out_shell_job() {
   outputs_json="$(api_get "/api/v1/jobs/$timeout_job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=200")"
 
-  jq -e '.status == "timed_out" and .command_type == "shell_argv" and .target_count == 1' \
+  jq -e '.status == "agent_timed_out" and .command_type == "shell_argv" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "timed_out" and .[0].exit_code == 124
+    length == 1 and .[0].client_id == $client and .[0].status == "agent_timed_out" and .[0].exit_code == 124
   ' <<<"$targets_json" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 124)
@@ -565,7 +566,7 @@ assert_timed_out_shell_job() {
   jq -e --arg job_id "$timeout_job_id" '
     any(.[]; .action == "job.target_result"
       and .metadata.job_id == $job_id
-      and .metadata.status == "timed_out"
+      and .metadata.status == "agent_timed_out"
       and .metadata.exit_code == 124)
   ' <<<"$audits_json" >/dev/null
 }
@@ -576,10 +577,10 @@ assert_file_pull_output() {
   targets_json="$(api_get "/api/v1/jobs/$file_pull_job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$file_pull_job_id/outputs")"
 
-  jq -e '.status == "completed" and .command_type == "file_pull" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "file_pull" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   pulled_bytes="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$pulled_bytes" == "$file_pull_payload" ]]
@@ -625,10 +626,10 @@ assert_user_sessions_output() {
   outputs_json="$(api_get "/api/v1/jobs/$user_sessions_job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=30")"
 
-  jq -e '.status == "completed" and .command_type == "user_sessions" and .target_count == 1' \
+  jq -e '.status == "succeeded" and .command_type == "user_sessions" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -658,10 +659,10 @@ assert_terminal_job_completed() {
   targets_json="$(api_get "/api/v1/jobs/$current_job_id/targets")"
 
   jq -e --arg command "$expected_command" '
-    .status == "completed" and .command_type == $command and .target_count == 1
+    .status == "succeeded" and .command_type == $command and .target_count == 1
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
 }
 
@@ -817,7 +818,7 @@ assert_resumable_event_streams() {
         and .next_offset == 0
         and .multi_target_policy == "same-offset"
         and .target_offsets[$client] == 0
-        and .accepted_targets == 1)
+        and .target_count == 1)
       and ([.[] | select(.event == "file_transfer_upload_chunk" and .session_id == $sid and .multi_target_policy == "same-offset" and (.target_offsets[$client] | type == "number"))] | length >= 2)
       and any(.[]; .event == "file_transfer_upload_complete"
         and .session_id == $sid
@@ -826,7 +827,7 @@ assert_resumable_event_streams() {
         and .sha256_hex == $sha
         and .multi_target_policy == "same-offset"
         and .target_offsets[$client] == $size
-        and .accepted_targets == 1)
+        and .target_count == 1)
     ' "$resumable_upload_events" >/dev/null
 
   jq -s -e \

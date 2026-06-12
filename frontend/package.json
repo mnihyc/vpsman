@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "generate:contracts": "cargo run --manifest-path ../Cargo.toml -p vpsman-common --bin generate_frontend_contracts -- src/generated/protocolContracts.ts",
+    "check:contracts": "../scripts/check-frontend-contracts.sh",
     "build": "node ../build/frontend-build-number.mjs && tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:ui": "playwright test"

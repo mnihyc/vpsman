@@ -219,6 +219,7 @@ export function App() {
                 onWindowChange={dashboard.setDashboardOverviewWindow}
                 overview={dashboard.dashboardOverview}
                 preferences={dashboard.dashboardPreferences}
+                server={dashboard.dashboardServer}
                 window={dashboard.dashboardOverviewWindow}
               />
             )}

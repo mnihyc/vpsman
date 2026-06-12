@@ -29,7 +29,7 @@ use crate::{
         MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
-    routes_dashboard::dashboard_overview,
+    routes_dashboard::{dashboard_overview, dashboard_server},
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
         download_file_transfer_source_artifact, list_file_transfer_sessions,
@@ -62,7 +62,7 @@ use crate::{
         list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
-    routes_jobs::create_job,
+    routes_jobs::{cancel_job, create_job},
     routes_key_lifecycle::{
         key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
         upsert_agent_identity,
@@ -81,6 +81,7 @@ use crate::{
     routes_server_jobs::{
         cancel_server_job, create_artifact_cleanup_job, list_server_jobs, preview_artifact_cleanup,
     },
+    routes_suite_config::{get_suite_config, update_suite_config},
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
         create_agent_update_release, create_hosted_agent_update_release,
@@ -128,7 +129,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(revoke_current_client_key),
         )
         .route("/api/v1/key-lifecycle/report", get(key_lifecycle_report))
+        .route(
+            "/api/v1/admin/suite-config",
+            get(get_suite_config).put(update_suite_config),
+        )
         .route("/api/v1/dashboard/overview", get(dashboard_overview))
+        .route("/api/v1/dashboard/server", get(dashboard_server))
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
         .route("/api/v1/fleet-alerts/export", get(export_fleet_alerts))
@@ -300,6 +306,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(download_agent_update_artifact),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
+        .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
         .route("/api/v1/jobs/{job_id}/outputs", get(list_job_outputs))
         .route(

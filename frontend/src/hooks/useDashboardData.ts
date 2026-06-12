@@ -462,6 +462,7 @@ export function useDashboardData(activeView: ActiveView) {
     dashboardOverviewLoading: dashboardOverview.dashboardOverviewLoading,
     dashboardOverviewWindow: dashboardOverview.dashboardOverviewWindow,
     dashboardPreferences: dashboardOverview.dashboardPreferences,
+    dashboardServer: dashboardOverview.dashboardServer,
     loadDashboardOverview: dashboardOverview.loadDashboardOverview,
     setDashboardOverviewWindow: dashboardOverview.setDashboardOverviewWindow,
     updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,

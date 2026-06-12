@@ -165,7 +165,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
             bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
         },
-        "completed",
+        "succeeded",
     )
     .await
     .unwrap();
@@ -186,7 +186,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             ifupdown_sha256_hex: payload_hash(right.ifupdown_snippet.as_bytes()),
             bird2_sha256_hex: payload_hash(right.bird2_interface_snippet.as_bytes()),
         },
-        "completed",
+        "succeeded",
     )
     .await
     .unwrap();
@@ -202,7 +202,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             plan: Box::new(plan),
             side: TunnelEndpointSide::Left,
         },
-        "completed",
+        "succeeded",
     )
     .await
     .unwrap();
@@ -597,7 +597,6 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -656,20 +655,19 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state_with_privilege_auto_approve(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
     let (status, response) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
+    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "dispatching");
+    assert_eq!(response.status, "succeeded_with_skips");
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(targets[0].status, "degraded_unprivileged");
+    assert_eq!(targets[0].status, "skipped");
 }
 
 #[tokio::test]
@@ -707,7 +705,6 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -754,7 +751,6 @@ async fn network_status_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -803,7 +799,6 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -855,7 +850,6 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -906,6 +900,7 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }
 

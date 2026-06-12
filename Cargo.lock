@@ -3167,6 +3167,7 @@ dependencies = [
  "snow",
  "thiserror",
  "tokio",
+ "toml",
  "uuid",
 ]
 

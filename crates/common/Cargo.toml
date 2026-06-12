@@ -22,4 +22,5 @@ sha2.workspace = true
 snow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
 uuid.workspace = true

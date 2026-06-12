@@ -60,6 +60,7 @@ fn schedule_test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }
 
@@ -240,8 +241,8 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "dispatching");
-    wait_for_job_status(&repo, response.job_id, "degraded_unprivileged").await;
+    assert_eq!(response.status, "succeeded_with_skips");
+    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
     assert_eq!(
         repo.schedule_by_id(schedule.id).await.unwrap().next_run_at,
         next_run_before
@@ -254,7 +255,7 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].client_id, "client-a");
-    assert_eq!(targets[0].status, "degraded_unprivileged");
+    assert_eq!(targets[0].status, "skipped");
 
     let audits = repo.list_audit_logs(20).await.unwrap();
     let dispatch_audit = audits

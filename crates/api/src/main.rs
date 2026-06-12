@@ -66,7 +66,9 @@ mod repository_network_recommendations;
 mod repository_operator_totp;
 mod repository_restores;
 mod repository_schedules;
+mod repository_server_dashboard;
 mod repository_server_jobs;
+mod repository_suite_config;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
 mod repository_topology_graph;
@@ -89,6 +91,7 @@ mod routes_network;
 mod routes_restores;
 mod routes_schedules;
 mod routes_server_jobs;
+mod routes_suite_config;
 mod routes_terminal_sessions;
 mod routes_update_releases;
 mod routes_webhook_rules;
@@ -109,6 +112,7 @@ use routes::build_router;
 use state::{AppState, UpdateReleasePolicy};
 use tokio::sync::broadcast;
 use tracing::info;
+use vpsman_common::{read_secret_file_ref, SuiteConfig};
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
@@ -188,6 +192,12 @@ use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]
 struct Args {
+    #[arg(
+        long,
+        env = "VPSMAN_SUITE_CONFIG",
+        default_value = "config/vpsman.toml"
+    )]
+    suite_config: PathBuf,
     #[arg(long, env = "VPSMAN_API_BIND", default_value = "0.0.0.0:8080")]
     bind: SocketAddr,
     #[arg(long, env = "VPSMAN_POSTGRES_URL")]
@@ -286,6 +296,208 @@ struct Args {
     alert_cpu_load_critical: f64,
 }
 
+impl Args {
+    fn apply_suite_config(&mut self, config: &SuiteConfig) -> std::result::Result<(), String> {
+        if env_absent("VPSMAN_API_BIND") {
+            if let Some(bind) = config.api.bind.as_deref() {
+                self.bind = bind
+                    .parse()
+                    .map_err(|error| format!("api.bind_invalid:{error}"))?;
+            }
+        }
+        apply_opt_string(
+            &mut self.postgres_url,
+            "VPSMAN_POSTGRES_URL",
+            config.database.postgres_url.as_deref(),
+        );
+        apply_path_default(
+            &mut self.migrations_dir,
+            "VPSMAN_MIGRATIONS_DIR",
+            config.database.migrations_dir.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.gateway_control_url,
+            "VPSMAN_GATEWAY_CONTROL_URL",
+            config.api.gateway_control_url.as_deref(),
+        );
+        apply_opt_path(
+            &mut self.backup_object_store_dir,
+            "VPSMAN_BACKUP_OBJECT_STORE_DIR",
+            config
+                .storage
+                .backup_object_store_dir
+                .as_deref()
+                .or(config.storage.object_store_dir.as_deref()),
+        );
+        apply_opt_path(
+            &mut self.update_object_store_dir,
+            "VPSMAN_UPDATE_OBJECT_STORE_DIR",
+            config
+                .storage
+                .update_object_store_dir
+                .as_deref()
+                .or(config.storage.object_store_dir.as_deref()),
+        );
+        apply_opt_string(
+            &mut self.object_endpoint,
+            "VPSMAN_OBJECT_ENDPOINT",
+            config.storage.object_endpoint.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.object_bucket,
+            "VPSMAN_OBJECT_BUCKET",
+            config.storage.object_bucket.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.update_object_endpoint,
+            "VPSMAN_UPDATE_OBJECT_ENDPOINT",
+            config.storage.update_object_endpoint.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.update_object_bucket,
+            "VPSMAN_UPDATE_OBJECT_BUCKET",
+            config.storage.update_object_bucket.as_deref(),
+        );
+        apply_string_default(
+            &mut self.object_region,
+            "VPSMAN_OBJECT_REGION",
+            config.storage.object_region.as_deref(),
+        );
+        apply_string_default(
+            &mut self.update_object_region,
+            "VPSMAN_UPDATE_OBJECT_REGION",
+            config.storage.update_object_region.as_deref(),
+        );
+        apply_bool_default(
+            &mut self.object_create_bucket,
+            "VPSMAN_OBJECT_CREATE_BUCKET",
+            config.storage.object_create_bucket,
+        );
+        apply_bool_default(
+            &mut self.update_object_create_bucket,
+            "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
+            config.storage.update_object_create_bucket,
+        );
+        apply_opt_string(
+            &mut self.update_artifact_public_base_url,
+            "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL",
+            config.api.update_artifact_public_base_url.as_deref(),
+        );
+        if env_absent("VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES") {
+            if let Some(value) = config.api.job_output_artifact_min_bytes {
+                self.job_output_artifact_min_bytes = value;
+            }
+        }
+        if env_absent("VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES") {
+            if let Some(value) = config.api.require_registered_agent_updates {
+                self.require_registered_agent_updates = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO") {
+            if let Some(value) = config.api.alert_memory_available_warning_ratio {
+                self.alert_memory_available_warning_ratio = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO") {
+            if let Some(value) = config.api.alert_memory_available_critical_ratio {
+                self.alert_memory_available_critical_ratio = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO") {
+            if let Some(value) = config.api.alert_disk_available_warning_ratio {
+                self.alert_disk_available_warning_ratio = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO") {
+            if let Some(value) = config.api.alert_disk_available_critical_ratio {
+                self.alert_disk_available_critical_ratio = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING") {
+            if let Some(value) = config.api.alert_cpu_load_warning {
+                self.alert_cpu_load_warning = value;
+            }
+        }
+        if env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL") {
+            if let Some(value) = config.api.alert_cpu_load_critical {
+                self.alert_cpu_load_critical = value;
+            }
+        }
+        if env_absent("VPSMAN_API_DB_MAX_CONNECTIONS") {
+            if let Some(value) = config.capacity.api_db_pool {
+                std::env::set_var("VPSMAN_API_DB_MAX_CONNECTIONS", value.to_string());
+            }
+        }
+        if self.internal_token.is_none() && env_absent("VPSMAN_INTERNAL_TOKEN") {
+            self.internal_token =
+                read_secret_file_ref(config.secrets.internal_token_file.as_deref())?;
+        }
+        if self.object_access_key.is_none() && env_absent("VPSMAN_OBJECT_ACCESS_KEY") {
+            self.object_access_key =
+                read_secret_file_ref(config.secrets.object_access_key_file.as_deref())?;
+        }
+        if self.object_secret_key.is_none() && env_absent("VPSMAN_OBJECT_SECRET_KEY") {
+            self.object_secret_key =
+                read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
+        }
+        if self.update_object_access_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_ACCESS_KEY")
+        {
+            self.update_object_access_key =
+                read_secret_file_ref(config.secrets.update_object_access_key_file.as_deref())?;
+        }
+        if self.update_object_secret_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_SECRET_KEY")
+        {
+            self.update_object_secret_key =
+                read_secret_file_ref(config.secrets.update_object_secret_key_file.as_deref())?;
+        }
+        Ok(())
+    }
+}
+
+fn env_absent(name: &str) -> bool {
+    std::env::var_os(name).is_none()
+}
+
+fn apply_opt_string(target: &mut Option<String>, env_name: &str, value: Option<&str>) {
+    if target.is_none() && env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = Some(value.to_string());
+        }
+    }
+}
+
+fn apply_opt_path(target: &mut Option<PathBuf>, env_name: &str, value: Option<&str>) {
+    if target.is_none() && env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = Some(PathBuf::from(value));
+        }
+    }
+}
+
+fn apply_path_default(target: &mut PathBuf, env_name: &str, value: Option<&str>) {
+    if env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = PathBuf::from(value);
+        }
+    }
+}
+
+fn apply_string_default(target: &mut String, env_name: &str, value: Option<&str>) {
+    if env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = value.to_string();
+        }
+    }
+}
+
+fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -295,7 +507,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    let suite_config =
+        SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    args.apply_suite_config(&suite_config)
+        .map_err(anyhow::Error::msg)?;
     info!(
         version = env!("CARGO_PKG_VERSION"),
         server_build_number = build_info::server_build_number(),
@@ -353,6 +569,7 @@ async fn main() -> Result<()> {
         fleet_alert_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
         require_registered_agent_updates: args.require_registered_agent_updates,
+        suite_config_path: args.suite_config.clone(),
     };
     state
         .repo

@@ -89,8 +89,13 @@ impl Repository {
             anyhow::bail!("VPSMAN_POSTGRES_URL is required");
         };
 
+        let max_connections = std::env::var("VPSMAN_API_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(32)
+            .clamp(1, 256);
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect(postgres_url)
             .await
             .context("failed to connect to PostgreSQL")?;

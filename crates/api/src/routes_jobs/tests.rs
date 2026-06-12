@@ -29,12 +29,12 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
         }],
     });
 
-    assert_eq!(outcome.status, "timed_out");
+    assert_eq!(outcome.status, "agent_timed_out");
     assert_eq!(outcome.exit_code, Some(124));
     assert!(outcome.accepted);
     assert_eq!(
         aggregate_job_status_from_statuses(&[outcome.status], 1),
-        "timed_out"
+        "agent_timed_out"
     );
 }
 
@@ -75,6 +75,7 @@ fn protocol_mismatch_detects_unsupported_command_status_output() {
         command_version: Some(2),
         accepted: true,
         message: "failed".to_string(),
+        received_at: None,
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
@@ -114,6 +115,7 @@ fn protocol_mismatch_detects_lower_response_command_version() {
         command_version: Some(1),
         accepted: true,
         message: "ok".to_string(),
+        received_at: None,
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
@@ -162,31 +164,28 @@ fn stale_target_message_keeps_failure_reason_explicit() {
 #[test]
 fn aggregate_job_status_uses_terminal_target_states() {
     assert_eq!(
-        aggregate_job_status_from_statuses(&["completed".to_string(), "completed".to_string()], 2),
-        "completed"
+        aggregate_job_status_from_statuses(&["succeeded".to_string(), "succeeded".to_string()], 2),
+        "succeeded"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2),
-        "partially_completed"
+        aggregate_job_status_from_statuses(&["succeeded".to_string(), "failed".to_string()], 2),
+        "partial_success"
     );
     assert_eq!(
         aggregate_job_status_from_statuses(&["failed".to_string(), "failed".to_string()], 2),
         "failed"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["dispatch_failed".to_string()], 1),
-        "dispatch_failed"
+        aggregate_job_status_from_statuses(&["control_timed_out".to_string()], 1),
+        "control_timed_out"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["degraded_unprivileged".to_string()], 1),
-        "degraded_unprivileged"
+        aggregate_job_status_from_statuses(&["skipped".to_string()], 1),
+        "succeeded_with_skips"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(
-            &["completed".to_string(), "degraded_unprivileged".to_string()],
-            2,
-        ),
-        "partially_completed"
+        aggregate_job_status_from_statuses(&["succeeded".to_string(), "skipped".to_string()], 2,),
+        "succeeded_with_skips"
     );
 }
 
@@ -486,7 +485,7 @@ fn capability_degraded_outcome_records_operator_hint() {
             .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
 
-    assert_eq!(outcome.status, "degraded_unprivileged");
+    assert_eq!(outcome.status, "skipped");
     assert!(!outcome.accepted);
     assert_eq!(
         status["reason"],
@@ -496,6 +495,34 @@ fn capability_degraded_outcome_records_operator_hint() {
         .as_str()
         .unwrap()
         .contains("force_unprivileged"));
+}
+
+#[test]
+fn job_timeout_must_fit_selected_agent_caps() {
+    let agents = vec![
+        test_agent(
+            "short-cap",
+            AgentCapabilitySnapshot {
+                command_timeout_secs: 30,
+                ..AgentCapabilitySnapshot::default()
+            },
+        ),
+        test_agent(
+            "long-cap",
+            AgentCapabilitySnapshot {
+                command_timeout_secs: 600,
+                ..AgentCapabilitySnapshot::default()
+            },
+        ),
+    ];
+
+    assert!(validate_agent_command_timeout_cap(
+        45,
+        &["short-cap".to_string(), "long-cap".to_string()],
+        &agents,
+    )
+    .is_err());
+    validate_agent_command_timeout_cap(45, &["long-cap".to_string()], &agents).unwrap();
 }
 
 fn skipped_client_ids(skipped: &[CapabilitySkip]) -> Vec<&str> {

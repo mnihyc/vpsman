@@ -352,7 +352,7 @@ function buildTerminalOperation(
     return {
       type: "terminal_input",
       session_id: sessionId,
-      input_seq: clampInteger(inputSeqInput, 0, Number.MAX_SAFE_INTEGER),
+      input_seq: clampInteger(inputSeqInput, 1, Number.MAX_SAFE_INTEGER),
       data_base64: base64FromText(inputText),
     };
   }

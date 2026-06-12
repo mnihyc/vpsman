@@ -47,6 +47,7 @@ selected_sha="$(sha256sum "$selected_file" | awk '{print $1}')"
 
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
 VPSMAN_POSTGRES_URL="$postgres_url" \
+VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
@@ -189,8 +190,8 @@ targets_json="$(api_auth_get "/api/v1/jobs/$job_id/targets")"
 outputs_json="$(api_auth_get "/api/v1/jobs/$job_id/outputs")"
 audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 
-jq -e '.status == "completed" and .command_type == "backup"' <<<"$job_json" >/dev/null
-jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
+jq -e '.status == "succeeded" and .command_type == "backup"' <<<"$job_json" >/dev/null
+jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "succeeded" and .exit_code == 0)' <<<"$targets_json" >/dev/null
 jq -e --arg path "$selected_file" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
@@ -257,6 +258,7 @@ restore_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --destination-root "$restore_root" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
+    --force-unprivileged \
     --confirmed)"
 restore_job_id="$(jq -r '.job_id' <<<"$restore_json")"
 smoke_assert_job_create_queued "$restore_json" 1
@@ -277,6 +279,7 @@ rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --target-client-id "$client_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
+    --force-unprivileged \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
 smoke_assert_job_create_queued "$rollback_json" 1
@@ -304,14 +307,20 @@ vty_restore_root="$SMOKE_TMPDIR/vty-restore-root"
 vty_restore_log="$SMOKE_TMPDIR/vty-restore.log"
 {
   printf 'enable\n'
-  printf 'restore-run %s %s --path %s --include-config --destination-root %s --timeout 30 --confirmed\n' \
+  printf 'restore-run %s %s --path %s --include-config --destination-root %s --timeout 30 --force-unprivileged --confirmed\n' \
     "$backup_request_id" "$client_id" "$selected_file" "$vty_restore_root"
   printf 'exit\n'
 } | VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   VPSMAN_BACKUP_PRIVATE_KEY_HEX="$backup_private_hex" \
   target/debug/vpsctl --api-url "$api_url" vty >"$vty_restore_log" 2>&1
-grep -q '"status":"completed"' "$vty_restore_log"
+vty_restore_job_id="$(grep -Eo '"job_id":"[^"]+"' "$vty_restore_log" | head -1 | cut -d'"' -f4)"
+if [[ -z "$vty_restore_job_id" ]]; then
+  echo "vty restore did not print a job id" >&2
+  cat "$vty_restore_log" >&2 || true
+  exit 1
+fi
+smoke_wait_api_job_status "$api_url" "$vty_restore_job_id" completed 45 >/dev/null
 vty_restored_selected="$vty_restore_root${selected_file}"
 cmp -s "$selected_file" "$vty_restored_selected"
 
@@ -339,6 +348,7 @@ migration_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --restore-plan-id "$migration_restore_plan_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
+    --force-unprivileged \
     --note "live migration run" \
     --confirmed)"
 migration_job_id="$(jq -r '.restore_job.job_id' <<<"$migration_json")"

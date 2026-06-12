@@ -118,10 +118,12 @@ start_api() {
     api_log="$SMOKE_TMPDIR/api-$label-$attempt.log"
     VPSMAN_API_BIND="127.0.0.1:$api_port" \
     VPSMAN_POSTGRES_URL="$postgres_url" \
+    VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
     VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+    VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -196,10 +198,10 @@ assert_job_completed() {
   job_json="$(api_get "/api/v1/jobs/$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   jq -e --arg command_type "$command_type" '
-    .status == "completed" and .command_type == $command_type and .target_count == 1
+    .status == "succeeded" and .command_type == $command_type and .target_count == 1
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
 }
 
@@ -481,6 +483,7 @@ auth_json="$(curl -fsS \
   -d '{"username":"network-apply-smoke","password":"network-apply-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "network-apply-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
@@ -516,12 +519,29 @@ smoke_create_direct_agent_config \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
-sed -i \
-  -e 's/^apply_enabled = .*/apply_enabled = true/' \
-  -e "s|^root_dir = .*|root_dir = \"$network_root\"|" \
-  -e 's/^validate_enabled = .*/validate_enabled = false/' \
-  -e 's/^reload_enabled = .*/reload_enabled = false/' \
-  "$agent_config"
+enable_network_apply_config() {
+  local config_path="$1"
+  if grep -q '^apply_enabled = ' "$config_path"; then
+    sed -i \
+      -e 's/^apply_enabled = .*/apply_enabled = true/' \
+      -e "s|^root_dir = .*|root_dir = \"$network_root\"|" \
+      -e 's/^validate_enabled = .*/validate_enabled = false/' \
+      -e 's/^reload_enabled = .*/reload_enabled = false/' \
+      "$config_path"
+  else
+    cat >>"$config_path" <<TOML
+
+[network]
+apply_enabled = true
+root_dir = "$network_root"
+validate_enabled = false
+reload_enabled = false
+TOML
+  fi
+}
+
+enable_network_apply_config "$agent_config"
+enable_network_apply_config "$peer_agent_config"
 grep -q 'apply_enabled = true' "$agent_config"
 grep -q "root_dir = \"$network_root\"" "$agent_config"
 
@@ -639,10 +659,17 @@ assert_outputs_redacted
 assert_audit_evidence
 
 stop_agent
-sed -i \
-  -e 's/^runtime_reconcile_enabled = .*/runtime_reconcile_enabled = true/' \
-  -e 's/^runtime_unprivileged_mutation_policy = .*/runtime_unprivileged_mutation_policy = "try_external_adapters"/' \
-  "$agent_config"
+if grep -q '^runtime_reconcile_enabled = ' "$agent_config"; then
+  sed -i \
+    -e 's/^runtime_reconcile_enabled = .*/runtime_reconcile_enabled = true/' \
+    -e 's/^runtime_unprivileged_mutation_policy = .*/runtime_unprivileged_mutation_policy = "try_external_adapters"/' \
+    "$agent_config"
+else
+  cat >>"$agent_config" <<TOML
+runtime_reconcile_enabled = true
+runtime_unprivileged_mutation_policy = "try_external_adapters"
+TOML
+fi
 grep -q 'runtime_reconcile_enabled = true' "$agent_config"
 grep -q 'runtime_unprivileged_mutation_policy = "try_external_adapters"' "$agent_config"
 start_agent "runtime-adapter"

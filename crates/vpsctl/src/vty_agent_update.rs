@@ -33,7 +33,7 @@ pub(crate) fn submit_vty_agent_update_command(
             &privilege_context.password,
             &privilege_context.salt_hex,
             parse_vty_agent_update(&parts[1..]).with_context(|| {
-                "usage: agent-update --artifact-url <https-url> --sha256-hex <sha256> [--artifact-signature-hex <sig>] [--artifact-signing-key-hex <key>] <target ...> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                "usage: agent-update --artifact-url <https-url> --sha256-hex <sha256> [--artifact-signature-hex <sig>] [--artifact-signing-key-hex <key>] <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
             })?,
         ),
         "agent-update-activate" => submit_vty_agent_update_activate(
@@ -42,7 +42,7 @@ pub(crate) fn submit_vty_agent_update_command(
             &privilege_context.password,
             &privilege_context.salt_hex,
             parse_vty_agent_update_activate(&parts[1..]).with_context(|| {
-                "usage: agent-update-activate --staged-sha256-hex <sha256> <target ...> [--restart-agent] [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                "usage: agent-update-activate --staged-sha256-hex <sha256> <target ...> [--restart-agent] [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
             })?,
         ),
         "agent-update-rollback" => submit_vty_agent_update_rollback(
@@ -51,7 +51,7 @@ pub(crate) fn submit_vty_agent_update_command(
             &privilege_context.password,
             &privilege_context.salt_hex,
             parse_vty_agent_update_rollback(&parts[1..]).with_context(|| {
-                "usage: agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...> [--timeout <1-3600>] [--privilege-ttl <1-3600>] [--force-unprivileged] --confirmed"
+                "usage: agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
             })?,
         ),
         command => anyhow::bail!("unknown agent update command {command}"),

@@ -220,6 +220,7 @@ pub(crate) struct JobOutputView {
     pub(crate) artifact_size_bytes: Option<i64>,
     pub(crate) exit_code: Option<i32>,
     pub(crate) done: bool,
+    pub(crate) received_at: Option<String>,
     pub(crate) created_at: String,
 }
 
@@ -817,8 +818,22 @@ pub(crate) struct CreateJobRequest {
     pub(crate) privileged: bool,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
-    #[serde(default)]
-    pub(crate) reconnect_policy: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateJobTargetCounts {
+    pub(crate) total: usize,
+    pub(crate) runnable: usize,
+    pub(crate) skipped: usize,
+    pub(crate) rejected_unavailable: usize,
+    pub(crate) pending: usize,
+    pub(crate) delivering: usize,
+    pub(crate) running: usize,
+    pub(crate) succeeded: usize,
+    pub(crate) failed: usize,
+    pub(crate) agent_timed_out: usize,
+    pub(crate) control_timed_out: usize,
+    pub(crate) canceled: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -827,6 +842,33 @@ pub(crate) struct CreateJobResponse {
     pub(crate) target_count: usize,
     pub(crate) accepted_targets: usize,
     pub(crate) status: String,
+    pub(crate) target_counts: CreateJobTargetCounts,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelJobRequest {
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelJobTargetResult {
+    pub(crate) client_id: String,
+    pub(crate) acked: bool,
+    pub(crate) accepted: bool,
+    pub(crate) applied: bool,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelJobResponse {
+    pub(crate) job_id: Uuid,
+    pub(crate) requested_targets: usize,
+    pub(crate) pending_canceled: usize,
+    pub(crate) cancel_acks: Vec<CancelJobTargetResult>,
+    pub(crate) status: Option<String>,
+    pub(crate) accepted_targets: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]

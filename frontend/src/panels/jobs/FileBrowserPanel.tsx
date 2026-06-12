@@ -191,12 +191,8 @@ export function FileBrowserPanel({
       argv: [],
       operation,
       timeout_secs: timeoutSecs,
-        force_unprivileged: false,
+      force_unprivileged: false,
       privileged: true,
-      reconnect_policy: {
-        duplicate_delivery: "ignore_completed",
-        resume_outputs: true,
-      },
       privilege_assertion: built.privilegeAssertion,
     });
     const outputs = await waitForOutputs(job.job_id, onLoadOutputs, options.expectedType);

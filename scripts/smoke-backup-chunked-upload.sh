@@ -29,6 +29,7 @@ gateway_log="$SMOKE_TMPDIR/gateway.log"
 
 VPSMAN_API_BIND="127.0.0.1:$api_port" \
 VPSMAN_POSTGRES_URL="$postgres_url" \
+VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \

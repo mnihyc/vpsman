@@ -101,15 +101,15 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
             }
             "--privilege-ttl" => {
                 privilege_ttl_secs =
-                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
+                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 15, 300)?;
                 index += 2;
             }
             value if value.starts_with("--privilege-ttl=") => {
                 privilege_ttl_secs = parse_bounded_u64(
                     "--privilege-ttl",
                     Some(value.trim_start_matches("--privilege-ttl=")),
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }
@@ -339,15 +339,15 @@ pub(crate) fn parse_vty_file_transfer_download(
             }
             "--privilege-ttl" => {
                 privilege_ttl_secs =
-                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 1, 3600)?;
+                    parse_bounded_u64("--privilege-ttl", tokens.get(index + 1).copied(), 15, 300)?;
                 index += 2;
             }
             value if value.starts_with("--privilege-ttl=") => {
                 privilege_ttl_secs = parse_bounded_u64(
                     "--privilege-ttl",
                     Some(value.trim_start_matches("--privilege-ttl=")),
-                    1,
-                    3600,
+                    15,
+                    300,
                 )?;
                 index += 1;
             }

@@ -521,6 +521,48 @@ const dashboardOverview = {
   window: "24h",
 };
 
+const dashboardServer = {
+  cancellations: {
+    acked: 1,
+    awaiting_ack: 0,
+    requested: 1,
+    sent: 1,
+  },
+  db_pool: {
+    idle_connections: 18,
+    in_use_connections: 6,
+    max_connections: 32,
+    open_connections: 24,
+  },
+  dispatch: {
+    active_jobs: 2,
+    pending_jobs: 1,
+    queue_depth: 4,
+    retried_targets: 2,
+    running_jobs: 1,
+    total_dispatch_attempts: 42,
+  },
+  gateway_events: {
+    active_queues: 3,
+    delivered_events: 928,
+    queued_events: 0,
+    retry_attempts: 2,
+    status: "live",
+  },
+  generated_at: "2026-06-05T20:44:58Z",
+  notes: ["50-VPS capacity profile active"],
+  targets: {
+    active: 3,
+    agent_timed_out_last_24h: 1,
+    canceled_last_24h: 1,
+    control_timed_out_last_24h: 1,
+    deadline_expired_active: 0,
+    delivering: 1,
+    pending: 1,
+    running: 2,
+  },
+};
+
 const operatorPreferences = {
   bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
@@ -1643,6 +1685,7 @@ export async function installConsoleApiMock(page: Page) {
       artifactsFixture,
       backupsFixture,
       dashboardOverviewFixture,
+      dashboardServerFixture,
       dataSourceAssignmentsFixture,
       dataSourcePresetsFixture,
       dataSourceStatusFixture,
@@ -2329,6 +2372,9 @@ export async function installConsoleApiMock(page: Page) {
             },
             window: requestedWindow,
           });
+        }
+        if (pathname === "/api/v1/dashboard/server") {
+          return jsonResponse(dashboardServerFixture);
         }
         if (pathname === "/api/v1/fleet/summary") {
           const currentAgents = visibleAgents();
@@ -3616,6 +3662,7 @@ export async function installConsoleApiMock(page: Page) {
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
+      dashboardServerFixture: dashboardServer,
       dataSourceAssignmentsFixture: dataSourceAssignments,
       dataSourcePresetsFixture: dataSourcePresets,
       dataSourceStatusFixture: dataSourceStatus,

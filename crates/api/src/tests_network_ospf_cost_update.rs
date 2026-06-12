@@ -107,7 +107,6 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -155,5 +154,6 @@ fn test_state(repo: Repository) -> AppState {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     }
 }

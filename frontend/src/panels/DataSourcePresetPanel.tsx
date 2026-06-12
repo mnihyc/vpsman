@@ -174,7 +174,7 @@ export function DataSourcePresetPanel({
     (lastAssignment
       ? `${lastAssignment.target_count} VPS preset assignments evaluated`
       : lastApplyJob
-        ? `Data-source patch job ${lastApplyJob.job_id} queued ${lastApplyJob.target_count} target`
+        ? `Data-source patch job ${lastApplyJob.job_id} ${lastApplyJob.status}; ${lastApplyJob.target_count} target`
       : `${presets.length} presets across ${new Set(presets.map((preset) => preset.domain)).size} domains`);
 
   useEffect(() => {

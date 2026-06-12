@@ -124,7 +124,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
-        reconnect_policy: None,
     };
     let state = AppState {
         repo: repo.clone(),
@@ -138,6 +137,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: true,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -186,6 +186,7 @@ async fn uploaded_agent_update_artifact_is_hosted_and_sanitized() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -324,6 +325,7 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -402,6 +404,7 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let signature_hex = hex::encode(sign_update_artifact_hash(&signing_key, &sha256_hex));
     let signing_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
@@ -527,6 +530,7 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
     };
     let headers = crate::test_auth_headers(&state).await;
     let mut request = signed_release_request("vpsman-agent", "2.4.0", "nightly");
@@ -653,6 +657,7 @@ fn signed_release_request(
 fn test_args() -> Args {
     Args {
         bind: "127.0.0.1:0".parse().unwrap(),
+        suite_config: PathBuf::from("config/vpsman.toml"),
         postgres_url: None,
         migrations_dir: PathBuf::from("migrations"),
         internal_token: None,
