@@ -436,24 +436,108 @@
   gap: 8px;
 }
 
-.systemConfigGrid,
-.systemDiffGrid {
+.systemConfigOverview .sectionHeader {
+  align-items: flex-start;
+}
+
+.systemConfigSummary {
   display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.systemConfigStatusItem {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #dfe3eb;
+  border-top: 3px solid #80868b;
+  border-radius: 8px;
+  padding: 11px;
+  background: #fff;
+}
+
+.systemConfigStatusItem.ok {
+  border-top-color: #188038;
+}
+
+.systemConfigStatusItem.info {
+  border-top-color: #1a73e8;
+}
+
+.systemConfigStatusItem.warning {
+  border-top-color: #f9ab00;
+}
+
+.systemConfigStatusItem.critical {
+  border-top-color: #d93025;
+}
+
+.systemConfigStatusItem > span {
+  grid-row: span 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #f1f3f4;
+  color: #1a73e8;
+}
+
+.systemConfigStatusItem small {
+  min-width: 0;
+  overflow: hidden;
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.systemConfigStatusItem strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #202124;
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.systemConfigBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+  gap: 16px;
+}
+
+.systemConfigEditor,
+.systemConfigReview {
+  min-width: 0;
+}
+
+.editorModeGroup {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.systemConfigGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
   gap: 14px;
   padding: 16px;
 }
 
-.systemConfigGrid {
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
-}
-
-.systemDiffGrid {
-  grid-template-columns: minmax(220px, 0.8fr) repeat(2, minmax(260px, 1fr));
-}
-
 .systemConfigGroup {
   display: grid;
+  align-content: start;
   gap: 10px;
+  min-width: 0;
   border: 1px solid #dfe3eb;
   border-radius: 8px;
   padding: 14px;
@@ -461,10 +545,19 @@
 }
 
 .systemConfigGroup h3,
-.systemDiffGrid h3 {
+.systemReviewBlock h3,
+.systemImpactList h3,
+.systemDiffPreview h3 {
   margin: 0;
   color: #202124;
   font-size: 14px;
+}
+
+.systemConfigGroup p {
+  margin: -4px 0 2px;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .systemConfigGroup label {
@@ -473,23 +566,124 @@
   min-width: 0;
   color: #3c4043;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
+}
+
+.systemConfigGroup input:not([type="checkbox"]),
+.systemConfigToml {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: #202124;
+  outline: 0;
+  padding: 0 10px;
 }
 
 .systemConfigGroup input:not([type="checkbox"]) {
-  width: 100%;
-  min-width: 0;
+  font-weight: 600;
+}
+
+.systemConfigGroup input:not([type="checkbox"]):focus,
+.systemConfigToml:focus {
+  border-color: #1a73e8;
+}
+
+.systemConfigGroup label.checkLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.systemConfigGroup label.checkLine input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.systemTomlEditor {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.systemTomlNotes {
+  display: grid;
+  gap: 6px;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .systemConfigToml {
-  width: calc(100% - 32px);
-  min-height: 420px;
-  margin: 0 16px 16px;
-  border: 1px solid #dfe3eb;
-  border-radius: 8px;
+  min-height: 520px;
   padding: 12px;
   font: 12px/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   resize: vertical;
+}
+
+.systemConfigNotice {
+  margin: 12px 16px 0;
+}
+
+.systemReviewStack {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.systemReviewBlock,
+.systemImpactList {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.systemReviewBlock .privilegeManager {
+  margin: 0;
+}
+
+.systemReviewBlock .privilegeFields,
+.systemReviewBlock .inlinePrivilege {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.systemImpactGrid {
+  display: grid;
+  gap: 12px;
+}
+
+.systemImpactList {
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafd;
+}
+
+.systemImpactList ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #3c4043;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.systemDiffPreview {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.compactChipList {
+  margin: 0;
+}
+
+.compactJsonPreview {
+  max-height: 220px;
 }
 
 .chipList {

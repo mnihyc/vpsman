@@ -300,6 +300,21 @@ until ((telemetry_ready_client_count == agent_count)); do
 done
 telemetry_rollup_count="$(docker exec "$pg_container" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM telemetry_rollups WHERE bucket_secs = $rollup_bucket_secs")"
 
+deadline=$((SECONDS + 60))
+telemetry_network_rate_ready_client_count=0
+until ((telemetry_network_rate_ready_client_count >= agent_count)); do
+  if ((SECONDS >= deadline)); then
+    dump_docker_logs "not enough per-client telemetry network rates arrived through the API"
+    api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" >&2 || true
+    docker exec "$pg_container" psql -U vpsman -d vpsman -c "SELECT client_id, interface, bucket_start, sample_count FROM telemetry_network_rates ORDER BY client_id, interface, bucket_start DESC" >&2 || true
+    exit 1
+  fi
+  telemetry_network_rate_ready_client_count="$(api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -r '
+    [.[] | select(.sample_count >= 2 and (.interface | length) > 0) | .client_id] | unique | length
+  ')"
+  sleep 1
+done
+
 agents_json="$(api_get "/api/v1/agents")"
 jq -e \
   --argjson expected "$agent_count" \
@@ -325,13 +340,13 @@ api_get "/api/v1/tags" | jq -e \
   any(.[]; .name == "audit:docker-fleet" and (.clients | length) == $expected)
 ' >/dev/null
 
-api_get "/api/v1/telemetry/rollups?limit=200" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
-  ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2)] | length) >= $expected and
+api_get "/api/v1/telemetry/rollups?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
+  ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2) | .client_id] | unique | length) >= $expected and
   all(.[] | select(.bucket_secs == $bucket and .sample_count >= 2); .memory_total_bytes_max > 0 and .disk_total_bytes_max >= 0)
 ' >/dev/null
 
-api_get "/api/v1/telemetry/network-rates?limit=200" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
-  ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2 and (.interface | length) > 0)] | length) >= $expected
+api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
+  ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2 and (.interface | length) > 0) | .client_id] | unique | length) >= $expected
 ' >/dev/null
 
 api_post "/api/v1/bulk/resolve" '{"selector_expression":"provider:alpha"}' \

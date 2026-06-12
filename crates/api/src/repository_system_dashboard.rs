@@ -466,9 +466,8 @@ fn system_metric_step_secs(start_unix: u64, end_unix: u64, chart_points: i64) ->
     let raw = span
         .div_ceil(requested)
         .max(SYSTEM_METRIC_BUCKET_SECS as u64);
-    ((raw + SYSTEM_METRIC_BUCKET_SECS as u64 - 1) / SYSTEM_METRIC_BUCKET_SECS as u64
-        * SYSTEM_METRIC_BUCKET_SECS as u64)
-        .min(86_400) as i32
+    (raw.div_ceil(SYSTEM_METRIC_BUCKET_SECS as u64) * SYSTEM_METRIC_BUCKET_SECS as u64).min(86_400)
+        as i32
 }
 
 fn timestamp_in_bounds(value: &str, start_unix: u64, end_unix: u64) -> bool {

@@ -735,7 +735,12 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await page.getByLabel("API DB pool").fill("40");
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
-  await expect(page.getByText("capacity.api_db_pool")).toBeVisible();
+  await expect(
+    page
+      .locator(".systemConfigReview")
+      .getByText("capacity.api_db_pool")
+      .first(),
+  ).toBeVisible();
 });
 
 test("packs dashboard top VPS cards by label length", async ({

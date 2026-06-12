@@ -121,6 +121,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     scopeValue: "US",
   });
   await maybeScreenshot(page, testInfo.project.name, "dashboard");
+  await expectLiveSystemDashboardTelemetry(page);
   if (isMobile) {
     writeScreenshotManifest(testInfo.project.name);
     await expectCleanLayout(page);
@@ -297,11 +298,10 @@ async function expectLiveDashboardTelemetry(page: Page) {
   const operationalHealth = page.locator(".dashboardSection").filter({
     has: page.getByRole("heading", { name: "Operational Health" }),
   });
-  await expect(operationalHealth).toContainText("DB pool");
-  await expect(operationalHealth).toContainText("Dispatch queue");
-  await expect(operationalHealth).toContainText("Deadline timeouts");
-  await expect(operationalHealth).toContainText("Cancel acks");
-  await expect(operationalHealth).toContainText("Gateway events");
+  await expect(operationalHealth).toContainText(`${expectedTotal}/${expectedTotal} online`);
+  await expect(operationalHealth).not.toContainText("DB pool");
+  await expect(operationalHealth).not.toContainText("Dispatch queue");
+  await expect(operationalHealth).not.toContainText("Gateway events");
   await expect(operationalHealth).not.toContainText(/No data|Gateway metrics unavailable/i);
 
   const resourceUsage = page.locator(".dashboardSection").filter({
@@ -346,6 +346,48 @@ async function expectLiveDashboardTelemetry(page: Page) {
   expect(
     await networkSection.locator(".dashboardClientRow").count(),
   ).toBeGreaterThan(0);
+}
+
+async function expectLiveSystemDashboardTelemetry(page: Page) {
+  await openConsoleSubpage(page, "System", "Dashboard");
+  await expect(
+    page.getByRole("heading", { name: "System dashboard", exact: true }),
+  ).toBeVisible();
+
+  const systemWorkspace = page.locator(".systemWorkspace");
+  await expect(
+    systemWorkspace.getByRole("heading", { name: "Capacity", exact: true }),
+  ).toBeVisible();
+  const capacity = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Capacity", exact: true }),
+  });
+  await expect(capacity).toContainText("API DB pool");
+  await expect(capacity).toContainText("Worker DB pool");
+  await expect(capacity).toContainText("Dispatcher in-flight");
+
+  const lifecycle = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Dispatch Lifecycle" }),
+  });
+  await expect(lifecycle).toContainText("Dispatch queue");
+  await expect(lifecycle).toContainText("Active targets");
+
+  const deadlines = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Deadlines" }),
+  });
+  await expect(deadlines).toContainText("Deadline timeouts");
+  await expect(deadlines).toContainText("Control timed out");
+
+  const cancellations = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Cancellations" }),
+  });
+  await expect(cancellations).toContainText("Cancel acks");
+  await expect(cancellations).toContainText("Awaiting ack");
+
+  const gatewayEvents = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Gateway Events" }),
+  });
+  await expect(gatewayEvents).toContainText("Event retries");
+  await expect(gatewayEvents).not.toContainText(/unavailable/i);
 }
 
 async function expectLiveFleetTelemetry(detail: Locator) {

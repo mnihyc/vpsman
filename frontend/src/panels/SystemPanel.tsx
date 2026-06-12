@@ -146,6 +146,9 @@ function SystemDashboardPanel({
   const dbPressure = dashboard?.current.db_pool.max_connections
     ? dashboard.current.db_pool.in_use_connections / dashboard.current.db_pool.max_connections
     : 0;
+  const deadlineTimeouts =
+    (dashboard?.current.targets.control_timed_out_last_24h ?? 0) +
+    (dashboard?.current.targets.agent_timed_out_last_24h ?? 0);
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -220,7 +223,7 @@ function SystemDashboardPanel({
           subtitle="Pending, delivering, running, retry, and active job pressure."
           metrics={[
             { label: "Active jobs", value: String(dashboard?.current.dispatch.active_jobs ?? 0) },
-            { label: "Queue depth", value: String(dashboard?.current.dispatch.queue_depth ?? 0) },
+            { label: "Dispatch queue", value: String(dashboard?.current.dispatch.queue_depth ?? 0) },
             { label: "Active targets", value: String(dashboard?.current.targets.active ?? 0) },
             { label: "Retried targets", value: String(dashboard?.current.dispatch.retried_targets ?? 0) },
           ]}
@@ -239,7 +242,7 @@ function SystemDashboardPanel({
           title="Deadlines"
           subtitle="Control deadline expiry, agent timeouts, and canceled outcomes."
           metrics={[
-            { label: "Expired active", value: String(dashboard?.current.targets.deadline_expired_active ?? 0) },
+            { label: "Deadline timeouts", value: String(deadlineTimeouts) },
             { label: "Control timed out", value: String(dashboard?.current.targets.control_timed_out_last_24h ?? 0) },
             { label: "Agent timed out", value: String(dashboard?.current.targets.agent_timed_out_last_24h ?? 0) },
             { label: "Agent offline timeout", value: secondsOrUnset(dashboard?.capacity.agent_offline_secs) },
@@ -262,7 +265,7 @@ function SystemDashboardPanel({
             { label: "Status", value: dashboard?.current.gateway_events.status ?? "unavailable" },
             { label: "Queued", value: valueOrUnset(dashboard?.current.gateway_events.queued_events) },
             { label: "Delivered", value: valueOrUnset(dashboard?.current.gateway_events.delivered_events) },
-            { label: "Retries", value: valueOrUnset(dashboard?.current.gateway_events.retry_attempts) },
+            { label: "Event retries", value: valueOrUnset(dashboard?.current.gateway_events.retry_attempts) },
           ]}
           lines={chartLines(series, [
             "gateway_events.queued_events",
@@ -281,7 +284,7 @@ function SystemDashboardPanel({
           metrics={[
             { label: "Requested", value: String(dashboard?.current.cancellations.requested ?? 0) },
             { label: "Sent", value: String(dashboard?.current.cancellations.sent ?? 0) },
-            { label: "Acked", value: String(dashboard?.current.cancellations.acked ?? 0) },
+            { label: "Cancel acks", value: String(dashboard?.current.cancellations.acked ?? 0) },
             { label: "Awaiting ack", value: String(dashboard?.current.cancellations.awaiting_ack ?? 0) },
           ]}
           lines={chartLines(series, [
@@ -410,8 +413,21 @@ function SystemConfigPanel({
   const [configError, setConfigError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [editorMode, setEditorMode] = useState<"form" | "toml">("form");
   const parsedDraft = useMemo(() => parseTomlDraft(draftToml), [draftToml]);
   const dirty = Boolean(config && draftToml !== config.toml);
+  const changedKeys = validation?.changed_keys ?? [];
+  const activeValidation = validation?.validation ?? config?.validation ?? null;
+  const hotReloadFields = activeValidation?.hot_reload_fields ?? [];
+  const restartRequiredFields = activeValidation?.restart_required_fields ?? [];
+  const validationState = validation
+    ? validation.validation.valid
+      ? "validated"
+      : "invalid"
+    : config?.validation.valid
+      ? "loaded"
+      : "invalid";
+  const saveDisabled = pending || !dirty || !validation || !confirmed || !privilegeMaterial;
 
   useEffect(() => {
     if (config) {
@@ -491,7 +507,7 @@ function SystemConfigPanel({
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
-        <section className="fleetPanel">
+        <section className="fleetPanel systemConfigOverview">
           <div className="sectionHeader">
             <div>
               <h2>System Config</h2>
@@ -506,7 +522,7 @@ function SystemConfigPanel({
                 <CheckCircle2 size={16} />
                 <span>Validate</span>
               </button>
-              <button className="primaryAction compactAction" disabled={pending || !dirty || !validation || !confirmed || !privilegeMaterial} onClick={saveDraft} type="button">
+              <button className="primaryAction compactAction" disabled={saveDisabled} onClick={saveDraft} type="button">
                 <Save size={16} />
                 <span>Save</span>
               </button>
@@ -516,126 +532,166 @@ function SystemConfigPanel({
           {configError && <div className="panelError">{configError}</div>}
           {configMessage && <div className="panelSuccess">{configMessage}</div>}
           {config && (
-            <div className="dashboardCardGrid operationalGrid">
-              <SystemStatusTile icon={<SlidersHorizontal size={18} />} label="Validation" value={config.validation.valid ? "valid" : "invalid"} />
-              <SystemStatusTile icon={<RefreshCw size={18} />} label="Hot reload" value={`${config.validation.hot_reload_fields.length} fields`} />
-              <SystemStatusTile icon={<AlertTriangle size={18} />} label="Restart required" value={`${config.validation.restart_required_fields.length} fields`} />
-              <SystemStatusTile icon={<LockKeyhole size={18} />} label="Privilege" value={privilegeMaterial ? "unlocked" : "locked"} />
+            <div className="systemConfigSummary">
+              <SystemConfigStatusItem icon={<SlidersHorizontal size={17} />} label="State" value={dirty ? "draft" : validationState} tone={dirty ? "warning" : validationState === "invalid" ? "critical" : "ok"} />
+              <SystemConfigStatusItem icon={<CheckCircle2 size={17} />} label="Changed keys" value={validation ? String(changedKeys.length) : "not validated"} tone={validation ? "info" : "neutral"} />
+              <SystemConfigStatusItem icon={<RefreshCw size={17} />} label="Hot reload" value={`${hotReloadFields.length} fields`} tone="info" />
+              <SystemConfigStatusItem icon={<AlertTriangle size={17} />} label="Restart required" value={`${restartRequiredFields.length} fields`} tone={restartRequiredFields.length ? "warning" : "ok"} />
+              <SystemConfigStatusItem icon={<LockKeyhole size={17} />} label="Privilege" value={privilegeMaterial ? "unlocked" : "locked"} tone={privilegeMaterial ? "ok" : "warning"} />
             </div>
           )}
         </section>
 
-        {!privilegeMaterial && (
-          <PrivilegeVaultBox
-            lastPayloadHash={null}
-            onPrivilegeMaterialChange={onPrivilegeMaterialChange}
-            privilegeMaterial={privilegeMaterial}
-          />
-        )}
-
-        <section className="dashboardSection">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2>Structured Controls</h2>
-              <span>Common suite settings rendered from TOML. Empty string fields remove optional keys.</span>
-            </div>
-            <ConsoleStatusBadge tone={parsedDraft.ok ? "ok" : "warning"}>
-              {parsedDraft.ok ? "TOML parsed" : "TOML invalid"}
-            </ConsoleStatusBadge>
-          </div>
-          <div className="systemConfigGrid">
-            <ConfigGroup title="API">
-              <ConfigText path="api.bind" label="Bind address" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="api.gateway_control_url" label="Gateway control URL" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="api.job_output_artifact_min_bytes" label="Output artifact threshold" parsed={parsedDraft} onChange={updateField} />
-              <ConfigCheckbox path="api.require_registered_agent_updates" label="Require registered agent updates" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-            <ConfigGroup title="Gateway">
-              <ConfigText path="gateway.bind" label="Agent bind" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="gateway.control_bind" label="Control bind" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="gateway.api_url" label="API URL" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="gateway.gateway_id" label="Gateway ID" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="gateway.reconnect_grace_secs" label="Reconnect grace seconds" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-            <ConfigGroup title="Worker">
-              <ConfigNumber path="worker.tick_secs" label="Tick seconds" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="worker.worker_lease_secs" label="Worker lease seconds" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="worker.agent_offline_timeout_secs" label="Offline timeout seconds" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="worker.schedule_command_timeout_secs" label="Schedule command timeout" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-            <ConfigGroup title="Capacity">
-              <ConfigNumber path="capacity.api_db_pool" label="API DB pool" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="capacity.worker_db_pool" label="Worker DB pool" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="capacity.dispatcher_batch" label="Dispatcher batch" parsed={parsedDraft} onChange={updateField} />
-              <ConfigNumber path="capacity.dispatcher_in_flight" label="Dispatcher in-flight" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-            <ConfigGroup title="Storage">
-              <ConfigText path="storage.object_store_dir" label="Object store dir" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="storage.object_endpoint" label="Object endpoint" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="storage.object_bucket" label="Object bucket" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="storage.update_object_bucket" label="Update object bucket" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-            <ConfigGroup title="Secrets">
-              <ConfigText path="secrets.internal_token_file" label="Internal token file" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="secrets.gateway_private_key_file" label="Gateway key file" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="secrets.privilege_verifier_key_file" label="Privilege verifier file" parsed={parsedDraft} onChange={updateField} />
-              <ConfigText path="secrets.object_secret_key_file" label="Object secret key file" parsed={parsedDraft} onChange={updateField} />
-            </ConfigGroup>
-          </div>
-        </section>
-
-        <section className="dashboardSection">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2>Raw TOML</h2>
-              <span>{config?.hot_reload_note ?? "Hot-reload notes unavailable"} / {config?.restart_required_note ?? "Restart notes unavailable"}</span>
-            </div>
-          </div>
-          <textarea
-            aria-label="Suite config TOML"
-            className="systemConfigToml"
-            onChange={(event) => {
-              setDraftToml(event.target.value);
-              setValidation(null);
-              setConfirmed(false);
-            }}
-            spellCheck={false}
-            value={draftToml}
-          />
-        </section>
-
-        <section className="dashboardSection">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2>Validation And Redacted Diff</h2>
-              <span>Secret file references are shown; secret file contents are never displayed.</span>
-            </div>
-            <ConsoleStatusBadge tone={validation?.validation.valid ? "ok" : "neutral"}>
-              {validation ? `${validation.changed_keys.length} changed` : "Not validated"}
-            </ConsoleStatusBadge>
-          </div>
-          <div className="systemDiffGrid">
-            <div>
-              <h3>Changed keys</h3>
-              <div className="chipList">
-                {(validation?.changed_keys ?? []).map((key) => <span key={key}>{key}</span>)}
-                {validation && validation.changed_keys.length === 0 ? <span>No changes</span> : null}
+        <div className="systemConfigBody">
+          <section className="dashboardSection systemConfigEditor">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2>Suite editor</h2>
+                <span>{editorMode === "form" ? "Structured controls for common runtime settings." : "Full TOML editor for advanced settings."}</span>
               </div>
-              <label className="checkLine inlineCheck">
-                <input checked={confirmed} disabled={!validation || !dirty} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-                <span>Reviewed redacted diff and restart/hot-reload impact</span>
-              </label>
+              <div className="editorModeGroup">
+                <ConsoleStatusBadge tone={parsedDraft.ok ? "ok" : "warning"}>
+                  {parsedDraft.ok ? "TOML parsed" : "TOML invalid"}
+                </ConsoleStatusBadge>
+                <div className="segmented" role="group" aria-label="Suite config editor mode">
+                  <button aria-pressed={editorMode === "form"} className={editorMode === "form" ? "selected" : ""} onClick={() => setEditorMode("form")} type="button">
+                    Form
+                  </button>
+                  <button aria-pressed={editorMode === "toml"} className={editorMode === "toml" ? "selected" : ""} onClick={() => setEditorMode("toml")} type="button">
+                    TOML
+                  </button>
+                </div>
+              </div>
             </div>
-            <div>
-              <h3>Current redacted</h3>
-              <pre className="jsonPreview">{formatJson(config?.redacted ?? validation?.old_redacted ?? null)}</pre>
+            {!parsedDraft.ok && (
+              <div className="panelWarning systemConfigNotice">
+                Structured controls are paused until the TOML parses. Use the raw TOML editor to repair the document.
+              </div>
+            )}
+            {editorMode === "form" ? (
+              <div className="systemConfigGrid compactForm">
+                <ConfigGroup title="API" description="Public API bind and gateway control settings.">
+                  <ConfigText path="api.bind" label="Bind address" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="api.gateway_control_url" label="Gateway control URL" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="api.job_output_artifact_min_bytes" label="Output artifact threshold" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigCheckbox path="api.require_registered_agent_updates" label="Require registered agent updates" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+                <ConfigGroup title="Gateway" description="Agent listener, control listener, and API forwarding identity.">
+                  <ConfigText path="gateway.bind" label="Agent bind" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="gateway.control_bind" label="Control bind" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="gateway.api_url" label="API URL" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="gateway.gateway_id" label="Gateway ID" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="gateway.reconnect_grace_secs" label="Reconnect grace seconds" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+                <ConfigGroup title="Worker" description="Schedule cadence, leases, and offline reconciliation.">
+                  <ConfigNumber path="worker.tick_secs" label="Tick seconds" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="worker.worker_lease_secs" label="Worker lease seconds" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="worker.agent_offline_timeout_secs" label="Offline timeout seconds" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="worker.schedule_command_timeout_secs" label="Schedule command timeout" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+                <ConfigGroup title="Capacity" description="Fleet defaults sized for 20-50 VPS operation.">
+                  <ConfigNumber path="capacity.api_db_pool" label="API DB pool" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="capacity.worker_db_pool" label="Worker DB pool" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="capacity.dispatcher_batch" label="Dispatcher batch" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="capacity.dispatcher_in_flight" label="Dispatcher in-flight" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+                <ConfigGroup title="Storage" description="Object-store locations and optional S3 buckets.">
+                  <ConfigText path="storage.object_store_dir" label="Object store dir" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="storage.object_endpoint" label="Object endpoint" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="storage.object_bucket" label="Object bucket" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="storage.update_object_bucket" label="Update object bucket" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+                <ConfigGroup title="Secrets" description="Mounted secret-file references only; contents stay hidden.">
+                  <ConfigText path="secrets.internal_token_file" label="Internal token file" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="secrets.gateway_private_key_file" label="Gateway key file" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="secrets.privilege_verifier_key_file" label="Privilege verifier file" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="secrets.object_secret_key_file" label="Object secret key file" parsed={parsedDraft} onChange={updateField} />
+                </ConfigGroup>
+              </div>
+            ) : (
+              <div className="systemTomlEditor">
+                <div className="systemTomlNotes">
+                  <span>{config?.hot_reload_note ?? "Hot-reload notes unavailable"}</span>
+                  <span>{config?.restart_required_note ?? "Restart notes unavailable"}</span>
+                </div>
+                <textarea
+                  aria-label="Suite config TOML"
+                  className="systemConfigToml"
+                  onChange={(event) => {
+                    setDraftToml(event.target.value);
+                    setValidation(null);
+                    setConfirmed(false);
+                  }}
+                  spellCheck={false}
+                  value={draftToml}
+                />
+              </div>
+            )}
+          </section>
+
+          <aside className="dashboardSection systemConfigReview" aria-label="Suite config validation and save review">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2>Review and save</h2>
+                <span>Validate, review impact, unlock privilege, then save.</span>
+              </div>
+              <ConsoleStatusBadge tone={validation?.validation.valid ? "ok" : dirty ? "warning" : "neutral"}>
+                {validation ? `${changedKeys.length} changed` : dirty ? "Draft" : "No draft"}
+              </ConsoleStatusBadge>
             </div>
-            <div>
-              <h3>Draft redacted</h3>
-              <pre className="jsonPreview">{formatJson(validation?.redacted ?? null)}</pre>
+
+            <div className="systemReviewStack">
+              <div className="systemReviewBlock">
+                <h3>Changed keys</h3>
+                <div className="chipList compactChipList">
+                  {changedKeys.map((key) => <span key={key}>{key}</span>)}
+                  {validation && changedKeys.length === 0 ? <span>No changes</span> : null}
+                  {!validation ? <span>Validate draft first</span> : null}
+                </div>
+              </div>
+
+              <div className="systemImpactGrid">
+                <ImpactList title="Hot reload" fields={hotReloadFields} emptyLabel="No hot-reload fields reported" />
+                <ImpactList title="Restart required" fields={restartRequiredFields} emptyLabel="No restart-only fields reported" />
+              </div>
+
+              <div className="systemReviewBlock">
+                <h3>Privilege</h3>
+                <PrivilegeVaultBox
+                  lastPayloadHash={null}
+                  onPrivilegeMaterialChange={onPrivilegeMaterialChange}
+                  privilegeMaterial={privilegeMaterial}
+                  lockPrivilegeLabel="Lock suite privilege"
+                  unlockLabel="Unlock"
+                  usePrivilegeLabel="Use for suite save"
+                />
+              </div>
+
+              <div className="systemReviewBlock">
+                <h3>Save guard</h3>
+                <label className="checkLine inlineCheck">
+                  <input checked={confirmed} disabled={!validation || !dirty} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
+                  <span>Reviewed redacted diff and restart/hot-reload impact</span>
+                </label>
+                <button className="primaryAction wideAction" disabled={saveDisabled} onClick={saveDraft} type="button">
+                  <Save size={16} />
+                  <span>{pending ? "Saving" : "Save suite config"}</span>
+                </button>
+              </div>
+
+              <div className="systemDiffPreview">
+                <div>
+                  <h3>Current redacted</h3>
+                  <pre className="jsonPreview compactJsonPreview">{formatJson(config?.redacted ?? validation?.old_redacted ?? null)}</pre>
+                </div>
+                <div>
+                  <h3>Draft redacted</h3>
+                  <pre className="jsonPreview compactJsonPreview">{formatJson(validation?.redacted ?? null)}</pre>
+                </div>
+              </div>
             </div>
-          </div>
-        </section>
+          </aside>
+        </div>
       </div>
     </div>
   );
@@ -643,11 +699,45 @@ function SystemConfigPanel({
 
 type ParsedTomlDraft = { ok: true; table: TomlTable } | { ok: false; error: string };
 
-function ConfigGroup({ children, title }: { children: ReactNode; title: string }) {
+function SystemConfigStatusItem({
+  icon,
+  label,
+  tone,
+  value,
+}: {
+  icon: ReactNode;
+  label: string;
+  tone: "critical" | "info" | "neutral" | "ok" | "warning";
+  value: string;
+}) {
+  return (
+    <div className={`systemConfigStatusItem ${tone}`}>
+      <span>{icon}</span>
+      <small>{label}</small>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ConfigGroup({ children, description, title }: { children: ReactNode; description: string; title: string }) {
   return (
     <div className="systemConfigGroup">
       <h3>{title}</h3>
+      <p>{description}</p>
       {children}
+    </div>
+  );
+}
+
+function ImpactList({ emptyLabel, fields, title }: { emptyLabel: string; fields: string[]; title: string }) {
+  return (
+    <div className="systemImpactList">
+      <h3>{title}</h3>
+      <ul>
+        {fields.slice(0, 8).map((field) => <li key={field}>{field}</li>)}
+        {fields.length === 0 ? <li>{emptyLabel}</li> : null}
+        {fields.length > 8 ? <li>{fields.length - 8} more fields</li> : null}
+      </ul>
     </div>
   );
 }

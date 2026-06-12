@@ -32,3 +32,4 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | `0005_network_tunnels.sql` | Initial tunnel, tunnel-plan, and network-observation schema. |
 | `0006_agent_updates.sql` | Initial agent update release schema. Artifact verification remains intentionally scoped to agent update releases only. |
 | `0007_data_sources_file_transfer.sql` | Initial data-source preset, client assignment, and file-transfer source-artifact schema, including built-in presets. |
+| `0008_system_metrics.sql` | Initial durable System Dashboard metric-rollup schema. Adds 60-second control-plane metric buckets and registers `system_metric_rollups` as an explicit history-retention/export domain without destructive changes. |

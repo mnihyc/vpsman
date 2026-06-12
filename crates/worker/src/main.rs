@@ -373,7 +373,7 @@ fn apply_i32_default(target: &mut i32, env_name: &str, value: Option<i32>) {
 }
 
 fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
-    if env_absent(env_name) {
+    if !*target && env_absent(env_name) {
         if let Some(value) = value {
             *target = value;
         }
@@ -2247,5 +2247,18 @@ mod schedule_tests {
             ..VpsMetadata::default()
         });
         assert!(expression_matches(&context, &expression));
+    }
+
+    #[test]
+    fn suite_bool_defaults_do_not_disable_explicit_true_flags() {
+        let env_name = "VPSMAN_WORKER_APPLY_BOOL_DEFAULT_TEST_UNSET";
+
+        let mut explicit_true = true;
+        apply_bool_default(&mut explicit_true, env_name, Some(false));
+        assert!(explicit_true);
+
+        let mut default_false = false;
+        apply_bool_default(&mut default_false, env_name, Some(true));
+        assert!(default_false);
     }
 }

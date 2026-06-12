@@ -12,6 +12,8 @@ use crate::{
     repository::Repository,
 };
 
+const TELEMETRY_LIST_LIMIT_MAX: i64 = 50_000;
+
 impl Repository {
     pub(crate) async fn list_dashboard_telemetry_rollups(
         &self,
@@ -147,7 +149,7 @@ impl Repository {
                         .cmp(&left.bucket_start)
                         .then_with(|| left.client_id.cmp(&right.client_id))
                 });
-                rows.truncate(limit.clamp(1, 200) as usize);
+                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -180,7 +182,7 @@ impl Repository {
                 )
                 .bind(client_id)
                 .bind(bucket_secs)
-                .bind(limit.clamp(1, 200))
+                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
                 .fetch_all(pool)
                 .await?;
 
@@ -357,7 +359,7 @@ impl Repository {
                         .then_with(|| left.client_id.cmp(&right.client_id))
                         .then_with(|| left.interface.cmp(&right.interface))
                 });
-                rows.truncate(limit.clamp(1, 200) as usize);
+                rows.truncate(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX) as usize);
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -425,7 +427,7 @@ impl Repository {
                 .bind(client_id)
                 .bind(interface)
                 .bind(bucket_secs)
-                .bind(limit.clamp(1, 200))
+                .bind(limit.clamp(1, TELEMETRY_LIST_LIMIT_MAX))
                 .fetch_all(pool)
                 .await?;
 
