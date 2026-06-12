@@ -109,7 +109,9 @@
   .resourceGrid,
   .dashboardNetworkPanel,
   .dashboardLists,
-  .dashboardControlBar {
+  .dashboardControlBar,
+  .systemConfigGrid,
+  .systemDiffGrid {
     grid-template-columns: 1fr;
   }
 

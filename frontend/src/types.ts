@@ -83,24 +83,14 @@ export type DashboardOverviewRecord = {
   drilldowns: DashboardDrilldownRecord[];
 };
 
-export type DashboardServerRecord = {
-  generated_at: string;
-  db_pool: DashboardServerDbPoolRecord;
-  dispatch: DashboardServerDispatchRecord;
-  targets: DashboardServerTargetsRecord;
-  cancellations: DashboardServerCancellationsRecord;
-  gateway_events: DashboardServerGatewayEventsRecord;
-  notes: string[];
-};
-
-export type DashboardServerDbPoolRecord = {
+export type SystemDashboardDbPoolRecord = {
   max_connections: number;
   open_connections: number;
   idle_connections: number;
   in_use_connections: number;
 };
 
-export type DashboardServerDispatchRecord = {
+export type SystemDashboardDispatchRecord = {
   active_jobs: number;
   pending_jobs: number;
   running_jobs: number;
@@ -109,7 +99,7 @@ export type DashboardServerDispatchRecord = {
   retried_targets: number;
 };
 
-export type DashboardServerTargetsRecord = {
+export type SystemDashboardTargetsRecord = {
   pending: number;
   delivering: number;
   running: number;
@@ -120,19 +110,64 @@ export type DashboardServerTargetsRecord = {
   canceled_last_24h: number;
 };
 
-export type DashboardServerCancellationsRecord = {
+export type SystemDashboardCancellationsRecord = {
   requested: number;
   sent: number;
   acked: number;
   awaiting_ack: number;
 };
 
-export type DashboardServerGatewayEventsRecord = {
+export type SystemDashboardGatewayEventsRecord = {
   queued_events: number | null;
   delivered_events: number | null;
   retry_attempts: number | null;
   active_queues: number | null;
   status: "live" | "unavailable" | string;
+};
+
+export type SystemDashboardRecord = {
+  generated_at: string;
+  window: string;
+  bucket_secs: number;
+  current: SystemDashboardSnapshotRecord;
+  capacity: SystemDashboardCapacityRecord;
+  series: SystemMetricSeriesRecord[];
+  notes: string[];
+};
+
+export type SystemDashboardSnapshotRecord = {
+  db_pool: SystemDashboardDbPoolRecord;
+  dispatch: SystemDashboardDispatchRecord;
+  targets: SystemDashboardTargetsRecord;
+  cancellations: SystemDashboardCancellationsRecord;
+  gateway_events: SystemDashboardGatewayEventsRecord;
+};
+
+export type SystemDashboardCapacityRecord = {
+  api_db_pool: number | null;
+  worker_db_pool: number | null;
+  dispatcher_batch: number | null;
+  dispatcher_in_flight: number | null;
+  dispatch_ack_secs: number | null;
+  event_post_secs: number | null;
+  internal_http_read_secs: number | null;
+  worker_schedule_command_secs: number | null;
+  agent_offline_secs: number | null;
+};
+
+export type SystemMetricSeriesRecord = {
+  metric: string;
+  label: string;
+  unit: string;
+  points: SystemMetricPointRecord[];
+};
+
+export type SystemMetricPointRecord = {
+  bucket_start: string;
+  avg_value: number;
+  max_value: number;
+  latest_value: number;
+  sample_count: number;
 };
 
 export type DashboardScopeRecord = {
@@ -2248,6 +2283,38 @@ export type BulkResolveResponse = {
   target_count: number;
 };
 
+export type SuiteConfigValidationRecord = {
+  valid: boolean;
+  version: number;
+  restart_required_fields: string[];
+  hot_reload_fields: string[];
+};
+
+export type SuiteConfigResponse = {
+  path: string;
+  exists: boolean;
+  toml: string;
+  redacted: JsonValue;
+  validation: SuiteConfigValidationRecord;
+  hot_reload_note: string;
+  restart_required_note: string;
+};
+
+export type SuiteConfigValidateResponse = {
+  path: string;
+  exists: boolean;
+  changed_keys: string[];
+  redacted: JsonValue;
+  old_redacted: JsonValue;
+  validation: SuiteConfigValidationRecord;
+};
+
+export type SuiteConfigUpdateResponse = {
+  path: string;
+  changed_keys: string[];
+  validation: SuiteConfigValidationRecord;
+};
+
 export type ActiveView =
   | "Dashboard"
   | "Fleet"
@@ -2259,4 +2326,4 @@ export type ActiveView =
   | "Topology"
   | "Backups"
   | "Access"
-  | "Preferences";
+  | "System";

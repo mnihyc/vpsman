@@ -36,6 +36,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-resizable-panels": "^4.11.2",
+    "smol-toml": "^1.6.1",
     "uplot": "^1.6.32"
   },
   "devDependencies": {

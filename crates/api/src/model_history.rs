@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HistoryDomain {
     AuditLogs,
+    SystemMetricRollups,
     TelemetryRollups,
     JobOutputs,
     BackupArtifacts,
@@ -11,8 +12,9 @@ pub(crate) enum HistoryDomain {
 }
 
 impl HistoryDomain {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::AuditLogs,
+        Self::SystemMetricRollups,
         Self::TelemetryRollups,
         Self::JobOutputs,
         Self::BackupArtifacts,
@@ -23,6 +25,7 @@ impl HistoryDomain {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AuditLogs => "audit_logs",
+            Self::SystemMetricRollups => "system_metric_rollups",
             Self::TelemetryRollups => "telemetry_rollups",
             Self::JobOutputs => "job_outputs",
             Self::BackupArtifacts => "backup_artifacts",
@@ -34,6 +37,9 @@ impl HistoryDomain {
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value.trim() {
             "audit_logs" | "audit" => Some(Self::AuditLogs),
+            "system_metric_rollups" | "system_metrics" | "system" => {
+                Some(Self::SystemMetricRollups)
+            }
             "telemetry_rollups" | "telemetry" => Some(Self::TelemetryRollups),
             "job_outputs" | "jobs" => Some(Self::JobOutputs),
             "backup_artifacts" | "backups" => Some(Self::BackupArtifacts),
@@ -46,6 +52,7 @@ impl HistoryDomain {
     pub(crate) fn default_retention_days(self) -> i32 {
         match self {
             Self::JobOutputs => 30,
+            Self::SystemMetricRollups => 3650,
             Self::TelemetryRollups => 3650,
             Self::NetworkObservations | Self::TopologyHistory => 180,
             Self::AuditLogs => 365,
@@ -56,7 +63,7 @@ impl HistoryDomain {
     pub(crate) fn default_prune_limit(self) -> i32 {
         match self {
             Self::JobOutputs | Self::NetworkObservations => 5_000,
-            Self::TelemetryRollups | Self::TopologyHistory => 2_000,
+            Self::SystemMetricRollups | Self::TelemetryRollups | Self::TopologyHistory => 2_000,
             Self::AuditLogs | Self::BackupArtifacts => 1_000,
         }
     }

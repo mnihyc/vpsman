@@ -65,6 +65,8 @@ pub(crate) struct MemoryState {
     pub(crate) agent_update_releases: Arc<RwLock<Vec<AgentUpdateReleaseView>>>,
     pub(crate) server_jobs: Arc<RwLock<Vec<ServerJobView>>>,
     pub(crate) network_observations: Arc<RwLock<Vec<NetworkObservationView>>>,
+    pub(crate) system_metric_rollups:
+        Arc<RwLock<Vec<crate::model_dashboard::SystemMetricRollupView>>>,
     pub(crate) telemetry_rollups: Arc<RwLock<Vec<TelemetryRollupView>>>,
     pub(crate) telemetry_network_rates: Arc<RwLock<Vec<TelemetryNetworkRateView>>>,
     pub(crate) telemetry_tunnels: Arc<RwLock<Vec<TelemetryTunnelView>>>,

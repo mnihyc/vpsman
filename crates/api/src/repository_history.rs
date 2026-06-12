@@ -256,6 +256,21 @@ impl Repository {
                             object_keys: Vec::new(),
                         })
                     }
+                    HistoryDomain::SystemMetricRollups => {
+                        let matched_rows = prune_memory_vec(
+                            &memory.system_metric_rollups,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                            |row| &row.bucket_start,
+                        )
+                        .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
                     HistoryDomain::JobOutputs => {
                         let mut rows = memory.job_outputs.write().await;
                         let mut matched_indices = rows
@@ -596,6 +611,12 @@ async fn prune_postgres_history_domain(
         (HistoryDomain::TelemetryRollups, false) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, false).await
         }
+        (HistoryDomain::SystemMetricRollups, true) => {
+            prune_system_metric_rollups(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::SystemMetricRollups, false) => {
+            prune_system_metric_rollups(pool, cutoff_unix, limit, false).await
+        }
         (HistoryDomain::JobOutputs, true) => {
             prune_job_outputs(pool, cutoff_unix, limit, true).await
         }
@@ -756,6 +777,49 @@ async fn prune_telemetry_rollups(
           AND rollup.bucket_secs = doomed.bucket_secs
           AND rollup.bucket_start = doomed.bucket_start
         RETURNING rollup.client_id
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_system_metric_rollups(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT metric, bucket_secs, bucket_start
+        FROM system_metric_rollups
+        WHERE bucket_start < to_timestamp($1)
+        ORDER BY bucket_start ASC, metric ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT metric, bucket_secs, bucket_start
+            FROM system_metric_rollups
+            WHERE bucket_start < to_timestamp($1)
+            ORDER BY bucket_start ASC, metric ASC
+            LIMIT $2
+        )
+        DELETE FROM system_metric_rollups rollup
+        USING doomed
+        WHERE rollup.metric = doomed.metric
+          AND rollup.bucket_secs = doomed.bucket_secs
+          AND rollup.bucket_start = doomed.bucket_start
+        RETURNING rollup.metric
         "#
     };
     let rows = sqlx::query(query)

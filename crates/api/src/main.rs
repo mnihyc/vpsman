@@ -66,9 +66,9 @@ mod repository_network_recommendations;
 mod repository_operator_totp;
 mod repository_restores;
 mod repository_schedules;
-mod repository_server_dashboard;
 mod repository_server_jobs;
 mod repository_suite_config;
+mod repository_system_dashboard;
 mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
 mod repository_topology_graph;
@@ -92,6 +92,7 @@ mod routes_restores;
 mod routes_schedules;
 mod routes_server_jobs;
 mod routes_suite_config;
+mod routes_system;
 mod routes_terminal_sessions;
 mod routes_update_releases;
 mod routes_webhook_rules;
@@ -110,7 +111,7 @@ use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
 use state::{AppState, UpdateReleasePolicy};
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time};
 use tracing::info;
 use vpsman_common::{read_secret_file_ref, SuiteConfig};
 
@@ -592,12 +593,25 @@ async fn main() -> Result<()> {
         })
         .await?;
     job_dispatcher::spawn_job_dispatcher(state.clone());
+    spawn_system_metric_sampler(state.clone());
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;
     info!(bind = %args.bind, "api listening");
     axum::serve(listener, build_router(state)).await?;
     Ok(())
+}
+
+fn spawn_system_metric_sampler(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(std::time::Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = routes_system::record_system_dashboard_sample(&state).await {
+                tracing::warn!(%error, "failed to record system dashboard metric sample");
+            }
+        }
+    });
 }
 
 fn required_internal_token(value: Option<&str>) -> Result<String> {

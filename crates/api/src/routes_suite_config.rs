@@ -35,6 +35,22 @@ pub(crate) struct UpdateSuiteConfigRequest {
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValidateSuiteConfigRequest {
+    pub(crate) toml: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ValidateSuiteConfigResponse {
+    pub(crate) path: String,
+    pub(crate) exists: bool,
+    pub(crate) changed_keys: Vec<String>,
+    pub(crate) redacted: Value,
+    pub(crate) old_redacted: Value,
+    pub(crate) validation: SuiteConfigValidation,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct UpdateSuiteConfigResponse {
     pub(crate) path: String,
@@ -101,6 +117,30 @@ pub(crate) async fn update_suite_config(
     Ok(Json(UpdateSuiteConfigResponse {
         path: state.suite_config_path.display().to_string(),
         changed_keys,
+        validation: parsed.validation_summary(),
+    }))
+}
+
+pub(crate) async fn validate_suite_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ValidateSuiteConfigRequest>,
+) -> Result<Json<ValidateSuiteConfigResponse>, ApiError> {
+    let _operator = state.require_operator_role(&headers, "admin").await?;
+    if request.toml.len() > 256 * 1024 {
+        return Err(ApiError::bad_request("suite_config_too_large"));
+    }
+    let parsed = SuiteConfig::parse(&request.toml)
+        .map_err(|_| ApiError::bad_request("suite_config_invalid"))?;
+    let (exists, old_text) = read_suite_config_text(&state)?;
+    let old_redacted = redacted_toml_json(&old_text)?;
+    let redacted = redacted_toml_json(&request.toml)?;
+    Ok(Json(ValidateSuiteConfigResponse {
+        path: state.suite_config_path.display().to_string(),
+        exists,
+        changed_keys: changed_json_paths(&old_redacted, &redacted),
+        old_redacted,
+        redacted,
         validation: parsed.validation_summary(),
     }))
 }

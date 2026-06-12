@@ -20,6 +20,7 @@ import { useFleetData } from "./useFleetData";
 import { useInventoryData } from "./useInventoryData";
 import { useJobsData } from "./useJobsData";
 import { useSchedulesData } from "./useSchedulesData";
+import { useSystemData } from "./useSystemData";
 import { useTopologyData } from "./useTopologyData";
 
 export function useDashboardData(activeView: ActiveView) {
@@ -49,6 +50,7 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAudits,
   );
   const schedules = useSchedulesData(apiToken, requireAuth, audit.loadAudits);
+  const system = useSystemData(apiToken, requireAuth);
   const topology = useTopologyData(apiToken, requireAuth, audit.loadAudits);
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
   const scheduleDashboardOverviewReload = useCallback(() => {
@@ -155,8 +157,10 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Access") {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
-    } else if (activeView === "Preferences") {
+    } else if (activeView === "System") {
       void access.loadCurrentOperatorProfile();
+      void system.loadSystemDashboard();
+      void system.loadSuiteConfig();
     }
   }, [
     access.loadCurrentOperator,
@@ -169,6 +173,8 @@ export function useDashboardData(activeView: ActiveView) {
     inventory.loadTagInventory,
     jobs.loadJobs,
     schedules.loadSchedules,
+    system.loadSuiteConfig,
+    system.loadSystemDashboard,
     topology.loadNetworkObservations,
     topology.loadNetworkTrends,
     topology.loadOspfRecommendations,
@@ -462,7 +468,6 @@ export function useDashboardData(activeView: ActiveView) {
     dashboardOverviewLoading: dashboardOverview.dashboardOverviewLoading,
     dashboardOverviewWindow: dashboardOverview.dashboardOverviewWindow,
     dashboardPreferences: dashboardOverview.dashboardPreferences,
-    dashboardServer: dashboardOverview.dashboardServer,
     loadDashboardOverview: dashboardOverview.loadDashboardOverview,
     setDashboardOverviewWindow: dashboardOverview.setDashboardOverviewWindow,
     updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,
@@ -480,6 +485,20 @@ export function useDashboardData(activeView: ActiveView) {
     schedulesError: schedules.schedulesError,
     schedulesLoading: schedules.schedulesLoading,
     summary: fleet.summary,
+    systemDashboard: system.systemDashboard,
+    systemDashboardError: system.systemDashboardError,
+    systemDashboardLoading: system.systemDashboardLoading,
+    systemDashboardPointDensity: system.systemDashboardPointDensity,
+    systemDashboardWindow: system.systemDashboardWindow,
+    setSystemDashboardPointDensity: system.setSystemDashboardPointDensity,
+    setSystemDashboardWindow: system.setSystemDashboardWindow,
+    loadSystemDashboard: system.loadSystemDashboard,
+    suiteConfig: system.suiteConfig,
+    suiteConfigError: system.suiteConfigError,
+    suiteConfigLoading: system.suiteConfigLoading,
+    loadSuiteConfig: system.loadSuiteConfig,
+    validateSuiteConfig: system.validateSuiteConfig,
+    updateSuiteConfig: system.updateSuiteConfig,
     telemetryNetworkRates: fleet.telemetryNetworkRates,
     telemetryTunnels: fleet.telemetryTunnels,
     tags: inventory.tags,

@@ -18,6 +18,24 @@ export {
 const statusOutput = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
 
+const systemSeries = (
+  metric: string,
+  label: string,
+  unit: string,
+  values: number[],
+) => ({
+  label,
+  metric,
+  points: values.map((value, index) => ({
+    avg_value: value,
+    bucket_start: `2026-06-05T20:${String(20 + index * 10).padStart(2, "0")}:00Z`,
+    latest_value: value,
+    max_value: value,
+    sample_count: 1,
+  })),
+  unit,
+});
+
 const summary = {
   never: 0,
   offline: 1,
@@ -521,46 +539,160 @@ const dashboardOverview = {
   window: "24h",
 };
 
-const dashboardServer = {
-  cancellations: {
-    acked: 1,
-    awaiting_ack: 0,
-    requested: 1,
-    sent: 1,
+const systemDashboard = {
+  bucket_secs: 60,
+  capacity: {
+    agent_offline_secs: 300,
+    api_db_pool: 32,
+    dispatch_ack_secs: 30,
+    dispatcher_batch: 128,
+    dispatcher_in_flight: 64,
+    event_post_secs: 15,
+    internal_http_read_secs: 15,
+    worker_db_pool: 8,
+    worker_schedule_command_secs: 30,
   },
-  db_pool: {
-    idle_connections: 18,
-    in_use_connections: 6,
-    max_connections: 32,
-    open_connections: 24,
-  },
-  dispatch: {
-    active_jobs: 2,
-    pending_jobs: 1,
-    queue_depth: 4,
-    retried_targets: 2,
-    running_jobs: 1,
-    total_dispatch_attempts: 42,
-  },
-  gateway_events: {
-    active_queues: 3,
-    delivered_events: 928,
-    queued_events: 0,
-    retry_attempts: 2,
-    status: "live",
+  current: {
+    cancellations: {
+      acked: 1,
+      awaiting_ack: 0,
+      requested: 1,
+      sent: 1,
+    },
+    db_pool: {
+      idle_connections: 18,
+      in_use_connections: 6,
+      max_connections: 32,
+      open_connections: 24,
+    },
+    dispatch: {
+      active_jobs: 2,
+      pending_jobs: 1,
+      queue_depth: 4,
+      retried_targets: 2,
+      running_jobs: 1,
+      total_dispatch_attempts: 42,
+    },
+    gateway_events: {
+      active_queues: 3,
+      delivered_events: 928,
+      queued_events: 0,
+      retry_attempts: 2,
+      status: "live",
+    },
+    targets: {
+      active: 3,
+      agent_timed_out_last_24h: 1,
+      canceled_last_24h: 1,
+      control_timed_out_last_24h: 1,
+      deadline_expired_active: 0,
+      delivering: 1,
+      pending: 1,
+      running: 2,
+    },
   },
   generated_at: "2026-06-05T20:44:58Z",
   notes: ["50-VPS capacity profile active"],
-  targets: {
-    active: 3,
-    agent_timed_out_last_24h: 1,
-    canceled_last_24h: 1,
-    control_timed_out_last_24h: 1,
-    deadline_expired_active: 0,
-    delivering: 1,
-    pending: 1,
-    running: 2,
+  series: [
+    systemSeries("db_pool.in_use_connections", "DB in-use connections", "connections", [4, 5, 6]),
+    systemSeries("db_pool.open_connections", "DB open connections", "connections", [20, 22, 24]),
+    systemSeries("db_pool.idle_connections", "DB idle connections", "connections", [16, 17, 18]),
+    systemSeries("db_pool.max_connections", "DB max connections", "connections", [32, 32, 32]),
+    systemSeries("dispatch.queue_depth", "Dispatch queue depth", "targets", [1, 2, 4]),
+    systemSeries("targets.delivering", "Delivering targets", "targets", [0, 1, 1]),
+    systemSeries("targets.running", "Running targets", "targets", [1, 2, 2]),
+    systemSeries("dispatch.retried_targets", "Retried targets", "targets", [0, 1, 2]),
+    systemSeries("targets.deadline_expired_active", "Expired active targets", "targets", [0, 0, 0]),
+    systemSeries("targets.control_timed_out_last_24h", "Control timeouts", "targets", [0, 1, 1]),
+    systemSeries("targets.agent_timed_out_last_24h", "Agent timeouts", "targets", [0, 0, 1]),
+    systemSeries("targets.canceled_last_24h", "Canceled targets", "targets", [0, 1, 1]),
+    systemSeries("gateway_events.queued_events", "Gateway queued events", "events", [2, 1, 0]),
+    systemSeries("gateway_events.delivered_events", "Gateway delivered events", "events", [900, 918, 928]),
+    systemSeries("gateway_events.retry_attempts", "Gateway retry attempts", "attempts", [0, 1, 2]),
+    systemSeries("gateway_events.active_queues", "Gateway active queues", "queues", [2, 3, 3]),
+    systemSeries("cancellations.requested", "Cancel requested", "targets", [0, 1, 1]),
+    systemSeries("cancellations.sent", "Cancel sent", "targets", [0, 1, 1]),
+    systemSeries("cancellations.acked", "Cancel acked", "targets", [0, 1, 1]),
+    systemSeries("cancellations.awaiting_ack", "Cancel awaiting ack", "targets", [0, 0, 0]),
+  ],
+  window: "24h",
+};
+
+const suiteConfigToml = `version = 1
+
+[api]
+bind = "0.0.0.0:8080"
+gateway_control_url = "http://gateway:9444"
+job_output_artifact_min_bytes = 32768
+require_registered_agent_updates = false
+
+[gateway]
+bind = "0.0.0.0:9443"
+control_bind = "0.0.0.0:9444"
+api_url = "http://api:8080"
+gateway_id = "compose-gateway"
+reconnect_grace_secs = 60
+
+[worker]
+tick_secs = 30
+worker_lease_secs = 60
+agent_offline_timeout_secs = 300
+schedule_command_timeout_secs = 30
+
+[capacity]
+api_db_pool = 32
+worker_db_pool = 8
+dispatcher_batch = 128
+dispatcher_in_flight = 64
+
+[storage]
+object_store_dir = "/var/lib/vpsman/objects"
+
+[timeout]
+dispatch_ack_secs = 30
+event_post_secs = 15
+internal_http_read_secs = 15
+agent_offline_secs = 300
+
+[secrets]
+internal_token_file = "/run/secrets/vpsman_internal_token"
+gateway_private_key_file = "/run/secrets/vpsman_gateway_private_key_hex"
+privilege_verifier_key_file = "/run/secrets/vpsman_privilege_verifier_key_hex"
+`;
+
+const suiteConfigRedacted = {
+  api: {
+    bind: "0.0.0.0:8080",
+    gateway_control_url: "http://gateway:9444",
+    job_output_artifact_min_bytes: 32768,
+    require_registered_agent_updates: false,
   },
+  capacity: {
+    api_db_pool: 32,
+    dispatcher_batch: 128,
+    dispatcher_in_flight: 64,
+    worker_db_pool: 8,
+  },
+  gateway: {
+    api_url: "http://api:8080",
+    bind: "0.0.0.0:9443",
+    control_bind: "0.0.0.0:9444",
+    gateway_id: "compose-gateway",
+    reconnect_grace_secs: 60,
+  },
+  secrets: {
+    gateway_private_key_file: "/run/secrets/vpsman_gateway_private_key_hex",
+    internal_token_file: "/run/secrets/vpsman_internal_token",
+    privilege_verifier_key_file: "/run/secrets/vpsman_privilege_verifier_key_hex",
+  },
+  version: 1,
+};
+
+const suiteConfigValidation = {
+  hot_reload_fields: ["capacity.api_db_pool", "capacity.dispatcher_in_flight", "timeout.*"],
+  restart_required_fields: ["api.bind", "gateway.bind", "database.postgres_url", "secrets.*"],
+  valid: true,
+  version: 1,
 };
 
 const operatorPreferences = {
@@ -1685,7 +1817,7 @@ export async function installConsoleApiMock(page: Page) {
       artifactsFixture,
       backupsFixture,
       dashboardOverviewFixture,
-      dashboardServerFixture,
+      systemDashboardFixture,
       dataSourceAssignmentsFixture,
       dataSourcePresetsFixture,
       dataSourceStatusFixture,
@@ -1711,6 +1843,9 @@ export async function installConsoleApiMock(page: Page) {
       processSupervisorInventoryFixture,
       schedulesFixture,
       summaryFixture,
+      suiteConfigRedactedFixture,
+      suiteConfigTomlFixture,
+      suiteConfigValidationFixture,
       tagsFixture,
       terminalSessionsFixture,
       topologyGraphFixture,
@@ -1720,6 +1855,7 @@ export async function installConsoleApiMock(page: Page) {
     }) => {
       const originalFetch = window.fetch.bind(window);
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
+      let currentSuiteConfigToml = suiteConfigTomlFixture;
       const deletedAgentIds = new Set<string>();
       const visibleAgents = () =>
         agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
@@ -2320,6 +2456,29 @@ export async function installConsoleApiMock(page: Page) {
           total_targets: targets.length,
         };
       };
+      const requestJsonBody = async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        let rawBody = init?.body;
+        if (rawBody === undefined && input instanceof Request) {
+          rawBody = await input.clone().text();
+        }
+        if (typeof rawBody === "string") {
+          return rawBody.trim() ? JSON.parse(rawBody) : {};
+        }
+        if (rawBody instanceof Blob) {
+          const text = await rawBody.text();
+          return text.trim() ? JSON.parse(text) : {};
+        }
+        if (rawBody instanceof URLSearchParams) {
+          return Object.fromEntries(rawBody.entries());
+        }
+        if (rawBody instanceof FormData) {
+          return Object.fromEntries(rawBody.entries());
+        }
+        return {};
+      };
 
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
@@ -2373,8 +2532,48 @@ export async function installConsoleApiMock(page: Page) {
             window: requestedWindow,
           });
         }
-        if (pathname === "/api/v1/dashboard/server") {
-          return jsonResponse(dashboardServerFixture);
+        if (pathname === "/api/v1/system/dashboard") {
+          return jsonResponse(systemDashboardFixture);
+        }
+        if (pathname === "/api/v1/admin/suite-config") {
+          if (method === "GET") {
+            return jsonResponse({
+              exists: true,
+              hot_reload_note: "Pool sizes, dispatcher limits, timeouts, alert thresholds, schedule settings, and UI-visible limits are hot-reload tunables when the owning service reloads config.",
+              path: "config/vpsman.toml",
+              redacted: suiteConfigRedactedFixture,
+              restart_required_note: "Bind addresses, database URL, secret refs, keys, and object-store clients require service restart.",
+              toml: currentSuiteConfigToml,
+              validation: suiteConfigValidationFixture,
+            });
+          }
+          if (method === "PUT") {
+            const body = (await requestJsonBody(input, init)) as { toml?: string };
+            currentSuiteConfigToml = body.toml ?? currentSuiteConfigToml;
+            return jsonResponse({
+              changed_keys: ["capacity.api_db_pool"],
+              path: "config/vpsman.toml",
+              validation: suiteConfigValidationFixture,
+            });
+          }
+        }
+        if (pathname === "/api/v1/admin/suite-config/validate") {
+          const body = (await requestJsonBody(input, init)) as { toml?: string };
+          const draftToml = body.toml ?? currentSuiteConfigToml;
+          return jsonResponse({
+            changed_keys: ["capacity.api_db_pool"],
+            exists: true,
+            old_redacted: suiteConfigRedactedFixture,
+            path: "config/vpsman.toml",
+            redacted: {
+              ...suiteConfigRedactedFixture,
+              capacity: {
+                ...(suiteConfigRedactedFixture.capacity),
+                api_db_pool: draftToml.includes("api_db_pool = 40") ? 40 : 32,
+              },
+            },
+            validation: suiteConfigValidationFixture,
+          });
         }
         if (pathname === "/api/v1/fleet/summary") {
           const currentAgents = visibleAgents();
@@ -3662,7 +3861,7 @@ export async function installConsoleApiMock(page: Page) {
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
-      dashboardServerFixture: dashboardServer,
+      systemDashboardFixture: systemDashboard,
       dataSourceAssignmentsFixture: dataSourceAssignments,
       dataSourcePresetsFixture: dataSourcePresets,
       dataSourceStatusFixture: dataSourceStatus,
@@ -3688,6 +3887,9 @@ export async function installConsoleApiMock(page: Page) {
       processSupervisorInventoryFixture: processSupervisorInventory,
       schedulesFixture: schedules,
       summaryFixture: summary,
+      suiteConfigRedactedFixture: suiteConfigRedacted,
+      suiteConfigTomlFixture: suiteConfigToml,
+      suiteConfigValidationFixture: suiteConfigValidation,
       tagsFixture: tags,
       terminalSessionsFixture: terminalSessions,
       topologyGraphFixture: topologyGraph,

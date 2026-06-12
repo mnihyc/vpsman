@@ -235,9 +235,22 @@ const allViews: ScreenshotEntry[] = [
     id: "42-access-privilege",
   },
   {
-    view: "Preferences",
-    heading: "Preferences",
-    id: "43-preferences-operator",
+    view: "System",
+    subpage: "Dashboard",
+    heading: "System dashboard",
+    id: "43-system-dashboard",
+  },
+  {
+    view: "System",
+    subpage: "Config",
+    heading: "System config",
+    id: "44-system-config",
+  },
+  {
+    view: "System",
+    subpage: "Preferences",
+    heading: "System preferences",
+    id: "45-system-preferences",
   },
 ];
 

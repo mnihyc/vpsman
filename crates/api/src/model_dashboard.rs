@@ -231,18 +231,7 @@ pub(crate) struct DashboardDrilldownView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DashboardServerView {
-    pub(crate) generated_at: String,
-    pub(crate) db_pool: DashboardServerDbPoolView,
-    pub(crate) dispatch: DashboardServerDispatchView,
-    pub(crate) targets: DashboardServerTargetsView,
-    pub(crate) cancellations: DashboardServerCancellationsView,
-    pub(crate) gateway_events: DashboardServerGatewayEventsView,
-    pub(crate) notes: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct DashboardServerDbPoolView {
+pub(crate) struct SystemDashboardDbPoolView {
     pub(crate) max_connections: u32,
     pub(crate) open_connections: u32,
     pub(crate) idle_connections: u32,
@@ -250,7 +239,7 @@ pub(crate) struct DashboardServerDbPoolView {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct DashboardServerDispatchView {
+pub(crate) struct SystemDashboardDispatchView {
     pub(crate) active_jobs: i64,
     pub(crate) pending_jobs: i64,
     pub(crate) running_jobs: i64,
@@ -260,7 +249,7 @@ pub(crate) struct DashboardServerDispatchView {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct DashboardServerTargetsView {
+pub(crate) struct SystemDashboardTargetsView {
     pub(crate) pending: i64,
     pub(crate) delivering: i64,
     pub(crate) running: i64,
@@ -272,7 +261,7 @@ pub(crate) struct DashboardServerTargetsView {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct DashboardServerCancellationsView {
+pub(crate) struct SystemDashboardCancellationsView {
     pub(crate) requested: i64,
     pub(crate) sent: i64,
     pub(crate) acked: i64,
@@ -280,10 +269,70 @@ pub(crate) struct DashboardServerCancellationsView {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct DashboardServerGatewayEventsView {
+pub(crate) struct SystemDashboardGatewayEventsView {
     pub(crate) queued_events: Option<u64>,
     pub(crate) delivered_events: Option<u64>,
     pub(crate) retry_attempts: Option<u64>,
     pub(crate) active_queues: Option<u64>,
     pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemDashboardView {
+    pub(crate) generated_at: String,
+    pub(crate) window: String,
+    pub(crate) bucket_secs: i32,
+    pub(crate) current: SystemDashboardSnapshotView,
+    pub(crate) capacity: SystemDashboardCapacityView,
+    pub(crate) series: Vec<SystemMetricSeriesView>,
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemDashboardSnapshotView {
+    pub(crate) db_pool: SystemDashboardDbPoolView,
+    pub(crate) dispatch: SystemDashboardDispatchView,
+    pub(crate) targets: SystemDashboardTargetsView,
+    pub(crate) cancellations: SystemDashboardCancellationsView,
+    pub(crate) gateway_events: SystemDashboardGatewayEventsView,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct SystemDashboardCapacityView {
+    pub(crate) api_db_pool: Option<u32>,
+    pub(crate) worker_db_pool: Option<u32>,
+    pub(crate) dispatcher_batch: Option<i64>,
+    pub(crate) dispatcher_in_flight: Option<usize>,
+    pub(crate) dispatch_ack_secs: Option<u64>,
+    pub(crate) event_post_secs: Option<u64>,
+    pub(crate) internal_http_read_secs: Option<u64>,
+    pub(crate) worker_schedule_command_secs: Option<u64>,
+    pub(crate) agent_offline_secs: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemMetricSeriesView {
+    pub(crate) metric: String,
+    pub(crate) label: String,
+    pub(crate) unit: String,
+    pub(crate) points: Vec<SystemMetricPointView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemMetricPointView {
+    pub(crate) bucket_start: String,
+    pub(crate) avg_value: f64,
+    pub(crate) max_value: f64,
+    pub(crate) latest_value: f64,
+    pub(crate) sample_count: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemMetricRollupView {
+    pub(crate) metric: String,
+    pub(crate) bucket_start: String,
+    pub(crate) sample_count: i32,
+    pub(crate) avg_value: f64,
+    pub(crate) max_value: f64,
+    pub(crate) latest_value: f64,
 }

@@ -360,19 +360,20 @@ jq -e \
   any(.label_clusters[]; .label == "provider:alpha" and .total == $alpha_count)
 ' <<<"$dashboard_json" >/dev/null
 
-server_dashboard_json="$(api_get "/api/v1/dashboard/server")"
+system_dashboard_json="$(api_get "/api/v1/system/dashboard?window=1h&chart_points=120")"
 jq -e '
-  .db_pool.max_connections >= 1 and
-  .db_pool.open_connections >= 1 and
-  .dispatch.active_jobs >= 0 and
-  .dispatch.queue_depth >= 0 and
-  .targets.active >= 0 and
-  .targets.deadline_expired_active >= 0 and
-  .cancellations.acked >= 0 and
-  .gateway_events.status == "live" and
-  (.gateway_events.queued_events // 0) >= (.gateway_events.delivered_events // 0) and
-  (.gateway_events.retry_attempts // 0) >= 0
-' <<<"$server_dashboard_json" >/dev/null
+  .current.db_pool.max_connections >= 1 and
+  .current.db_pool.open_connections >= 1 and
+  .current.dispatch.active_jobs >= 0 and
+  .current.dispatch.queue_depth >= 0 and
+  .current.targets.active >= 0 and
+  .current.targets.deadline_expired_active >= 0 and
+  .current.cancellations.acked >= 0 and
+  .current.gateway_events.status == "live" and
+  ((.current.gateway_events.queued_events // 0) >= (.current.gateway_events.delivered_events // 0)) and
+  (.current.gateway_events.retry_attempts // 0) >= 0 and
+  any(.series[]; .metric == "db_pool.in_use_connections")
+' <<<"$system_dashboard_json" >/dev/null
 
 api_get "/api/v1/dashboard/overview?window=all&group_by=providers" \
   | jq -e --argjson expected "$agent_count" '
@@ -599,10 +600,11 @@ if ((long_running_secs > 0)); then
   api_get "/api/v1/jobs/$long_job_id/outputs" | jq -e --argjson expected "$agent_count" '
     ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-long-done\n")) | length) == $expected
   ' >/dev/null
-  api_get "/api/v1/dashboard/server" | jq -e --argjson expected "$agent_count" '
-    .dispatch.total_dispatch_attempts >= $expected and
-    .targets.deadline_expired_active == 0 and
-    .gateway_events.status == "live"
+  api_get "/api/v1/system/dashboard?window=1h&chart_points=120" | jq -e --argjson expected "$agent_count" '
+    .current.dispatch.total_dispatch_attempts >= $expected and
+    .current.targets.deadline_expired_active == 0 and
+    .current.gateway_events.status == "live" and
+    any(.series[]; .metric == "dispatch.queue_depth")
   ' >/dev/null
 fi
 
@@ -717,7 +719,7 @@ jq -n \
       "operator_auth_and_preferences",
       "tag_registry_and_bulk_resolve_any_all",
       "dashboard_scope_filter_and_group_by",
-      "server_dashboard_queue_pool_cancel_gateway_counters",
+      "system_dashboard_queue_pool_cancel_gateway_counters",
       "telemetry_rollups_network_speed_and_traffic",
       "durable_bulk_job_dispatch_outputs",
       "schedule_registry",

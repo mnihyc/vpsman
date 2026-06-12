@@ -56,8 +56,8 @@ export function getHeroTitle(view: ActiveView): string {
       return "Schedules";
     case "Audit":
       return "Audit log";
-    case "Preferences":
-      return "Preferences";
+    case "System":
+      return "System";
     default:
       return `${view} management`;
   }
@@ -83,8 +83,8 @@ export function getHeroCopy(view: ActiveView): string {
       return "Backup, restore, and migration workflows";
     case "Access":
       return "Operator sessions, roles, and privileged unlock state";
-    case "Preferences":
-      return "Operator-level display, timezone, language, and navigation defaults";
+    case "System":
+      return "Control-plane dashboard, suite configuration, and operator preferences";
     default:
       return "";
   }

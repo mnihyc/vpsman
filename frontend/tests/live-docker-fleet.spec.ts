@@ -241,7 +241,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await exerciseServerJobsCleanup(page, testInfo.project.name);
 
   await verifyDesktopSubpages(page, testInfo.project.name);
-  await openConsoleSubpage(page, "Preferences", "Operator");
+  await openConsoleSubpage(page, "System", "Preferences");
   const preferencesPanel = page.locator(".preferencesPanel");
   await expect(
     preferencesPanel.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
@@ -254,7 +254,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page,
     testInfo.project.name,
     "page-preferences-operator",
-    "Preferences / Operator page with saved display and workflow defaults.",
+    "System / Preferences page with saved display and workflow defaults.",
   );
   await maybeScreenshot(page, testInfo.project.name, "preferences");
   writeScreenshotManifest(testInfo.project.name);

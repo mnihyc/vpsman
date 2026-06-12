@@ -11,7 +11,7 @@ import { AccessPanel } from "./panels/AccessPanel";
 import { AuditLogPanel } from "./panels/AuditLogPanel";
 import { BackupsPanel } from "./panels/BackupsPanel";
 import { TopologyPanel } from "./panels/TopologyPanel";
-import { PreferencesPanel } from "./panels/PreferencesPanel";
+import { SystemPanel } from "./panels/SystemPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
@@ -27,6 +27,16 @@ import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
 
 function getScopedHeroTitle(view: ActiveView, subpage: string): string {
+  if (view === "System") {
+    switch (subpage) {
+      case "config":
+        return "System config";
+      case "operator":
+        return "System preferences";
+      default:
+        return "System dashboard";
+    }
+  }
   if (view !== "Jobs") {
     return getHeroTitle(view);
   }
@@ -219,7 +229,6 @@ export function App() {
                 onWindowChange={dashboard.setDashboardOverviewWindow}
                 overview={dashboard.dashboardOverview}
                 preferences={dashboard.dashboardPreferences}
-                server={dashboard.dashboardServer}
                 window={dashboard.dashboardOverviewWindow}
               />
             )}
@@ -532,8 +541,29 @@ export function App() {
                 wsState={dashboard.wsState}
               />
             )}
-            {activeView === "Preferences" && (
-              <PreferencesPanel operator={dashboard.operator} />
+            {activeView === "System" && (
+              <SystemPanel
+                activeSubpage={activeSubpage}
+                dashboard={dashboard.systemDashboard}
+                dashboardError={dashboard.systemDashboardError}
+                dashboardLoading={dashboard.systemDashboardLoading}
+                dashboardPointDensity={dashboard.systemDashboardPointDensity}
+                dashboardWindow={dashboard.systemDashboardWindow}
+                onDashboardPointDensityChange={
+                  dashboard.setSystemDashboardPointDensity
+                }
+                onDashboardRefresh={() => void dashboard.loadSystemDashboard()}
+                onDashboardWindowChange={dashboard.setSystemDashboardWindow}
+                onLoadSuiteConfig={() => void dashboard.loadSuiteConfig()}
+                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                onUpdateSuiteConfig={dashboard.updateSuiteConfig}
+                onValidateSuiteConfig={dashboard.validateSuiteConfig}
+                operator={dashboard.operator}
+                privilegeMaterial={privilegeMaterial}
+                suiteConfig={dashboard.suiteConfig}
+                suiteConfigError={dashboard.suiteConfigError}
+                suiteConfigLoading={dashboard.suiteConfigLoading}
+              />
             )}
           </>
         )}

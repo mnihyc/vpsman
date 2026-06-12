@@ -29,7 +29,7 @@ use crate::{
         MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{list_command_templates, upsert_command_template},
-    routes_dashboard::{dashboard_overview, dashboard_server},
+    routes_dashboard::dashboard_overview,
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
         download_file_transfer_source_artifact, list_file_transfer_sessions,
@@ -81,7 +81,8 @@ use crate::{
     routes_server_jobs::{
         cancel_server_job, create_artifact_cleanup_job, list_server_jobs, preview_artifact_cleanup,
     },
-    routes_suite_config::{get_suite_config, update_suite_config},
+    routes_suite_config::{get_suite_config, update_suite_config, validate_suite_config},
+    routes_system::system_dashboard,
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
         create_agent_update_release, create_hosted_agent_update_release,
@@ -133,8 +134,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/admin/suite-config",
             get(get_suite_config).put(update_suite_config),
         )
+        .route(
+            "/api/v1/admin/suite-config/validate",
+            post(validate_suite_config),
+        )
         .route("/api/v1/dashboard/overview", get(dashboard_overview))
-        .route("/api/v1/dashboard/server", get(dashboard_server))
+        .route("/api/v1/system/dashboard", get(system_dashboard))
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
         .route("/api/v1/fleet-alerts/export", get(export_fleet_alerts))

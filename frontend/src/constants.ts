@@ -6,8 +6,8 @@ import {
   KeyRound,
   LayoutDashboard,
   Server,
+  ServerCog,
   SlidersHorizontal,
-  Settings,
   Tag,
   TerminalSquare,
   type LucideIcon,
@@ -31,7 +31,7 @@ export const navItems: readonly { view: ActiveView; icon: LucideIcon }[] = [
   { view: "Backups", icon: DatabaseBackup },
   { view: "Audit", icon: ClipboardList },
   { view: "Access", icon: KeyRound },
-  { view: "Preferences", icon: Settings },
+  { view: "System", icon: ServerCog },
 ];
 
 export const navSections: readonly {
@@ -52,7 +52,7 @@ export const navSections: readonly {
   },
   {
     label: "System",
-    items: navItems.filter((item) => item.view === "Preferences"),
+    items: navItems.filter((item) => item.view === "System"),
   },
 ];
 
@@ -124,10 +124,20 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "gateway", label: "Gateway", description: "Gateway sessions and control-plane stream state" },
     { id: "privilege", label: "Privilege unlock", description: "Local privilege unlock and vault controls" },
   ],
-  Preferences: [
+  System: [
+    {
+      id: "dashboard",
+      label: "Dashboard",
+      description: "Control-plane capacity, queues, deadlines, gateway events, and service health",
+    },
+    {
+      id: "config",
+      label: "Config",
+      description: "Suite TOML validation, redacted diff review, and privileged config save",
+    },
     {
       id: "operator",
-      label: "Operator",
+      label: "Preferences",
       description: "Display, timezone, language, and navigation defaults",
     },
   ],

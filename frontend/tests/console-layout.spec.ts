@@ -178,9 +178,9 @@ test("renders an operational cloud-console fleet workspace", async ({
     const nav = page.getByRole("navigation", {
       name: "Primary console navigation",
     });
-    await page.getByRole("button", { name: "Preferences" }).click();
+    await openConsoleSubpage(page, "System", "Preferences");
     await expect(
-      page.getByRole("heading", { name: "Preferences", exact: true }),
+      page.getByRole("heading", { name: "System preferences", exact: true }),
     ).toBeVisible();
     await page.getByLabel("Name display").selectOption("name");
     await page
@@ -202,7 +202,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
     await expect(edgeRow).toContainText("edge-sfo-01");
     await expect(edgeRow).not.toContainText("(fo01)");
-    await nav.getByRole("button", { name: "Preferences", exact: true }).click();
+    await openConsoleSubpage(page, "System", "Preferences");
     await page.getByLabel("Name display").selectOption("name_id_suffix");
     await page
       .getByLabel("Bulk output comparison default")
@@ -467,7 +467,7 @@ test("clears browser-local console selections without deleting vault records", a
     );
   });
 
-  await openConsoleSubpage(page, "Preferences", "Operator");
+  await openConsoleSubpage(page, "System", "Preferences");
   await expect(
     page.getByRole("heading", { name: "Operator preferences" }),
   ).toBeVisible();
@@ -506,7 +506,7 @@ test("scopes duplicate sidebar subpage labels to their parent view", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Preferences", "Operator");
+  await openConsoleSubpage(page, "System", "Preferences");
   await page.getByLabel("Default expansion").selectOption("all");
   await page.getByRole("button", { name: "Save preferences" }).click();
   await expect(
@@ -692,6 +692,50 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     ).toBeVisible();
     await expect(page.getByText("Active source status").first()).toBeVisible();
   }
+});
+
+test("keeps control-plane metrics in System pages", async ({ page }) => {
+  await page.goto("/");
+
+  const dashboard = page.locator(".dashboardWorkspace");
+  await expect(
+    page.getByRole("heading", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operational Health" }),
+  ).toBeVisible();
+  await expect(dashboard.getByText("DB pool", { exact: true })).toHaveCount(0);
+  await expect(
+    dashboard.getByText("Gateway events", { exact: true }),
+  ).toHaveCount(0);
+
+  await openConsoleSubpage(page, "System", "Dashboard");
+  await expect(
+    page.getByRole("heading", { name: "System dashboard", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Capacity", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Dispatch Lifecycle", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Gateway Events", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Dispatcher in-flight")).toBeVisible();
+  await expect(page.getByText("API DB pool")).toBeVisible();
+
+  await openConsoleSubpage(page, "System", "Config");
+  await expect(
+    page.getByRole("heading", { name: "System config", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "System Config", exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("API DB pool").fill("40");
+  await page.getByRole("button", { name: "Validate" }).click();
+  await expect(page.getByText(/Validation passed/)).toBeVisible();
+  await expect(page.getByText("capacity.api_db_pool")).toBeVisible();
 });
 
 test("packs dashboard top VPS cards by label length", async ({

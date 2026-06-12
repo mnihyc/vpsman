@@ -200,6 +200,17 @@ pub(crate) async fn export_history(
                     ),
                 );
             }
+            HistoryDomain::SystemMetricRollups => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    json!(
+                        state
+                            .repo
+                            .list_system_metric_rollups(0, unix_now(), limit)
+                            .await?
+                    ),
+                );
+            }
             HistoryDomain::JobOutputs => {
                 data.insert(
                     domain.as_str().to_string(),

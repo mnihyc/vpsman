@@ -19,7 +19,6 @@ import type {
   DashboardPreferences,
   DashboardRefreshIntervalSecs,
   DashboardResourceMetric,
-  DashboardServerRecord,
   DashboardResourceSeriesRecord,
   DashboardScopeKind,
   DashboardTrafficClientRecord,
@@ -38,7 +37,6 @@ type DashboardPanelProps = {
   onWindowChange: (window: DashboardWindow) => void;
   overview: DashboardOverviewRecord | null;
   preferences: DashboardPreferences;
-  server: DashboardServerRecord | null;
   window: DashboardWindow;
 };
 
@@ -87,7 +85,6 @@ export function DashboardPanel({
   onWindowChange,
   overview,
   preferences,
-  server,
   window,
 }: DashboardPanelProps) {
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
@@ -96,9 +93,6 @@ export function DashboardPanel({
   const resources = overview?.resources;
   const resourceCurve = overview?.resource_curve;
   const network = overview?.network;
-  const poolPressure = server?.db_pool.max_connections
-    ? server.db_pool.in_use_connections / server.db_pool.max_connections
-    : 0;
   const fallbackDrilldown = overview?.drilldowns[0] ?? {
     label: "Open fleet instances",
     query: null,
@@ -406,111 +400,7 @@ export function DashboardPanel({
               tone="info"
               value={formatBitsPerSecond((network?.rx_bps ?? 0) + (network?.tx_bps ?? 0))}
             />
-            <DashboardMetricCard
-              detail={`${server?.db_pool.in_use_connections ?? 0}/${server?.db_pool.max_connections ?? 0} in use, ${server?.db_pool.idle_connections ?? 0} idle`}
-              icon={<Server size={19} />}
-              label="DB pool"
-              onClick={() =>
-                openDrawer({
-                  description: "PostgreSQL pool occupancy for API request, websocket, ingest, and dispatch work.",
-                  metrics: [
-                    { label: "Max connections", value: String(server?.db_pool.max_connections ?? 0) },
-                    { label: "Open", value: String(server?.db_pool.open_connections ?? 0) },
-                    { label: "In use", tone: poolPressure >= 0.8 ? "warning" : "ok", value: String(server?.db_pool.in_use_connections ?? 0) },
-                    { label: "Idle", value: String(server?.db_pool.idle_connections ?? 0) },
-                  ],
-                  title: "DB pool",
-                })
-              }
-              tone={poolPressure >= 0.9 ? "critical" : poolPressure >= 0.8 ? "warning" : "ok"}
-              value={server ? `${Math.round(poolPressure * 100)}%` : "No data"}
-            />
-            <DashboardMetricCard
-              detail={`${server?.targets.active ?? 0} active targets, ${server?.dispatch.total_dispatch_attempts ?? 0} dispatch attempts`}
-              icon={<Activity size={19} />}
-              label="Dispatch queue"
-              onClick={() =>
-                openDrawer({
-                  description: "Targets waiting for delivery and targets currently active in command execution.",
-                  drilldown: { label: "Open job history", query: null, subpage: "history", view: "Jobs" },
-                  metrics: [
-                    { label: "Queue depth", tone: server?.dispatch.queue_depth ? "info" : "ok", value: String(server?.dispatch.queue_depth ?? 0) },
-                    { label: "Pending targets", value: String(server?.targets.pending ?? 0) },
-                    { label: "Delivering", value: String(server?.targets.delivering ?? 0) },
-                    { label: "Running", value: String(server?.targets.running ?? 0) },
-                    { label: "Retried targets", tone: server?.dispatch.retried_targets ? "warning" : "ok", value: String(server?.dispatch.retried_targets ?? 0) },
-                  ],
-                  title: "Dispatch queue",
-                })
-              }
-              tone={server && server.dispatch.queue_depth > 0 ? "info" : "ok"}
-              value={String(server?.dispatch.queue_depth ?? 0)}
-            />
-            <DashboardMetricCard
-              detail={`${server?.targets.deadline_expired_active ?? 0} active expired, ${server?.targets.agent_timed_out_last_24h ?? 0} agent timeouts`}
-              icon={<AlertTriangle size={19} />}
-              label="Deadline timeouts"
-              onClick={() =>
-                openDrawer({
-                  description: "Targets past control deadline and target terminal timeout outcomes observed in the last 24 hours.",
-                  drilldown: { label: "Review timed-out jobs", query: "status:control_timed_out", subpage: "history", view: "Jobs" },
-                  metrics: [
-                    { label: "Expired active", tone: server?.targets.deadline_expired_active ? "critical" : "ok", value: String(server?.targets.deadline_expired_active ?? 0) },
-                    { label: "Control timed out", tone: server?.targets.control_timed_out_last_24h ? "warning" : "ok", value: String(server?.targets.control_timed_out_last_24h ?? 0) },
-                    { label: "Agent timed out", tone: server?.targets.agent_timed_out_last_24h ? "warning" : "ok", value: String(server?.targets.agent_timed_out_last_24h ?? 0) },
-                  ],
-                  title: "Deadline timeouts",
-                })
-              }
-              tone={server && server.targets.deadline_expired_active > 0 ? "critical" : server && server.targets.control_timed_out_last_24h > 0 ? "warning" : "ok"}
-              value={String(server?.targets.control_timed_out_last_24h ?? 0)}
-            />
-            <DashboardMetricCard
-              detail={`${server?.cancellations.acked ?? 0}/${server?.cancellations.sent ?? 0} acked, ${server?.cancellations.awaiting_ack ?? 0} waiting`}
-              icon={<RefreshCw size={19} />}
-              label="Cancel acks"
-              onClick={() =>
-                openDrawer({
-                  description: "Fleet-job cancellation delivery and explicit agent acknowledgements.",
-                  drilldown: { label: "Open job history", query: "status:canceled", subpage: "history", view: "Jobs" },
-                  metrics: [
-                    { label: "Requested", value: String(server?.cancellations.requested ?? 0) },
-                    { label: "Sent", value: String(server?.cancellations.sent ?? 0) },
-                    { label: "Acked", tone: "ok", value: String(server?.cancellations.acked ?? 0) },
-                    { label: "Awaiting ack", tone: server?.cancellations.awaiting_ack ? "warning" : "ok", value: String(server?.cancellations.awaiting_ack ?? 0) },
-                  ],
-                  title: "Cancel acks",
-                })
-              }
-              tone={server && server.cancellations.awaiting_ack > 0 ? "warning" : "ok"}
-              value={String(server?.cancellations.acked ?? 0)}
-            />
-            <DashboardMetricCard
-              detail={
-                server?.gateway_events.status === "live"
-                  ? `${server.gateway_events.delivered_events ?? 0}/${server.gateway_events.queued_events ?? 0} delivered, ${server.gateway_events.active_queues ?? 0} queues`
-                  : "Gateway metrics unavailable"
-              }
-              icon={<Network size={19} />}
-              label="Gateway events"
-              onClick={() =>
-                openDrawer({
-                  description: "Gateway-to-API event forwarder counters for retried telemetry, output, and session posts.",
-                  metrics: [
-                    { label: "Status", tone: server?.gateway_events.status === "live" ? "ok" : "warning", value: server?.gateway_events.status ?? "unavailable" },
-                    { label: "Queued", value: String(server?.gateway_events.queued_events ?? 0) },
-                    { label: "Delivered", tone: "ok", value: String(server?.gateway_events.delivered_events ?? 0) },
-                    { label: "Retries", tone: server?.gateway_events.retry_attempts ? "warning" : "ok", value: String(server?.gateway_events.retry_attempts ?? 0) },
-                    { label: "Active queues", value: String(server?.gateway_events.active_queues ?? 0) },
-                  ],
-                  title: "Gateway events",
-                })
-              }
-              tone={server?.gateway_events.status !== "live" ? "warning" : server.gateway_events.retry_attempts ? "warning" : "ok"}
-              value={server?.gateway_events.status === "live" ? String(server.gateway_events.retry_attempts ?? 0) : "No data"}
-            />
           </div>
-          {server?.notes.length ? <div className="dashboardScopeHint">{server.notes.join("; ")}</div> : null}
         </section>
 
         <section className="dashboardSection" aria-labelledby="dashboard-resources-title">
