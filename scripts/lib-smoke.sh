@@ -180,6 +180,7 @@ smoke_init_tmpdir() {
   local name="$1"
   mkdir -p .tmp
   SMOKE_TMPDIR="$(mktemp -d "$SMOKE_ROOT_DIR/.tmp/${name}.XXXXXX")"
+  export VPSMAN_SUITE_CONFIG="$SMOKE_TMPDIR/no-suite.toml"
   SMOKE_PIDS=()
   SMOKE_RESERVED_PORTS=()
   SMOKE_CONTAINERS=()

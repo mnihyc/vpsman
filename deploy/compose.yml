@@ -23,8 +23,8 @@ services:
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
-      - ../config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
-      - ../config/secrets:/run/secrets:ro
+      - ./config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
+      - ./config/secrets:/run/secrets:ro
     depends_on:
       - postgres
 
@@ -40,8 +40,8 @@ services:
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
-      - ../config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
-      - ../config/secrets:/run/secrets:ro
+      - ./config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
+      - ./config/secrets:/run/secrets:ro
     depends_on:
       - api
 
@@ -55,8 +55,8 @@ services:
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
-      - ../config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
-      - ../config/secrets:/run/secrets:ro
+      - ./config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
+      - ./config/secrets:/run/secrets:ro
     depends_on:
       - postgres
       - api

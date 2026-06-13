@@ -14,11 +14,15 @@ First place release assets into the checkout-local runtime layout:
 - server binaries: `deploy/runtime/server/current/bin/`
 - migration SQL files: `deploy/runtime/server/current/migrations/`
 - extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+- suite config: `deploy/config/vpsman.toml`
+- secret files referenced by suite config: `deploy/config/secrets/`
 
 Then start the stack:
 
 ```sh
-docker compose -f deploy/compose.yml --env-file deploy/.env.example up -d
+cd deploy
+cp .env.example .env
+docker compose up -d
 ```
 
 The default compose shape uses:
@@ -29,11 +33,14 @@ The default compose shape uses:
 - Gateway control API: private between API and gateway containers
 - PostgreSQL: `deploy/runtime/postgres/data`
 - Local object storage: `deploy/runtime/data`
+- Suite config: `deploy/config/vpsman.toml`, mounted as
+  `/etc/vpsman/vpsman.toml` through compose
 
-For production, replace placeholder secrets in `deploy/.env.example` and serve
-the panel/API through HTTPS. Leave S3/MinIO variables unset unless you are
-deliberately testing that adapter; local disk object storage is the current
-default deployment shape. To upgrade, replace the files under
+For production, replace placeholder secrets in `deploy/.env`, review
+`deploy/config/vpsman.toml`, and serve the panel/API through HTTPS. Leave
+S3/MinIO variables unset unless you are deliberately testing that adapter;
+local disk object storage is the current default deployment shape. To upgrade,
+replace the files under
 `deploy/runtime/server/current` and
 `deploy/runtime/frontend/current`, then restart the compose stack; no Rust or
 frontend rebuild is required. Runtime state stays in checkout-local paths, not
@@ -57,6 +64,9 @@ export VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO=0.20
 export VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO=0.10
 export VPSMAN_ALERT_CPU_LOAD_WARNING=2.0
 export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
+# Optional for manual runs. Set this to the operator config file you intend
+# to use; compose sets its own container path.
+# export VPSMAN_SUITE_CONFIG=.tmp/local-vpsman.toml
 
 cargo run -p vpsman-api
 cargo run -p vpsman-gateway

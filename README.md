@@ -65,6 +65,8 @@ Place release files into this checkout-local layout:
 
 - server ZIP contents: `deploy/runtime/server/current/`
 - extracted frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+- suite config: `deploy/config/vpsman.toml`
+- secret files referenced by suite config: `deploy/config/secrets/`
 
 Then run:
 
@@ -83,6 +85,10 @@ Persistent runtime data stays in checkout-local paths:
 
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.
+Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml` and mounts
+`deploy/config/vpsman.toml` there. Direct binary runs are independent of the
+compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you want a specific
+operator config file.
 
 The compose template publishes only Nginx on all host interfaces. API and
 gateway host ports are bound to `127.0.0.1` by default, and gateway control uses

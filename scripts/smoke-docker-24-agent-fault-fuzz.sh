@@ -364,6 +364,7 @@ docker run -d \
   -e VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
   -e VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
   -e VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
+  -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
   -e VPSMAN_ENROLLMENT_TELEMETRY_LIGHT_SECS=2 \
   -e VPSMAN_ENROLLMENT_TELEMETRY_FULL_SECS=4 \
   -e VPSMAN_ENROLLMENT_DEFAULT_COUNTRY="" \
@@ -397,6 +398,7 @@ docker run -d \
   -e VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
   -e VPSMAN_GATEWAY_ID=docker-fault-fuzz-gateway \
   -e VPSMAN_GATEWAY_RECONNECT_GRACE_SECS=2 \
+  -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
   -e RUST_LOG=vpsman_gateway=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \
