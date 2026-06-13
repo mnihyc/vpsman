@@ -13,8 +13,8 @@ import {
   TimerReset,
 } from "lucide-react";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
-import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
 import {
   buildPrivilegeAssertion,
@@ -44,7 +44,7 @@ type SystemPanelProps = {
   onDashboardRefresh: () => void;
   onDashboardWindowChange: (window: SystemDashboardWindow) => void;
   onLoadSuiteConfig: () => void;
-  onPrivilegeMaterialChange: (material: PrivilegeMaterial | null) => void;
+  onOpenPrivilegeUnlock: () => void;
   onUpdateSuiteConfig: (
     toml: string,
     privilegeAssertion: unknown,
@@ -83,7 +83,7 @@ export function SystemPanel({
   onDashboardRefresh,
   onDashboardWindowChange,
   onLoadSuiteConfig,
-  onPrivilegeMaterialChange,
+  onOpenPrivilegeUnlock,
   onUpdateSuiteConfig,
   onValidateSuiteConfig,
   operator,
@@ -99,7 +99,7 @@ export function SystemPanel({
         error={suiteConfigError}
         loading={suiteConfigLoading}
         onLoad={onLoadSuiteConfig}
-        onPrivilegeMaterialChange={onPrivilegeMaterialChange}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onUpdate={onUpdateSuiteConfig}
         onValidate={onValidateSuiteConfig}
         privilegeMaterial={privilegeMaterial}
@@ -393,7 +393,7 @@ function SystemConfigPanel({
   error,
   loading,
   onLoad,
-  onPrivilegeMaterialChange,
+  onOpenPrivilegeUnlock,
   onUpdate,
   onValidate,
   privilegeMaterial,
@@ -402,7 +402,7 @@ function SystemConfigPanel({
   error: string | null;
   loading: boolean;
   onLoad: () => void;
-  onPrivilegeMaterialChange: (material: PrivilegeMaterial | null) => void;
+  onOpenPrivilegeUnlock: () => void;
   onUpdate: (toml: string, privilegeAssertion: unknown) => Promise<SuiteConfigUpdateResponse>;
   onValidate: (toml: string) => Promise<SuiteConfigValidateResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -412,7 +412,7 @@ function SystemConfigPanel({
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<"form" | "toml">("form");
   const parsedDraft = useMemo(() => parseTomlDraft(draftToml), [draftToml]);
   const dirty = Boolean(config && draftToml !== config.toml);
@@ -427,7 +427,7 @@ function SystemConfigPanel({
     : config?.validation.valid
       ? "loaded"
       : "invalid";
-  const saveDisabled = pending || !dirty || !validation || !confirmed || !privilegeMaterial;
+  const reviewDisabled = pending || !dirty || !validation || !privilegeMaterial || !validation.validation.valid;
 
   useEffect(() => {
     if (config) {
@@ -435,7 +435,7 @@ function SystemConfigPanel({
       setValidation(null);
       setConfigMessage(null);
       setConfigError(null);
-      setConfirmed(false);
+      setConfirmOpen(false);
     }
   }, [config]);
 
@@ -464,8 +464,8 @@ function SystemConfigPanel({
       setConfigError("Validate the current TOML before saving");
       return;
     }
-    if (!confirmed) {
-      setConfigError("Review and confirm the redacted diff before saving");
+    if (!validation.validation.valid) {
+      setConfigError("Fix validation errors before saving");
       return;
     }
     setPending(true);
@@ -483,7 +483,7 @@ function SystemConfigPanel({
       });
       const response = await onUpdate(draftToml, privilegeAssertion);
       setConfigMessage(`Saved suite config; changed keys: ${response.changed_keys.join(", ") || "none"}.`);
-      setConfirmed(false);
+      setConfirmOpen(false);
       onLoad();
     } catch (saveError) {
       setConfigError(saveError instanceof Error ? saveError.message : "Suite config save failed");
@@ -501,7 +501,7 @@ function SystemConfigPanel({
     setTomlPath(next, path.split("."), value);
     setDraftToml(stringify(next));
     setValidation(null);
-    setConfirmed(false);
+    setConfirmOpen(false);
   }
 
   return (
@@ -522,9 +522,9 @@ function SystemConfigPanel({
                 <CheckCircle2 size={16} />
                 <span>Validate</span>
               </button>
-              <button className="primaryAction compactAction" disabled={saveDisabled} onClick={saveDraft} type="button">
+              <button className="primaryAction compactAction" disabled={reviewDisabled} onClick={() => setConfirmOpen(true)} type="button">
                 <Save size={16} />
-                <span>Save</span>
+                <span>Review save</span>
               </button>
             </div>
           </div>
@@ -620,7 +620,7 @@ function SystemConfigPanel({
                   onChange={(event) => {
                     setDraftToml(event.target.value);
                     setValidation(null);
-                    setConfirmed(false);
+                    setConfirmOpen(false);
                   }}
                   spellCheck={false}
                   value={draftToml}
@@ -629,11 +629,11 @@ function SystemConfigPanel({
             )}
           </section>
 
-          <aside className="dashboardSection systemConfigReview" aria-label="Suite config validation and save review">
+          <section className="dashboardSection systemConfigReview" aria-label="Suite config validation and save review">
             <div className="dashboardSectionHeader">
               <div>
                 <h2>Review and save</h2>
-                <span>Validate, review impact, unlock privilege, then save.</span>
+                <span>Validate, review impact, use global privilege unlock, then confirm save.</span>
               </div>
               <ConsoleStatusBadge tone={validation?.validation.valid ? "ok" : dirty ? "warning" : "neutral"}>
                 {validation ? `${changedKeys.length} changed` : dirty ? "Draft" : "No draft"}
@@ -657,25 +657,22 @@ function SystemConfigPanel({
 
               <div className="systemReviewBlock">
                 <h3>Privilege</h3>
-                <PrivilegeVaultBox
-                  lastPayloadHash={null}
-                  onPrivilegeMaterialChange={onPrivilegeMaterialChange}
-                  privilegeMaterial={privilegeMaterial}
-                  lockPrivilegeLabel="Lock suite privilege"
-                  unlockLabel="Unlock"
-                  usePrivilegeLabel="Use for suite save"
-                />
+                <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}>
+                  <LockKeyhole size={18} />
+                  <span>{privilegeMaterial ? "Privilege unlocked for this browser session" : "Unlock privilege from Access before saving suite config"}</span>
+                  {!privilegeMaterial && (
+                    <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+                      Unlock in Access
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="systemReviewBlock">
-                <h3>Save guard</h3>
-                <label className="checkLine inlineCheck">
-                  <input checked={confirmed} disabled={!validation || !dirty} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
-                  <span>Reviewed redacted diff and restart/hot-reload impact</span>
-                </label>
-                <button className="primaryAction wideAction" disabled={saveDisabled} onClick={saveDraft} type="button">
+                <h3>Save</h3>
+                <button className="primaryAction wideAction" disabled={reviewDisabled} onClick={() => setConfirmOpen(true)} type="button">
                   <Save size={16} />
-                  <span>{pending ? "Saving" : "Save suite config"}</span>
+                  <span>{pending ? "Saving" : "Review save"}</span>
                 </button>
               </div>
 
@@ -690,7 +687,24 @@ function SystemConfigPanel({
                 </div>
               </div>
             </div>
-          </aside>
+            <ConfirmationPrompt
+              confirmLabel="Save suite config"
+              detail="This writes the suite TOML, may hot-reload runtime settings, and may require service restarts for restart-only keys."
+              error={configError}
+              items={[
+                { label: "Changed keys", value: String(changedKeys.length) },
+                { label: "Hot reload fields", value: String(hotReloadFields.length) },
+                { label: "Restart required fields", value: String(restartRequiredFields.length) },
+                { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+              ]}
+              onCancel={() => setConfirmOpen(false)}
+              onConfirm={() => void saveDraft()}
+              open={confirmOpen}
+              pending={pending}
+              title="Confirm suite config save"
+              tone="danger"
+            />
+          </section>
         </div>
       </div>
     </div>

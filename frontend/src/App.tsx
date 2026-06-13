@@ -555,7 +555,7 @@ export function App() {
                 onDashboardRefresh={() => void dashboard.loadSystemDashboard()}
                 onDashboardWindowChange={dashboard.setSystemDashboardWindow}
                 onLoadSuiteConfig={() => void dashboard.loadSuiteConfig()}
-                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onUpdateSuiteConfig={dashboard.updateSuiteConfig}
                 onValidateSuiteConfig={dashboard.validateSuiteConfig}
                 operator={dashboard.operator}

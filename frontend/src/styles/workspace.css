@@ -509,7 +509,6 @@
 
 .systemConfigBody {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
   gap: 16px;
 }
 
@@ -639,15 +638,6 @@
   display: grid;
   gap: 10px;
   min-width: 0;
-}
-
-.systemReviewBlock .privilegeManager {
-  margin: 0;
-}
-
-.systemReviewBlock .privilegeFields,
-.systemReviewBlock .inlinePrivilege {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .systemImpactGrid {
@@ -1184,11 +1174,26 @@
   gap: 7px;
 }
 
+.preferenceControls label.checkLine {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+}
+
 .preferenceControls label span {
   color: #5f6368;
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.preferenceControls label.checkLine span {
+  color: #3c4043;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-transform: none;
 }
 
 .preferenceControls input,
@@ -1202,6 +1207,16 @@
   color: #202124;
   outline: 0;
   padding: 0 12px;
+}
+
+.preferenceControls label.checkLine input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
 }
 
 .preferenceControls textarea {

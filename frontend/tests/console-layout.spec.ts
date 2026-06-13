@@ -741,6 +741,10 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
       .getByText("capacity.api_db_pool")
       .first(),
   ).toBeVisible();
+  await expect(page.getByLabel("Suite config validation and save review")).toBeVisible();
+  await expect(page.getByText("Unlock in Access")).toBeVisible();
+  await expect(page.getByLabel(/super password/i)).toHaveCount(0);
+  await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
 });
 
 test("packs dashboard top VPS cards by label length", async ({
