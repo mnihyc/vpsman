@@ -1073,6 +1073,8 @@ pub struct GatewayForwardMetricsSnapshot {
     #[serde(default)]
     pub retained_output_truncated_events: u64,
     #[serde(default)]
+    pub rejected_agent_connections: u64,
+    #[serde(default)]
     pub unhealthy: bool,
 }
 

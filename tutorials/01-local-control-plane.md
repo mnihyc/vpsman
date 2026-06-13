@@ -52,10 +52,11 @@ Manual startup is useful while iterating:
 
 ```sh
 export VPSMAN_API_BIND=127.0.0.1:8080
+export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN=dev-internal-token
+export VPSMAN_INTERNAL_TOKEN=dev-internal-token-change-me-32chars
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
 export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
@@ -68,6 +69,7 @@ export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
 # to use; compose sets its own container path.
 # export VPSMAN_SUITE_CONFIG=.tmp/local-vpsman.toml
 
+# Run each service in its own shell with the same environment.
 cargo run -p vpsman-api
 cargo run -p vpsman-gateway
 cargo run -p vpsman-worker
@@ -92,7 +94,6 @@ cargo run -p vpsctl -- --api-url http://127.0.0.1:8080 bootstrap
 After creating or obtaining an operator token, export it:
 
 ```sh
-export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_API_TOKEN=<operator_token>
 cargo run -p vpsctl -- me
 cargo run -p vpsctl -- summary

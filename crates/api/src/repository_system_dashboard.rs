@@ -525,6 +525,12 @@ pub(crate) fn system_metric_samples_from_snapshot(
                     .retained_output_truncated_events
                     .unwrap_or_default() as f64,
             ),
+            sample(
+                "gateway_events.rejected_agent_connections",
+                gateway_events
+                    .rejected_agent_connections
+                    .unwrap_or_default() as f64,
+            ),
         ]);
     }
     samples

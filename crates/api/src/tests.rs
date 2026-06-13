@@ -1,5 +1,8 @@
 use super::*;
-use vpsman_common::{AgentHello, GatewayAgentHelloIngest, JobCommand};
+use vpsman_common::{
+    job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, GatewayAgentHelloIngest,
+    JobCommand, OspfCostPolicy, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+};
 
 #[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
@@ -856,6 +859,120 @@ async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
 }
 
 #[tokio::test]
+async fn memory_dispatch_claim_preserves_source_schedule_id() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let schedule_id = Uuid::new_v4();
+    let job_id = repo
+        .record_dispatching_job_from_schedule(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "scheduled_request_fingerprint",
+            &operator,
+            &["client-a".to_string()],
+            schedule_id,
+        )
+        .await
+        .unwrap();
+
+    let claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    assert_eq!(claim.len(), 1);
+    assert_eq!(claim[0].job_id, job_id);
+    assert_eq!(claim[0].source_schedule_id, Some(schedule_id));
+}
+
+#[tokio::test]
+async fn memory_dispatch_exclusivity_uses_operation_for_scheduled_labels() {
+    for (case, operation) in exclusive_dispatch_operation_cases() {
+        let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));
+        let repo = Repository::Memory(MemoryState::default());
+        let scheduled_job_id = record_memory_dispatch_job(
+            &repo,
+            operation.clone(),
+            Some(Uuid::new_v4()),
+            Some(scheduled_label.clone()),
+            &format!("{case}_scheduled_first"),
+        )
+        .await;
+        let direct_job_id = record_memory_dispatch_job(
+            &repo,
+            operation.clone(),
+            None,
+            None,
+            &format!("{case}_direct_second"),
+        )
+        .await;
+
+        let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        assert_eq!(first_claim.len(), 1, "{case}: scheduled claim");
+        assert_eq!(first_claim[0].job_id, scheduled_job_id, "{case}");
+        assert_eq!(first_claim[0].command_type, scheduled_label, "{case}");
+        assert!(
+            repo.claim_due_job_targets(10, 30).await.unwrap().is_empty(),
+            "{case}: direct job must wait behind scheduled exclusive operation"
+        );
+
+        complete_memory_target(&repo, scheduled_job_id).await;
+        let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        assert_eq!(second_claim.len(), 1, "{case}: direct claim");
+        assert_eq!(second_claim[0].job_id, direct_job_id, "{case}");
+        assert_eq!(
+            second_claim[0].command_type,
+            job_command_type_label(&operation),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn memory_dispatch_direct_exclusive_blocks_scheduled_operation() {
+    for (case, operation) in exclusive_dispatch_operation_cases() {
+        let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));
+        let repo = Repository::Memory(MemoryState::default());
+        let direct_job_id = record_memory_dispatch_job(
+            &repo,
+            operation.clone(),
+            None,
+            None,
+            &format!("{case}_direct_first"),
+        )
+        .await;
+        let scheduled_job_id = record_memory_dispatch_job(
+            &repo,
+            operation.clone(),
+            Some(Uuid::new_v4()),
+            Some(scheduled_label.clone()),
+            &format!("{case}_scheduled_second"),
+        )
+        .await;
+
+        let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        assert_eq!(first_claim.len(), 1, "{case}: direct claim");
+        assert_eq!(first_claim[0].job_id, direct_job_id, "{case}");
+        assert_eq!(
+            first_claim[0].command_type,
+            job_command_type_label(&operation),
+            "{case}"
+        );
+        assert!(
+            repo.claim_due_job_targets(10, 30).await.unwrap().is_empty(),
+            "{case}: scheduled job must wait behind direct exclusive operation"
+        );
+
+        complete_memory_target(&repo, direct_job_id).await;
+        let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        assert_eq!(second_claim.len(), 1, "{case}: scheduled claim");
+        assert_eq!(second_claim[0].job_id, scheduled_job_id, "{case}");
+        assert_eq!(second_claim[0].command_type, scheduled_label, "{case}");
+        assert!(second_claim[0].source_schedule_id.is_some(), "{case}");
+    }
+}
+
+#[tokio::test]
 async fn job_output_comparison_groups_execution_summaries_by_status_and_output() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -1104,6 +1221,140 @@ fn test_job_request(clients: &[&str]) -> CreateJobRequest {
         privileged: true,
         privilege_assertion: None,
     }
+}
+
+fn operation_job_request(operation: JobCommand, clients: &[&str]) -> CreateJobRequest {
+    CreateJobRequest {
+        job_id: None,
+        selector_expression: test_selector_expression_for_clients(clients),
+        target_client_ids: clients.iter().map(|client| (*client).to_string()).collect(),
+        destructive: true,
+        confirmed: true,
+        command: job_command_type_label(&operation).to_string(),
+        argv: Vec::new(),
+        operation: Some(operation),
+        timeout_secs: Some(5),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    }
+}
+
+fn exclusive_dispatch_operation_cases() -> Vec<(&'static str, JobCommand)> {
+    vec![
+        (
+            "backup",
+            JobCommand::Backup {
+                paths: vec!["/etc/hostname".to_string()],
+                include_config: true,
+                recipient_public_key_hex: None,
+            },
+        ),
+        (
+            "shell",
+            JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+        ),
+        (
+            "network",
+            JobCommand::NetworkRollback {
+                plan: Box::new(test_dispatch_tunnel_plan()),
+                side: TunnelEndpointSide::Left,
+            },
+        ),
+    ]
+}
+
+fn test_dispatch_tunnel_plan() -> vpsman_common::TunnelPlan {
+    plan_tunnel(&TunnelPlanInput {
+        name: "client-a-client-b".to_string(),
+        interface_name: "tunab".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "client-a".to_string(),
+        right_client_id: "client-b".to_string(),
+        left_underlay: "198.51.100.10".to_string(),
+        right_underlay: "203.0.113.20".to_string(),
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        bandwidth: BandwidthTier::M100,
+        latency_ms: 18.0,
+        packet_loss_ratio: 0.0,
+        preference: 1.0,
+        ospf_policy: OspfCostPolicy::default(),
+    })
+    .unwrap()
+}
+
+async fn record_memory_dispatch_job(
+    repo: &Repository,
+    operation: JobCommand,
+    source_schedule_id: Option<Uuid>,
+    command_type_override: Option<String>,
+    fingerprint_suffix: &str,
+) -> Uuid {
+    let operator = test_operator();
+    let request = operation_job_request(operation.clone(), &["client-a"]);
+    let command_hash = payload_hash(&encode_json(&operation).unwrap());
+    let request_fingerprint = format!("memory_dispatch_exclusive_{fingerprint_suffix}");
+    let job_id = match source_schedule_id {
+        Some(schedule_id) => repo
+            .record_dispatching_job_from_schedule(
+                Uuid::new_v4(),
+                &request,
+                &command_hash,
+                &request_fingerprint,
+                &operator,
+                &["client-a".to_string()],
+                schedule_id,
+            )
+            .await
+            .unwrap(),
+        None => repo
+            .record_dispatching_job(
+                Uuid::new_v4(),
+                &request,
+                &command_hash,
+                &request_fingerprint,
+                &operator,
+                &["client-a".to_string()],
+            )
+            .await
+            .unwrap(),
+    };
+    if let Some(command_type) = command_type_override {
+        let Repository::Memory(memory) = repo else {
+            unreachable!("test uses memory repository");
+        };
+        let mut jobs = memory.jobs.write().await;
+        let job = jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .expect("recorded job must be visible");
+        job.command_type = command_type;
+    }
+    job_id
+}
+
+async fn complete_memory_target(repo: &Repository, job_id: Uuid) {
+    repo.update_job_target_result(
+        job_id,
+        "client-a",
+        &TargetDispatchOutcome {
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            command_version: Some(1),
+            accepted: true,
+            message: "ok".to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
 }
 
 async fn record_test_output(

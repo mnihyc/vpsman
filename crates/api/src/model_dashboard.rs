@@ -288,6 +288,7 @@ pub(crate) struct SystemDashboardGatewayEventsView {
     pub(crate) dropped_by_reason: GatewayForwardDropReasonCounters,
     pub(crate) critical_failures_by_reason: GatewayForwardCriticalFailureCounters,
     pub(crate) retained_output_truncated_events: Option<u64>,
+    pub(crate) rejected_agent_connections: Option<u64>,
     pub(crate) status: String,
 }
 

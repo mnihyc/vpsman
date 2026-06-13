@@ -1,9 +1,6 @@
 use std::{
     ffi::{CString, OsStr, OsString},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, PermissionsExt},
-    },
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -15,7 +12,13 @@ use vpsman_common::{
     CommandOutput, FileActionPolicy, FileOwnershipPolicy, OutputStream,
 };
 
-use crate::file_pull::chunked_output;
+use crate::{
+    file_pull::chunked_output,
+    platform_accounts::{
+        chown_path as platform_chown_path, metadata_gid, metadata_mode, metadata_mtime_unix,
+        metadata_uid, PlatformAccounts,
+    },
+};
 
 const MAX_FILE_LIST_LIMIT: u32 = 1000;
 const MAX_FILE_READ_BYTES: u64 = 1024 * 1024;
@@ -696,10 +699,10 @@ async fn metadata_json(path: &Path, metadata: &std::fs::Metadata) -> Result<Valu
         "is_file": metadata.is_file(),
         "is_symlink": metadata.file_type().is_symlink(),
         "size_bytes": metadata.len(),
-        "mode": metadata.mode() & 0o777,
-        "uid": metadata.uid(),
-        "gid": metadata.gid(),
-        "mtime_unix": metadata.mtime(),
+        "mode": metadata_mode(metadata).map(|mode| mode & 0o777),
+        "uid": metadata_uid(metadata),
+        "gid": metadata_gid(metadata),
+        "mtime_unix": metadata_mtime_unix(metadata),
         "symlink_target": symlink_target,
     }))
 }
@@ -844,11 +847,10 @@ fn resolve_owner_group(
             status: OwnershipResolutionStatus::Unchanged,
         });
     }
-    let users = read_name_id_file("/etc/passwd");
-    let groups = read_name_id_file("/etc/group");
+    let accounts = PlatformAccounts::load();
     let mut missing = Vec::new();
-    let owner_id = resolve_name_or_id(owner, &users, "owner", &mut missing);
-    let group_id = resolve_name_or_id(group, &groups, "group", &mut missing);
+    let owner_id = resolve_name_or_id(owner, true, &accounts, "owner", &mut missing);
+    let group_id = resolve_name_or_id(group, false, &accounts, "group", &mut missing);
     if !missing.is_empty() {
         if ownership_policy == FileOwnershipPolicy::Ignore {
             return Ok(OwnershipResolution {
@@ -868,10 +870,10 @@ fn resolve_owner_group(
         gid: resolved_gid,
         owner: owner_id
             .and_then(|value| value.1)
-            .or_else(|| resolved_uid.and_then(|value| name_for_id(&users, value))),
+            .or_else(|| resolved_uid.and_then(|value| accounts.user_name_for_id(value))),
         group: group_id
             .and_then(|value| value.1)
-            .or_else(|| resolved_gid.and_then(|value| name_for_id(&groups, value))),
+            .or_else(|| resolved_gid.and_then(|value| accounts.group_name_for_id(value))),
         status: if resolved_uid.is_some() || resolved_gid.is_some() {
             OwnershipResolutionStatus::Planned
         } else {
@@ -880,42 +882,32 @@ fn resolve_owner_group(
     })
 }
 
-fn read_name_id_file(path: &str) -> Vec<(String, u32)> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() < 3 {
-                return None;
-            }
-            Some((parts[0].to_string(), parts[2].parse().ok()?))
-        })
-        .collect()
-}
-
 fn resolve_name_or_id(
     value: Option<&str>,
-    entries: &[(String, u32)],
+    user: bool,
+    accounts: &PlatformAccounts,
     kind: &str,
     missing: &mut Vec<String>,
 ) -> Option<(u32, Option<String>)> {
     let value = value.map(str::trim).filter(|value| !value.is_empty())?;
     if let Ok(id) = value.parse::<u32>() {
-        return Some((id, name_for_id(entries, id)));
+        let name = if user {
+            accounts.user_name_for_id(id)
+        } else {
+            accounts.group_name_for_id(id)
+        };
+        return Some((id, name));
     }
-    if let Some((name, id)) = entries.iter().find(|(name, _)| name == value) {
-        return Some((*id, Some(name.clone())));
+    let resolved = if user {
+        accounts.resolve_user(value)
+    } else {
+        accounts.resolve_group(value)
+    };
+    if let Some(resolved) = resolved {
+        return Some((resolved.id, resolved.name));
     }
     missing.push(format!("{kind}:{value}"));
     None
-}
-
-fn name_for_id(entries: &[(String, u32)], id: u32) -> Option<String> {
-    entries
-        .iter()
-        .find(|(_, candidate_id)| *candidate_id == id)
-        .map(|(name, _)| name.clone())
 }
 
 fn merge_id(kind: &str, explicit: Option<u32>, resolved: Option<u32>) -> Result<Option<u32>> {
@@ -939,7 +931,7 @@ fn chown_path_recursive(
     if metadata.file_type().is_symlink() {
         return Ok(());
     }
-    chown_path(path, uid, gid)?;
+    platform_chown_path(path, uid, gid)?;
     if recursive && metadata.is_dir() {
         for entry in std::fs::read_dir(path)
             .with_context(|| format!("failed to read directory {}", path.display()))?
@@ -947,22 +939,6 @@ fn chown_path_recursive(
             let entry = entry?;
             chown_path_recursive(&entry.path(), uid, gid, true)?;
         }
-    }
-    Ok(())
-}
-
-fn chown_path(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
-    let path =
-        CString::new(path.as_os_str().as_bytes()).context("path contains an interior nul byte")?;
-    let uid = uid
-        .map(|value| value as libc::uid_t)
-        .unwrap_or(!0 as libc::uid_t);
-    let gid = gid
-        .map(|value| value as libc::gid_t)
-        .unwrap_or(!0 as libc::gid_t);
-    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to change file ownership");
     }
     Ok(())
 }
@@ -1025,7 +1001,7 @@ fn copy_path(source: &Path, destination: &Path, recursive: bool, overwrite: bool
         })?;
         std::fs::set_permissions(
             destination,
-            std::fs::Permissions::from_mode(metadata.mode() & 0o777),
+            std::fs::Permissions::from_mode(metadata_mode(&metadata).unwrap_or(0o644) & 0o777),
         )
         .with_context(|| format!("failed to set mode on {}", destination.display()))?;
         return Ok(());
@@ -1047,7 +1023,7 @@ fn copy_path(source: &Path, destination: &Path, recursive: bool, overwrite: bool
         }
         std::fs::set_permissions(
             destination,
-            std::fs::Permissions::from_mode(metadata.mode() & 0o777),
+            std::fs::Permissions::from_mode(metadata_mode(&metadata).unwrap_or(0o755) & 0o777),
         )
         .with_context(|| format!("failed to set mode on {}", destination.display()))?;
         for entry in std::fs::read_dir(source)

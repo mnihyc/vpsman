@@ -67,7 +67,7 @@ impl GatewayControlClient {
         value: &T,
     ) -> Result<()> {
         let Some(api_url) = &self.api_url else {
-            return Ok(());
+            anyhow::bail!("gateway API URL is required for event forwarding");
         };
         let Ok(body) = serde_json::to_vec(value) else {
             warn!(path, "failed to serialize gateway event for API forwarding");
@@ -96,7 +96,7 @@ impl GatewayControlClient {
         noise_public_key_hex: &str,
     ) -> Result<GatewayIdentityValidationResponse> {
         let Some(api_url) = &self.api_url else {
-            anyhow::bail!("enrolled IK identity validation requires VPSMAN_API_URL or a static expected client key");
+            anyhow::bail!("enrolled IK identity validation requires VPSMAN_API_URL");
         };
         let body = post_json(
             api_url,
@@ -142,6 +142,7 @@ pub(crate) struct GatewayForwardMetrics {
     dropped_by_reason: GatewayForwardDropReasonAtomicCounters,
     critical_failures_by_reason: GatewayForwardCriticalFailureAtomicCounters,
     retained_output_truncated_events: AtomicU64,
+    rejected_agent_connections: AtomicU64,
     unhealthy: AtomicBool,
 }
 
@@ -469,6 +470,7 @@ impl GatewayForwardMetrics {
             retained_output_truncated_events: self
                 .retained_output_truncated_events
                 .load(Ordering::Relaxed),
+            rejected_agent_connections: self.rejected_agent_connections.load(Ordering::Relaxed),
             unhealthy: self.unhealthy.load(Ordering::Relaxed),
         }
     }
@@ -476,6 +478,11 @@ impl GatewayForwardMetrics {
     pub(crate) fn record_retained_output_truncated(&self, count: u64) {
         self.retained_output_truncated_events
             .fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_rejected_agent_connection(&self) {
+        self.rejected_agent_connections
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_drop(&self, kind: GatewayForwardEventKind, reason: GatewayForwardDropReason) {
@@ -902,6 +909,22 @@ mod tests {
             created_at: time::Instant::now(),
             created_unix: unix_now(),
         }
+    }
+
+    #[tokio::test]
+    async fn post_without_api_url_returns_error() {
+        let client = GatewayControlClient::new(None, None, GatewayHttpTimeouts::default());
+        let error = client
+            .post(
+                "client-a",
+                "/internal/v1/gateway/session-started",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("gateway API URL is required"));
     }
 
     #[tokio::test]

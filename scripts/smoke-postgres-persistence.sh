@@ -763,7 +763,8 @@ rejected_job_json="$(api_post_expect_status "/api/v1/jobs" '{
   "argv": ["/usr/bin/uptime"],
   "operation": null,
   "timeout_secs": 5,
-  "privileged": true
+  "privileged": true,
+  "confirmed": true
 }' "403")"
 jq -e '.error == "privilege_assertion_required" and .status == 403' \
   <<<"$rejected_job_json" >/dev/null
@@ -772,7 +773,6 @@ command_template_request="$(jq -n '{
   name: "pg-smoke-tag-uptime",
   scope_kind: "tag",
   scope_value: "edge",
-  command_type: "shell",
   operation: {
     type: "shell",
     argv: ["/usr/bin/uptime"],
@@ -786,10 +786,10 @@ command_template_request="$(jq -n '{
 }')"
 command_template_json="$(api_post "/api/v1/command-templates" "$command_template_request")"
 command_template_id="$(jq -r '.id' <<<"$command_template_json")"
-jq -e '.name == "pg-smoke-tag-uptime" and .scope_kind == "tag" and .scope_value == "edge" and .operation.type == "shell"' \
+jq -e '.name == "pg-smoke-tag-uptime" and .scope_kind == "tag" and .scope_value == "edge" and .command_type == "shell_argv" and .operation.type == "shell"' \
   <<<"$command_template_json" >/dev/null
 api_get "/api/v1/command-templates?limit=20&scope_kind=tag&scope_value=edge" | jq -e --arg template_id "$command_template_id" '
-  any(.[]; .id == $template_id and .name == "pg-smoke-tag-uptime" and .command_type == "shell")
+  any(.[]; .id == $template_id and .name == "pg-smoke-tag-uptime" and .command_type == "shell_argv")
 ' >/dev/null
 
 rejected_job_payload="$(jq -n '{
@@ -799,7 +799,8 @@ rejected_job_payload="$(jq -n '{
   argv: ["/usr/bin/uptime"],
   operation: null,
   timeout_secs: 5,
-  privileged: true
+  privileged: true,
+  confirmed: true
 }')"
 rejected_job_first="$(api_post_expect_status "/api/v1/jobs" "$rejected_job_payload" "403")"
 jq -e '.error == "privilege_assertion_required" and .status == 403' \

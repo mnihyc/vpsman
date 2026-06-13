@@ -270,6 +270,7 @@ function SystemDashboardPanel({
             { label: "Telemetry coalesced", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.coalesced) },
             { label: "Target queue full", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.target_queue_full) },
             { label: "Retained output trunc", value: valueOrUnset(dashboard?.current.gateway_events.retained_output_truncated_events) },
+            { label: "Rejected connects", value: valueOrUnset(dashboard?.current.gateway_events.rejected_agent_connections) },
             { label: "Delivered", value: valueOrUnset(dashboard?.current.gateway_events.delivered_events) },
             { label: "Event retries", value: valueOrUnset(dashboard?.current.gateway_events.retry_attempts) },
           ]}
@@ -281,6 +282,7 @@ function SystemDashboardPanel({
             "gateway_events.dropped_by_reason.coalesced",
             "gateway_events.dropped_by_reason.target_queue_full",
             "gateway_events.retained_output_truncated_events",
+            "gateway_events.rejected_agent_connections",
             "gateway_events.delivered_events",
             "gateway_events.retry_attempts",
           ])}

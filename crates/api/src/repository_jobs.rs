@@ -4,7 +4,10 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::{job_command_safety, JobCommand, JobCommandSafety};
+use vpsman_common::{
+    job_command_safety, job_command_safety_by_operation_type, JobCommand, JobCommandSafety,
+    JOB_COMMAND_SAFETY_EXCLUSIVE,
+};
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED,
     JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
@@ -13,45 +16,6 @@ use vpsman_server_core::{
 };
 
 pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
-
-const EXCLUSIVE_COMMAND_TYPES: &[&str] = &[
-    "shell_pty",
-    "shell_argv",
-    "shell_script",
-    "terminal_open",
-    "terminal_input",
-    "terminal_poll",
-    "terminal_resize",
-    "terminal_close",
-    "hot_config",
-    "data_source_config_patch",
-    "agent_update",
-    "agent_update_activate",
-    "agent_update_rollback",
-    "agent_update_check",
-    "file_push",
-    "file_push_chunked",
-    "file_transfer_start",
-    "file_transfer_chunk",
-    "file_transfer_commit",
-    "file_transfer_abort",
-    "file_write_text",
-    "file_mkdir",
-    "file_rename",
-    "file_delete",
-    "file_chmod",
-    "file_chown",
-    "file_copy",
-    "process_start",
-    "process_stop",
-    "process_restart",
-    "backup",
-    "restore",
-    "restore_rollback",
-    "network_apply",
-    "network_ospf_cost_update",
-    "network_rollback",
-];
 
 const EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS: i32 = 0x5650_534d;
 
@@ -80,6 +44,20 @@ fn schedule_job_outcome_error(status: &str) -> Option<&str> {
         None
     } else {
         Some(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_operation_types_follow_shared_command_safety() {
+        let exclusive = exclusive_operation_types();
+        assert!(exclusive.contains(&"backup"));
+        assert!(exclusive.contains(&"shell"));
+        assert!(exclusive.contains(&"network_apply"));
+        assert!(!exclusive.contains(&"network_status"));
     }
 }
 
@@ -124,6 +102,15 @@ fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str 
         .map(|target| target.status.clone())
         .collect::<Vec<_>>();
     aggregate_job_status_from_statuses(&statuses, targets.len())
+}
+
+fn exclusive_operation_types() -> Vec<&'static str> {
+    job_command_safety_by_operation_type()
+        .iter()
+        .filter_map(|(operation_type, safety)| {
+            (*safety == JOB_COMMAND_SAFETY_EXCLUSIVE).then_some(*operation_type)
+        })
+        .collect()
 }
 
 fn job_history_order_by(sort: Option<&str>, descending: bool) -> &'static str {
@@ -223,10 +210,7 @@ pub(crate) struct ClaimedJobTarget {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) actor_id: Option<Uuid>,
-    #[expect(
-        dead_code,
-        reason = "retained for dispatch diagnostics and event context"
-    )]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) command_type: String,
     pub(crate) payload_hash: String,
     pub(crate) operation: JobCommand,
@@ -941,6 +925,13 @@ impl Repository {
                     .write()
                     .await
                     .insert(job_id, request.timeout_secs.unwrap_or(30).clamp(1, 3600));
+                if let Some(schedule_id) = source_schedule_id {
+                    memory
+                        .job_source_schedule_ids
+                        .write()
+                        .await
+                        .insert(job_id, schedule_id);
+                }
                 memory
                     .job_targets
                     .write()
@@ -1052,6 +1043,7 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let operations = memory.job_operations.read().await.clone();
+                let source_schedule_ids = memory.job_source_schedule_ids.read().await.clone();
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
                 let target_snapshot = memory.job_targets.read().await.clone();
@@ -1103,7 +1095,7 @@ impl Repository {
                         command_type: job.command_type.clone(),
                         payload_hash: job.payload_hash.clone(),
                         operation,
-                        source_schedule_id: None,
+                        source_schedule_id: source_schedule_ids.get(&target.job_id).copied(),
                         timeout_secs: timeouts
                             .get(&target.job_id)
                             .copied()
@@ -1138,7 +1130,7 @@ impl Repository {
                                 OR target.deadline_at > now()
                               )
                               AND (
-                                job.command_type <> ALL($3::text[])
+                                COALESCE(job.operation ->> 'type', '') <> ALL($3::text[])
                                 OR (
                                   pg_try_advisory_xact_lock(
                                     $4::integer,
@@ -1154,7 +1146,7 @@ impl Repository {
                                       AND active_target.completed_at IS NULL
                                       AND active_target.status IN ('dispatching', 'running')
                                       AND active_job.completed_at IS NULL
-                                      AND active_job.command_type = ANY($3::text[])
+                                      AND COALESCE(active_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
                                         active_target.job_id <> target.job_id
                                         OR active_target.client_id <> target.client_id
@@ -1171,7 +1163,7 @@ impl Repository {
                                       AND earlier_target.status IN ('queued', 'dispatching')
                                       AND earlier_job.completed_at IS NULL
                                       AND earlier_job.status IN ('queued', 'running')
-                                      AND earlier_job.command_type = ANY($3::text[])
+                                      AND COALESCE(earlier_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
                                         earlier_target.deadline_at IS NULL
                                         OR earlier_target.deadline_at > now()
@@ -1226,7 +1218,7 @@ impl Repository {
                 )
                 .bind(limit.clamp(1, 500))
                 .bind(lease_secs.clamp(1, 3600) as i32)
-                .bind(EXCLUSIVE_COMMAND_TYPES.to_vec())
+                .bind(exclusive_operation_types())
                 .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
                 .fetch_all(pool)
                 .await?;

@@ -415,3 +415,32 @@ pub(crate) struct IngestResponse {
     accepted: bool,
     message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingest_unsupported_command_output_maps_to_rejected_target_status() {
+        let job_id = uuid::Uuid::new_v4();
+        let output = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "unsupported_command_version",
+                "status": "rejected",
+                "command_type": "shell_argv",
+            }))
+            .unwrap(),
+            exit_code: Some(78),
+            done: true,
+        };
+
+        let outcome =
+            target_outcome_from_done_output(job_id, &output, "2026-06-13T00:00:00Z".to_string());
+
+        assert_eq!(outcome.status, TARGET_STATUS_REJECTED);
+        assert_eq!(outcome.exit_code, Some(78));
+        assert_eq!(outcome.message, "unsupported_command_version: rejected");
+    }
+}

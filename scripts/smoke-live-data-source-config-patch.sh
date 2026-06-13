@@ -281,7 +281,7 @@ assert_execution_policy_applied() {
       --confirmed)"
   terminal_reject_job_id="$(jq -r '.job.job_id' <<<"$terminal_json")"
   if ! jq -e '.job.target_count == 1' <<<"$terminal_json" >/dev/null \
-    || ! smoke_wait_api_job_status "$api_url" "$terminal_reject_job_id" failed 45 >/dev/null; then
+    || ! smoke_wait_api_job_status "$api_url" "$terminal_reject_job_id" rejected 45 >/dev/null; then
     dump_job_diagnostics "disabled PTY policy did not reject terminal open" \
       "$terminal_reject_job_id"
     exit 1
@@ -289,7 +289,7 @@ assert_execution_policy_applied() {
   terminal_targets="$(api_get "/api/v1/jobs/$terminal_reject_job_id/targets")"
   terminal_outputs="$(api_get "/api/v1/jobs/$terminal_reject_job_id/outputs")"
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "failed" and .[0].exit_code == 126
+    length == 1 and .[0].client_id == $client and .[0].status == "rejected" and .[0].exit_code == 126
   ' <<<"$terminal_targets" >/dev/null
   jq -e '
     .[] | select(.stream == "status" and .done == true and .exit_code == 126)

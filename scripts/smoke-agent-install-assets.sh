@@ -82,10 +82,13 @@ VPSMAN_INSTALL_ROOT="$stage_root" \
   VPSMAN_SKIP_SERVICE_ENABLE=1 \
   bash scripts/install-agent.sh >"$SMOKE_TMPDIR/install-a.log"
 
-installed_agent="$stage_root/opt/vpsman/vpsman-agent"
-installed_config="$stage_root/etc/vpsman/agent.toml"
-systemd_unit="$stage_root/etc/systemd/system/vpsman-agent.service"
-sysv_script="$stage_root/etc/init.d/vpsman-agent"
+root_work_dir="/opt/vpsman-agent"
+installed_agent="$stage_root$root_work_dir/bin/vpsman-agent"
+installed_config="$stage_root$root_work_dir/config/agent.toml"
+systemd_unit="$stage_root$root_work_dir/systemd/vpsman-agent.service"
+sysv_script="$stage_root$root_work_dir/init.d/vpsman-agent"
+state_dir="$stage_root$root_work_dir/state"
+log_dir="$stage_root$root_work_dir/log"
 
 test -x "$installed_agent"
 test -f "$installed_config"
@@ -96,7 +99,8 @@ cmp -s "$config_a" "$installed_config"
 config_mode="$(stat -c '%a' "$installed_config")"
 test "$config_mode" = "600"
 
-grep -q '^ExecStart=/opt/vpsman/vpsman-agent --config /etc/vpsman/agent.toml run$' "$systemd_unit"
+grep -q "^WorkingDirectory=$root_work_dir$" "$systemd_unit"
+grep -q "^ExecStart=$root_work_dir/bin/vpsman-agent --config $root_work_dir/config/agent.toml run$" "$systemd_unit"
 grep -q '^Restart=always$' "$systemd_unit"
 grep -q '^UMask=0077$' "$systemd_unit"
 grep -q 'start-stop-daemon --start' "$sysv_script"
@@ -130,11 +134,11 @@ VPSMAN_INSTALL_ROOT="$stage_root" \
   VPSMAN_SKIP_SERVICE_ENABLE=1 \
   bash scripts/install-agent.sh >"$SMOKE_TMPDIR/install-b-force.log"
 cmp -s "$config_b" "$installed_config"
-test "$(find "$stage_root/etc/vpsman" -name 'agent.toml.backup.*' | wc -l)" -eq 1
+test "$(find "$stage_root$root_work_dir/config" -name 'agent.toml.backup.*' | wc -l)" -eq 1
 
-mkdir -p "$stage_root/var/lib/vpsman" "$stage_root/var/log/vpsman"
-printf 'state\n' >"$stage_root/var/lib/vpsman/state.marker"
-printf 'log\n' >"$stage_root/var/log/vpsman/install.log"
+mkdir -p "$state_dir" "$log_dir"
+printf 'state\n' >"$state_dir/state.marker"
+printf 'log\n' >"$log_dir/install.log"
 
 VPSMAN_INSTALL_ROOT="$stage_root" \
   VPSMAN_UNINSTALL=1 \
@@ -145,8 +149,8 @@ test ! -e "$systemd_unit"
 test ! -e "$sysv_script"
 test -f "$installed_config"
 cmp -s "$config_b" "$installed_config"
-test -f "$stage_root/var/lib/vpsman/state.marker"
-test -f "$stage_root/var/log/vpsman/install.log"
+test -f "$state_dir/state.marker"
+test -f "$log_dir/install.log"
 grep -q 'agent config preserved' "$SMOKE_TMPDIR/uninstall-preserve.log"
 
 VPSMAN_INSTALL_ROOT="$stage_root" \
@@ -169,37 +173,42 @@ test ! -e "$installed_agent"
 test ! -e "$systemd_unit"
 test ! -e "$sysv_script"
 test ! -e "$installed_config"
-test ! -e "$stage_root/var/lib/vpsman/state.marker"
-test ! -e "$stage_root/var/log/vpsman/install.log"
+test ! -e "$state_dir/state.marker"
+test ! -e "$log_dir/install.log"
 grep -q 'agent config, state, and logs purged' "$SMOKE_TMPDIR/uninstall-purge.log"
 
-unprivileged_home="/home/vpsman-user"
-VPSMAN_INSTALL_ROOT="$unprivileged_root" \
-  VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_SERVICE_HOME="$unprivileged_home" \
-  VPSMAN_AGENT_BINARY="$fake_agent" \
-  VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/unprivileged-install.log"
+unprivileged_cwd="$SMOKE_TMPDIR/unprivileged-cwd"
+mkdir -p "$unprivileged_cwd"
+(
+  cd "$unprivileged_cwd"
+  VPSMAN_INSTALL_ROOT="$unprivileged_root" \
+    VPSMAN_INSTALL_MODE=unprivileged \
+    VPSMAN_AGENT_BINARY="$fake_agent" \
+    VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
+    VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
+    VPSMAN_SKIP_SERVICE_ENABLE=1 \
+    bash "$ROOT_DIR/scripts/install-agent.sh" >"$SMOKE_TMPDIR/unprivileged-install.log"
+)
 
-unprivileged_agent="$unprivileged_root$unprivileged_home/.local/lib/vpsman/vpsman-agent"
-unprivileged_config="$unprivileged_root$unprivileged_home/.config/vpsman/agent.toml"
-unprivileged_state_dir="$unprivileged_root$unprivileged_home/.local/state/vpsman"
-unprivileged_log_dir="$unprivileged_root$unprivileged_home/.local/state/vpsman/log"
-unprivileged_unit="$unprivileged_root$unprivileged_home/.config/systemd/user/vpsman-agent.service"
+unprivileged_work_dir="$unprivileged_cwd/vpsman-agent"
+staged_unprivileged_work_dir="$unprivileged_root$unprivileged_work_dir"
+unprivileged_agent="$staged_unprivileged_work_dir/bin/vpsman-agent"
+unprivileged_config="$staged_unprivileged_work_dir/config/agent.toml"
+unprivileged_state_dir="$staged_unprivileged_work_dir/state"
+unprivileged_log_dir="$staged_unprivileged_work_dir/log"
+unprivileged_unit="$staged_unprivileged_work_dir/systemd/user/vpsman-agent.service"
 
 test -x "$unprivileged_agent"
 test -f "$unprivileged_config"
 test -d "$unprivileged_state_dir"
 test -d "$unprivileged_log_dir"
 test -f "$unprivileged_unit"
-test ! -e "$unprivileged_root/etc/systemd/system/vpsman-agent.service"
-test ! -e "$unprivileged_root/etc/init.d/vpsman-agent"
+test ! -e "$staged_unprivileged_work_dir/systemd/vpsman-agent.service"
+test ! -e "$staged_unprivileged_work_dir/init.d/vpsman-agent"
 cmp -s "$config_a" "$unprivileged_config"
 test "$(stat -c '%a' "$unprivileged_config")" = "600"
-grep -q "^WorkingDirectory=$unprivileged_home/.local/lib/vpsman$" "$unprivileged_unit"
-grep -q "^ExecStart=$unprivileged_home/.local/lib/vpsman/vpsman-agent --config $unprivileged_home/.config/vpsman/agent.toml run$" "$unprivileged_unit"
+grep -q "^WorkingDirectory=$unprivileged_work_dir$" "$unprivileged_unit"
+grep -q "^ExecStart=$unprivileged_work_dir/bin/vpsman-agent --config $unprivileged_work_dir/config/agent.toml run$" "$unprivileged_unit"
 grep -q '^WantedBy=default.target$' "$unprivileged_unit"
 if grep -q '^User=' "$unprivileged_unit"; then
   echo "user systemd unit must not embed a root/system User= directive" >&2
@@ -209,12 +218,14 @@ fi
 printf 'state\n' >"$unprivileged_state_dir/state.marker"
 printf 'log\n' >"$unprivileged_log_dir/install.log"
 
-VPSMAN_INSTALL_ROOT="$unprivileged_root" \
-  VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_SERVICE_HOME="$unprivileged_home" \
-  VPSMAN_UNINSTALL=1 \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/unprivileged-uninstall-preserve.log"
+(
+  cd "$unprivileged_cwd"
+  VPSMAN_INSTALL_ROOT="$unprivileged_root" \
+    VPSMAN_INSTALL_MODE=unprivileged \
+    VPSMAN_UNINSTALL=1 \
+    VPSMAN_SKIP_SERVICE_ENABLE=1 \
+    bash "$ROOT_DIR/scripts/install-agent.sh" >"$SMOKE_TMPDIR/unprivileged-uninstall-preserve.log"
+)
 test ! -e "$unprivileged_agent"
 test ! -e "$unprivileged_unit"
 test -f "$unprivileged_config"
@@ -222,24 +233,28 @@ test -f "$unprivileged_state_dir/state.marker"
 test -f "$unprivileged_log_dir/install.log"
 grep -q 'agent config preserved' "$SMOKE_TMPDIR/unprivileged-uninstall-preserve.log"
 
-VPSMAN_INSTALL_ROOT="$unprivileged_root" \
-  VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_SERVICE_HOME="$unprivileged_home" \
-  VPSMAN_AGENT_BINARY="$fake_agent" \
-  VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
-  VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/unprivileged-reinstall.log"
+(
+  cd "$unprivileged_cwd"
+  VPSMAN_INSTALL_ROOT="$unprivileged_root" \
+    VPSMAN_INSTALL_MODE=unprivileged \
+    VPSMAN_AGENT_BINARY="$fake_agent" \
+    VPSMAN_AGENT_SHA256_HEX="$fake_agent_sha" \
+    VPSMAN_AGENT_CONFIG_B64="$config_a_b64" \
+    VPSMAN_SKIP_SERVICE_ENABLE=1 \
+    bash "$ROOT_DIR/scripts/install-agent.sh" >"$SMOKE_TMPDIR/unprivileged-reinstall.log"
+)
 test -x "$unprivileged_agent"
 test -f "$unprivileged_unit"
 
-VPSMAN_INSTALL_ROOT="$unprivileged_root" \
-  VPSMAN_INSTALL_MODE=unprivileged \
-  VPSMAN_SERVICE_HOME="$unprivileged_home" \
-  VPSMAN_UNINSTALL=1 \
-  VPSMAN_PURGE_CONFIG=1 \
-  VPSMAN_SKIP_SERVICE_ENABLE=1 \
-  bash scripts/install-agent.sh >"$SMOKE_TMPDIR/unprivileged-uninstall-purge.log"
+(
+  cd "$unprivileged_cwd"
+  VPSMAN_INSTALL_ROOT="$unprivileged_root" \
+    VPSMAN_INSTALL_MODE=unprivileged \
+    VPSMAN_UNINSTALL=1 \
+    VPSMAN_PURGE_CONFIG=1 \
+    VPSMAN_SKIP_SERVICE_ENABLE=1 \
+    bash "$ROOT_DIR/scripts/install-agent.sh" >"$SMOKE_TMPDIR/unprivileged-uninstall-purge.log"
+)
 test ! -e "$unprivileged_agent"
 test ! -e "$unprivileged_unit"
 test ! -e "$unprivileged_config"
@@ -267,7 +282,7 @@ if VPSMAN_INSTALL_ROOT="$bad_agent_root" \
   exit 1
 fi
 grep -q 'agent binary sha256 mismatch' "$SMOKE_TMPDIR/bad-agent-hash.log"
-test ! -e "$bad_agent_root/opt/vpsman/vpsman-agent"
+test ! -e "$bad_agent_root$root_work_dir/bin/vpsman-agent"
 
 if VPSMAN_INSTALL_ROOT="$unsafe_path_root" \
   VPSMAN_INSTALL_DIR="/" \

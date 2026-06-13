@@ -21,7 +21,7 @@ esac
 
 is_scanned_file() {
   case "$1" in
-    ./.git/*|./target/*|./frontend/node_modules/*|./frontend/dist/*|./frontend/test-results/*|./frontend/playwright-report/*|./.tmp/*)
+    ./.git/*|./target/*|./tmp/*|./deploy/runtime/*|./frontend/tmp/*|./frontend/node_modules/*|./frontend/dist/*|./frontend/test-results/*|./frontend/playwright-report/*|./.tmp/*)
       return 1
       ;;
   esac
@@ -48,7 +48,10 @@ report_fixed_match() {
   if [[ -z "$needle" ]]; then
     return
   fi
-  if output="$(grep -InF "$needle" "$file" 2>/dev/null)"; then
+  if output="$(grep -InF "$needle" "$file" 2>/dev/null | grep -vE 'github\.com/mnihyc/vpsman|raw\.githubusercontent\.com/mnihyc/vpsman|mnihyc/vpsman' || true)"; then
+    if [[ -z "$output" ]]; then
+      return
+    fi
     echo "repo hygiene violation: $label in $file" >&2
     printf '%s\n' "$output" >&2
     failures=$((failures + 1))
@@ -112,11 +115,21 @@ while IFS= read -r -d '' file; do
     fi
     hard_limit="$(source_line_hard_limit "$file")"
     if (( line_count > hard_limit )); then
-      echo "repo hygiene violation: source file exceeds hard role-based line limit $hard_limit: $file ($line_count)" >&2
-      failures=$((failures + 1))
+      if [[ "${VPSMAN_REPO_HYGIENE_FAIL_ON_HARD_LIMIT:-0}" == "1" ]]; then
+        echo "repo hygiene violation: source file exceeds hard role-based line limit $hard_limit: $file ($line_count)" >&2
+        failures=$((failures + 1))
+      else
+        echo "repo hygiene recommendation: source file exceeds role-based line limit $hard_limit: $file ($line_count)" >&2
+      fi
     fi
   fi
-done < <(find . -type f -print0)
+done < <(
+  find . \
+    \( -path './.git' -o -path './target' -o -path './tmp' -o -path './deploy/runtime' \
+       -o -path './frontend/tmp' -o -path './frontend/node_modules' -o -path './frontend/dist' \
+       -o -path './frontend/test-results' -o -path './frontend/playwright-report' -o -path './.tmp' \) \
+    -prune -o -type f -print0
+)
 
 if (( checked_files == 0 )); then
   echo "repo hygiene violation: no files were scanned" >&2

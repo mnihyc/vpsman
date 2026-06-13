@@ -23,6 +23,7 @@ use vpsman_common::{
 
 use crate::{
     child_process,
+    platform_accounts::{current_effective_uid, AccountIdentity, PlatformAccounts},
     process_cleanup::{terminate_process_group_blocking, ProcessCleanupReport},
     telemetry::unix_now,
 };
@@ -202,7 +203,7 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
         command.current_dir(cwd);
     }
     apply_terminal_environment(input.config, &mut command);
-    if let Some(identity) = user_resolution.identity {
+    if let Some(identity) = user_resolution.identity.as_ref() {
         command.uid(identity.uid);
         command.gid(identity.gid);
     }
@@ -277,8 +278,8 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
             "requested_user": input.user,
             "user_policy": input.user_policy,
             "user_resolution": user_resolution.status,
-            "resolved_uid": user_resolution.identity.map(|identity| identity.uid),
-            "resolved_gid": user_resolution.identity.map(|identity| identity.gid),
+            "resolved_uid": user_resolution.identity.as_ref().map(|identity| identity.uid),
+            "resolved_gid": user_resolution.identity.as_ref().map(|identity| identity.gid),
             "environment_policy": input.config.execution.environment_policy,
             "pty_policy": input.config.execution.pty_policy,
             "cols": input.cols,
@@ -293,14 +294,8 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
     ))
 }
 
-#[derive(Clone, Copy)]
-struct TerminalIdentity {
-    uid: u32,
-    gid: u32,
-}
-
 struct TerminalUserResolution {
-    identity: Option<TerminalIdentity>,
+    identity: Option<AccountIdentity>,
     status: &'static str,
 }
 
@@ -314,10 +309,10 @@ fn resolve_terminal_user(
             status: "agent_user",
         });
     };
-    let Some(identity) = lookup_passwd_user(user)? else {
+    let Some(identity) = PlatformAccounts::load().find_user_identity(user) else {
         return terminal_user_unavailable(policy, "requested_terminal_user_not_found");
     };
-    let current_uid = unsafe { libc::geteuid() } as u32;
+    let current_uid = current_effective_uid();
     if current_uid == identity.uid {
         return Ok(TerminalUserResolution {
             identity: None,
@@ -344,31 +339,6 @@ fn terminal_user_unavailable(
             status: reason,
         }),
     }
-}
-
-fn lookup_passwd_user(user: &str) -> Result<Option<TerminalIdentity>> {
-    let passwd = std::fs::read_to_string("/etc/passwd").context("failed to read /etc/passwd")?;
-    for line in passwd.lines() {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.split(':');
-        let Some(name) = parts.next() else {
-            continue;
-        };
-        if name != user {
-            continue;
-        }
-        let _password = parts.next();
-        let Some(uid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-            anyhow::bail!("requested_terminal_user_uid_invalid");
-        };
-        let Some(gid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-            anyhow::bail!("requested_terminal_user_gid_invalid");
-        };
-        return Ok(Some(TerminalIdentity { uid, gid }));
-    }
-    Ok(None)
 }
 
 fn apply_terminal_environment(config: &AgentConfig, command: &mut tokio::process::Command) {

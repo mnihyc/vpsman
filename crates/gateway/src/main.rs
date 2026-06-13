@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{mpsc, OwnedSemaphorePermit, Semaphore},
 };
 use tracing::{debug, info, warn};
 use vpsman_common::{
@@ -32,6 +33,8 @@ use crate::{
         GatewayState, PendingCommand, SESSION_COMMAND_QUEUE_CAPACITY,
     },
 };
+
+const MAX_AGENT_CONNECTIONS: usize = 4096;
 
 #[derive(Clone, Debug, Parser)]
 #[command(name = "vpsman-gateway", about = "TCP gateway for VPS agents")]
@@ -299,6 +302,11 @@ fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
             "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX must be a 32-byte hex key"
         );
     }
+    args.api_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("VPSMAN_API_URL is required")?;
     Ok(())
 }
 
@@ -311,18 +319,46 @@ async fn run_agent_listener(
         .await
         .with_context(|| format!("failed to bind gateway on {}", args.bind))?;
     info!(bind = %args.bind, "gateway listening");
+    let connection_permits = Arc::new(Semaphore::new(MAX_AGENT_CONNECTIONS));
 
     loop {
         let (stream, peer) = listener.accept().await?;
+        let Some(permit) =
+            try_acquire_agent_connection_permit(&connection_permits, &api_client, peer)
+        else {
+            continue;
+        };
         info!(%peer, "accepted agent connection");
         let args = args.clone();
         let state = state.clone();
         let api_client = api_client.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(error) = handle_agent(stream, peer, args, state, api_client).await {
                 warn!(%peer, %error, "agent session ended with error");
             }
         });
+    }
+}
+
+fn try_acquire_agent_connection_permit(
+    connection_permits: &Arc<Semaphore>,
+    api_client: &GatewayControlClient,
+    peer: SocketAddr,
+) -> Option<OwnedSemaphorePermit> {
+    match connection_permits.clone().try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(_) => {
+            api_client
+                .forward_metrics()
+                .record_rejected_agent_connection();
+            warn!(
+                %peer,
+                max_agent_connections = MAX_AGENT_CONNECTIONS,
+                "rejected agent connection because gateway admission is full"
+            );
+            None
+        }
     }
 }
 
@@ -747,9 +783,6 @@ async fn validate_runtime_identity(
         .noise_public_key_hex
         .as_deref()
         .context("enrolled IK session did not expose client static key")?;
-    if context.args.expect_client_public_key_hex.is_some() && context.args.api_url.is_none() {
-        return Ok(());
-    }
     let validation = context
         .control
         .validate_agent_identity(&hello.client_id, public_key_hex)
@@ -847,7 +880,34 @@ mod tests {
             .contains("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX is required"));
 
         args.privilege_verifier_key_hex = Some("11".repeat(32));
+        args.api_url = None;
+        assert!(validate_gateway_runtime_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("VPSMAN_API_URL is required"));
+
+        args.api_url = Some("http://127.0.0.1:8080".to_string());
         validate_gateway_runtime_mode(&args).unwrap();
+    }
+
+    #[test]
+    fn agent_connection_admission_records_rejection_when_full() {
+        let permits = Arc::new(Semaphore::new(0));
+        let client = GatewayControlClient::new(
+            Some("http://127.0.0.1:8080".to_string()),
+            None,
+            GatewayHttpTimeouts::default(),
+        );
+        let peer = "127.0.0.1:10000".parse().unwrap();
+
+        assert!(try_acquire_agent_connection_permit(&permits, &client, peer).is_none());
+        assert_eq!(
+            client
+                .forward_metrics()
+                .snapshot()
+                .rejected_agent_connections,
+            1
+        );
     }
 
     #[test]
@@ -874,7 +934,7 @@ mod tests {
             suite_config: std::path::PathBuf::from("config/vpsman.toml"),
             private_key_hex: Some("11".repeat(32)),
             expect_client_public_key_hex: None,
-            api_url: None,
+            api_url: Some("http://127.0.0.1:8080".to_string()),
             internal_token: Some("real-internal-token-value-32-plus-chars".to_string()),
             privilege_verifier_key_hex: Some("11".repeat(32)),
             gateway_id: "test-gateway".to_string(),

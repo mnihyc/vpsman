@@ -79,41 +79,51 @@ for image in "${images[@]}"; do
     "$image" \
     bash -lc '
       set -euo pipefail
+      root_work_dir="/opt/vpsman-agent"
+      agent_path="$VPSMAN_INSTALL_ROOT$root_work_dir/bin/vpsman-agent"
+      config_path="$VPSMAN_INSTALL_ROOT$root_work_dir/config/agent.toml"
+      systemd_unit="$VPSMAN_INSTALL_ROOT$root_work_dir/systemd/vpsman-agent.service"
+      sysv_script="$VPSMAN_INSTALL_ROOT$root_work_dir/init.d/vpsman-agent"
+      state_dir="$VPSMAN_INSTALL_ROOT$root_work_dir/state"
+      log_dir="$VPSMAN_INSTALL_ROOT$root_work_dir/log"
       bash scripts/install-agent.sh >"$VPSMAN_INSTALL_ROOT/install.log" 2>&1
-      test -x "$VPSMAN_INSTALL_ROOT/opt/vpsman/vpsman-agent"
-      test -f "$VPSMAN_INSTALL_ROOT/etc/vpsman/agent.toml"
-      test -f "$VPSMAN_INSTALL_ROOT/etc/systemd/system/vpsman-agent.service"
-      test -x "$VPSMAN_INSTALL_ROOT/etc/init.d/vpsman-agent"
-      test "$(stat -c "%a" "$VPSMAN_INSTALL_ROOT/etc/vpsman/agent.toml")" = "600"
-      grep -q "^ExecStart=/opt/vpsman/vpsman-agent --config /etc/vpsman/agent.toml run$" \
-        "$VPSMAN_INSTALL_ROOT/etc/systemd/system/vpsman-agent.service"
-      grep -q "start-stop-daemon --start" "$VPSMAN_INSTALL_ROOT/etc/init.d/vpsman-agent"
-      "$VPSMAN_INSTALL_ROOT/opt/vpsman/vpsman-agent" \
-        --config "$VPSMAN_INSTALL_ROOT/etc/vpsman/agent.toml" \
+      test -x "$agent_path"
+      test -f "$config_path"
+      test -f "$systemd_unit"
+      test -x "$sysv_script"
+      test -d "$state_dir"
+      test -d "$log_dir"
+      test "$(stat -c "%a" "$config_path")" = "600"
+      grep -q "^WorkingDirectory=$root_work_dir$" "$systemd_unit"
+      grep -q "^ExecStart=$root_work_dir/bin/vpsman-agent --config $root_work_dir/config/agent.toml run$" \
+        "$systemd_unit"
+      grep -q "start-stop-daemon --start" "$sysv_script"
+      "$agent_path" \
+        --config "$config_path" \
         once >"$VPSMAN_INSTALL_ROOT/metrics.json"
       grep -q "\"observed_unix\"" "$VPSMAN_INSTALL_ROOT/metrics.json"
       grep -q "\"memory\"" "$VPSMAN_INSTALL_ROOT/metrics.json"
-      printf "state\n" >"$VPSMAN_INSTALL_ROOT/var/lib/vpsman/state.marker"
-      printf "log\n" >"$VPSMAN_INSTALL_ROOT/var/log/vpsman/install.log"
+      printf "state\n" >"$state_dir/state.marker"
+      printf "log\n" >"$log_dir/install.log"
       VPSMAN_UNINSTALL=1 bash scripts/install-agent.sh >"$VPSMAN_INSTALL_ROOT/uninstall-preserve.log" 2>&1
-      test ! -e "$VPSMAN_INSTALL_ROOT/opt/vpsman/vpsman-agent"
-      test ! -e "$VPSMAN_INSTALL_ROOT/etc/systemd/system/vpsman-agent.service"
-      test ! -e "$VPSMAN_INSTALL_ROOT/etc/init.d/vpsman-agent"
-      test -f "$VPSMAN_INSTALL_ROOT/etc/vpsman/agent.toml"
-      test -f "$VPSMAN_INSTALL_ROOT/var/lib/vpsman/state.marker"
-      test -f "$VPSMAN_INSTALL_ROOT/var/log/vpsman/install.log"
+      test ! -e "$agent_path"
+      test ! -e "$systemd_unit"
+      test ! -e "$sysv_script"
+      test -f "$config_path"
+      test -f "$state_dir/state.marker"
+      test -f "$log_dir/install.log"
       grep -q "agent config preserved" "$VPSMAN_INSTALL_ROOT/uninstall-preserve.log"
       bash scripts/install-agent.sh >"$VPSMAN_INSTALL_ROOT/install-after-uninstall.log" 2>&1
-      test -x "$VPSMAN_INSTALL_ROOT/opt/vpsman/vpsman-agent"
-      test -f "$VPSMAN_INSTALL_ROOT/etc/systemd/system/vpsman-agent.service"
-      test -x "$VPSMAN_INSTALL_ROOT/etc/init.d/vpsman-agent"
+      test -x "$agent_path"
+      test -f "$systemd_unit"
+      test -x "$sysv_script"
       VPSMAN_UNINSTALL=1 VPSMAN_PURGE_CONFIG=1 bash scripts/install-agent.sh >"$VPSMAN_INSTALL_ROOT/uninstall-purge.log" 2>&1
-      test ! -e "$VPSMAN_INSTALL_ROOT/opt/vpsman/vpsman-agent"
-      test ! -e "$VPSMAN_INSTALL_ROOT/etc/systemd/system/vpsman-agent.service"
-      test ! -e "$VPSMAN_INSTALL_ROOT/etc/init.d/vpsman-agent"
-      test ! -e "$VPSMAN_INSTALL_ROOT/etc/vpsman/agent.toml"
-      test ! -e "$VPSMAN_INSTALL_ROOT/var/lib/vpsman/state.marker"
-      test ! -e "$VPSMAN_INSTALL_ROOT/var/log/vpsman/install.log"
+      test ! -e "$agent_path"
+      test ! -e "$systemd_unit"
+      test ! -e "$sysv_script"
+      test ! -e "$config_path"
+      test ! -e "$state_dir/state.marker"
+      test ! -e "$log_dir/install.log"
       grep -q "agent config, state, and logs purged" "$VPSMAN_INSTALL_ROOT/uninstall-purge.log"
     '; then
     echo "agent install distro smoke failed for $image" >&2

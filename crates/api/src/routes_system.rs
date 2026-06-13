@@ -98,6 +98,7 @@ pub(crate) async fn collect_system_dashboard_snapshot(
             dropped_by_reason: metrics.dropped_by_reason,
             critical_failures_by_reason: metrics.critical_failures_by_reason,
             retained_output_truncated_events: Some(metrics.retained_output_truncated_events),
+            rejected_agent_connections: Some(metrics.rejected_agent_connections),
             status: if metrics.unhealthy {
                 "unhealthy".to_string()
             } else {
@@ -260,6 +261,9 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
         }
         "gateway_events.retained_output_truncated_events" => {
             ("Gateway retained output truncations", "events")
+        }
+        "gateway_events.rejected_agent_connections" => {
+            ("Gateway rejected agent connections", "connections")
         }
         _ => ("System metric", "count"),
     }

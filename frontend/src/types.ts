@@ -208,6 +208,7 @@ export type SystemDashboardGatewayEventsRecord = {
   dropped_by_reason: GatewayForwardDropReasonCounters;
   critical_failures_by_reason: GatewayForwardCriticalFailureCounters;
   retained_output_truncated_events: number | null;
+  rejected_agent_connections: number | null;
   status: "live" | "unavailable" | string;
 };
 

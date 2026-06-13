@@ -9,13 +9,15 @@ Use local disk object storage first:
 
 ```sh
 export VPSMAN_API_BIND=127.0.0.1:8080
+export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
-export VPSMAN_INTERNAL_TOKEN=dev-internal-token
+export VPSMAN_INTERNAL_TOKEN=dev-internal-token-change-me-32chars
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
 
+# Run each service in its own shell with the same environment.
 cargo run -p vpsman-api
 cargo run -p vpsman-gateway
 cargo run -p vpsman-worker
@@ -33,7 +35,6 @@ Open `http://127.0.0.1:5173`.
 ## 2. Bootstrap Access
 
 ```sh
-export VPSMAN_API_URL=http://127.0.0.1:8080
 export VPSMAN_OPERATOR_PASSWORD=<admin_password>
 cargo run -p vpsctl -- bootstrap --username admin --password-env VPSMAN_OPERATOR_PASSWORD
 cargo run -p vpsctl -- login --username admin --password-env VPSMAN_OPERATOR_PASSWORD

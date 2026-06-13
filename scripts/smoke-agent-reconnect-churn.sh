@@ -5,9 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools awk docker file grep jq python3 shuf stat timeout
+smoke_require_tools awk curl docker file grep jq python3 shuf stat timeout
 
 agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
+api_bin="target/debug/vpsman-api"
 gateway_bin="target/debug/vpsman-gateway"
 vpsctl_bin="target/debug/vpsctl"
 latency_ms="${VPSMAN_AGENT_RECONNECT_LATENCY_MS:-150}"
@@ -16,8 +17,11 @@ deadline_secs="${VPSMAN_AGENT_RECONNECT_DEADLINE_SECS:-60}"
 binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-10485760}"
 
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build -p vpsman-gateway -p vpsctl
+  cargo build -p vpsman-api -p vpsman-gateway -p vpsctl
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
+fi
+if [[ ! -x "$api_bin" ]]; then
+  cargo build -p vpsman-api
 fi
 if [[ ! -x "$gateway_bin" ]]; then
   cargo build -p vpsman-gateway
@@ -38,11 +42,15 @@ fi
 
 smoke_init_tmpdir "vpsman-agent-reconnect-churn"
 
+api_port="$(smoke_free_port)"
+pg_port="$(smoke_free_port)"
 gateway_port="$(smoke_free_port)"
 gateway_control_port="$(smoke_free_port)"
 proxy_port="$(smoke_free_port)"
+api_url="http://127.0.0.1:$api_port"
 gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_addr="127.0.0.1:$gateway_control_port"
+gateway_control_url="http://$gateway_control_addr"
 proxy_addr="127.0.0.1:$proxy_port"
 internal_token="agent-reconnect-internal-token-$(date +%s%N)"
 privilege_verifier_key_hex="1111111111111111111111111111111111111111111111111111111111111111"
@@ -52,6 +60,7 @@ gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
 client_keys="$("$vpsctl_bin" noise-keygen)"
 client_private_hex="$(jq -r '.private_key_hex' <<<"$client_keys")"
 client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
+api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 proxy_log="$SMOKE_TMPDIR/proxy.log"
 proxy_stats="$SMOKE_TMPDIR/proxy-stats.json"
@@ -161,6 +170,36 @@ while True:
 PY
 chmod 0755 "$proxy_script"
 
+smoke_start_postgres "vpsman-agent-reconnect-postgres" "$pg_port" >/dev/null
+postgres_url="$SMOKE_POSTGRES_URL"
+
+VPSMAN_API_BIND="127.0.0.1:$api_port" \
+VPSMAN_POSTGRES_URL="$postgres_url" \
+VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
+VPSMAN_INTERNAL_TOKEN="$internal_token" \
+VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
+VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
+VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
+VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/backups" \
+VPSMAN_UPDATE_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/updates" \
+RUST_LOG="vpsman_api=warn" \
+  "$api_bin" >"$api_log" 2>&1 &
+smoke_track_pid "$!"
+smoke_wait_http "$api_url/health"
+
+auth_json="$(curl -fsS \
+  -H "Content-Type: application/json" \
+  -d '{"username":"agent-reconnect-smoke","password":"agent-reconnect-smoke-password"}' \
+  "$api_url/api/v1/auth/bootstrap")"
+access_token="$(jq -r '.access_token' <<<"$auth_json")"
+
+VPSMAN_API_TOKEN="$access_token" "$vpsctl_bin" --api-url "$api_url" agent-identity-upsert \
+  --client-id reconnect-smoke \
+  --client-public-key-hex "$client_public_hex" \
+  --display-name reconnect-smoke \
+  --tags reconnect-smoke \
+  --confirmed >/dev/null
+
 smoke_write_enrolled_agent_config \
   "$agent_config" \
   "reconnect-smoke" \
@@ -177,7 +216,7 @@ smoke_write_enrolled_agent_config \
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="$gateway_control_addr" \
 VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
-VPSMAN_GATEWAY_EXPECT_CLIENT_PUBLIC_KEY_HEX="$client_public_hex" \
+VPSMAN_API_URL="$api_url" \
 VPSMAN_SUITE_CONFIG="$SMOKE_TMPDIR/no-suite.toml" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
@@ -217,13 +256,13 @@ deadline=$((SECONDS + deadline_secs))
 until docker logs "$container_name" 2>&1 | grep -q "gateway accepted agent"; do
   if ! docker ps -q --filter "name=^/${container_name}$" | grep -q .; then
     smoke_dump_logs "reconnect-churn agent container exited before reconnecting" \
-      "$gateway_log" "$proxy_log" "$proxy_stats"
+      "$api_log" "$gateway_log" "$proxy_log" "$proxy_stats"
     docker logs "$container_name" >&2 || true
     exit 1
   fi
   if ((SECONDS >= deadline)); then
     smoke_dump_logs "agent did not reconnect through latency/drop proxy" \
-      "$gateway_log" "$proxy_log" "$proxy_stats"
+      "$api_log" "$gateway_log" "$proxy_log" "$proxy_stats"
     docker logs "$container_name" >&2 || true
     exit 1
   fi
@@ -238,7 +277,7 @@ dropped_connections="$(jq -r '.dropped_connections' "$proxy_stats")"
 proxied_connections="$(jq -r '.proxied_connections' "$proxy_stats")"
 if ((accepted_connections < 2 || dropped_connections < drop_first_connections || proxied_connections < 1)); then
   smoke_dump_logs "latency/drop proxy did not exercise reconnect path" \
-    "$gateway_log" "$proxy_log" "$proxy_stats"
+    "$api_log" "$gateway_log" "$proxy_log" "$proxy_stats"
   docker logs "$container_name" >&2 || true
   exit 1
 fi

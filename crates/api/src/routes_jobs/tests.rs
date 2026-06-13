@@ -518,6 +518,8 @@ fn capability_degraded_outcome_records_operator_hint() {
     let status: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
 
     assert_eq!(outcome.status, "skipped");
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(outcome.outputs[0].exit_code, Some(0));
     assert!(!outcome.accepted);
     assert_eq!(
         status["reason"],

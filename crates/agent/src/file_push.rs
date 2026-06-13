@@ -1,9 +1,6 @@
 use std::{
     ffi::CString,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, PermissionsExt},
-    },
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -20,6 +17,10 @@ use vpsman_common::{
     payload_hash, validate_absolute_file_path, validate_file_mode, validate_file_transfer_session,
     validate_file_transfer_session_token, CommandOutput, FileExistingPolicy, FileOwnershipPolicy,
     FilePushChunk, OutputStream, FILE_TRANSFER_CHUNK_BYTES,
+};
+
+use crate::platform_accounts::{
+    chown_path, metadata_gid, metadata_mode, metadata_uid, NameIdResolution, PlatformAccounts,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -491,10 +492,10 @@ fn file_push_status(
         "path": path,
         "size_bytes": data.len(),
         "sha256_hex": payload_hash(data),
-        "mode": metadata.mode() & 0o777,
+        "mode": metadata_mode(metadata).map(|mode| mode & 0o777),
         "requested_mode": mode,
-        "uid": metadata.uid(),
-        "gid": metadata.gid(),
+        "uid": metadata_uid(metadata),
+        "gid": metadata_gid(metadata),
         "owner": metadata_owner_name(metadata, ownership_plan),
         "group": metadata_group_name(metadata, ownership_plan),
         "overwrite_policy": file_existing_policy_label(existing_policy),
@@ -561,15 +562,14 @@ fn resolve_ownership(
         return Ok(OwnershipPlan::unchanged());
     }
 
-    let users = PasswdEntries::load();
-    let groups = GroupEntries::load();
+    let accounts = PlatformAccounts::load();
     let mut missing = Vec::new();
     let owner_resolution = match owner.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => resolve_owner_value(value, &users, &mut missing),
+        Some(value) => resolve_owner_value(value, &accounts, &mut missing),
         None => None,
     };
     let group_resolution = match group.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => resolve_group_value(value, &groups, &mut missing),
+        Some(value) => resolve_group_value(value, &accounts, &mut missing),
         None => None,
     };
 
@@ -599,36 +599,27 @@ fn resolve_ownership(
         gid: resolved_gid,
         owner: owner_resolution
             .and_then(|value| value.name)
-            .or_else(|| resolved_uid.and_then(|value| users.name_for_id(value))),
+            .or_else(|| resolved_uid.and_then(|value| accounts.user_name_for_id(value))),
         group: group_resolution
             .and_then(|value| value.name)
-            .or_else(|| resolved_gid.and_then(|value| groups.name_for_id(value))),
+            .or_else(|| resolved_gid.and_then(|value| accounts.group_name_for_id(value))),
         status: OwnershipPlanStatus::Planned,
     })
 }
 
-#[derive(Clone, Debug)]
-struct IdResolution {
-    id: u32,
-    name: Option<String>,
-}
-
 fn resolve_owner_value(
     value: &str,
-    users: &PasswdEntries,
+    accounts: &PlatformAccounts,
     missing: &mut Vec<String>,
-) -> Option<IdResolution> {
+) -> Option<NameIdResolution> {
     if let Ok(id) = value.parse::<u32>() {
-        return Some(IdResolution {
+        return Some(NameIdResolution {
             id,
-            name: users.name_for_id(id),
+            name: accounts.user_name_for_id(id),
         });
     }
-    if let Some(id) = users.id_for_name(value) {
-        return Some(IdResolution {
-            id,
-            name: Some(value.to_string()),
-        });
+    if let Some(resolution) = accounts.resolve_user(value) {
+        return Some(resolution);
     }
     missing.push(format!("owner:{value}"));
     None
@@ -636,20 +627,17 @@ fn resolve_owner_value(
 
 fn resolve_group_value(
     value: &str,
-    groups: &GroupEntries,
+    accounts: &PlatformAccounts,
     missing: &mut Vec<String>,
-) -> Option<IdResolution> {
+) -> Option<NameIdResolution> {
     if let Ok(id) = value.parse::<u32>() {
-        return Some(IdResolution {
+        return Some(NameIdResolution {
             id,
-            name: groups.name_for_id(id),
+            name: accounts.group_name_for_id(id),
         });
     }
-    if let Some(id) = groups.id_for_name(value) {
-        return Some(IdResolution {
-            id,
-            name: Some(value.to_string()),
-        });
+    if let Some(resolution) = accounts.resolve_group(value) {
+        return Some(resolution);
     }
     missing.push(format!("group:{value}"));
     None
@@ -669,90 +657,6 @@ fn merge_optional_id(
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct PasswdEntries {
-    entries: Vec<NameIdEntry>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct GroupEntries {
-    entries: Vec<NameIdEntry>,
-}
-
-#[derive(Clone, Debug)]
-struct NameIdEntry {
-    name: String,
-    id: u32,
-}
-
-impl PasswdEntries {
-    fn load() -> Self {
-        let data = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
-        let entries = data
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() < 3 {
-                    return None;
-                }
-                Some(NameIdEntry {
-                    name: parts[0].to_string(),
-                    id: parts[2].parse().ok()?,
-                })
-            })
-            .collect();
-        Self { entries }
-    }
-
-    fn id_for_name(&self, name: &str) -> Option<u32> {
-        self.entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| entry.id)
-    }
-
-    fn name_for_id(&self, id: u32) -> Option<String> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.name.clone())
-    }
-}
-
-impl GroupEntries {
-    fn load() -> Self {
-        let data = std::fs::read_to_string("/etc/group").unwrap_or_default();
-        let entries = data
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() < 3 {
-                    return None;
-                }
-                Some(NameIdEntry {
-                    name: parts[0].to_string(),
-                    id: parts[2].parse().ok()?,
-                })
-            })
-            .collect();
-        Self { entries }
-    }
-
-    fn id_for_name(&self, name: &str) -> Option<u32> {
-        self.entries
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| entry.id)
-    }
-
-    fn name_for_id(&self, id: u32) -> Option<String> {
-        self.entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.name.clone())
-    }
-}
-
 async fn apply_ownership_plan(path: &Path, ownership: &OwnershipPlan) -> Result<()> {
     if !matches!(ownership.status, OwnershipPlanStatus::Planned) {
         return Ok(());
@@ -763,22 +667,6 @@ async fn apply_ownership_plan(path: &Path, ownership: &OwnershipPlan) -> Result<
     tokio::task::spawn_blocking(move || chown_path(&path, uid, gid))
         .await
         .context("chown worker failed")?
-}
-
-fn chown_path(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
-    let path =
-        CString::new(path.as_os_str().as_bytes()).context("path contains an interior nul byte")?;
-    let uid = uid
-        .map(|value| value as libc::uid_t)
-        .unwrap_or(!0 as libc::uid_t);
-    let gid = gid
-        .map(|value| value as libc::gid_t)
-        .unwrap_or(!0 as libc::gid_t);
-    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to change file ownership");
-    }
-    Ok(())
 }
 
 async fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -832,15 +720,15 @@ fn ownership_status_label(status: &OwnershipPlanStatus) -> (&'static str, Option
 }
 
 fn metadata_owner_name(metadata: &std::fs::Metadata, plan: &OwnershipPlan) -> Option<String> {
-    plan.owner
-        .clone()
-        .or_else(|| PasswdEntries::load().name_for_id(metadata.uid()))
+    plan.owner.clone().or_else(|| {
+        metadata_uid(metadata).and_then(|uid| PlatformAccounts::load().user_name_for_id(uid))
+    })
 }
 
 fn metadata_group_name(metadata: &std::fs::Metadata, plan: &OwnershipPlan) -> Option<String> {
-    plan.group
-        .clone()
-        .or_else(|| GroupEntries::load().name_for_id(metadata.gid()))
+    plan.group.clone().or_else(|| {
+        metadata_gid(metadata).and_then(|gid| PlatformAccounts::load().group_name_for_id(gid))
+    })
 }
 
 fn validate_file_push_request(path: &str, mode: u32) -> Result<()> {

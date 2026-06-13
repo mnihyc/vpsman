@@ -7,6 +7,48 @@ DECLARE
 BEGIN
     SELECT status AS value, count(*) AS count
     INTO invalid
+    FROM jobs
+    WHERE status NOT IN (
+        'queued',
+        'running',
+        'completed',
+        'partial_success',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    )
+    GROUP BY status
+    LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'invalid_state:jobs.status:value=% count=%', invalid.value, invalid.count;
+    END IF;
+
+    SELECT status AS value, count(*) AS count
+    INTO invalid
+    FROM job_targets
+    WHERE status NOT IN (
+        'queued',
+        'dispatching',
+        'running',
+        'completed',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    )
+    GROUP BY status
+    LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'invalid_state:job_targets.status:value=% count=%', invalid.value, invalid.count;
+    END IF;
+
+    SELECT status AS value, count(*) AS count
+    INTO invalid
     FROM backup_requests
     WHERE status NOT IN ('requested_metadata_only', 'artifact_metadata_recorded')
     GROUP BY status
@@ -313,6 +355,42 @@ BEGIN
 END
 $$;
 
+ALTER TABLE jobs
+    DROP CONSTRAINT IF EXISTS jobs_status_common_check;
+
+ALTER TABLE jobs
+    ADD CONSTRAINT jobs_status_common_check
+    CHECK (status IN (
+        'queued',
+        'running',
+        'completed',
+        'partial_success',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    ));
+
+ALTER TABLE job_targets
+    DROP CONSTRAINT IF EXISTS job_targets_status_common_check;
+
+ALTER TABLE job_targets
+    ADD CONSTRAINT job_targets_status_common_check
+    CHECK (status IN (
+        'queued',
+        'dispatching',
+        'running',
+        'completed',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    ));
+
 ALTER TABLE backup_requests
     ADD CONSTRAINT backup_requests_status_check
     CHECK (status IN ('requested_metadata_only', 'artifact_metadata_recorded'));
@@ -407,6 +485,9 @@ ALTER TABLE terminal_sessions
             'terminal_close'
         )
     );
+
+ALTER TABLE command_templates
+    DROP CONSTRAINT IF EXISTS command_templates_display_group_check;
 
 ALTER TABLE command_templates
     ADD CONSTRAINT command_templates_display_group_check

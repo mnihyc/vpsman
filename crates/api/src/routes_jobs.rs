@@ -13,7 +13,7 @@ use vpsman_common::{
 };
 use vpsman_server_core::{
     CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_QUEUED, JOB_STATUS_REJECTED,
-    JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
+    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
     TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
     TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
     TARGET_STATUS_SKIPPED,
@@ -241,6 +241,7 @@ async fn create_job_inner(
             operator,
             JOB_STATUS_REJECTED,
             "all non-telemetry jobs require privilege unlock",
+            StatusCode::FORBIDDEN,
         )
         .await;
     }
@@ -252,8 +253,9 @@ async fn create_job_inner(
             &command_hash,
             &request_fingerprint,
             operator,
-            JOB_STATUS_FAILED,
+            JOB_STATUS_SKIPPED,
             "job has no resolved targets",
+            StatusCode::UNPROCESSABLE_ENTITY,
         )
         .await;
     }
@@ -268,6 +270,7 @@ async fn create_job_inner(
             operator,
             "failed",
             "registered agent update release missing",
+            StatusCode::CONFLICT,
         )
         .await;
     }
@@ -304,6 +307,7 @@ async fn create_job_inner(
             operator,
             JOB_STATUS_FAILED,
             "gateway control URL missing",
+            StatusCode::SERVICE_UNAVAILABLE,
         )
         .await;
     }
@@ -628,7 +632,7 @@ fn capability_degraded_outcome(
             job_id,
             stream: OutputStream::Status,
             data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
-            exit_code: Some(1),
+            exit_code: Some(0),
             done: true,
         }],
     })
@@ -643,6 +647,7 @@ async fn reject_job(
     operator: &AuthContext,
     status: &'static str,
     reason: &'static str,
+    response_status: StatusCode,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
     let job_id = state
         .repo
@@ -676,7 +681,7 @@ async fn reject_job(
     });
     let target_counts = create_job_target_counts(state, job_id).await?;
     Ok((
-        StatusCode::FORBIDDEN,
+        response_status,
         Json(CreateJobResponse {
             job_id,
             target_count,

@@ -203,7 +203,7 @@ async fn connect_and_stream(
                             send_active_command_output(
                                 &mut stream,
                                 &mut seq,
-                                &active_commands,
+                                &mut active_commands,
                                 output,
                             )
                             .await?;
@@ -406,6 +406,9 @@ struct ActiveCommand {
     payload_hash: String,
     safety: JobCommandSafety,
     stream_id: u32,
+    replay_outputs: Vec<CommandOutput>,
+    replay_output_bytes: usize,
+    replay_truncated: bool,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -433,35 +436,127 @@ struct CommandFrameContext<'a> {
 
 struct RecentCommandCache {
     max_entries: usize,
-    payload_hashes: HashMap<uuid::Uuid, String>,
+    max_total_output_bytes: usize,
+    max_entry_output_bytes: usize,
+    current_output_bytes: usize,
+    entries: HashMap<uuid::Uuid, RecentCommandEntry>,
     order: VecDeque<uuid::Uuid>,
+}
+
+#[derive(Clone)]
+struct RecentCommandEntry {
+    payload_hash: String,
+    outputs: Vec<CommandOutput>,
+    output_bytes: usize,
+    truncated: bool,
 }
 
 impl Default for RecentCommandCache {
     fn default() -> Self {
         Self {
             max_entries: 512,
-            payload_hashes: HashMap::new(),
+            max_total_output_bytes: 8 * 1024 * 1024,
+            max_entry_output_bytes: 1024 * 1024,
+            current_output_bytes: 0,
+            entries: HashMap::new(),
             order: VecDeque::new(),
         }
     }
 }
 
 impl RecentCommandCache {
-    fn remember(&mut self, job_id: uuid::Uuid, payload_hash: String) {
-        if !self.payload_hashes.contains_key(&job_id) {
+    fn remember(
+        &mut self,
+        job_id: uuid::Uuid,
+        payload_hash: String,
+        outputs: Vec<CommandOutput>,
+        truncated: bool,
+    ) {
+        let output_bytes = command_outputs_bytes(&outputs);
+        let replay_truncated = truncated || output_bytes > self.max_entry_output_bytes;
+        let (outputs, output_bytes) = if replay_truncated {
+            (Vec::new(), 0)
+        } else {
+            (outputs, output_bytes)
+        };
+        if let Some(existing) = self.entries.remove(&job_id) {
+            self.current_output_bytes = self
+                .current_output_bytes
+                .saturating_sub(existing.output_bytes);
+            self.order.retain(|candidate| *candidate != job_id);
+        }
+        while self.current_output_bytes.saturating_add(output_bytes) > self.max_total_output_bytes {
+            if let Some(expired) = self.order.pop_front() {
+                if let Some(expired) = self.entries.remove(&expired) {
+                    self.current_output_bytes = self
+                        .current_output_bytes
+                        .saturating_sub(expired.output_bytes);
+                }
+            } else {
+                break;
+            }
+        }
+        if !self.entries.contains_key(&job_id) {
             self.order.push_back(job_id);
         }
-        self.payload_hashes.insert(job_id, payload_hash);
+        self.current_output_bytes = self.current_output_bytes.saturating_add(output_bytes);
+        self.entries.insert(
+            job_id,
+            RecentCommandEntry {
+                payload_hash,
+                outputs,
+                output_bytes,
+                truncated: replay_truncated,
+            },
+        );
         while self.order.len() > self.max_entries {
             if let Some(expired) = self.order.pop_front() {
-                self.payload_hashes.remove(&expired);
+                if let Some(expired) = self.entries.remove(&expired) {
+                    self.current_output_bytes = self
+                        .current_output_bytes
+                        .saturating_sub(expired.output_bytes);
+                }
             }
         }
     }
 
-    fn get(&self, job_id: uuid::Uuid) -> Option<&str> {
-        self.payload_hashes.get(&job_id).map(String::as_str)
+    fn get(&self, job_id: uuid::Uuid) -> Option<&RecentCommandEntry> {
+        self.entries.get(&job_id)
+    }
+}
+
+fn command_outputs_bytes(outputs: &[CommandOutput]) -> usize {
+    outputs.iter().map(|output| output.data.len()).sum()
+}
+
+fn capture_replay_output(active: &mut ActiveCommand, output: &CommandOutput) {
+    if active.replay_truncated {
+        return;
+    }
+    let output_bytes = output.data.len();
+    if active.replay_output_bytes.saturating_add(output_bytes) > 1024 * 1024 {
+        active.replay_outputs.clear();
+        active.replay_output_bytes = 0;
+        active.replay_truncated = true;
+        return;
+    }
+    active.replay_output_bytes = active.replay_output_bytes.saturating_add(output_bytes);
+    active.replay_outputs.push(output.clone());
+}
+
+fn command_result_outputs(
+    job_id: uuid::Uuid,
+    result: Result<Vec<CommandOutput>>,
+) -> Vec<CommandOutput> {
+    match result {
+        Ok(outputs) => outputs,
+        Err(error) => vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: format!("command failed: {error}").into_bytes(),
+            exit_code: Some(127),
+            done: true,
+        }],
     }
 }
 
@@ -538,16 +633,19 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             min_command_protocol_version,
             "rejected command with unsupported protocol version"
         );
-        recent_commands.remember(request.job_id, request_payload_hash);
-        send_unsupported_command_version(
-            stream,
-            frame.stream_id,
-            seq,
+        let output = unsupported_command_version_output(
             request.job_id,
             &request.command,
             request.command_version,
-        )
-        .await?;
+        )?;
+        recent_commands.remember(
+            request.job_id,
+            request_payload_hash,
+            vec![output.clone()],
+            false,
+        );
+        send_unsupported_command_version(stream, frame.stream_id, seq, request.job_id, output)
+            .await?;
         return Ok(false);
     }
     if let Some(active) = active_commands.get(&request.job_id) {
@@ -566,38 +664,40 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         *seq += 1;
         return Ok(false);
     }
-    if let Some(completed_payload_hash) = recent_commands.get(request.job_id) {
-        if completed_payload_hash == request_payload_hash {
+    if let Some(completed) = recent_commands.get(request.job_id) {
+        if completed.payload_hash == request_payload_hash {
             let ack = JobAck {
                 job_id: request.job_id,
                 accepted: true,
-                message: "duplicate completed job suppressed".to_string(),
+                message: "duplicate completed job replayed".to_string(),
             };
             send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
             *seq += 1;
-            let status = serde_json::json!({
-                "type": "duplicate_job_suppressed",
-                "job_id": request.job_id,
-                "reason": "already_completed_in_agent_runtime",
-                "duplicate_delivery": "ignore_completed",
-                "resume_outputs": true,
-            });
-            let output = CommandOutput {
-                job_id: request.job_id,
-                stream: OutputStream::Status,
-                data: serde_json::to_vec(&status)?,
-                exit_code: Some(0),
-                done: true,
-            };
-            send_json_frame(
-                stream,
-                MessageKind::CommandOutput,
-                frame.stream_id,
-                *seq,
-                &output,
-            )
-            .await?;
-            *seq += 1;
+            if completed.truncated {
+                let output = duplicate_replay_truncated_output(request.job_id)?;
+                send_json_frame(
+                    stream,
+                    MessageKind::CommandOutput,
+                    frame.stream_id,
+                    *seq,
+                    &output,
+                )
+                .await?;
+                *seq += 1;
+            } else {
+                let marker =
+                    duplicate_replay_marker_output(request.job_id, completed.outputs.len())?;
+                send_json_frame(
+                    stream,
+                    MessageKind::CommandOutput,
+                    frame.stream_id,
+                    *seq,
+                    &marker,
+                )
+                .await?;
+                *seq += 1;
+                send_command_outputs(stream, frame.stream_id, seq, &completed.outputs).await?;
+            }
             return Ok(false);
         }
         let ack = JobAck {
@@ -638,8 +738,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
 
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);
-        recent_commands.remember(request.job_id, request_payload_hash);
-        send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
+        let outputs = command_result_outputs(request.job_id, result);
+        recent_commands.remember(request.job_id, request_payload_hash, outputs.clone(), false);
+        send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
     if let JobCommand::HotConfig {
@@ -656,14 +757,16 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             preserve_redacted.unwrap_or(false),
             base_config_sha256_hex.as_deref(),
         );
-        recent_commands.remember(request.job_id, request_payload_hash);
-        send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
+        let outputs = command_result_outputs(request.job_id, result);
+        recent_commands.remember(request.job_id, request_payload_hash, outputs.clone(), false);
+        send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
     if let JobCommand::DataSourceConfigPatch { toml } = &request.command {
         let result = apply_data_source_config_patch(request.job_id, config, config_path, toml);
-        recent_commands.remember(request.job_id, request_payload_hash);
-        send_command_result_outputs(stream, frame.stream_id, seq, request.job_id, result).await?;
+        let outputs = command_result_outputs(request.job_id, result);
+        recent_commands.remember(request.job_id, request_payload_hash, outputs.clone(), false);
+        send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
     let job_id = request.job_id;
@@ -710,6 +813,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             payload_hash: request_payload_hash,
             safety,
             stream_id,
+            replay_outputs: Vec::new(),
+            replay_output_bytes: 0,
+            replay_truncated: false,
             task,
         },
     );
@@ -755,11 +861,8 @@ async fn send_unsupported_command_version(
     stream_id: u32,
     seq: &mut u64,
     job_id: uuid::Uuid,
-    command: &JobCommand,
-    command_version: u16,
+    output: CommandOutput,
 ) -> Result<()> {
-    let current_command_protocol_version = job_command_protocol_version(command);
-    let min_command_protocol_version = job_command_min_supported_protocol_version(command);
     let ack = JobAck {
         job_id,
         accepted: true,
@@ -767,6 +870,18 @@ async fn send_unsupported_command_version(
     };
     send_json_frame(stream, MessageKind::CommandAck, stream_id, *seq, &ack).await?;
     *seq += 1;
+    send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, &output).await?;
+    *seq += 1;
+    Ok(())
+}
+
+fn unsupported_command_version_output(
+    job_id: uuid::Uuid,
+    command: &JobCommand,
+    command_version: u16,
+) -> Result<CommandOutput> {
+    let current_command_protocol_version = job_command_protocol_version(command);
+    let min_command_protocol_version = job_command_min_supported_protocol_version(command);
     let status = serde_json::json!({
         "type": "unsupported_command_version",
         "status": "rejected",
@@ -776,16 +891,13 @@ async fn send_unsupported_command_version(
         "min_command_protocol_version": min_command_protocol_version,
         "reason": "agent_binary_does_not_support_requested_command_protocol",
     });
-    let output = CommandOutput {
+    Ok(CommandOutput {
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
         exit_code: Some(78),
         done: true,
-    };
-    send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, &output).await?;
-    *seq += 1;
-    Ok(())
+    })
 }
 
 async fn execute_authorized_command(
@@ -1027,32 +1139,50 @@ async fn execute_authorized_command(
     }
 }
 
-async fn send_command_result_outputs(
+fn duplicate_replay_marker_output(
+    job_id: uuid::Uuid,
+    output_count: usize,
+) -> Result<CommandOutput> {
+    let status = serde_json::json!({
+        "type": "duplicate_job_replayed",
+        "status": "running",
+        "job_id": job_id,
+        "output_count": output_count,
+    });
+    Ok(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code: None,
+        done: false,
+    })
+}
+
+fn duplicate_replay_truncated_output(job_id: uuid::Uuid) -> Result<CommandOutput> {
+    let status = serde_json::json!({
+        "type": "duplicate_job_replay_unavailable",
+        "status": "failed",
+        "job_id": job_id,
+        "reason": "recent_command_replay_truncated",
+    });
+    Ok(CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&status)?,
+        exit_code: Some(75),
+        done: true,
+    })
+}
+
+async fn send_command_outputs(
     stream: &mut NoiseFrameStream<TcpStream>,
     stream_id: u32,
     seq: &mut u64,
-    job_id: uuid::Uuid,
-    result: Result<Vec<CommandOutput>>,
+    outputs: &[CommandOutput],
 ) -> Result<()> {
-    match result {
-        Ok(outputs) => {
-            for output in outputs {
-                send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, &output)
-                    .await?;
-                *seq += 1;
-            }
-        }
-        Err(error) => {
-            let output = CommandOutput {
-                job_id,
-                stream: OutputStream::Status,
-                data: format!("command failed: {error}").into_bytes(),
-                exit_code: Some(127),
-                done: true,
-            };
-            send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, &output).await?;
-            *seq += 1;
-        }
+    for output in outputs {
+        send_json_frame(stream, MessageKind::CommandOutput, stream_id, *seq, output).await?;
+        *seq += 1;
     }
     Ok(())
 }
@@ -1060,12 +1190,13 @@ async fn send_command_result_outputs(
 async fn send_active_command_output(
     stream: &mut NoiseFrameStream<TcpStream>,
     seq: &mut u64,
-    active_commands: &HashMap<uuid::Uuid, ActiveCommand>,
+    active_commands: &mut HashMap<uuid::Uuid, ActiveCommand>,
     output: CommandOutput,
 ) -> Result<()> {
-    let Some(active) = active_commands.get(&output.job_id) else {
+    let Some(active) = active_commands.get_mut(&output.job_id) else {
         return Ok(());
     };
+    capture_replay_output(active, &output);
     send_json_frame(
         stream,
         MessageKind::CommandOutput,
@@ -1088,8 +1219,18 @@ async fn finish_active_command(
     let Some(active) = active_commands.remove(&result.job_id) else {
         return Ok(());
     };
-    recent_commands.remember(result.job_id, active.payload_hash);
-    send_command_result_outputs(stream, result.stream_id, seq, result.job_id, result.result).await
+    let final_outputs = command_result_outputs(result.job_id, result.result);
+    let mut replay_outputs = active.replay_outputs;
+    replay_outputs.extend(final_outputs.iter().cloned());
+    let replay_truncated =
+        active.replay_truncated || command_outputs_bytes(&replay_outputs) > 1024 * 1024;
+    recent_commands.remember(
+        result.job_id,
+        active.payload_hash,
+        replay_outputs,
+        replay_truncated,
+    );
+    send_command_outputs(stream, result.stream_id, seq, &final_outputs).await
 }
 
 #[cfg(test)]
@@ -1106,15 +1247,79 @@ mod tests {
             ..RecentCommandCache::default()
         };
 
-        cache.remember(first, "hash-a".to_string());
-        cache.remember(second, "hash-b".to_string());
-        assert_eq!(cache.get(first), Some("hash-a"));
-        assert_eq!(cache.get(second), Some("hash-b"));
+        cache.remember(
+            first,
+            "hash-a".to_string(),
+            vec![test_status_output(first)],
+            false,
+        );
+        cache.remember(
+            second,
+            "hash-b".to_string(),
+            vec![test_status_output(second)],
+            false,
+        );
+        assert_eq!(
+            cache.get(first).map(|entry| entry.payload_hash.as_str()),
+            Some("hash-a")
+        );
+        assert_eq!(
+            cache.get(second).map(|entry| entry.payload_hash.as_str()),
+            Some("hash-b")
+        );
+        assert_eq!(cache.get(first).map(|entry| entry.outputs.len()), Some(1));
 
-        cache.remember(third, "hash-c".to_string());
-        assert_eq!(cache.get(first), None);
-        assert_eq!(cache.get(second), Some("hash-b"));
-        assert_eq!(cache.get(third), Some("hash-c"));
+        cache.remember(
+            third,
+            "hash-c".to_string(),
+            vec![test_status_output(third)],
+            false,
+        );
+        assert!(cache.get(first).is_none());
+        assert_eq!(
+            cache.get(second).map(|entry| entry.payload_hash.as_str()),
+            Some("hash-b")
+        );
+        assert_eq!(
+            cache.get(third).map(|entry| entry.payload_hash.as_str()),
+            Some("hash-c")
+        );
+    }
+
+    #[test]
+    fn recent_command_cache_marks_oversized_replay_unavailable() {
+        let job_id = uuid::Uuid::new_v4();
+        let mut cache = RecentCommandCache {
+            max_entry_output_bytes: 4,
+            ..RecentCommandCache::default()
+        };
+
+        cache.remember(
+            job_id,
+            "hash-a".to_string(),
+            vec![CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: b"too-large".to_vec(),
+                exit_code: Some(0),
+                done: true,
+            }],
+            false,
+        );
+
+        let entry = cache.get(job_id).expect("recent entry retained");
+        assert!(entry.truncated);
+        assert!(entry.outputs.is_empty());
+    }
+
+    fn test_status_output(job_id: uuid::Uuid) -> CommandOutput {
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: b"ok".to_vec(),
+            exit_code: Some(0),
+            done: true,
+        }
     }
 
     #[test]

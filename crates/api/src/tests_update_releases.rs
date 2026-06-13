@@ -146,7 +146,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         .await
         .unwrap();
 
-    assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(status, axum::http::StatusCode::CONFLICT);
     assert_eq!(response.status, "failed");
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs[0].payload_hash, command_hash);
