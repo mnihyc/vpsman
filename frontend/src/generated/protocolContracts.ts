@@ -62,6 +62,100 @@ export const JOB_OPERATION_TYPES = [
 ] as const;
 export type GeneratedJobOperationType = typeof JOB_OPERATION_TYPES[number];
 
+export const JOB_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "partial_success",
+  "skipped",
+  "rejected",
+  "failed",
+  "agent_timeout",
+  "control_timeout",
+  "canceled",
+] as const;
+export type GeneratedJobStatus = typeof JOB_STATUSES[number];
+
+export const JOB_TERMINAL_STATUSES = [
+  "completed",
+  "partial_success",
+  "skipped",
+  "rejected",
+  "failed",
+  "agent_timeout",
+  "control_timeout",
+  "canceled",
+] as const;
+export type GeneratedJobTerminalStatus = typeof JOB_TERMINAL_STATUSES[number];
+
+export const JOB_STATUS_CLASSES = [
+  "in_progress",
+  "successful",
+  "partial_success",
+  "skipped",
+  "unsuccessful",
+] as const;
+export type GeneratedJobStatusClass = typeof JOB_STATUS_CLASSES[number];
+
+export const JOB_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "running": "in_progress",
+  "completed": "successful",
+  "partial_success": "partial_success",
+  "skipped": "skipped",
+  "rejected": "unsuccessful",
+  "failed": "unsuccessful",
+  "agent_timeout": "unsuccessful",
+  "control_timeout": "unsuccessful",
+  "canceled": "unsuccessful",
+} as const satisfies Record<GeneratedJobStatus, GeneratedJobStatusClass>;
+
+export const JOB_TARGET_STATUSES = [
+  "queued",
+  "dispatching",
+  "running",
+  "completed",
+  "skipped",
+  "rejected",
+  "failed",
+  "agent_timeout",
+  "control_timeout",
+  "canceled",
+] as const;
+export type GeneratedJobTargetStatus = typeof JOB_TARGET_STATUSES[number];
+
+export const JOB_TARGET_TERMINAL_STATUSES = [
+  "completed",
+  "skipped",
+  "rejected",
+  "failed",
+  "agent_timeout",
+  "control_timeout",
+  "canceled",
+] as const;
+export type GeneratedJobTargetTerminalStatus = typeof JOB_TARGET_TERMINAL_STATUSES[number];
+
+export const JOB_TARGET_STATUS_CLASSES = [
+  "in_progress",
+  "successful",
+  "skipped",
+  "unsuccessful",
+] as const;
+export type GeneratedJobTargetStatusClass = typeof JOB_TARGET_STATUS_CLASSES[number];
+
+export const JOB_TARGET_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "dispatching": "in_progress",
+  "running": "in_progress",
+  "completed": "successful",
+  "skipped": "skipped",
+  "rejected": "unsuccessful",
+  "failed": "unsuccessful",
+  "agent_timeout": "unsuccessful",
+  "control_timeout": "unsuccessful",
+  "canceled": "unsuccessful",
+} as const satisfies Record<GeneratedJobTargetStatus, GeneratedJobTargetStatusClass>;
+
 export const JOB_PRIVILEGE_INTENT_FIELDS = [
   "version",
   "action",
@@ -73,6 +167,22 @@ export const JOB_PRIVILEGE_INTENT_FIELDS = [
   "force_unprivileged",
   "privileged",
 ] as const;
+
+export const CREATE_JOB_REQUEST_FIELDS = [
+  "job_id",
+  "selector_expression",
+  "target_client_ids",
+  "destructive",
+  "confirmed",
+  "command",
+  "argv",
+  "operation",
+  "timeout_secs",
+  "force_unprivileged",
+  "privileged",
+  "privilege_assertion",
+] as const;
+export type GeneratedCreateJobRequestField = typeof CREATE_JOB_REQUEST_FIELDS[number];
 
 export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "version",

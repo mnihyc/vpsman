@@ -1843,7 +1843,7 @@ fn tag_matches(tags: &[String], expected: &str) -> bool {
 }
 
 fn is_running_job_status(status: &str) -> bool {
-    matches!(status, "pending" | "running")
+    matches!(status, "queued" | "running")
 }
 
 fn is_degraded_agent_status(status: &str) -> bool {

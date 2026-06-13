@@ -61,6 +61,7 @@ fn schedule_test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 
@@ -240,9 +241,8 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
         .unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "succeeded_with_skips");
-    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
+    assert_eq!(response.status, "partial_success");
+    wait_for_job_status(&repo, response.job_id, "partial_success").await;
     assert_eq!(
         repo.schedule_by_id(schedule.id).await.unwrap().next_run_at,
         next_run_before

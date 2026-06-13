@@ -10,6 +10,29 @@ export async function installTransferJobApiMock(page: Page) {
     const transferSessionSizes: Record<string, number> = {};
     const transferSessionHashes: Record<string, string> = {};
     let transferJobCounter = 0;
+    const targetCountsFromStatuses = (statuses: string[]) => {
+      const counts = {
+        agent_timeout: 0,
+        canceled: 0,
+        completed: 0,
+        control_timeout: 0,
+        dispatching: 0,
+        failed: 0,
+        queued: 0,
+        rejected: 0,
+        running: 0,
+        skipped: 0,
+        total: statuses.length,
+      };
+      for (const status of statuses) {
+        if (status in counts && status !== "total") {
+          counts[status as keyof Omit<typeof counts, "total">] += 1;
+        }
+      }
+      return counts;
+    };
+    const completedTargetCounts = (total: number) =>
+      targetCountsFromStatuses(Array.from({ length: total }, () => "completed"));
     const downloadFixtureBytes = new TextEncoder().encode("resumable browser download payload");
     const selectorAgents = [
       { display_name: "edge-sfo-01", id: "agent-sfo-01", status: "online", tags: ["provider:alpha", "country:US", "edge"] },
@@ -179,9 +202,6 @@ export async function installTransferJobApiMock(page: Page) {
     const selectorAgentById = new Map(selectorAgents.map((agent) => [agent.id, agent]));
     const onlineClientIds = (clientIds: string[]) =>
       clientIds.filter((clientId) => selectorAgentById.get(clientId)?.status === "online");
-    const dispatchableClientIds = (clientIds: string[]) =>
-      clientIds.filter((clientId) => selectorAgentById.get(clientId)?.status !== "offline");
-
     const jsonResponse = (body: unknown) =>
       Promise.resolve(
         new Response(JSON.stringify(body), {
@@ -222,7 +242,7 @@ export async function installTransferJobApiMock(page: Page) {
       transferJobCounter += 1;
       return id;
     };
-    const createDynamicJob = (jobId: string, command: string, targetCount: number, status = "succeeded") => {
+    const createDynamicJob = (jobId: string, command: string, targetCount: number, status = "completed") => {
       dynamicJobs[jobId] = {
         actor_id: null,
         command_type: command,
@@ -248,7 +268,7 @@ export async function installTransferJobApiMock(page: Page) {
           job_id: jobId,
           message: completed ? "completed" : stale ? "stale: file operation command version mismatch" : "agent offline",
           started_at: completed || stale ? "2026-05-31T10:10:59Z" : null,
-          status: completed ? "completed" : stale ? "failed" : "dispatch_failed",
+          status: completed ? "completed" : stale ? "failed" : "control_timeout",
         };
       });
     };
@@ -592,15 +612,19 @@ export async function installTransferJobApiMock(page: Page) {
             (body as { selector_expression?: string } | null)?.selector_expression,
           );
           const outputClientIds = selectedClientIds.filter((clientId) => selectorAgentById.get(clientId)?.status === "online");
-          const status = outputClientIds.length === selectedClientIds.length ? "completed" : "partially_completed";
+          const status = outputClientIds.length === selectedClientIds.length ? "completed" : "partial_success";
           createDynamicJob(jobId, operationType, selectedClientIds.length, status);
           await createFileBrowserOutputs(jobId, body);
           createDynamicJobTargets(jobId, selectedClientIds, outputClientIds);
           return jsonResponse({
-            accepted_targets: dispatchableClientIds(selectedClientIds).length,
             target_count: selectedClientIds.length,
+            target_counts: targetCountsFromStatuses(
+              (dynamicJobTargets[jobId] ?? []).map((target) =>
+                (target as { status: string }).status,
+              ),
+            ),
             job_id: jobId,
-            status: "accepted",
+            status,
           });
         }
         if (operationType?.startsWith("file_transfer_")) {
@@ -613,10 +637,10 @@ export async function installTransferJobApiMock(page: Page) {
           createDynamicJob(jobId, operationType, targetCount);
           await createTransferOutputs(jobId, body);
           return jsonResponse({
-            accepted_targets: targetCount,
             target_count: targetCount,
+            target_counts: completedTargetCounts(targetCount),
             job_id: jobId,
-            status: "accepted",
+            status: "completed",
           });
         }
       }

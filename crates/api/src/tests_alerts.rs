@@ -90,7 +90,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             actor_id: None,
             command_type: "backup".to_string(),
             privileged: true,
-            status: "dispatch_failed".to_string(),
+            status: "failed".to_string(),
             target_count: 1,
             payload_hash: "aa".repeat(32),
             created_at: "100".to_string(),
@@ -645,6 +645,7 @@ fn alert_test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 

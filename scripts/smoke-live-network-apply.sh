@@ -198,10 +198,10 @@ assert_job_completed() {
   job_json="$(api_get "/api/v1/jobs/$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   jq -e --arg command_type "$command_type" '
-    .status == "succeeded" and .command_type == $command_type and .target_count == 1
+    .status == "completed" and .command_type == $command_type and .target_count == 1
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
 }
 

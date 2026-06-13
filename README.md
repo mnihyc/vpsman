@@ -85,8 +85,9 @@ In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.
 
 The compose template publishes only Nginx on all host interfaces. API and
-gateway host ports are bound to `127.0.0.1` by default; expose agent TCP through
-your chosen public proxy, firewall, or tunnel when needed.
+gateway host ports are bound to `127.0.0.1` by default, and gateway control uses
+a shared Unix socket under `deploy/runtime/data`; expose agent TCP through your
+chosen public proxy, firewall, or tunnel when needed.
 
 Update an existing Docker deployment from GitHub Releases:
 
@@ -112,10 +113,11 @@ data.
 ## Direct Gateway Agent Install
 
 Remote VPS agents connect to the raw TCP gateway listener. They never contact
-the browser panel, panel HTTP API, or a panel-side lookup endpoint during installation. Keep
-`9444` private. For public agents, expose or proxy only the agent TCP gateway on
-`9443`, provision each agent with gateway Noise identity material, and register
-the matching public key as a direct gateway identity.
+the browser panel, panel HTTP API, or a panel-side lookup endpoint during
+installation. Gateway control must stay private; the default compose deployment
+uses a local Unix socket for it. For public agents, expose or proxy only the
+agent TCP gateway on `9443`, provision each agent with gateway Noise identity
+material, and register the matching public key as a direct gateway identity.
 
 Typical flow:
 

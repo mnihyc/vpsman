@@ -210,6 +210,36 @@ impl SuiteConfig {
             3600,
             "timeout.gateway_reconnect_grace_secs",
         )?;
+        validate_optional_u64(
+            self.timeout.internal_http_connect_secs,
+            1,
+            300,
+            "timeout.internal_http_connect_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.internal_http_write_secs,
+            1,
+            300,
+            "timeout.internal_http_write_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.internal_http_read_secs,
+            1,
+            3600,
+            "timeout.internal_http_read_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.dispatch_ack_secs,
+            1,
+            3600,
+            "timeout.dispatch_ack_secs",
+        )?;
+        validate_optional_u64(
+            self.timeout.event_post_secs,
+            1,
+            3600,
+            "timeout.event_post_secs",
+        )?;
         Ok(())
     }
 
@@ -225,13 +255,13 @@ impl SuiteConfig {
                 "secrets.*".to_string(),
                 "storage.object_endpoint".to_string(),
                 "storage.update_object_endpoint".to_string(),
+                "capacity.dispatcher_batch".to_string(),
+                "capacity.dispatcher_in_flight".to_string(),
+                "timeout.*".to_string(),
             ],
             hot_reload_fields: vec![
                 "capacity.api_db_pool".to_string(),
                 "capacity.worker_db_pool".to_string(),
-                "capacity.dispatcher_batch".to_string(),
-                "capacity.dispatcher_in_flight".to_string(),
-                "timeout.*".to_string(),
                 "worker.schedule_command_timeout_secs".to_string(),
                 "api.alert_*".to_string(),
             ],

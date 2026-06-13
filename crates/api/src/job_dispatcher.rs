@@ -6,8 +6,8 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    JOB_STATUS_PENDING, JOB_STATUS_RUNNING, TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
-    TARGET_STATUS_SUCCEEDED,
+    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED,
+    TARGET_STATUS_REJECTED,
 };
 
 use crate::{
@@ -20,10 +20,8 @@ use crate::{
     TargetDispatchOutcome,
 };
 
-const DISPATCH_BATCH_LIMIT: i64 = 128;
 const DISPATCH_LEASE_SECS: i64 = 30;
 const DISPATCH_INTERVAL_SECS: u64 = 1;
-const DISPATCH_MAX_IN_FLIGHT: usize = 64;
 const DEADLINE_EXPIRE_LIMIT: i64 = 128;
 
 pub(crate) fn spawn_job_dispatcher(state: AppState) {
@@ -47,10 +45,10 @@ pub(crate) fn wake_job_dispatcher(state: AppState) {
 }
 
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
-    expire_control_timed_out_targets(state).await?;
+    expire_control_timeout_targets(state).await?;
     let claimed = state
         .repo
-        .claim_due_job_targets(DISPATCH_BATCH_LIMIT, DISPATCH_LEASE_SECS)
+        .claim_due_job_targets(state.dispatcher_config.batch_limit, DISPATCH_LEASE_SECS)
         .await?;
     let claimed_count = claimed.len();
     if claimed_count == 0 {
@@ -58,7 +56,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
     }
     debug!(claimed_count, "durable job dispatcher claimed targets");
     stream::iter(claimed)
-        .for_each_concurrent(DISPATCH_MAX_IN_FLIGHT, |claimed| {
+        .for_each_concurrent(state.dispatcher_config.in_flight, |claimed| {
             let state = state.clone();
             async move {
                 if let Err(error) = dispatch_claimed_target(&state, claimed).await {
@@ -72,7 +70,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
 
 async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) -> Result<()> {
     if !state.gateway.configured() {
-        let outcome = dispatch_failed_outcome(claimed.job_id, "gateway control URL missing");
+        let outcome = dispatch_error_outcome(claimed.job_id, "gateway control URL missing");
         return finish_claimed_target(state, &claimed, outcome).await;
     }
 
@@ -83,7 +81,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             client_id = %claimed.client_id,
             "backup request pre-record failed"
         );
-        let outcome = dispatch_failed_outcome(claimed.job_id, "backup request pre-record failed");
+        let outcome = dispatch_error_outcome(claimed.job_id, "backup request pre-record failed");
         return finish_claimed_target(state, &claimed, outcome).await;
     }
 
@@ -126,10 +124,10 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
     Ok(())
 }
 
-async fn expire_control_timed_out_targets(state: &AppState) -> Result<()> {
+async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
     let expired = state
         .repo
-        .expire_control_timed_out_targets(DEADLINE_EXPIRE_LIMIT)
+        .expire_control_timeout_targets(DEADLINE_EXPIRE_LIMIT)
         .await?;
     for target in expired {
         state
@@ -181,15 +179,14 @@ async fn expire_control_timed_out_targets(state: &AppState) -> Result<()> {
                     .await?;
             }
         }
-        if let Some((status, accepted_targets)) = state
+        if let Some(status) = state
             .repo
             .refresh_job_status_from_targets(target.job_id)
             .await?
         {
-            if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
+            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
                 state.publish(WsEvent::JobFinished {
                     job_id: target.job_id,
-                    accepted_targets,
                     status,
                 });
             }
@@ -228,7 +225,7 @@ async fn finish_claimed_target(
         });
     }
     if matches!(&claimed.operation, JobCommand::Backup { .. })
-        && outcome.status == TARGET_STATUS_SUCCEEDED
+        && outcome.status == TARGET_STATUS_COMPLETED
     {
         if let Some(operator) = auth_context_for_claim(state, claimed).await? {
             if let Err(error) = try_auto_record_backup_artifact(
@@ -245,15 +242,14 @@ async fn finish_claimed_target(
             }
         }
     }
-    if let Some((status, accepted_targets)) = state
+    if let Some(status) = state
         .repo
         .refresh_job_status_from_targets(claimed.job_id)
         .await?
     {
-        if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
+        if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
             state.publish(WsEvent::JobFinished {
                 job_id: claimed.job_id,
-                accepted_targets,
                 status,
             });
         }
@@ -343,9 +339,9 @@ async fn auth_context_for_claim(
     }))
 }
 
-fn dispatch_failed_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome {
+fn dispatch_error_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome {
     let status = serde_json::json!({
-        "type": "dispatch_failed",
+        "type": "dispatch_error",
         "status": TARGET_STATUS_FAILED,
         "message": message,
     });

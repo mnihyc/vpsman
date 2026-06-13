@@ -302,15 +302,14 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
     let (status, Json(response)) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
+    wait_for_job_status(&repo, response.job_id, "partial_success").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
     let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
     let status_output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.accepted_targets, 0);
-    assert_eq!(response.status, "succeeded_with_skips");
+    assert_eq!(response.status, "partial_success");
     assert_eq!(targets[0].status, "skipped");
     assert_eq!(
         status_output["reason"],
@@ -373,6 +372,7 @@ fn test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 
@@ -398,5 +398,6 @@ fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }

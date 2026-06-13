@@ -1,4 +1,12 @@
-import type { GeneratedJobOperationType } from "./generated/protocolContracts";
+import type {
+  GeneratedCreateJobRequestField,
+  GeneratedJobOperationType,
+  GeneratedJobStatus,
+  GeneratedJobTargetStatus,
+} from "./generated/protocolContracts";
+
+export type JobStatus = GeneratedJobStatus;
+export type JobTargetStatus = GeneratedJobTargetStatus;
 
 export type FleetSummary = {
   total: number;
@@ -92,7 +100,7 @@ export type SystemDashboardDbPoolRecord = {
 
 export type SystemDashboardDispatchRecord = {
   active_jobs: number;
-  pending_jobs: number;
+  queued_jobs: number;
   running_jobs: number;
   queue_depth: number;
   total_dispatch_attempts: number;
@@ -100,13 +108,13 @@ export type SystemDashboardDispatchRecord = {
 };
 
 export type SystemDashboardTargetsRecord = {
-  pending: number;
-  delivering: number;
+  queued: number;
+  dispatching: number;
   running: number;
   active: number;
   deadline_expired_active: number;
-  control_timed_out_last_24h: number;
-  agent_timed_out_last_24h: number;
+  control_timeout_last_24h: number;
+  agent_timeout_last_24h: number;
   canceled_last_24h: number;
 };
 
@@ -117,11 +125,42 @@ export type SystemDashboardCancellationsRecord = {
   awaiting_ack: number;
 };
 
+export type GatewayForwardEventKindCounters = {
+  telemetry: number;
+  command_output: number;
+  lifecycle: number;
+  terminal_output: number;
+  other: number;
+};
+
+export type GatewayForwardDropReasonCounters = {
+  global_queue_full: number;
+  target_queue_full: number;
+  expired: number;
+  coalesced: number;
+};
+
+export type GatewayForwardCriticalFailureCounters = {
+  global_queue_full: number;
+  target_queue_full: number;
+  expired: number;
+};
+
 export type SystemDashboardGatewayEventsRecord = {
   queued_events: number | null;
   delivered_events: number | null;
   retry_attempts: number | null;
   active_queues: number | null;
+  current_queue_depth: number | null;
+  oldest_event_age_secs: number | null;
+  dropped_events: number | null;
+  telemetry_dropped_events: number | null;
+  expired_events: number | null;
+  critical_failures: number | null;
+  dropped_by_kind: GatewayForwardEventKindCounters;
+  dropped_by_reason: GatewayForwardDropReasonCounters;
+  critical_failures_by_reason: GatewayForwardCriticalFailureCounters;
+  retained_output_truncated_events: number | null;
   status: "live" | "unavailable" | string;
 };
 
@@ -734,8 +773,7 @@ export type WsEvent =
   | {
       type: "job_rejected";
       job_id: string;
-      accepted_targets: number;
-      status: string;
+      status: JobStatus;
     }
   | {
       type: "job_output_recorded";
@@ -756,8 +794,7 @@ export type WsEvent =
   | {
       type: "job_finished";
       job_id: string;
-      accepted_targets: number;
-      status: string;
+      status: JobStatus;
     }
   | {
       type: "backup_artifact_recorded";
@@ -834,7 +871,7 @@ export type JobHistoryRecord = {
   actor_id: string | null;
   command_type: string;
   privileged: boolean;
-  status: string;
+  status: JobStatus;
   target_count: number;
   payload_hash: string;
   created_at: string;
@@ -903,9 +940,11 @@ export type JobOutputComparisonRecord = {
   rows: JobOutputComparisonRowRecord[];
 };
 
+export type JobOutputComparisonStatus = JobTargetStatus | "unknown";
+
 export type JobOutputComparisonGroupRecord = {
   group_id: string;
-  status: string;
+  status: JobOutputComparisonStatus;
   exit_code: number | null;
   output_digest_hex: string;
   output_compare_basis: "binary" | "text" | "binary_metadata" | string;
@@ -921,7 +960,7 @@ export type JobOutputComparisonRowRecord = {
   job_id: string;
   client_id: string;
   group_id: string;
-  status: string;
+  status: JobOutputComparisonStatus;
   exit_code: number | null;
   output_digest_hex: string;
   output_compare_basis: "binary" | "text" | "binary_metadata" | string;
@@ -1153,7 +1192,7 @@ export type TopologyGraph = {
 export type JobTargetRecord = {
   job_id: string;
   client_id: string;
-  status: string;
+  status: JobTargetStatus;
   message?: string | null;
   exit_code: number | null;
   started_at: string | null;
@@ -1715,29 +1754,29 @@ export type CreateJobRequest = {
   argv: string[];
   operation?: JobOperation;
   timeout_secs: number;
-  command_version?: number;
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
+type _FrontendCreateJobRequestExtraKeys = AssertNever<Exclude<keyof CreateJobRequest, GeneratedCreateJobRequestField>>;
+type _GeneratedCreateJobRequestMissingKeys = AssertNever<Exclude<GeneratedCreateJobRequestField, keyof CreateJobRequest>>;
+
 export type CreateJobResponse = {
   job_id: string;
   target_count: number;
-  accepted_targets: number;
-  status: string;
-  target_counts?: {
+  status: JobStatus;
+  target_counts: {
     total: number;
-    runnable: number;
-    skipped: number;
-    rejected_unavailable: number;
-    pending: number;
-    delivering: number;
+    queued: number;
+    dispatching: number;
     running: number;
-    succeeded: number;
+    completed: number;
+    skipped: number;
+    rejected: number;
     failed: number;
-    agent_timed_out: number;
-    control_timed_out: number;
+    agent_timeout: number;
+    control_timeout: number;
     canceled: number;
   };
 };

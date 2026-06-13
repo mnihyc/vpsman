@@ -692,8 +692,8 @@ fn failed_status(status: &str) -> bool {
     matches!(
         status,
         "failed"
-            | "agent_timed_out"
-            | "control_timed_out"
+            | "agent_timeout"
+            | "control_timeout"
             | "partial_success"
             | "rejected"
             | "canceled"

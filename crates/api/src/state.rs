@@ -34,6 +34,28 @@ pub(crate) struct AppState {
     pub(crate) job_output_artifact_min_bytes: usize,
     pub(crate) require_registered_agent_updates: bool,
     pub(crate) suite_config_path: PathBuf,
+    pub(crate) dispatcher_config: DispatcherRuntimeConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DispatcherRuntimeConfig {
+    pub(crate) batch_limit: i64,
+    pub(crate) in_flight: usize,
+    pub(crate) dispatch_ack_secs: u64,
+    pub(crate) event_post_secs: u64,
+    pub(crate) internal_http_read_secs: u64,
+}
+
+impl Default for DispatcherRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            batch_limit: 128,
+            in_flight: 64,
+            dispatch_ack_secs: 30,
+            event_post_secs: 15,
+            internal_http_read_secs: 15,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

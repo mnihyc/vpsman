@@ -196,8 +196,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --confirmed)"
 timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
 smoke_assert_job_create_queued "$timeout_json" 1
-smoke_wait_api_job_status "$api_url" "$timeout_job_id" timed_out 45 >/dev/null
-assert_timed_out_shell_job
+smoke_wait_api_job_status "$api_url" "$timeout_job_id" agent_timeout 45 >/dev/null
+assert_agent_timeout_shell_job
 
 printf '%s' "$file_pull_payload" >"$shell_marker"
 file_pull_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -513,7 +513,7 @@ assert_shell_script_job_output 0
 assert_job_follow_output
 assert_live_streaming_job_output
 assert_large_output_artifact
-assert_timed_out_shell_job
+assert_agent_timeout_shell_job
 assert_file_pull_output
 assert_terminal_session_workflow
 assert_resumable_transfer_workflow
@@ -597,5 +597,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "timed_out_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "agent_timeout_shell_job", "privilege_unlocked_file_pull", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
   }'

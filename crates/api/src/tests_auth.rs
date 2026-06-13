@@ -464,6 +464,7 @@ fn internal_gateway_token_requires_matching_bearer() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let missing = HeaderMap::new();
     let mut wrong = HeaderMap::new();
@@ -523,6 +524,7 @@ fn internal_gateway_token_is_mandatory_for_memory_repository() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
 
     assert_eq!(
@@ -551,5 +553,6 @@ fn memory_test_state() -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }

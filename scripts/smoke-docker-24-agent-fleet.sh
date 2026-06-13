@@ -553,20 +553,19 @@ job_json="$(vpsctl_json job-shell \
 job_id="$(jq -r '.job_id' <<<"$job_json")"
 jq -e --argjson alpha_count "$provider_alpha_count" '
   .target_counts.total == $alpha_count and
-  .target_counts.runnable == $alpha_count and
   .target_counts.skipped == 0 and
-  .target_counts.rejected_unavailable == 0
+  (.target_counts.rejected + .target_counts.failed + .target_counts.agent_timeout + .target_counts.control_timeout + .target_counts.canceled) == 0
 ' <<<"$job_json" >/dev/null
 smoke_assert_job_create_queued "$job_json" "$provider_alpha_count"
 
 vpsctl_json job-follow --job-id "$job_id" --interval-ms 250 --max-polls 240 --json >"$SMOKE_TMPDIR/job-follow.jsonl"
 api_get "/api/v1/jobs/$job_id" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
-  .status == "succeeded" and .target_count == $alpha_count
+  .status == "completed" and .target_count == $alpha_count
 ' >/dev/null
 api_get "/api/v1/jobs/$job_id/targets" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
-  length == $alpha_count and all(.[]; .status == "succeeded" and .exit_code == 0)
+  length == $alpha_count and all(.[]; .status == "completed" and .exit_code == 0)
 ' >/dev/null
 api_get "/api/v1/jobs/$job_id/outputs" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
@@ -596,9 +595,9 @@ if ((long_running_secs > 0)); then
   vpsctl_json job-follow --job-id "$long_job_id" --interval-ms 500 --max-polls "$((long_timeout * 2))" --json >"$SMOKE_TMPDIR/long-job-follow.jsonl"
   long_job_status_json="$(api_get "/api/v1/jobs/$long_job_id")"
   if ! jq -e --argjson expected "$agent_count" '
-    .status == "succeeded" and .target_count == $expected
+    .status == "completed" and .target_count == $expected
   ' <<<"$long_job_status_json" >/dev/null; then
-    echo "long-running job did not finish succeeded:" >&2
+    echo "long-running job did not finish completed:" >&2
     jq . <<<"$long_job_status_json" >&2 || true
     echo "long-running target status counts:" >&2
     api_get "/api/v1/jobs/$long_job_id/targets" \
@@ -611,7 +610,7 @@ if ((long_running_secs > 0)); then
     exit 1
   fi
   api_get "/api/v1/jobs/$long_job_id/targets" | jq -e --argjson expected "$agent_count" '
-    length == $expected and all(.[]; .status == "succeeded" and .exit_code == 0)
+    length == $expected and all(.[]; .status == "completed" and .exit_code == 0)
   ' >/dev/null
   api_get "/api/v1/jobs/$long_job_id/outputs" | jq -e --argjson expected "$agent_count" '
     ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-long-done\n")) | length) == $expected

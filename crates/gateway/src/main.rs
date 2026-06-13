@@ -7,10 +7,10 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -25,7 +25,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    api_client::GatewayControlClient,
+    api_client::{GatewayControlClient, GatewayHttpTimeouts},
     control::run_control_listener,
     state::{
         cancel_ack_result, finish_pending_command_response, GatewaySession, GatewaySessionMessage,
@@ -47,7 +47,7 @@ pub(crate) struct Args {
     #[arg(
         long,
         env = "VPSMAN_GATEWAY_CONTROL_BIND",
-        default_value = "127.0.0.1:9444"
+        default_value = "unix:./runtime/gateway-control.sock"
     )]
     control_bind: String,
     #[arg(long, env = "VPSMAN_GATEWAY_PRIVATE_KEY_HEX")]
@@ -68,6 +68,16 @@ pub(crate) struct Args {
         default_value_t = 60
     )]
     reconnect_grace_secs: u64,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_CONNECT_SECS", default_value_t = 10)]
+    internal_http_connect_secs: u64,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_WRITE_SECS", default_value_t = 10)]
+    internal_http_write_secs: u64,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_READ_SECS", default_value_t = 15)]
+    internal_http_read_secs: u64,
+    #[arg(long, env = "VPSMAN_EVENT_POST_SECS", default_value_t = 15)]
+    event_post_secs: u64,
+    #[arg(long, env = "VPSMAN_DISPATCH_ACK_SECS", default_value_t = 30)]
+    dispatch_ack_secs: u64,
 }
 
 #[tokio::main]
@@ -91,12 +101,24 @@ async fn main() -> Result<()> {
     );
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     validate_gateway_runtime_mode(&args)?;
-    let api_client = GatewayControlClient::new(args.api_url.clone(), args.internal_token.clone());
+    let api_client = GatewayControlClient::new(
+        args.api_url.clone(),
+        args.internal_token.clone(),
+        args.gateway_http_timeouts(),
+    );
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
         reconnect_grace_secs: args.reconnect_grace_secs,
+        dispatch_ack_secs: args.dispatch_ack_secs,
         ..GatewayState::default()
     };
+    let critical_failure_state = state.clone();
+    api_client.set_critical_failure_handler(move |client_id, reason| {
+        let state = critical_failure_state.clone();
+        tokio::spawn(async move {
+            request_agent_disconnect(&state, &client_id, reason).await;
+        });
+    });
     let agent_args = args.clone();
     let agent_state = state.clone();
     let agent_api_client = api_client.clone();
@@ -146,6 +168,31 @@ impl Args {
                 self.reconnect_grace_secs = value;
             }
         }
+        apply_u64_default(
+            &mut self.internal_http_connect_secs,
+            "VPSMAN_INTERNAL_HTTP_CONNECT_SECS",
+            config.timeout.internal_http_connect_secs,
+        );
+        apply_u64_default(
+            &mut self.internal_http_write_secs,
+            "VPSMAN_INTERNAL_HTTP_WRITE_SECS",
+            config.timeout.internal_http_write_secs,
+        );
+        apply_u64_default(
+            &mut self.internal_http_read_secs,
+            "VPSMAN_INTERNAL_HTTP_READ_SECS",
+            config.timeout.internal_http_read_secs,
+        );
+        apply_u64_default(
+            &mut self.event_post_secs,
+            "VPSMAN_EVENT_POST_SECS",
+            config.timeout.event_post_secs,
+        );
+        apply_u64_default(
+            &mut self.dispatch_ack_secs,
+            "VPSMAN_DISPATCH_ACK_SECS",
+            config.timeout.dispatch_ack_secs,
+        );
         if self.internal_token.is_none() && env_absent("VPSMAN_INTERNAL_TOKEN") {
             self.internal_token =
                 read_secret_file_ref(config.secrets.internal_token_file.as_deref())?;
@@ -161,6 +208,15 @@ impl Args {
                 read_secret_file_ref(config.secrets.privilege_verifier_key_file.as_deref())?;
         }
         Ok(())
+    }
+
+    fn gateway_http_timeouts(&self) -> GatewayHttpTimeouts {
+        GatewayHttpTimeouts {
+            connect: Duration::from_secs(self.internal_http_connect_secs.clamp(1, 300)),
+            write: Duration::from_secs(self.internal_http_write_secs.clamp(1, 300)),
+            read: Duration::from_secs(self.internal_http_read_secs.clamp(1, 3600)),
+            event_post: Duration::from_secs(self.event_post_secs.clamp(1, 3600)),
+        }
     }
 }
 
@@ -180,6 +236,14 @@ fn apply_string_default(target: &mut String, env_name: &str, value: Option<&str>
     if env_absent(env_name) {
         if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
             *target = value.to_string();
+        }
+    }
+}
+
+fn apply_u64_default(target: &mut u64, env_name: &str, value: Option<u64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
         }
     }
 }
@@ -355,6 +419,9 @@ async fn handle_agent(
                         outbound_seq += 1;
                         pending_cancels.insert(job_id, cancel.response);
                     }
+                    GatewaySessionMessage::Disconnect(reason) => {
+                        break Err(anyhow!("agent_session_closed_by_gateway:{reason}"));
+                    }
                 }
             }
         }
@@ -382,9 +449,41 @@ async fn handle_agent(
                 "/internal/v1/gateway/session-ended",
                 &end_event,
             )
-            .await;
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    %error,
+                    client_id = %target_key,
+                    "failed to enqueue gateway session-ended event"
+                )
+            });
     }
     result
+}
+
+async fn request_agent_disconnect(state: &GatewayState, client_id: &str, reason: &str) {
+    let sender = state
+        .sessions
+        .read()
+        .await
+        .get(client_id)
+        .map(|session| session.sender.clone());
+    let Some(sender) = sender else {
+        warn!(
+            client_id,
+            reason, "critical gateway forwarding failure had no active agent session to close"
+        );
+        return;
+    };
+    if sender
+        .send(GatewaySessionMessage::Disconnect(reason.to_string()))
+        .is_err()
+    {
+        warn!(
+            client_id,
+            reason, "critical gateway forwarding failure could not signal agent session close"
+        );
+    }
 }
 
 async fn unregister_session_if_current(
@@ -444,7 +543,7 @@ async fn handle_agent_frame(
                     "/internal/v1/gateway/agent-hello",
                     &ingest,
                 )
-                .await;
+                .await?;
             *client_id = Some(hello.client_id.clone());
             context.state.sessions.write().await.insert(
                 hello.client_id.clone(),
@@ -474,7 +573,7 @@ async fn handle_agent_frame(
                     "/internal/v1/gateway/session-started",
                     &session_event,
                 )
-                .await;
+                .await?;
             let reply = ServerHello {
                 server_id: context.args.gateway_id.clone(),
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -488,6 +587,7 @@ async fn handle_agent_frame(
         }
         MessageKind::Telemetry => {
             let telemetry: TelemetryEnvelope = decode_json(&frame.decoded_payload()?)?;
+            validate_telemetry_session_client_id(client_id.as_deref(), &telemetry.client_id)?;
             info!(
                 client_id = %telemetry.client_id,
                 hostname = %telemetry.metrics.hostname,
@@ -503,7 +603,7 @@ async fn handle_agent_frame(
             context
                 .control
                 .post(&target_key, "/internal/v1/gateway/telemetry", &ingest)
-                .await;
+                .await?;
         }
         MessageKind::CommandAck => {
             let ack: JobAck = decode_json(&frame.decoded_payload()?)?;
@@ -550,8 +650,14 @@ async fn handle_agent_frame(
                         "/internal/v1/gateway/command-output",
                         &ingest,
                     )
-                    .await;
-                pending.outputs.push(output);
+                    .await?;
+                let truncated = pending.retain_output_if_response_waiting(output);
+                if truncated > 0 {
+                    context
+                        .state
+                        .forward_metrics
+                        .record_retained_output_truncated(truncated);
+                }
                 if done {
                     remove_job_id = Some(pending.job_id);
                 }
@@ -575,7 +681,7 @@ async fn handle_agent_frame(
             context
                 .control
                 .post(&target_key, "/internal/v1/gateway/terminal-output", &ingest)
-                .await;
+                .await?;
         }
         MessageKind::Keepalive => {
             debug!(?client_id, "keepalive");
@@ -583,6 +689,19 @@ async fn handle_agent_frame(
         other => {
             debug!(?other, "unhandled gateway frame");
         }
+    }
+    Ok(())
+}
+
+fn validate_telemetry_session_client_id(
+    authenticated_client_id: Option<&str>,
+    telemetry_client_id: &str,
+) -> Result<()> {
+    let Some(authenticated_client_id) = authenticated_client_id else {
+        anyhow::bail!("telemetry_before_hello");
+    };
+    if telemetry_client_id != authenticated_client_id {
+        anyhow::bail!("telemetry_client_id_mismatch");
     }
     Ok(())
 }
@@ -730,6 +849,23 @@ mod tests {
         validate_gateway_runtime_mode(&args).unwrap();
     }
 
+    #[test]
+    fn telemetry_client_id_must_match_authenticated_session() {
+        validate_telemetry_session_client_id(Some("client-a"), "client-a").unwrap();
+        assert_eq!(
+            validate_telemetry_session_client_id(None, "client-a")
+                .unwrap_err()
+                .to_string(),
+            "telemetry_before_hello"
+        );
+        assert_eq!(
+            validate_telemetry_session_client_id(Some("client-a"), "client-b")
+                .unwrap_err()
+                .to_string(),
+            "telemetry_client_id_mismatch"
+        );
+    }
+
     fn test_args() -> Args {
         Args {
             bind: "127.0.0.1:0".to_string(),
@@ -742,6 +878,11 @@ mod tests {
             privilege_verifier_key_hex: Some("11".repeat(32)),
             gateway_id: "test-gateway".to_string(),
             reconnect_grace_secs: 60,
+            internal_http_connect_secs: 10,
+            internal_http_write_secs: 10,
+            internal_http_read_secs: 15,
+            event_post_secs: 15,
+            dispatch_ack_secs: 30,
         }
     }
 }

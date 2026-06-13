@@ -1,4 +1,13 @@
+import {
+  JOB_TARGET_STATUSES,
+  JOB_TARGET_STATUS_CLASS_BY_STATUS,
+  JOB_TARGET_TERMINAL_STATUSES,
+} from "./generated/protocolContracts";
 import type { AgentView, JobOutputRecord, JobTargetRecord } from "./types";
+import type {
+  GeneratedJobTargetStatus,
+  GeneratedJobTargetStatusClass,
+} from "./generated/protocolContracts";
 
 export type BulkFailureReason = {
   reason: string;
@@ -6,15 +15,25 @@ export type BulkFailureReason = {
 };
 
 export type BulkJobProgress = {
-  accepted: number;
+  agent_timeout: number;
+  canceled: number;
   completed: number;
-  doing: number;
-  expected: number;
+  control_timeout: number;
+  dispatching: number;
   failed: number;
   failureReasons?: BulkFailureReason[];
+  in_progress: number;
   jobId: string;
+  queued: number;
+  rejected: number;
   retrieved: number;
+  running: number;
+  skipped: number;
+  successful: number;
+  terminal: number;
+  total: number;
   unavailable: number;
+  unsuccessful: number;
 };
 
 export const DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS = 500;
@@ -29,81 +48,168 @@ export function bulkProgressTimeoutMs(timeoutSecs: number | undefined): number {
 }
 
 export function buildBulkJobProgress({
-  acceptedTargets,
   jobId,
   outputs = [],
+  targetCount,
   targetRecords,
   targets,
 }: {
-  acceptedTargets: number;
   jobId: string;
   outputs?: JobOutputRecord[];
+  targetCount?: number;
   targetRecords: JobTargetRecord[];
   targets: AgentView[];
 }): BulkJobProgress {
   const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
+  const targetByClient = new Map(targets.map((target) => [target.id, target]));
   const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
+  const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
+  let agent_timeout = 0;
+  let canceled = 0;
   let completed = 0;
+  let control_timeout = 0;
+  let dispatching = 0;
   let failed = 0;
   const failureReasons: BulkFailureReason[] = [];
+  let queued = 0;
+  let rejected = 0;
   let retrieved = 0;
+  let running = 0;
+  let skipped = 0;
   let unavailable = 0;
 
   for (const target of targets) {
-    const targetRecord = targetRecordByClient.get(target.id);
     if (targetPreflightUnavailable(target)) {
       unavailable += 1;
-      continue;
-    }
-    if (!targetRecord) {
-      continue;
-    }
-    if (targetRecordTerminal(targetRecord.status) || outputClientIds.has(target.id)) {
-      retrieved += 1;
-    }
-    if (targetRecordSucceeded(targetRecord.status)) {
-      completed += 1;
-    } else if (targetRecordFailed(targetRecord.status)) {
-      failed += 1;
-      failureReasons.push(targetFailureReason(target, targetRecord));
     }
   }
 
-  const accepted = acceptedDispatchTargetCount(acceptedTargets, targets);
-  const doing = Math.max(0, accepted - completed - failed);
+  for (const targetRecord of targetRecords) {
+    const target = targetByClient.get(targetRecord.client_id) ?? {
+      display_name: targetRecord.client_id,
+      id: targetRecord.client_id,
+      status: "unknown",
+    };
+    const statusClass = targetRecordStatusClass(targetRecord.status);
+    switch (targetRecord.status) {
+      case "queued":
+        queued += 1;
+        break;
+      case "dispatching":
+        dispatching += 1;
+        break;
+      case "running":
+        running += 1;
+        break;
+      case "completed":
+        completed += 1;
+        break;
+      case "skipped":
+        skipped += 1;
+        break;
+      case "rejected":
+        rejected += 1;
+        break;
+      case "failed":
+        failed += 1;
+        break;
+      case "agent_timeout":
+        agent_timeout += 1;
+        break;
+      case "control_timeout":
+        control_timeout += 1;
+        break;
+      case "canceled":
+        canceled += 1;
+        break;
+      default:
+        failed += 1;
+        break;
+    }
+    if (statusClass === "unsuccessful") {
+      failureReasons.push(targetFailureReason(target, targetRecord));
+    }
+    if (targetRecordTerminal(targetRecord.status) || outputClientIds.has(targetRecord.client_id)) {
+      retrieved += 1;
+    }
+  }
+
+  for (const clientId of outputClientIds) {
+    if (!targetRecordByClient.has(clientId)) {
+      retrieved += 1;
+    }
+  }
+
+  queued += Math.max(0, total - targetRecords.length);
+  const in_progress = queued + dispatching + running;
+  const successful = completed;
+  const unsuccessful = rejected + failed + agent_timeout + control_timeout + canceled;
+  const terminal = successful + skipped + unsuccessful;
   return {
-    accepted,
+    agent_timeout,
+    canceled,
     completed,
-    doing,
-    expected: targets.length,
+    control_timeout,
+    dispatching,
     failed,
     failureReasons,
+    in_progress,
     jobId,
+    queued,
+    rejected,
     retrieved,
+    running,
+    skipped,
+    successful,
+    terminal,
+    total,
     unavailable,
+    unsuccessful,
   };
 }
 
-export function acceptedDispatchTargetCount(acceptedTargets: number, targets: AgentView[]): number {
-  const dispatchableTargets = targets.filter((target) => !targetPreflightUnavailable(target)).length;
-  return Math.min(acceptedTargets, dispatchableTargets);
+export function createJobTargetCount(job: { target_count: number; target_counts: { total: number } }): number {
+  return Math.max(0, job.target_counts.total);
 }
+
+export function targetRecordCompleted(status: GeneratedJobTargetStatus | undefined): boolean {
+  return targetRecordStatusClass(status) === "successful";
+}
+
+export function targetRecordSkipped(status: GeneratedJobTargetStatus | undefined): boolean {
+  return targetRecordStatusClass(status) === "skipped";
+}
+
+export function targetRecordFailed(status: GeneratedJobTargetStatus | undefined): boolean {
+  return targetRecordStatusClass(status) === "unsuccessful";
+}
+
+export function targetRecordTerminal(status: GeneratedJobTargetStatus | undefined): boolean {
+  return status !== undefined && TARGET_TERMINAL_STATUS_SET.has(status);
+}
+
+function targetRecordStatusClass(status: GeneratedJobTargetStatus | undefined): GeneratedJobTargetStatusClass | undefined {
+  return status !== undefined && TARGET_STATUS_SET.has(status) ? JOB_TARGET_STATUS_CLASS_BY_STATUS[status] : undefined;
+}
+
+const TARGET_STATUS_SET = new Set<GeneratedJobTargetStatus>(JOB_TARGET_STATUSES);
+const TARGET_TERMINAL_STATUS_SET = new Set<GeneratedJobTargetStatus>(JOB_TARGET_TERMINAL_STATUSES);
 
 export async function waitForBulkJobTargets(
   jobId: string,
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
   options: {
-    acceptedTargets: number;
     intervalMs?: number;
     onProgress?: (progress: BulkJobProgress) => void;
+    targetCount?: number;
     targets: AgentView[];
     timeoutMs?: number;
   },
 ): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[] }> {
   let lastTargets: JobTargetRecord[] = [];
   let progress = buildBulkJobProgress({
-    acceptedTargets: options.acceptedTargets,
     jobId,
+    targetCount: options.targetCount,
     targetRecords: lastTargets,
     targets: options.targets,
   });
@@ -116,13 +222,13 @@ export async function waitForBulkJobTargets(
       // Keep polling. A transient target-history fetch failure should not hide the run.
     }
     progress = buildBulkJobProgress({
-      acceptedTargets: options.acceptedTargets,
       jobId,
+      targetCount: options.targetCount,
       targetRecords: lastTargets,
       targets: options.targets,
     });
     options.onProgress?.(progress);
-    if (progress.completed + progress.failed + progress.unavailable >= progress.expected) {
+    if (progress.total === 0 || progress.terminal >= progress.total) {
       return { progress, targets: lastTargets };
     }
     await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
@@ -132,12 +238,18 @@ export async function waitForBulkJobTargets(
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {
   return [
-    `active ${progress.accepted}/${progress.expected}`,
-    `doing ${progress.doing}`,
+    `targets ${progress.terminal}/${progress.total}`,
+    `in progress ${progress.in_progress}`,
     `retrieved ${progress.retrieved}`,
-    `done ${progress.completed}`,
+    `completed ${progress.completed}`,
+    progress.skipped > 0 ? `skipped ${progress.skipped}` : "",
     progress.unavailable > 0 ? `unavailable ${progress.unavailable}` : "",
+    progress.unsuccessful > 0 ? `unsuccessful ${progress.unsuccessful}` : "",
+    progress.rejected > 0 ? `rejected ${progress.rejected}` : "",
     progress.failed > 0 ? `failed ${progress.failed}` : "",
+    progress.agent_timeout > 0 ? `agent_timeout ${progress.agent_timeout}` : "",
+    progress.control_timeout > 0 ? `control_timeout ${progress.control_timeout}` : "",
+    progress.canceled > 0 ? `canceled ${progress.canceled}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -171,26 +283,26 @@ export function formatTargetAvailabilitySummary(targets: AgentView[]): string {
 }
 
 export function bulkOutcomeSummary(progress: BulkJobProgress): string {
-  if (progress.unavailable > 0 && progress.failed > 0 && progress.completed > 0) {
-    return `partial success: ${progress.completed} done, ${progress.failed} failed, ${progress.unavailable} unavailable`;
+  if (progress.completed > 0 && (progress.unsuccessful > 0 || progress.skipped > 0)) {
+    return [
+      `partial success: ${progress.completed} completed`,
+      progress.unsuccessful > 0 ? `${progress.unsuccessful} unsuccessful` : "",
+      progress.skipped > 0 ? `${progress.skipped} skipped` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
   }
-  if (progress.unavailable > 0 && progress.completed > 0 && progress.failed === 0) {
-    return `partial success: ${progress.completed} done, ${progress.unavailable} unavailable`;
+  if (progress.skipped > 0 && progress.unsuccessful === 0 && progress.terminal >= progress.total) {
+    return `partial success: ${progress.skipped} skipped`;
   }
-  if (progress.failed > 0 && progress.completed > 0) {
-    return `partial success: ${progress.completed} done, ${progress.failed} failed`;
+  if (progress.unsuccessful > 0 && progress.skipped > 0) {
+    return `unsuccessful on ${vpsCountLabel(progress.unsuccessful)}, ${progress.skipped} skipped`;
   }
-  if (progress.failed > 0 && progress.completed === 0 && progress.unavailable > 0) {
-    return `failed on ${vpsCountLabel(progress.failed)}, ${progress.unavailable} unavailable`;
+  if (progress.unsuccessful > 0) {
+    return `unsuccessful on ${vpsCountLabel(progress.unsuccessful)}`;
   }
-  if (progress.failed > 0 && progress.completed === 0) {
-    return `failed on ${vpsCountLabel(progress.failed)}`;
-  }
-  if (progress.completed === progress.expected && progress.expected > 0) {
+  if (progress.completed === progress.total && progress.total > 0 && progress.in_progress === 0) {
     return `completed on ${vpsCountLabel(progress.completed)}`;
-  }
-  if (progress.unavailable === progress.expected && progress.expected > 0) {
-    return `${progress.unavailable} unavailable`;
   }
   return bulkProgressLabel(progress);
 }
@@ -199,30 +311,7 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-export function targetRecordSucceeded(status: string | undefined): boolean {
-  return ["completed", "degraded_unprivileged", "done", "ok", "skipped", "succeeded", "unchanged"].includes((status ?? "").toLowerCase());
-}
-
-export function targetRecordFailed(status: string | undefined): boolean {
-  return [
-    "agent_timed_out",
-    "canceled",
-    "control_timed_out",
-    "dispatch_failed",
-    "failed",
-    "rejected",
-    "rejected_authorization_required",
-    "rejected_by_agent",
-    "timed_out",
-  ].includes((status ?? "").toLowerCase());
-}
-
-export function targetRecordTerminal(status: string | undefined): boolean {
-  const normalized = (status ?? "").toLowerCase();
-  return targetRecordSucceeded(normalized) || targetRecordFailed(normalized);
-}
-
-function targetFailureReason(target: AgentView, targetRecord: JobTargetRecord): BulkFailureReason {
+function targetFailureReason(target: Pick<AgentView, "display_name" | "id" | "status">, targetRecord: JobTargetRecord): BulkFailureReason {
   const message = targetRecord.message?.trim();
   const rawReason = message || targetRecord.status || "failed";
   const reason =

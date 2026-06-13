@@ -8,6 +8,9 @@ use vpsman_common::{
 
 use crate::api_client::GatewayForwardMetrics;
 
+const MAX_RETAINED_COMMAND_OUTPUTS: usize = 256;
+const MAX_RETAINED_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone)]
 pub(crate) struct GatewayState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
@@ -15,6 +18,7 @@ pub(crate) struct GatewayState {
     pub(crate) disconnected_at: Arc<RwLock<HashMap<String, Instant>>>,
     pub(crate) forward_metrics: Arc<GatewayForwardMetrics>,
     pub(crate) reconnect_grace_secs: u64,
+    pub(crate) dispatch_ack_secs: u64,
 }
 
 impl Default for GatewayState {
@@ -25,6 +29,7 @@ impl Default for GatewayState {
             disconnected_at: Arc::default(),
             forward_metrics: Arc::default(),
             reconnect_grace_secs: 60,
+            dispatch_ack_secs: 30,
         }
     }
 }
@@ -38,6 +43,7 @@ pub(crate) struct GatewaySession {
 pub(crate) enum GatewaySessionMessage {
     Command(GatewayCommand),
     Cancel(GatewayCancelCommand),
+    Disconnect(String),
 }
 
 pub(crate) struct GatewayCommand {
@@ -58,6 +64,26 @@ pub(crate) struct PendingCommand {
     pub(crate) outputs: Vec<CommandOutput>,
     pub(crate) next_output_seq: i32,
     pub(crate) response: Option<oneshot::Sender<GatewayCommandDispatchResult>>,
+}
+
+impl PendingCommand {
+    pub(crate) fn retain_output_if_response_waiting(&mut self, output: CommandOutput) -> u64 {
+        if self.response.is_none() {
+            return 0;
+        }
+        self.outputs.push(output);
+        let mut dropped = 0_u64;
+        while self.outputs.len() > MAX_RETAINED_COMMAND_OUTPUTS
+            || retained_output_bytes(&self.outputs) > MAX_RETAINED_COMMAND_OUTPUT_BYTES
+        {
+            if self.outputs.is_empty() {
+                break;
+            }
+            self.outputs.remove(0);
+            dropped = dropped.saturating_add(1);
+        }
+        dropped
+    }
 }
 
 pub(crate) fn finish_pending_command_response(
@@ -99,5 +125,79 @@ pub(crate) fn cancel_ack_result(
         accepted: ack.accepted,
         applied: ack.applied,
         message: ack.message,
+    }
+}
+
+fn retained_output_bytes(outputs: &[CommandOutput]) -> usize {
+    outputs
+        .iter()
+        .map(|output| output.data.len().saturating_add(64))
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vpsman_common::OutputStream;
+
+    #[test]
+    fn pending_command_does_not_retain_output_after_ack_response_is_consumed() {
+        let job_id = uuid::Uuid::new_v4();
+        let (response, _receiver) = oneshot::channel();
+        let mut pending = PendingCommand {
+            client_id: "client-a".to_string(),
+            job_id,
+            command_version: 1,
+            ack: Some(JobAck {
+                job_id,
+                accepted: true,
+                message: "accepted".to_string(),
+            }),
+            outputs: Vec::new(),
+            next_output_seq: 0,
+            response: Some(response),
+        };
+
+        finish_pending_command_response(&mut pending, None, Vec::new());
+        let dropped = pending.retain_output_if_response_waiting(CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"noisy output after ack".to_vec(),
+            exit_code: None,
+            done: false,
+        });
+
+        assert_eq!(dropped, 0);
+        assert!(pending.response.is_none());
+        assert!(pending.outputs.is_empty());
+    }
+
+    #[test]
+    fn pending_command_reports_retained_output_truncation() {
+        let job_id = uuid::Uuid::new_v4();
+        let (response, _receiver) = oneshot::channel();
+        let mut pending = PendingCommand {
+            client_id: "client-a".to_string(),
+            job_id,
+            command_version: 1,
+            ack: None,
+            outputs: Vec::new(),
+            next_output_seq: 0,
+            response: Some(response),
+        };
+
+        let mut dropped = 0_u64;
+        for _ in 0..(MAX_RETAINED_COMMAND_OUTPUTS + 2) {
+            dropped += pending.retain_output_if_response_waiting(CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: b"line\n".to_vec(),
+                exit_code: None,
+                done: false,
+            });
+        }
+
+        assert_eq!(dropped, 2);
+        assert_eq!(pending.outputs.len(), MAX_RETAINED_COMMAND_OUTPUTS);
     }
 }

@@ -1,9 +1,13 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, UnixListener},
     sync::oneshot,
     time,
 };
@@ -22,6 +26,31 @@ use crate::{
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn run_control_listener(args: Args, state: GatewayState) -> Result<()> {
+    if let Some(path) = control_socket_path(&args.control_bind) {
+        prepare_control_socket(&path)?;
+        let listener = UnixListener::bind(&path)
+            .with_context(|| format!("failed to bind gateway control socket {}", path.display()))?;
+        info!(path = %path.display(), "gateway control listening on Unix socket");
+
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let state = state.clone();
+            let internal_token = args.internal_token.clone();
+            let privilege_verifier_key_hex = args.privilege_verifier_key_hex.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handle_control_connection(
+                    stream,
+                    state,
+                    internal_token,
+                    privilege_verifier_key_hex,
+                )
+                .await
+                {
+                    warn!(%error, "gateway Unix control request failed");
+                }
+            });
+        }
+    }
     let listener = TcpListener::bind(&args.control_bind)
         .await
         .with_context(|| format!("failed to bind gateway control on {}", args.control_bind))?;
@@ -43,12 +72,42 @@ pub(crate) async fn run_control_listener(args: Args, state: GatewayState) -> Res
     }
 }
 
-async fn handle_control_connection(
-    mut stream: TcpStream,
+fn control_socket_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    value
+        .strip_prefix("unix://")
+        .or_else(|| value.strip_prefix("unix:"))
+        .map(PathBuf::from)
+}
+
+fn prepare_control_socket(path: &Path) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create control socket directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    if path.exists() {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove stale control socket {}", path.display()))?;
+    }
+    Ok(())
+}
+
+async fn handle_control_connection<S>(
+    mut stream: S,
     state: GatewayState,
     internal_token: Option<String>,
     privilege_verifier_key_hex: Option<String>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let request = read_http_request(&mut stream).await?;
     if request.method != "POST"
         || !matches!(
@@ -205,7 +264,7 @@ async fn dispatch_gateway_command(
                     response: response_tx,
                 }))
                 .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
-            return time::timeout(Duration::from_secs(30), response_rx)
+            return time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
                 .await
                 .context("gateway command ack timed out")?
                 .context("gateway command response dropped");
@@ -249,13 +308,16 @@ async fn cancel_gateway_command(
             response: response_tx,
         }))
         .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
-    time::timeout(Duration::from_secs(30), response_rx)
+    time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
         .await
         .context("gateway command cancel timed out")?
         .context("gateway command cancel response dropped")
 }
 
-async fn write_gateway_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {
+async fn write_gateway_error<S>(stream: &mut S, error: anyhow::Error) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let message = error.to_string();
     let status = if message.contains("agent_not_online") {
         "404 Not Found"
@@ -267,7 +329,10 @@ async fn write_gateway_error(stream: &mut TcpStream, error: anyhow::Error) -> Re
     write_http_json(stream, status, &serde_json::json!({"error": message})).await
 }
 
-async fn write_privilege_error(stream: &mut TcpStream, error: anyhow::Error) -> Result<()> {
+async fn write_privilege_error<S>(stream: &mut S, error: anyhow::Error) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let message = error.to_string();
     let status = if message.contains("not configured") {
         "503 Service Unavailable"
@@ -289,7 +354,10 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
+async fn read_http_request<S>(stream: &mut S) -> Result<HttpRequest>
+where
+    S: AsyncRead + Unpin,
+{
     let mut buffer = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 1024];
@@ -373,11 +441,11 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-async fn write_http_json<T: serde::Serialize>(
-    stream: &mut TcpStream,
-    status: &str,
-    value: &T,
-) -> Result<()> {
+async fn write_http_json<S, T>(stream: &mut S, status: &str, value: &T) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+    T: serde::Serialize,
+{
     let body = serde_json::to_vec(value)?;
     let response = format!(
         "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",

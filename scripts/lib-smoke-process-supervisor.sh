@@ -33,10 +33,10 @@ assert_supervisor_status_job() {
   audits_json="$(api_get "/api/v1/audit?limit=50")"
 
   jq -e --arg command_type "$command_type" '
-    .status == "succeeded" and .command_type == $command_type and .target_count == 1
+    .status == "completed" and .command_type == $command_type and .target_count == 1
   ' <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   status_json="$(
     jq -r '.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' \
@@ -69,10 +69,10 @@ assert_supervisor_snapshot_job() {
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
 
-  jq -e '.status == "succeeded" and .command_type == "process_status" and .target_count == 1' \
+  jq -e '.status == "completed" and .command_type == "process_status" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   snapshot_json="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   jq -e --arg name "$supervisor_name" '
@@ -88,10 +88,10 @@ assert_supervisor_logs_job() {
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
 
-  jq -e '.status == "succeeded" and .command_type == "process_logs" and .target_count == 1' \
+  jq -e '.status == "completed" and .command_type == "process_logs" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   decoded_stdout="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   if [[ "$decoded_stdout" != *"$supervisor_payload"* ]]; then

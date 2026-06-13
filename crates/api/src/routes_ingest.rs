@@ -9,8 +9,8 @@ use vpsman_common::{
     OutputStream,
 };
 use vpsman_server_core::{
-    JOB_STATUS_PENDING, JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_FAILED,
-    TARGET_STATUS_RUNNING, TARGET_STATUS_SUCCEEDED,
+    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_FAILED, TARGET_STATUS_RUNNING,
 };
 
 use crate::{
@@ -161,18 +161,17 @@ pub(crate) async fn ingest_command_output(
             .repo
             .update_job_target_result(event.job_id, &event.client_id, &outcome)
             .await?;
-        if outcome.status == TARGET_STATUS_SUCCEEDED {
+        if outcome.status == TARGET_STATUS_COMPLETED {
             try_auto_record_backup_artifact_from_ingest(&state, &event).await?;
         }
-        if let Some((status, accepted_targets)) = state
+        if let Some(status) = state
             .repo
             .refresh_job_status_from_targets(event.job_id)
             .await?
         {
-            if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
+            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
                 state.publish(WsEvent::JobFinished {
                     job_id: event.job_id,
-                    accepted_targets,
                     status,
                 });
             }
@@ -235,9 +234,9 @@ fn target_outcome_from_done_output(
     let timed_out = crate::routes_jobs::output_indicates_timeout(output);
     let exit_code = output.exit_code;
     let status = if timed_out {
-        TARGET_STATUS_AGENT_TIMED_OUT
+        TARGET_STATUS_AGENT_TIMEOUT
     } else if exit_code.unwrap_or(0) == 0 {
-        TARGET_STATUS_SUCCEEDED
+        TARGET_STATUS_COMPLETED
     } else {
         TARGET_STATUS_FAILED
     };

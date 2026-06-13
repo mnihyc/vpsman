@@ -88,7 +88,21 @@ pub(crate) async fn collect_system_dashboard_snapshot(
             delivered_events: Some(metrics.delivered_events),
             retry_attempts: Some(metrics.retry_attempts),
             active_queues: Some(metrics.active_queues),
-            status: "live".to_string(),
+            current_queue_depth: Some(metrics.current_queue_depth),
+            oldest_event_age_secs: metrics.oldest_event_age_secs,
+            dropped_events: Some(metrics.dropped_events),
+            telemetry_dropped_events: Some(metrics.telemetry_dropped_events),
+            expired_events: Some(metrics.expired_events),
+            critical_failures: Some(metrics.critical_failures),
+            dropped_by_kind: metrics.dropped_by_kind,
+            dropped_by_reason: metrics.dropped_by_reason,
+            critical_failures_by_reason: metrics.critical_failures_by_reason,
+            retained_output_truncated_events: Some(metrics.retained_output_truncated_events),
+            status: if metrics.unhealthy {
+                "unhealthy".to_string()
+            } else {
+                "live".to_string()
+            },
         },
         Err(error) => {
             notes.push(format!("gateway event metrics unavailable: {error}"));
@@ -140,11 +154,11 @@ fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {
     SystemDashboardCapacityView {
         api_db_pool: config.capacity.api_db_pool,
         worker_db_pool: config.capacity.worker_db_pool,
-        dispatcher_batch: config.capacity.dispatcher_batch,
-        dispatcher_in_flight: config.capacity.dispatcher_in_flight,
-        dispatch_ack_secs: config.timeout.dispatch_ack_secs,
-        event_post_secs: config.timeout.event_post_secs,
-        internal_http_read_secs: config.timeout.internal_http_read_secs,
+        dispatcher_batch: Some(state.dispatcher_config.batch_limit),
+        dispatcher_in_flight: Some(state.dispatcher_config.in_flight),
+        dispatch_ack_secs: Some(state.dispatcher_config.dispatch_ack_secs),
+        event_post_secs: Some(state.dispatcher_config.event_post_secs),
+        internal_http_read_secs: Some(state.dispatcher_config.internal_http_read_secs),
         worker_schedule_command_secs: config
             .timeout
             .worker_schedule_command_secs
@@ -191,18 +205,18 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
         "db_pool.idle_connections" => ("DB idle connections", "connections"),
         "db_pool.in_use_connections" => ("DB in-use connections", "connections"),
         "dispatch.active_jobs" => ("Active jobs", "jobs"),
-        "dispatch.pending_jobs" => ("Pending jobs", "jobs"),
+        "dispatch.queued_jobs" => ("Queued jobs", "jobs"),
         "dispatch.running_jobs" => ("Running jobs", "jobs"),
         "dispatch.queue_depth" => ("Dispatch queue depth", "targets"),
         "dispatch.total_dispatch_attempts" => ("Dispatch attempts", "attempts"),
         "dispatch.retried_targets" => ("Retried targets", "targets"),
-        "targets.pending" => ("Pending targets", "targets"),
-        "targets.delivering" => ("Delivering targets", "targets"),
+        "targets.queued" => ("Queued targets", "targets"),
+        "targets.dispatching" => ("Dispatching targets", "targets"),
         "targets.running" => ("Running targets", "targets"),
         "targets.active" => ("Active targets", "targets"),
         "targets.deadline_expired_active" => ("Expired active targets", "targets"),
-        "targets.control_timed_out_last_24h" => ("Control timeouts", "targets"),
-        "targets.agent_timed_out_last_24h" => ("Agent timeouts", "targets"),
+        "targets.control_timeout_last_24h" => ("Control timeouts", "targets"),
+        "targets.agent_timeout_last_24h" => ("Agent timeouts", "targets"),
         "targets.canceled_last_24h" => ("Canceled targets", "targets"),
         "cancellations.requested" => ("Cancel requested", "targets"),
         "cancellations.sent" => ("Cancel sent", "targets"),
@@ -212,6 +226,41 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
         "gateway_events.delivered_events" => ("Gateway delivered events", "events"),
         "gateway_events.retry_attempts" => ("Gateway retry attempts", "attempts"),
         "gateway_events.active_queues" => ("Gateway active queues", "queues"),
+        "gateway_events.current_queue_depth" => ("Gateway queue depth", "events"),
+        "gateway_events.oldest_event_age_secs" => ("Gateway oldest event age", "seconds"),
+        "gateway_events.dropped_events" => ("Gateway dropped events", "events"),
+        "gateway_events.telemetry_dropped_events" => ("Gateway telemetry drops", "events"),
+        "gateway_events.expired_events" => ("Gateway expired events", "events"),
+        "gateway_events.critical_failures" => ("Gateway critical failures", "events"),
+        "gateway_events.dropped_by_kind.telemetry" => ("Gateway telemetry drops by kind", "events"),
+        "gateway_events.dropped_by_kind.command_output" => {
+            ("Gateway command output drops", "events")
+        }
+        "gateway_events.dropped_by_kind.lifecycle" => ("Gateway lifecycle drops", "events"),
+        "gateway_events.dropped_by_kind.terminal_output" => {
+            ("Gateway terminal output drops", "events")
+        }
+        "gateway_events.dropped_by_kind.other" => ("Gateway other drops", "events"),
+        "gateway_events.dropped_by_reason.global_queue_full" => {
+            ("Gateway global queue full drops", "events")
+        }
+        "gateway_events.dropped_by_reason.target_queue_full" => {
+            ("Gateway target queue full drops", "events")
+        }
+        "gateway_events.dropped_by_reason.expired" => ("Gateway expired drops", "events"),
+        "gateway_events.dropped_by_reason.coalesced" => ("Gateway coalesced telemetry", "events"),
+        "gateway_events.critical_failures_by_reason.global_queue_full" => {
+            ("Gateway critical global queue failures", "events")
+        }
+        "gateway_events.critical_failures_by_reason.target_queue_full" => {
+            ("Gateway critical target queue failures", "events")
+        }
+        "gateway_events.critical_failures_by_reason.expired" => {
+            ("Gateway critical expired failures", "events")
+        }
+        "gateway_events.retained_output_truncated_events" => {
+            ("Gateway retained output truncations", "events")
+        }
         _ => ("System metric", "count"),
     }
 }

@@ -797,6 +797,65 @@ async fn dispatching_job_records_and_updates_target_results() {
 }
 
 #[tokio::test]
+async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+
+    let first_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "first_request_fingerprint",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    let second_job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "second_request_fingerprint",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+
+    let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    assert_eq!(first_claim.len(), 1);
+    assert_eq!(first_claim[0].job_id, first_job_id);
+    assert_eq!(first_claim[0].client_id, "client-a");
+    assert!(repo.claim_due_job_targets(10, 30).await.unwrap().is_empty());
+
+    repo.update_job_target_result(
+        first_job_id,
+        "client-a",
+        &TargetDispatchOutcome {
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            command_version: Some(1),
+            accepted: true,
+            message: "ok".to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    assert_eq!(second_claim.len(), 1);
+    assert_eq!(second_claim[0].job_id, second_job_id);
+    assert_eq!(second_claim[0].client_id, "client-a");
+}
+
+#[tokio::test]
 async fn job_output_comparison_groups_execution_summaries_by_status_and_output() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();

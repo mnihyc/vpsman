@@ -28,18 +28,19 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await activate(page.getByRole("button", { name: "Run bulk action" }));
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "active" }).filter({ hasText: "23/24" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "doing" }).filter({ hasText: "0" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "22" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "targets" }).filter({ hasText: "24/24" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "in progress" }).filter({ hasText: "0" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "retrieved" }).filter({ hasText: "24" })).toBeVisible();
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "failed" }).filter({ hasText: "1" })).toBeVisible();
+  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unsuccessful" }).filter({ hasText: "2" })).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unavailable" }).filter({ hasText: "1" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "offline" })).toBeVisible();
-  await expect(resultPanel.getByText("partial success: 22 done, 1 failed, 1 unavailable", { exact: true })).toBeVisible();
+  await expect(resultPanel.getByText("partial success: 22 completed, 2 unsuccessful", { exact: true })).toBeVisible();
   const reasons = resultPanel.getByLabel("Failed target reasons");
   await expect(reasons.getByText("stale: file download command_version mismatch", { exact: true })).toBeVisible();
+  await expect(reasons.getByText("agent offline", { exact: true })).toBeVisible();
   await expect(reasons.getByText("edge-us-22", { exact: true })).toBeVisible();
   await expect(page.getByText("Same hierarchy and content")).toBeVisible();
   await expect(page.getByText("Same hash")).toBeVisible();
@@ -118,6 +119,27 @@ async function installTwentyFourTargetFileMock(page: Page) {
     };
     const statusOutputBody = (value: unknown) => btoa(JSON.stringify(value));
     const bytesToBase64 = (text: string) => btoa(text);
+    const targetCountsFromStatuses = (statuses: string[]) => {
+      const counts = {
+        agent_timeout: 0,
+        canceled: 0,
+        completed: 0,
+        control_timeout: 0,
+        dispatching: 0,
+        failed: 0,
+        queued: 0,
+        rejected: 0,
+        running: 0,
+        skipped: 0,
+        total: statuses.length,
+      };
+      for (const status of statuses) {
+        if (status in counts && status !== "total") {
+          counts[status as keyof Omit<typeof counts, "total">] += 1;
+        }
+      }
+      return counts;
+    };
     const outputReads: Record<string, number> = {};
     const manifestEntries = (sha256Hex: string) => [
       { kind: "directory", path: "sites" },
@@ -211,7 +233,7 @@ async function installTwentyFourTargetFileMock(page: Page) {
           const outputIds = new Set(outputTargets.map((agent) => agent.id));
           jobTargets[jobId] = targets.map((agent) => ({
             client_id: agent.id,
-            completed_at: agent.status === "offline" ? null : "2026-06-02T10:11:00Z",
+            completed_at: "2026-06-02T10:11:00Z",
             exit_code: outputIds.has(agent.id) ? 0 : agent.status === "stale" ? 2 : null,
             job_id: jobId,
             message: outputIds.has(agent.id)
@@ -220,13 +242,15 @@ async function installTwentyFourTargetFileMock(page: Page) {
                 ? "stale: file download command_version mismatch"
                 : "agent offline",
             started_at: outputIds.has(agent.id) || agent.status === "stale" ? "2026-06-02T10:10:59Z" : null,
-            status: outputIds.has(agent.id) ? "completed" : agent.status === "stale" ? "failed" : "dispatch_failed",
+            status: outputIds.has(agent.id) ? "completed" : agent.status === "stale" ? "failed" : "control_timeout",
           }));
           return jsonResponse({
-            accepted_targets: targets.filter((agent) => agent.status !== "offline").length,
             target_count: targets.length,
+            target_counts: targetCountsFromStatuses(
+              jobTargets[jobId].map((target) => target.status),
+            ),
             job_id: jobId,
-            status: "accepted",
+            status: "running",
           });
         }
       }

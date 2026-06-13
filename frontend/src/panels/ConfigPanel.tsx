@@ -6,6 +6,7 @@ import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import {
   buildBulkJobProgress,
+  createJobTargetCount,
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
@@ -511,21 +512,21 @@ function BulkConfigApply({
         timeout_secs: boundedTimeoutSecs,
       });
       const initial = buildBulkJobProgress({
-        acceptedTargets: response.target_count,
+        targetCount: createJobTargetCount(response),
         jobId: response.job_id,
         targetRecords: [],
         targets: preview.targets,
       });
       setProgress(initial);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.target_count,
+        targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: preview.targets,
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.target_count,
+          targetCount: createJobTargetCount(response),
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
@@ -701,14 +702,14 @@ function SingleVpsConfig({
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.target_count,
+        targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [singleTarget],
       });
       const outputs = await onLoadJobOutputs(response.job_id);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.target_count,
+          targetCount: createJobTargetCount(response),
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
@@ -758,14 +759,14 @@ function SingleVpsConfig({
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        acceptedTargets: response.target_count,
+        targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [singleTarget],
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
-          acceptedTargets: response.target_count,
+          targetCount: createJobTargetCount(response),
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,

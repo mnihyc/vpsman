@@ -5,11 +5,10 @@ import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
-  acceptedDispatchTargetCount,
-  bulkOutcomeSummary,
-  type BulkFailureReason,
+  buildBulkJobProgress,
+  createJobTargetCount,
   targetPreflightUnavailable,
-  targetRecordFailed,
+  waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../../bulkJobProgress";
 import {
@@ -27,6 +26,10 @@ import {
 import { parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { agentsMatchingExpression } from "../../searchExpression";
+import {
+  isJobTargetStatus,
+  jobTargetStatusBadgeClass,
+} from "../../jobStatusPresentation";
 import type {
   AgentView,
   BulkResolveResponse,
@@ -44,8 +47,8 @@ import { runPanelAction, shortId, statusClass } from "../../utils";
 
 const SELECTOR_STORAGE_KEY = "vpsman.multiFile.selectorExpression";
 const BULK_JOB_TIMEOUT_SECS = 60;
-const BULK_OUTPUT_POLL_INTERVAL_MS = 500;
-const BULK_OUTPUT_WAIT_TIMEOUT_MS = (BULK_JOB_TIMEOUT_SECS + 30) * 1000;
+const BULK_OUTPUT_SUMMARY_POLL_INTERVAL_MS = 500;
+const BULK_OUTPUT_SUMMARY_WAIT_MS = 5_000;
 
 type MultiFileAction = "download_files" | "upload_file" | "copy" | "rename" | "delete" | "chmod" | "chown" | "mkdir" | "write_text";
 
@@ -107,8 +110,8 @@ export function MultiFileActionsPanel({
   const [lastOutputs, setLastOutputs] = useState<JobOutputRecord[]>([]);
   const [lastOperation, setLastOperation] = useState<JobOperation | null>(null);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [bulkProgress, setBulkProgress] = useState<BulkProgress | null>(null);
-  const [lastRunProgress, setLastRunProgress] = useState<BulkProgress | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<BulkJobProgress | null>(null);
+  const [lastRunProgress, setLastRunProgress] = useState<BulkJobProgress | null>(null);
   const localMatches = useMemo(() => agentsMatchingExpression(agents, selectorExpression), [agents, selectorExpression]);
   const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const downloadComparison = useMemo(
@@ -258,26 +261,33 @@ export function MultiFileActionsPanel({
       });
       let outputs: JobOutputRecord[] = [];
       let targets: JobTargetRecord[] = [];
-      let finalProgress = buildBulkProgress({
-        acceptedTargets: job.target_count,
+      const targetCount = createJobTargetCount(job);
+      let finalProgress = buildBulkJobProgress({
         jobId: job.job_id,
+        targetCount,
         outputs,
         targetRecords: targets,
         targets: confirmation.targets,
       });
       setBulkProgress(finalProgress);
       try {
-        const result = await waitForOutputs(job.job_id, onLoadOutputs, onLoadTargets, {
-          acceptedTargets: job.target_count,
+        const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+          targetCount,
           targets: confirmation.targets,
           onProgress: (progress) => {
             finalProgress = progress;
             setBulkProgress(progress);
           },
         });
-        outputs = result.outputs;
         targets = result.targets;
-        finalProgress = result.progress;
+        outputs = await loadOutputsForSummary(job.job_id, onLoadOutputs, targets);
+        finalProgress = buildBulkJobProgress({
+          jobId: job.job_id,
+          targetCount,
+          outputs,
+          targetRecords: targets,
+          targets: confirmation.targets,
+        });
       } finally {
         setBulkProgress(null);
       }
@@ -512,7 +522,7 @@ export function MultiFileActionsPanel({
               lastSummary.map((group) => (
                 <details key={group.key} open>
                   <summary>
-                    <span className={`status ${statusClass(group.status)}`}>{group.status}</span>
+                    <span className={`status ${bulkSummaryStatusClass(group)}`}>{group.status}</span>
                     <strong>{vpsCountLabel(group.clientIds.length)}</strong>
                     <span>{group.reason || group.label}</span>
                   </summary>
@@ -657,8 +667,6 @@ type DownloadStatusRecord = {
   status: FileOperationStatus;
 };
 
-type BulkProgress = BulkJobProgress;
-
 type BulkSummaryGroup = {
   clientIds: string[];
   detail: string;
@@ -718,7 +726,7 @@ function groupBulkOutputs(
     const targetRecord = targetRecordByClient.get(target.id);
     const agent = agentById.get(target.id) ?? target;
     const unavailable = targetPreflightUnavailable(agent);
-    const state = unavailable ? "unavailable" : targetRecord?.status ?? "pending";
+    const state = unavailable ? "unavailable" : targetRecord?.status ?? "queued";
     const reason = unavailable ? agent.status : targetRecord?.message ?? targetRecord?.status ?? "waiting_for_output";
     const label = unavailable ? "Agent unavailable" : targetRecord?.status ? "Job target status" : "No file status";
     const detail = unavailable
@@ -742,6 +750,13 @@ function groupBulkOutputs(
     groups.set(key, group);
   }
   return Array.from(groups.values()).sort((left, right) => right.clientIds.length - left.clientIds.length);
+}
+
+function bulkSummaryStatusClass(group: BulkSummaryGroup): string {
+  if (group.label === "Job target status" && isJobTargetStatus(group.status)) {
+    return jobTargetStatusBadgeClass(group.status);
+  }
+  return statusClass(group.status);
 }
 
 function successfulDownloadClientIds(groups: BulkSummaryGroup[]): string[] {
@@ -1046,135 +1061,27 @@ function statusPreview(status: NonNullable<ReturnType<typeof parseLatestFileStat
   return "";
 }
 
-async function waitForOutputs(
+async function loadOutputsForSummary(
   jobId: string,
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
-  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
-  options: {
-    acceptedTargets: number;
-    onProgress?: (progress: BulkProgress) => void;
-    targets: AgentView[];
-  },
-): Promise<{ outputs: JobOutputRecord[]; progress: BulkProgress; targets: JobTargetRecord[] }> {
+  targetRecords: JobTargetRecord[],
+): Promise<JobOutputRecord[]> {
+  const expectedStatusOutputs = targetRecords.filter((target) => target.status === "completed").length;
   let lastOutputs: JobOutputRecord[] = [];
-  let lastTargets: JobTargetRecord[] = [];
-  let progress = buildBulkProgress({
-    acceptedTargets: options.acceptedTargets,
-    jobId,
-    outputs: lastOutputs,
-    targetRecords: lastTargets,
-    targets: options.targets,
-  });
-  const deadline = Date.now() + BULK_OUTPUT_WAIT_TIMEOUT_MS;
+  const deadline = Date.now() + BULK_OUTPUT_SUMMARY_WAIT_MS;
   while (Date.now() <= deadline) {
-    const [outputsResult, targetsResult] = await Promise.allSettled([onLoadOutputs(jobId), onLoadTargets(jobId)]);
-    if (outputsResult.status === "fulfilled") {
-      lastOutputs = outputsResult.value;
+    try {
+      lastOutputs = await onLoadOutputs(jobId);
+    } catch {
+      lastOutputs = [];
     }
-    if (targetsResult.status === "fulfilled") {
-      lastTargets = targetsResult.value;
+    const statusOutputCount = lastOutputs.filter((output) => output.stream === "status" && output.done).length;
+    if (expectedStatusOutputs === 0 || statusOutputCount >= expectedStatusOutputs) {
+      return lastOutputs;
     }
-    progress = buildBulkProgress({
-      acceptedTargets: options.acceptedTargets,
-      jobId,
-      outputs: lastOutputs,
-      targetRecords: lastTargets,
-      targets: options.targets,
-    });
-    options.onProgress?.(progress);
-    if (progress.retrieved + progress.failed + progress.unavailable >= progress.expected) {
-      return { outputs: lastOutputs, progress, targets: lastTargets };
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, BULK_OUTPUT_POLL_INTERVAL_MS));
+    await new Promise((resolve) => window.setTimeout(resolve, BULK_OUTPUT_SUMMARY_POLL_INTERVAL_MS));
   }
-  return { outputs: lastOutputs, progress, targets: lastTargets };
-}
-
-function buildBulkProgress({
-  acceptedTargets,
-  jobId,
-  outputs,
-  targetRecords,
-  targets,
-}: {
-  acceptedTargets: number;
-  jobId: string;
-  outputs: JobOutputRecord[];
-  targetRecords: JobTargetRecord[];
-  targets: AgentView[];
-}): BulkProgress {
-  const statusOutputs = outputs.filter((output) => output.stream === "status" && output.data_base64);
-  const statusByClient = new Map<string, FileOperationStatus>();
-  for (const output of statusOutputs) {
-    const status = parseLatestFileStatus([output]);
-    if (status) {
-      statusByClient.set(output.client_id, status);
-    }
-  }
-  const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
-  let completed = 0;
-  let failed = 0;
-  const failureReasons: BulkFailureReason[] = [];
-  let unavailable = 0;
-  for (const target of targets) {
-    const status = statusByClient.get(target.id);
-    const targetRecord = targetRecordByClient.get(target.id);
-    if (targetPreflightUnavailable(target) && !status) {
-      unavailable += 1;
-      continue;
-    }
-    if (status) {
-      if (fileStatusSucceeded(status.status)) {
-        completed += 1;
-      } else {
-        failed += 1;
-        failureReasons.push({
-          reason: status.reason ?? status.status ?? "file operation failed",
-          target: target.display_name || target.id,
-        });
-      }
-      continue;
-    }
-    if (targetRecord && targetRecordFailed(targetRecord.status)) {
-      failed += 1;
-      failureReasons.push({
-        reason: targetRecord.message ?? targetRecord.status,
-        target: target.display_name || target.id,
-      });
-    }
-  }
-  const retrieved = Array.from(statusByClient.keys()).filter((clientId) => targets.some((target) => target.id === clientId)).length;
-  const accepted = acceptedDispatchTargetCount(acceptedTargets, targets);
-  const doing = Math.max(0, accepted - retrieved - failed);
-  return {
-    accepted,
-    completed,
-    doing,
-    expected: targets.length,
-    failed,
-    failureReasons,
-    jobId,
-    retrieved,
-    unavailable,
-  };
-}
-
-function fileStatusSucceeded(status: string | undefined): boolean {
-  return (
-    !status ||
-    [
-      "changed",
-      "completed",
-      "copied",
-      "created",
-      "deleted",
-      "ok",
-      "renamed",
-      "skipped",
-      "unchanged",
-      "updated",
-    ].includes(status)
-  );
+  return lastOutputs;
 }
 
 function parseMode(value: string): number {

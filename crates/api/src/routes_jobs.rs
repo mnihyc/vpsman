@@ -7,15 +7,16 @@ use axum::{
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, payload_hash, CommandOutput, GatewayCommandDispatchResult,
-    JobCancelRequest as GatewayJobCancelRequest, JobCommand, OutputStream,
+    encode_json, job_command_requires_confirmation, payload_hash, CommandOutput,
+    GatewayCommandDispatchResult, JobCancelRequest as GatewayJobCancelRequest, JobCommand,
+    OutputStream,
 };
 use vpsman_server_core::{
-    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_PENDING, JOB_STATUS_REJECTED,
-    JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_CANCELED,
-    TARGET_STATUS_CONTROL_TIMED_OUT, TARGET_STATUS_DELIVERING, TARGET_STATUS_FAILED,
-    TARGET_STATUS_PENDING, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
-    TARGET_STATUS_SUCCEEDED,
+    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_QUEUED, JOB_STATUS_REJECTED,
+    JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
+    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
+    TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
+    TARGET_STATUS_SKIPPED,
 };
 
 use crate::{
@@ -116,11 +117,10 @@ pub(crate) async fn cancel_job(
         }
     }
     let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
-    if let Some((status, accepted_targets)) = &refreshed {
-        if !matches!(status.as_str(), JOB_STATUS_PENDING | JOB_STATUS_RUNNING) {
+    if let Some(status) = &refreshed {
+        if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
             state.publish(WsEvent::JobFinished {
                 job_id,
-                accepted_targets: *accepted_targets,
                 status: status.clone(),
             });
         }
@@ -132,8 +132,7 @@ pub(crate) async fn cancel_job(
             requested_targets: plan.cancel_targets.len() + plan.pending_canceled,
             pending_canceled: plan.pending_canceled,
             cancel_acks,
-            status: refreshed.as_ref().map(|(status, _)| status.clone()),
-            accepted_targets: refreshed.map(|(_, accepted_targets)| accepted_targets),
+            status: refreshed,
         }),
     ))
 }
@@ -183,30 +182,8 @@ async fn create_job_inner(
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
     let job_command = request.job_command()?;
-    if !request.confirmed {
-        match &job_command {
-            JobCommand::Backup { .. } => {
-                return Err(ApiError::conflict("backup_confirmation_required"));
-            }
-            JobCommand::HotConfig { .. }
-            | JobCommand::DataSourceConfigPatch { .. }
-            | JobCommand::UpdateAgent { .. }
-            | JobCommand::AgentUpdateActivate { .. }
-            | JobCommand::AgentUpdateRollback { .. }
-            | JobCommand::AgentUpdateCheck { .. } => {
-                return Err(ApiError::conflict("config_update_confirmation_required"));
-            }
-            JobCommand::FileWriteText { .. }
-            | JobCommand::FileMkdir { .. }
-            | JobCommand::FileRename { .. }
-            | JobCommand::FileDelete { .. }
-            | JobCommand::FileChmod { .. }
-            | JobCommand::FileChown { .. }
-            | JobCommand::FileCopy { .. } => {
-                return Err(ApiError::conflict("file_operation_confirmation_required"));
-            }
-            _ => {}
-        }
+    if !request.confirmed && job_command_requires_confirmation(&job_command) {
+        return Err(ApiError::conflict(confirmation_error_code(&job_command)));
     }
     let command_payload = encode_json(&job_command).map_err(|error| {
         ApiError::from(anyhow!(
@@ -361,21 +338,44 @@ async fn create_job_inner(
         .repo
         .refresh_job_status_from_targets(job_id)
         .await?
-        .map(|(status, _)| status)
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
-    let accepted_targets = state.repo.count_job_accepted_targets(job_id).await?;
     let target_counts = create_job_target_counts(state, job_id).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
             job_id,
             target_count: resolved_targets.len(),
-            accepted_targets,
             status,
             target_counts,
         }),
     ))
+}
+
+fn confirmation_error_code(command: &JobCommand) -> &'static str {
+    match command {
+        JobCommand::Backup { .. } => "backup_confirmation_required",
+        JobCommand::HotConfig { .. }
+        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. } => "config_update_confirmation_required",
+        JobCommand::FilePush { .. }
+        | JobCommand::FilePushChunked { .. }
+        | JobCommand::FileTransferStart { .. }
+        | JobCommand::FileTransferChunk { .. }
+        | JobCommand::FileTransferCommit { .. }
+        | JobCommand::FileTransferAbort { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. } => "file_operation_confirmation_required",
+        _ => "command_confirmation_required",
+    }
 }
 
 fn request_fingerprint_for_job(
@@ -423,7 +423,6 @@ async fn existing_job_response_for_id(
     Ok(Some(CreateJobResponse {
         job_id: existing.id,
         target_count: existing.target_count.max(0) as usize,
-        accepted_targets: state.repo.count_job_accepted_targets(existing.id).await?,
         status: existing.status,
         target_counts: create_job_target_counts(state, existing.id).await?,
     }))
@@ -436,38 +435,28 @@ async fn create_job_target_counts(
     let targets = state.repo.list_job_targets(job_id).await?;
     let mut counts = CreateJobTargetCounts {
         total: targets.len(),
-        runnable: 0,
-        skipped: 0,
-        rejected_unavailable: 0,
-        pending: 0,
-        delivering: 0,
+        queued: 0,
+        dispatching: 0,
         running: 0,
-        succeeded: 0,
+        completed: 0,
+        skipped: 0,
+        rejected: 0,
         failed: 0,
-        agent_timed_out: 0,
-        control_timed_out: 0,
+        agent_timeout: 0,
+        control_timeout: 0,
         canceled: 0,
     };
     for target in targets {
         match target.status.as_str() {
-            TARGET_STATUS_PENDING => {
-                counts.pending += 1;
-                counts.runnable += 1;
-            }
-            TARGET_STATUS_DELIVERING => {
-                counts.delivering += 1;
-                counts.runnable += 1;
-            }
-            TARGET_STATUS_RUNNING => {
-                counts.running += 1;
-                counts.runnable += 1;
-            }
-            TARGET_STATUS_SUCCEEDED => counts.succeeded += 1,
+            TARGET_STATUS_QUEUED => counts.queued += 1,
+            TARGET_STATUS_DISPATCHING => counts.dispatching += 1,
+            TARGET_STATUS_RUNNING => counts.running += 1,
+            TARGET_STATUS_COMPLETED => counts.completed += 1,
             TARGET_STATUS_SKIPPED => counts.skipped += 1,
-            TARGET_STATUS_REJECTED => counts.rejected_unavailable += 1,
+            TARGET_STATUS_REJECTED => counts.rejected += 1,
             TARGET_STATUS_FAILED => counts.failed += 1,
-            TARGET_STATUS_AGENT_TIMED_OUT => counts.agent_timed_out += 1,
-            TARGET_STATUS_CONTROL_TIMED_OUT => counts.control_timed_out += 1,
+            TARGET_STATUS_AGENT_TIMEOUT => counts.agent_timeout += 1,
+            TARGET_STATUS_CONTROL_TIMEOUT => counts.control_timeout += 1,
             TARGET_STATUS_CANCELED => counts.canceled += 1,
             _ => counts.failed += 1,
         }
@@ -546,7 +535,7 @@ pub(crate) fn stale_target_message(message: &str, reason: &str) -> String {
 }
 
 fn target_status_needs_reason(status: &str) -> bool {
-    !matches!(status, TARGET_STATUS_RUNNING | TARGET_STATUS_SUCCEEDED)
+    !matches!(status, TARGET_STATUS_RUNNING | TARGET_STATUS_COMPLETED)
 }
 
 fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status: &str) -> String {
@@ -682,7 +671,6 @@ async fn reject_job(
     );
     state.publish(WsEvent::JobRejected {
         job_id,
-        accepted_targets: 0,
         status: status.clone(),
     });
     let target_counts = create_job_target_counts(state, job_id).await?;
@@ -691,7 +679,6 @@ async fn reject_job(
         Json(CreateJobResponse {
             job_id,
             target_count,
-            accepted_targets: 0,
             status,
             target_counts,
         }),
@@ -765,10 +752,10 @@ pub(crate) fn target_outcome_from_gateway(
     let final_output = result.outputs.iter().rev().find(|output| output.done);
     let exit_code = final_output.and_then(|output| output.exit_code);
     let status = if final_output.is_some_and(output_indicates_timeout) {
-        TARGET_STATUS_AGENT_TIMED_OUT
+        TARGET_STATUS_AGENT_TIMEOUT
     } else {
         match exit_code {
-            Some(0) => TARGET_STATUS_SUCCEEDED,
+            Some(0) => TARGET_STATUS_COMPLETED,
             Some(_) => TARGET_STATUS_FAILED,
             None => TARGET_STATUS_RUNNING,
         }

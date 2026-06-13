@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, RwLock as StdRwLock,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -15,23 +16,34 @@ use tokio::{
     time::{self, sleep, Duration},
 };
 use tracing::warn;
-use vpsman_common::GatewayForwardMetricsSnapshot;
+use vpsman_common::{
+    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
+    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot,
+};
+
+type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub(crate) struct GatewayControlClient {
     api_url: Option<String>,
     internal_token: Option<String>,
     forwarder: Arc<GatewayEventForwarder>,
+    timeouts: GatewayHttpTimeouts,
 }
 
 impl GatewayControlClient {
-    pub(crate) fn new(api_url: Option<String>, internal_token: Option<String>) -> Self {
+    pub(crate) fn new(
+        api_url: Option<String>,
+        internal_token: Option<String>,
+        timeouts: GatewayHttpTimeouts,
+    ) -> Self {
         Self {
             api_url: api_url.map(|url| url.trim_end_matches('/').to_string()),
             internal_token: internal_token
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
             forwarder: Arc::default(),
+            timeouts,
         }
     }
 
@@ -39,13 +51,27 @@ impl GatewayControlClient {
         self.forwarder.metrics.clone()
     }
 
-    pub(crate) async fn post<T: serde::Serialize>(&self, target_key: &str, path: &str, value: &T) {
+    pub(crate) fn set_critical_failure_handler<F>(&self, handler: F)
+    where
+        F: Fn(String, &'static str) + Send + Sync + 'static,
+    {
+        if let Ok(mut slot) = self.forwarder.critical_failure_handler.write() {
+            *slot = Some(Arc::new(handler));
+        }
+    }
+
+    pub(crate) async fn post<T: serde::Serialize>(
+        &self,
+        target_key: &str,
+        path: &str,
+        value: &T,
+    ) -> Result<()> {
         let Some(api_url) = &self.api_url else {
-            return;
+            return Ok(());
         };
         let Ok(body) = serde_json::to_vec(value) else {
             warn!(path, "failed to serialize gateway event for API forwarding");
-            return;
+            return Ok(());
         };
         self.forwarder
             .enqueue(
@@ -55,9 +81,13 @@ impl GatewayControlClient {
                     path: path.to_string(),
                     body,
                     internal_token: self.internal_token.clone(),
+                    kind: GatewayForwardEventKind::for_path(path),
+                    created_at: time::Instant::now(),
+                    created_unix: unix_now(),
                 },
+                self.timeouts,
             )
-            .await;
+            .await
     }
 
     pub(crate) async fn validate_agent_identity(
@@ -76,6 +106,7 @@ impl GatewayControlClient {
                 noise_public_key_hex: noise_public_key_hex.to_string(),
             },
             self.internal_token.as_deref(),
+            self.timeouts,
         )
         .await?;
         serde_json::from_str(&body).context("failed to parse gateway identity validation response")
@@ -84,7 +115,9 @@ impl GatewayControlClient {
 
 #[derive(Default)]
 struct GatewayEventForwarder {
-    queues: Mutex<HashMap<String, mpsc::UnboundedSender<GatewayForwardEvent>>>,
+    queues: Mutex<HashMap<String, mpsc::Sender<GatewayForwardQueueItem>>>,
+    telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
+    critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
     metrics: Arc<GatewayForwardMetrics>,
 }
 
@@ -94,6 +127,41 @@ pub(crate) struct GatewayForwardMetrics {
     delivered_events: AtomicU64,
     retry_attempts: AtomicU64,
     active_queues: AtomicU64,
+    current_queue_depth: AtomicU64,
+    oldest_event_unix: AtomicU64,
+    dropped_events: AtomicU64,
+    telemetry_dropped_events: AtomicU64,
+    expired_events: AtomicU64,
+    critical_failures: AtomicU64,
+    dropped_by_kind: GatewayForwardKindAtomicCounters,
+    dropped_by_reason: GatewayForwardDropReasonAtomicCounters,
+    critical_failures_by_reason: GatewayForwardCriticalFailureAtomicCounters,
+    retained_output_truncated_events: AtomicU64,
+    unhealthy: AtomicBool,
+}
+
+#[derive(Default)]
+struct GatewayForwardKindAtomicCounters {
+    telemetry: AtomicU64,
+    command_output: AtomicU64,
+    lifecycle: AtomicU64,
+    terminal_output: AtomicU64,
+    other: AtomicU64,
+}
+
+#[derive(Default)]
+struct GatewayForwardDropReasonAtomicCounters {
+    global_queue_full: AtomicU64,
+    target_queue_full: AtomicU64,
+    expired: AtomicU64,
+    coalesced: AtomicU64,
+}
+
+#[derive(Default)]
+struct GatewayForwardCriticalFailureAtomicCounters {
+    global_queue_full: AtomicU64,
+    target_queue_full: AtomicU64,
+    expired: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -102,30 +170,251 @@ struct GatewayForwardEvent {
     path: String,
     body: Vec<u8>,
     internal_token: Option<String>,
+    kind: GatewayForwardEventKind,
+    created_at: time::Instant,
+    created_unix: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayForwardEventKind {
+    Telemetry,
+    CommandOutput,
+    Lifecycle,
+    TerminalOutput,
+    Other,
+}
+
+#[derive(Debug)]
+enum GatewayForwardQueueItem {
+    Event(GatewayForwardEvent),
+    Telemetry { created_unix: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayForwardDropReason {
+    GlobalQueueFull,
+    TargetQueueFull,
+    Expired,
+    Coalesced,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GatewayHttpTimeouts {
+    pub(crate) connect: Duration,
+    pub(crate) write: Duration,
+    pub(crate) read: Duration,
+    pub(crate) event_post: Duration,
+}
+
+impl Default for GatewayHttpTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            write: Duration::from_secs(10),
+            read: Duration::from_secs(15),
+            event_post: Duration::from_secs(15),
+        }
+    }
+}
+
+const PER_TARGET_QUEUE_CAPACITY: usize = 512;
+const GLOBAL_QUEUE_CAPACITY: u64 = 10_000;
+const TELEMETRY_EVENT_TTL: Duration = Duration::from_secs(60);
+const CRITICAL_EVENT_TTL: Duration = Duration::from_secs(300);
+const NONCRITICAL_EVENT_TTL: Duration = Duration::from_secs(120);
+
 impl GatewayEventForwarder {
-    async fn enqueue(&self, target_key: String, event: GatewayForwardEvent) {
-        let mut event = Some(event);
+    async fn enqueue(
+        &self,
+        target_key: String,
+        event: GatewayForwardEvent,
+        timeouts: GatewayHttpTimeouts,
+    ) -> Result<()> {
+        if event.kind == GatewayForwardEventKind::Telemetry {
+            return self.enqueue_telemetry(target_key, event, timeouts).await;
+        }
+        self.enqueue_event(target_key, event, timeouts).await
+    }
+
+    async fn enqueue_telemetry(
+        &self,
+        target_key: String,
+        event: GatewayForwardEvent,
+        timeouts: GatewayHttpTimeouts,
+    ) -> Result<()> {
+        if self.metrics.current_queue_depth.load(Ordering::Relaxed) >= GLOBAL_QUEUE_CAPACITY {
+            return self
+                .drop_enqueue_event(
+                    &target_key,
+                    event,
+                    GatewayForwardDropReason::GlobalQueueFull,
+                )
+                .await;
+        }
+
+        let mut pending = self.telemetry_pending.lock().await;
+        let created_unix = event.created_unix;
+        if let Some(previous) = pending.insert(target_key.clone(), event) {
+            drop(pending);
+            self.record_drop(&previous, GatewayForwardDropReason::Coalesced);
+            warn!(
+                path = %previous.path,
+                kind = ?previous.kind,
+                target_key,
+                "coalesced stale gateway telemetry before API forwarding"
+            );
+            return Ok(());
+        }
+        drop(pending);
+
+        if let Err(error) = self
+            .enqueue_queue_item(
+                target_key.clone(),
+                GatewayForwardQueueItem::Telemetry { created_unix },
+                timeouts,
+            )
+            .await
+        {
+            let removed = self.telemetry_pending.lock().await.remove(&target_key);
+            if let Some(event) = removed {
+                return self
+                    .drop_enqueue_event(
+                        &target_key,
+                        event,
+                        GatewayForwardDropReason::TargetQueueFull,
+                    )
+                    .await;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn enqueue_event(
+        &self,
+        target_key: String,
+        event: GatewayForwardEvent,
+        timeouts: GatewayHttpTimeouts,
+    ) -> Result<()> {
+        if self.metrics.current_queue_depth.load(Ordering::Relaxed) >= GLOBAL_QUEUE_CAPACITY {
+            return self
+                .drop_enqueue_event(
+                    &target_key,
+                    event,
+                    GatewayForwardDropReason::GlobalQueueFull,
+                )
+                .await;
+        }
+        self.enqueue_queue_item(target_key, GatewayForwardQueueItem::Event(event), timeouts)
+            .await
+    }
+
+    async fn enqueue_queue_item(
+        &self,
+        target_key: String,
+        item: GatewayForwardQueueItem,
+        timeouts: GatewayHttpTimeouts,
+    ) -> Result<()> {
         let mut queues = self.queues.lock().await;
-        if let Some(sender) = queues.get(&target_key) {
-            match sender.send(event.take().expect("event exists")) {
-                Ok(()) => {
-                    self.metrics.queued_events.fetch_add(1, Ordering::Relaxed);
-                    return;
+        if !queues.contains_key(&target_key) {
+            let (sender, receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+            let metrics = self.metrics.clone();
+            let telemetry_pending = self.telemetry_pending.clone();
+            let critical_failure_handler = self.critical_failure_handler.clone();
+            self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(run_forward_queue(
+                target_key.clone(),
+                receiver,
+                telemetry_pending,
+                metrics,
+                critical_failure_handler,
+                timeouts,
+            ));
+            queues.insert(target_key.clone(), sender);
+        }
+        let sender = queues
+            .get(&target_key)
+            .expect("queue sender exists after creation");
+        let event_unix = item.created_unix();
+        let previous_depth = self
+            .metrics
+            .current_queue_depth
+            .fetch_add(1, Ordering::Relaxed);
+        if previous_depth == 0 {
+            self.metrics
+                .oldest_event_unix
+                .store(event_unix, Ordering::Relaxed);
+        }
+        match sender.try_send(item) {
+            Ok(()) => {
+                self.metrics.queued_events.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(item))
+            | Err(mpsc::error::TrySendError::Closed(item)) => {
+                let previous = self
+                    .metrics
+                    .current_queue_depth
+                    .fetch_sub(1, Ordering::Relaxed);
+                if previous <= 1 {
+                    self.metrics.oldest_event_unix.store(0, Ordering::Relaxed);
                 }
-                Err(error) => {
-                    event = Some(error.0);
+                match item {
+                    GatewayForwardQueueItem::Event(event) => {
+                        self.drop_enqueue_event(
+                            &target_key,
+                            event,
+                            GatewayForwardDropReason::TargetQueueFull,
+                        )
+                        .await
+                    }
+                    GatewayForwardQueueItem::Telemetry { .. } => {
+                        Err(anyhow!("gateway_forwarder_target_queue_full"))
+                    }
                 }
             }
         }
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let metrics = self.metrics.clone();
-        self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(run_forward_queue(target_key.clone(), receiver, metrics));
-        let _ = sender.send(event.expect("event exists after queue creation"));
-        self.metrics.queued_events.fetch_add(1, Ordering::Relaxed);
-        queues.insert(target_key, sender);
+    }
+
+    async fn drop_enqueue_event(
+        &self,
+        target_key: &str,
+        event: GatewayForwardEvent,
+        reason: GatewayForwardDropReason,
+    ) -> Result<()> {
+        self.record_drop(&event, reason);
+        if event.kind.critical() {
+            self.record_critical_failure(reason);
+            self.notify_critical_failure(target_key, reason);
+            anyhow::bail!(
+                "gateway_forwarder_critical_event_dropped:{}:{}",
+                reason.as_str(),
+                event.path
+            );
+        }
+        warn!(
+            path = %event.path,
+            kind = ?event.kind,
+            reason = reason.as_str(),
+            "dropped gateway event before API forwarding"
+        );
+        Ok(())
+    }
+
+    fn record_drop(&self, event: &GatewayForwardEvent, reason: GatewayForwardDropReason) {
+        self.metrics.record_drop(event.kind, reason);
+    }
+
+    fn record_critical_failure(&self, reason: GatewayForwardDropReason) {
+        self.metrics.record_critical_failure(reason);
+    }
+
+    fn notify_critical_failure(&self, target_key: &str, reason: GatewayForwardDropReason) {
+        if let Ok(slot) = self.critical_failure_handler.read() {
+            if let Some(handler) = slot.as_ref() {
+                handler(target_key.to_string(), reason.as_str());
+            }
+        }
     }
 }
 
@@ -136,40 +425,256 @@ impl GatewayForwardMetrics {
             delivered_events: self.delivered_events.load(Ordering::Relaxed),
             retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
             active_queues: self.active_queues.load(Ordering::Relaxed),
+            current_queue_depth: self.current_queue_depth.load(Ordering::Relaxed),
+            oldest_event_age_secs: oldest_event_age_secs(
+                self.current_queue_depth.load(Ordering::Relaxed),
+                self.oldest_event_unix.load(Ordering::Relaxed),
+            ),
+            dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            telemetry_dropped_events: self.telemetry_dropped_events.load(Ordering::Relaxed),
+            expired_events: self.expired_events.load(Ordering::Relaxed),
+            critical_failures: self.critical_failures.load(Ordering::Relaxed),
+            dropped_by_kind: self.dropped_by_kind.snapshot(),
+            dropped_by_reason: self.dropped_by_reason.snapshot(),
+            critical_failures_by_reason: self.critical_failures_by_reason.snapshot(),
+            retained_output_truncated_events: self
+                .retained_output_truncated_events
+                .load(Ordering::Relaxed),
+            unhealthy: self.unhealthy.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn record_retained_output_truncated(&self, count: u64) {
+        self.retained_output_truncated_events
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn record_drop(&self, kind: GatewayForwardEventKind, reason: GatewayForwardDropReason) {
+        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+        if kind == GatewayForwardEventKind::Telemetry {
+            self.telemetry_dropped_events
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.dropped_by_kind.increment(kind);
+        self.dropped_by_reason.increment(reason);
+        if reason == GatewayForwardDropReason::Expired {
+            self.expired_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_critical_failure(&self, reason: GatewayForwardDropReason) {
+        self.critical_failures.fetch_add(1, Ordering::Relaxed);
+        self.critical_failures_by_reason.increment(reason);
+        self.unhealthy.store(true, Ordering::Relaxed);
+    }
+}
+
+impl GatewayForwardKindAtomicCounters {
+    fn increment(&self, kind: GatewayForwardEventKind) {
+        match kind {
+            GatewayForwardEventKind::Telemetry => &self.telemetry,
+            GatewayForwardEventKind::CommandOutput => &self.command_output,
+            GatewayForwardEventKind::Lifecycle => &self.lifecycle,
+            GatewayForwardEventKind::TerminalOutput => &self.terminal_output,
+            GatewayForwardEventKind::Other => &self.other,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> GatewayForwardEventKindCounters {
+        GatewayForwardEventKindCounters {
+            telemetry: self.telemetry.load(Ordering::Relaxed),
+            command_output: self.command_output.load(Ordering::Relaxed),
+            lifecycle: self.lifecycle.load(Ordering::Relaxed),
+            terminal_output: self.terminal_output.load(Ordering::Relaxed),
+            other: self.other.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl GatewayForwardDropReasonAtomicCounters {
+    fn increment(&self, reason: GatewayForwardDropReason) {
+        match reason {
+            GatewayForwardDropReason::GlobalQueueFull => &self.global_queue_full,
+            GatewayForwardDropReason::TargetQueueFull => &self.target_queue_full,
+            GatewayForwardDropReason::Expired => &self.expired,
+            GatewayForwardDropReason::Coalesced => &self.coalesced,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> GatewayForwardDropReasonCounters {
+        GatewayForwardDropReasonCounters {
+            global_queue_full: self.global_queue_full.load(Ordering::Relaxed),
+            target_queue_full: self.target_queue_full.load(Ordering::Relaxed),
+            expired: self.expired.load(Ordering::Relaxed),
+            coalesced: self.coalesced.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl GatewayForwardCriticalFailureAtomicCounters {
+    fn increment(&self, reason: GatewayForwardDropReason) {
+        match reason {
+            GatewayForwardDropReason::GlobalQueueFull => &self.global_queue_full,
+            GatewayForwardDropReason::TargetQueueFull => &self.target_queue_full,
+            GatewayForwardDropReason::Expired => &self.expired,
+            GatewayForwardDropReason::Coalesced => return,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> GatewayForwardCriticalFailureCounters {
+        GatewayForwardCriticalFailureCounters {
+            global_queue_full: self.global_queue_full.load(Ordering::Relaxed),
+            target_queue_full: self.target_queue_full.load(Ordering::Relaxed),
+            expired: self.expired.load(Ordering::Relaxed),
         }
     }
 }
 
 async fn run_forward_queue(
     target_key: String,
-    mut receiver: mpsc::UnboundedReceiver<GatewayForwardEvent>,
+    mut receiver: mpsc::Receiver<GatewayForwardQueueItem>,
+    telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
     metrics: Arc<GatewayForwardMetrics>,
+    critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
+    timeouts: GatewayHttpTimeouts,
 ) {
-    while let Some(event) = receiver.recv().await {
-        post_json_retry_forever(event, &target_key, &metrics).await;
-        metrics.delivered_events.fetch_add(1, Ordering::Relaxed);
+    while let Some(item) = receiver.recv().await {
+        let Some(event) = queue_item_event(item, &target_key, &telemetry_pending).await else {
+            finish_forward_event(&metrics);
+            continue;
+        };
+        if telemetry_superseded(&event, &target_key, &telemetry_pending).await {
+            metrics.record_drop(event.kind, GatewayForwardDropReason::Coalesced);
+            warn!(
+                path = %event.path,
+                kind = ?event.kind,
+                target_key,
+                "dropped superseded gateway telemetry before API forwarding"
+            );
+            finish_forward_event(&metrics);
+            continue;
+        }
+        if event.expired() {
+            metrics.record_drop(event.kind, GatewayForwardDropReason::Expired);
+            if event.kind.critical() {
+                metrics.record_critical_failure(GatewayForwardDropReason::Expired);
+                notify_critical_failure(
+                    &critical_failure_handler,
+                    &target_key,
+                    GatewayForwardDropReason::Expired,
+                );
+            }
+            warn!(
+                path = %event.path,
+                kind = ?event.kind,
+                target_key,
+                "expired gateway event before API forwarding"
+            );
+            finish_forward_event(&metrics);
+            continue;
+        }
+        if post_json_retry_until_expired(
+            event,
+            &target_key,
+            &metrics,
+            &critical_failure_handler,
+            &telemetry_pending,
+            timeouts,
+        )
+        .await
+        {
+            metrics.delivered_events.fetch_add(1, Ordering::Relaxed);
+        }
+        finish_forward_event(&metrics);
     }
     metrics.active_queues.fetch_sub(1, Ordering::Relaxed);
 }
 
-async fn post_json_retry_forever(
+async fn queue_item_event(
+    item: GatewayForwardQueueItem,
+    target_key: &str,
+    telemetry_pending: &Mutex<HashMap<String, GatewayForwardEvent>>,
+) -> Option<GatewayForwardEvent> {
+    match item {
+        GatewayForwardQueueItem::Event(event) => Some(event),
+        GatewayForwardQueueItem::Telemetry { .. } => {
+            telemetry_pending.lock().await.remove(target_key)
+        }
+    }
+}
+
+async fn telemetry_superseded(
+    event: &GatewayForwardEvent,
+    target_key: &str,
+    telemetry_pending: &Mutex<HashMap<String, GatewayForwardEvent>>,
+) -> bool {
+    event.kind == GatewayForwardEventKind::Telemetry
+        && telemetry_pending.lock().await.contains_key(target_key)
+}
+
+fn finish_forward_event(metrics: &GatewayForwardMetrics) {
+    let previous = metrics.current_queue_depth.fetch_sub(1, Ordering::Relaxed);
+    if previous <= 1 {
+        metrics.oldest_event_unix.store(0, Ordering::Relaxed);
+    }
+}
+
+async fn post_json_retry_until_expired(
     event: GatewayForwardEvent,
     target_key: &str,
     metrics: &GatewayForwardMetrics,
-) {
+    critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
+    telemetry_pending: &Mutex<HashMap<String, GatewayForwardEvent>>,
+    timeouts: GatewayHttpTimeouts,
+) -> bool {
     let mut attempt = 1_u64;
     loop {
+        if telemetry_superseded(&event, target_key, telemetry_pending).await {
+            metrics.record_drop(event.kind, GatewayForwardDropReason::Coalesced);
+            warn!(
+                path = %event.path,
+                kind = ?event.kind,
+                target_key,
+                attempt,
+                "stopped retrying superseded gateway telemetry"
+            );
+            return false;
+        }
         match post_json_bytes(
             &event.api_url,
             &event.path,
             &event.body,
             event.internal_token.as_deref(),
+            timeouts,
         )
         .await
         {
-            Ok(_) => return,
+            Ok(_) => return true,
             Err(error) => {
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
+                if event.expired() {
+                    metrics.record_drop(event.kind, GatewayForwardDropReason::Expired);
+                    if event.kind.critical() {
+                        metrics.record_critical_failure(GatewayForwardDropReason::Expired);
+                        notify_critical_failure(
+                            critical_failure_handler,
+                            target_key,
+                            GatewayForwardDropReason::Expired,
+                        );
+                    }
+                    warn!(
+                        %error,
+                        path = %event.path,
+                        kind = ?event.kind,
+                        target_key,
+                        attempt,
+                        "gateway event forwarding expired"
+                    );
+                    return false;
+                }
                 warn!(
                     %error,
                     path = %event.path,
@@ -179,9 +684,21 @@ async fn post_json_retry_forever(
                 );
                 let backoff_ms =
                     250_u64.saturating_mul(2_u64.saturating_pow((attempt - 1).min(7) as u32));
-                sleep(Duration::from_millis(backoff_ms.min(30_000))).await;
+                sleep(Duration::from_millis(backoff_ms.min(5_000))).await;
                 attempt = attempt.saturating_add(1);
             }
+        }
+    }
+}
+
+fn notify_critical_failure(
+    handler_slot: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
+    target_key: &str,
+    reason: GatewayForwardDropReason,
+) {
+    if let Ok(slot) = handler_slot.read() {
+        if let Some(handler) = slot.as_ref() {
+            handler(target_key.to_string(), reason.as_str());
         }
     }
 }
@@ -191,9 +708,10 @@ async fn post_json<T: serde::Serialize>(
     path: &str,
     value: &T,
     internal_token: Option<&str>,
+    timeouts: GatewayHttpTimeouts,
 ) -> Result<String> {
     let body = serde_json::to_vec(value)?;
-    post_json_bytes(base_url, path, &body, internal_token).await
+    post_json_bytes(base_url, path, &body, internal_token, timeouts).await
 }
 
 async fn post_json_bytes(
@@ -201,6 +719,22 @@ async fn post_json_bytes(
     path: &str,
     body: &[u8],
     internal_token: Option<&str>,
+    timeouts: GatewayHttpTimeouts,
+) -> Result<String> {
+    time::timeout(
+        timeouts.event_post,
+        post_json_bytes_inner(base_url, path, body, internal_token, timeouts),
+    )
+    .await
+    .context("API event post timed out")?
+}
+
+async fn post_json_bytes_inner(
+    base_url: &str,
+    path: &str,
+    body: &[u8],
+    internal_token: Option<&str>,
+    timeouts: GatewayHttpTimeouts,
 ) -> Result<String> {
     let without_scheme = base_url
         .strip_prefix("http://")
@@ -210,7 +744,7 @@ async fn post_json_bytes(
         .map(|(host, rest)| (host, format!("/{rest}")))
         .unwrap_or((without_scheme, String::new()));
     let request_path = format!("{prefix}{path}");
-    let mut stream = time::timeout(Duration::from_secs(10), TcpStream::connect(host_port))
+    let mut stream = time::timeout(timeouts.connect, TcpStream::connect(host_port))
         .await
         .context("API connect timed out")?
         .with_context(|| format!("failed to connect to API at {host_port}"))?;
@@ -220,18 +754,15 @@ async fn post_json_bytes(
         "POST {request_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    time::timeout(
-        Duration::from_secs(10),
-        stream.write_all(request.as_bytes()),
-    )
-    .await
-    .context("API request header write timed out")??;
-    time::timeout(Duration::from_secs(10), stream.write_all(body))
+    time::timeout(timeouts.write, stream.write_all(request.as_bytes()))
+        .await
+        .context("API request header write timed out")??;
+    time::timeout(timeouts.write, stream.write_all(body))
         .await
         .context("API request body write timed out")??;
 
     let mut response = Vec::new();
-    time::timeout(Duration::from_secs(15), stream.read_to_end(&mut response))
+    time::timeout(timeouts.read, stream.read_to_end(&mut response))
         .await
         .context("API response read timed out")??;
     let response = String::from_utf8_lossy(&response);
@@ -248,6 +779,73 @@ async fn post_json_bytes(
     Ok(body.trim().to_string())
 }
 
+impl GatewayForwardEventKind {
+    fn for_path(path: &str) -> Self {
+        match path {
+            "/internal/v1/gateway/telemetry" => Self::Telemetry,
+            "/internal/v1/gateway/command-output" => Self::CommandOutput,
+            "/internal/v1/gateway/session-started"
+            | "/internal/v1/gateway/session-ended"
+            | "/internal/v1/gateway/agent-hello" => Self::Lifecycle,
+            "/internal/v1/gateway/terminal-output" => Self::TerminalOutput,
+            _ => Self::Other,
+        }
+    }
+
+    fn critical(self) -> bool {
+        matches!(self, Self::CommandOutput | Self::Lifecycle)
+    }
+
+    fn ttl(self) -> Duration {
+        match self {
+            Self::Telemetry => TELEMETRY_EVENT_TTL,
+            Self::CommandOutput | Self::Lifecycle => CRITICAL_EVENT_TTL,
+            Self::TerminalOutput | Self::Other => NONCRITICAL_EVENT_TTL,
+        }
+    }
+}
+
+impl GatewayForwardEvent {
+    fn expired(&self) -> bool {
+        self.created_at.elapsed() >= self.kind.ttl()
+    }
+}
+
+impl GatewayForwardQueueItem {
+    fn created_unix(&self) -> u64 {
+        match self {
+            Self::Event(event) => event.created_unix,
+            Self::Telemetry { created_unix } => *created_unix,
+        }
+    }
+}
+
+impl GatewayForwardDropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GlobalQueueFull => "global_queue_full",
+            Self::TargetQueueFull => "target_queue_full",
+            Self::Expired => "expired",
+            Self::Coalesced => "coalesced",
+        }
+    }
+}
+
+fn oldest_event_age_secs(current_depth: u64, oldest_unix: u64) -> Option<u64> {
+    if current_depth == 0 || oldest_unix == 0 {
+        None
+    } else {
+        Some(unix_now().saturating_sub(oldest_unix))
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Serialize)]
 struct GatewayIdentityValidationRequest {
     client_id: String,
@@ -258,4 +856,98 @@ struct GatewayIdentityValidationRequest {
 pub(crate) struct GatewayIdentityValidationResponse {
     pub(crate) accepted: bool,
     pub(crate) message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    fn test_event(path: &str, body: &[u8]) -> GatewayForwardEvent {
+        GatewayForwardEvent {
+            api_url: "http://127.0.0.1:9".to_string(),
+            path: path.to_string(),
+            body: body.to_vec(),
+            internal_token: Some("test-token".to_string()),
+            kind: GatewayForwardEventKind::for_path(path),
+            created_at: time::Instant::now(),
+            created_unix: unix_now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_enqueue_keeps_latest_pending_event() {
+        let forwarder = GatewayEventForwarder::default();
+        let (sender, _receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+        forwarder
+            .queues
+            .lock()
+            .await
+            .insert("client-a".to_string(), sender);
+
+        forwarder
+            .enqueue(
+                "client-a".to_string(),
+                test_event("/internal/v1/gateway/telemetry", br#"{"seq":1}"#),
+                GatewayHttpTimeouts::default(),
+            )
+            .await
+            .unwrap();
+        forwarder
+            .enqueue(
+                "client-a".to_string(),
+                test_event("/internal/v1/gateway/telemetry", br#"{"seq":2}"#),
+                GatewayHttpTimeouts::default(),
+            )
+            .await
+            .unwrap();
+
+        let pending = forwarder.telemetry_pending.lock().await;
+        assert_eq!(
+            pending.get("client-a").map(|event| event.body.as_slice()),
+            Some(br#"{"seq":2}"#.as_slice())
+        );
+        let snapshot = forwarder.metrics.snapshot();
+        assert_eq!(snapshot.queued_events, 1);
+        assert_eq!(snapshot.current_queue_depth, 1);
+        assert_eq!(snapshot.dropped_events, 1);
+        assert_eq!(snapshot.telemetry_dropped_events, 1);
+        assert_eq!(snapshot.dropped_by_kind.telemetry, 1);
+        assert_eq!(snapshot.dropped_by_reason.coalesced, 1);
+    }
+
+    #[tokio::test]
+    async fn critical_enqueue_overflow_marks_unhealthy_and_notifies_handler() {
+        let forwarder = GatewayEventForwarder::default();
+        forwarder
+            .metrics
+            .current_queue_depth
+            .store(GLOBAL_QUEUE_CAPACITY, Ordering::Relaxed);
+        let (sent, received) = oneshot::channel::<(String, &'static str)>();
+        let sent = std::sync::Mutex::new(Some(sent));
+        *forwarder.critical_failure_handler.write().unwrap() =
+            Some(Arc::new(move |client_id, reason| {
+                if let Some(sender) = sent.lock().unwrap().take() {
+                    let _ = sender.send((client_id, reason));
+                }
+            }));
+
+        let result = forwarder
+            .enqueue(
+                "client-a".to_string(),
+                test_event("/internal/v1/gateway/command-output", br#"{}"#),
+                GatewayHttpTimeouts::default(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let (client_id, reason) = received.await.unwrap();
+        assert_eq!(client_id, "client-a");
+        assert_eq!(reason, "global_queue_full");
+        let snapshot = forwarder.metrics.snapshot();
+        assert!(snapshot.unhealthy);
+        assert_eq!(snapshot.critical_failures, 1);
+        assert_eq!(snapshot.critical_failures_by_reason.global_queue_full, 1);
+        assert_eq!(snapshot.dropped_by_kind.command_output, 1);
+    }
 }

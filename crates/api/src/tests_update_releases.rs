@@ -138,6 +138,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: true,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -146,7 +147,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         .unwrap();
 
     assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
-    assert_eq!(response.accepted_targets, 0);
     assert_eq!(response.status, "failed");
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs[0].payload_hash, command_hash);
@@ -187,6 +187,7 @@ async fn uploaded_agent_update_artifact_is_hosted_and_sanitized() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -326,6 +327,7 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let headers = crate::test_auth_headers(&state).await;
 
@@ -405,6 +407,7 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let signature_hex = hex::encode(sign_update_artifact_hash(&signing_key, &sha256_hex));
     let signing_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
@@ -531,6 +534,7 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     };
     let headers = crate::test_auth_headers(&state).await;
     let mut request = signed_release_request("vpsman-agent", "2.4.0", "nightly");
@@ -662,6 +666,13 @@ fn test_args() -> Args {
         migrations_dir: PathBuf::from("migrations"),
         internal_token: None,
         gateway_control_url: None,
+        internal_http_connect_secs: 10,
+        internal_http_write_secs: 10,
+        internal_http_read_secs: 15,
+        dispatch_ack_secs: 30,
+        event_post_secs: 15,
+        dispatcher_batch: 128,
+        dispatcher_in_flight: 64,
         backup_object_store_dir: None,
         update_object_store_dir: None,
         update_object_endpoint: None,

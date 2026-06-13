@@ -1,4 +1,8 @@
 use serde::Serialize;
+use vpsman_common::{
+    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
+    GatewayForwardEventKindCounters,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DashboardOverviewView {
@@ -241,7 +245,7 @@ pub(crate) struct SystemDashboardDbPoolView {
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct SystemDashboardDispatchView {
     pub(crate) active_jobs: i64,
-    pub(crate) pending_jobs: i64,
+    pub(crate) queued_jobs: i64,
     pub(crate) running_jobs: i64,
     pub(crate) queue_depth: i64,
     pub(crate) total_dispatch_attempts: i64,
@@ -250,13 +254,13 @@ pub(crate) struct SystemDashboardDispatchView {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct SystemDashboardTargetsView {
-    pub(crate) pending: i64,
-    pub(crate) delivering: i64,
+    pub(crate) queued: i64,
+    pub(crate) dispatching: i64,
     pub(crate) running: i64,
     pub(crate) active: i64,
     pub(crate) deadline_expired_active: i64,
-    pub(crate) control_timed_out_last_24h: i64,
-    pub(crate) agent_timed_out_last_24h: i64,
+    pub(crate) control_timeout_last_24h: i64,
+    pub(crate) agent_timeout_last_24h: i64,
     pub(crate) canceled_last_24h: i64,
 }
 
@@ -274,6 +278,16 @@ pub(crate) struct SystemDashboardGatewayEventsView {
     pub(crate) delivered_events: Option<u64>,
     pub(crate) retry_attempts: Option<u64>,
     pub(crate) active_queues: Option<u64>,
+    pub(crate) current_queue_depth: Option<u64>,
+    pub(crate) oldest_event_age_secs: Option<u64>,
+    pub(crate) dropped_events: Option<u64>,
+    pub(crate) telemetry_dropped_events: Option<u64>,
+    pub(crate) expired_events: Option<u64>,
+    pub(crate) critical_failures: Option<u64>,
+    pub(crate) dropped_by_kind: GatewayForwardEventKindCounters,
+    pub(crate) dropped_by_reason: GatewayForwardDropReasonCounters,
+    pub(crate) critical_failures_by_reason: GatewayForwardCriticalFailureCounters,
+    pub(crate) retained_output_truncated_events: Option<u64>,
     pub(crate) status: String,
 }
 

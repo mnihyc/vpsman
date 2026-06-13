@@ -33,33 +33,35 @@ impl Repository {
             Self::Memory(state) => {
                 let jobs = state.jobs.read().await;
                 let targets = state.job_targets.read().await;
-                let pending_jobs = jobs
+                let queued_jobs = jobs
                     .iter()
-                    .filter(|job| job.completed_at.is_none() && job.status == "pending")
+                    .filter(|job| job.completed_at.is_none() && job.status == "queued")
                     .count() as i64;
                 let running_jobs = jobs
                     .iter()
                     .filter(|job| job.completed_at.is_none() && job.status == "running")
                     .count() as i64;
-                let pending = targets
+                let queued = targets
                     .iter()
-                    .filter(|target| target.completed_at.is_none() && target.status == "pending")
+                    .filter(|target| target.completed_at.is_none() && target.status == "queued")
                     .count() as i64;
-                let delivering = targets
+                let dispatching = targets
                     .iter()
-                    .filter(|target| target.completed_at.is_none() && target.status == "delivering")
+                    .filter(|target| {
+                        target.completed_at.is_none() && target.status == "dispatching"
+                    })
                     .count() as i64;
                 let running = targets
                     .iter()
                     .filter(|target| target.completed_at.is_none() && target.status == "running")
                     .count() as i64;
-                let control_timed_out = targets
+                let control_timeout = targets
                     .iter()
-                    .filter(|target| target.status == "control_timed_out")
+                    .filter(|target| target.status == "control_timeout")
                     .count() as i64;
-                let agent_timed_out = targets
+                let agent_timeout = targets
                     .iter()
-                    .filter(|target| target.status == "agent_timed_out")
+                    .filter(|target| target.status == "agent_timeout")
                     .count() as i64;
                 let canceled = targets
                     .iter()
@@ -73,21 +75,21 @@ impl Repository {
                         in_use_connections: 0,
                     },
                     dispatch: SystemDashboardDispatchView {
-                        active_jobs: pending_jobs + running_jobs,
-                        pending_jobs,
+                        active_jobs: queued_jobs + running_jobs,
+                        queued_jobs,
                         running_jobs,
-                        queue_depth: pending + delivering,
+                        queue_depth: queued + dispatching,
                         total_dispatch_attempts: 0,
                         retried_targets: 0,
                     },
                     targets: SystemDashboardTargetsView {
-                        pending,
-                        delivering,
+                        queued,
+                        dispatching,
                         running,
-                        active: delivering + running,
+                        active: dispatching + running,
                         deadline_expired_active: 0,
-                        control_timed_out_last_24h: control_timed_out,
-                        agent_timed_out_last_24h: agent_timed_out,
+                        control_timeout_last_24h: control_timeout,
+                        agent_timeout_last_24h: agent_timeout,
                         canceled_last_24h: canceled,
                     },
                     cancellations: SystemDashboardCancellationsView::default(),
@@ -97,24 +99,24 @@ impl Repository {
                 let target_row = sqlx::query(
                     r#"
                     SELECT
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'pending')::bigint AS pending,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'delivering')::bigint AS delivering,
+                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued,
+                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'dispatching')::bigint AS dispatching,
                         COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status IN ('delivering', 'running'))::bigint AS active,
+                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status IN ('dispatching', 'running'))::bigint AS active,
                         COUNT(*) FILTER (
                             WHERE completed_at IS NULL
-                              AND status IN ('delivering', 'running')
+                              AND status IN ('dispatching', 'running')
                               AND deadline_at IS NOT NULL
                               AND deadline_at <= now()
                         )::bigint AS deadline_expired_active,
                         COUNT(*) FILTER (
-                            WHERE status = 'control_timed_out'
+                            WHERE status = 'control_timeout'
                               AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS control_timed_out_last_24h,
+                        )::bigint AS control_timeout_last_24h,
                         COUNT(*) FILTER (
-                            WHERE status = 'agent_timed_out'
+                            WHERE status = 'agent_timeout'
                               AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS agent_timed_out_last_24h,
+                        )::bigint AS agent_timeout_last_24h,
                         COUNT(*) FILTER (
                             WHERE status = 'canceled'
                               AND COALESCE(completed_at, cancel_acked_at, cancel_sent_at, cancel_requested_at, started_at) >= now() - interval '24 hours'
@@ -138,7 +140,7 @@ impl Repository {
                     r#"
                     SELECT
                         COUNT(*) FILTER (WHERE completed_at IS NULL)::bigint AS active_jobs,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'pending')::bigint AS pending_jobs,
+                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued_jobs,
                         COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running_jobs
                     FROM jobs
                     "#,
@@ -157,22 +159,21 @@ impl Repository {
                     },
                     dispatch: SystemDashboardDispatchView {
                         active_jobs: job_row.try_get("active_jobs")?,
-                        pending_jobs: job_row.try_get("pending_jobs")?,
+                        queued_jobs: job_row.try_get("queued_jobs")?,
                         running_jobs: job_row.try_get("running_jobs")?,
-                        queue_depth: target_row.try_get::<i64, _>("pending")?
-                            + target_row.try_get::<i64, _>("delivering")?,
+                        queue_depth: target_row.try_get::<i64, _>("queued")?
+                            + target_row.try_get::<i64, _>("dispatching")?,
                         total_dispatch_attempts: target_row.try_get("total_dispatch_attempts")?,
                         retried_targets: target_row.try_get("retried_targets")?,
                     },
                     targets: SystemDashboardTargetsView {
-                        pending: target_row.try_get("pending")?,
-                        delivering: target_row.try_get("delivering")?,
+                        queued: target_row.try_get("queued")?,
+                        dispatching: target_row.try_get("dispatching")?,
                         running: target_row.try_get("running")?,
                         active: target_row.try_get("active")?,
                         deadline_expired_active: target_row.try_get("deadline_expired_active")?,
-                        control_timed_out_last_24h: target_row
-                            .try_get("control_timed_out_last_24h")?,
-                        agent_timed_out_last_24h: target_row.try_get("agent_timed_out_last_24h")?,
+                        control_timeout_last_24h: target_row.try_get("control_timeout_last_24h")?,
+                        agent_timeout_last_24h: target_row.try_get("agent_timeout_last_24h")?,
                         canceled_last_24h: target_row.try_get("canceled_last_24h")?,
                     },
                     cancellations: SystemDashboardCancellationsView {
@@ -383,10 +384,7 @@ pub(crate) fn system_metric_samples_from_snapshot(
             snapshot.db_pool.in_use_connections as f64,
         ),
         sample("dispatch.active_jobs", snapshot.dispatch.active_jobs as f64),
-        sample(
-            "dispatch.pending_jobs",
-            snapshot.dispatch.pending_jobs as f64,
-        ),
+        sample("dispatch.queued_jobs", snapshot.dispatch.queued_jobs as f64),
         sample(
             "dispatch.running_jobs",
             snapshot.dispatch.running_jobs as f64,
@@ -400,8 +398,8 @@ pub(crate) fn system_metric_samples_from_snapshot(
             "dispatch.retried_targets",
             snapshot.dispatch.retried_targets as f64,
         ),
-        sample("targets.pending", snapshot.targets.pending as f64),
-        sample("targets.delivering", snapshot.targets.delivering as f64),
+        sample("targets.queued", snapshot.targets.queued as f64),
+        sample("targets.dispatching", snapshot.targets.dispatching as f64),
         sample("targets.running", snapshot.targets.running as f64),
         sample("targets.active", snapshot.targets.active as f64),
         sample(
@@ -409,12 +407,12 @@ pub(crate) fn system_metric_samples_from_snapshot(
             snapshot.targets.deadline_expired_active as f64,
         ),
         sample(
-            "targets.control_timed_out_last_24h",
-            snapshot.targets.control_timed_out_last_24h as f64,
+            "targets.control_timeout_last_24h",
+            snapshot.targets.control_timeout_last_24h as f64,
         ),
         sample(
-            "targets.agent_timed_out_last_24h",
-            snapshot.targets.agent_timed_out_last_24h as f64,
+            "targets.agent_timeout_last_24h",
+            snapshot.targets.agent_timeout_last_24h as f64,
         ),
         sample(
             "targets.canceled_last_24h",
@@ -431,7 +429,7 @@ pub(crate) fn system_metric_samples_from_snapshot(
             snapshot.cancellations.awaiting_ack as f64,
         ),
     ];
-    if gateway_events.status == "live" {
+    if matches!(gateway_events.status.as_str(), "live" | "unhealthy") {
         samples.extend([
             sample(
                 "gateway_events.queued_events",
@@ -448,6 +446,84 @@ pub(crate) fn system_metric_samples_from_snapshot(
             sample(
                 "gateway_events.active_queues",
                 gateway_events.active_queues.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.current_queue_depth",
+                gateway_events.current_queue_depth.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.oldest_event_age_secs",
+                gateway_events.oldest_event_age_secs.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.dropped_events",
+                gateway_events.dropped_events.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.telemetry_dropped_events",
+                gateway_events.telemetry_dropped_events.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.expired_events",
+                gateway_events.expired_events.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.critical_failures",
+                gateway_events.critical_failures.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_kind.telemetry",
+                gateway_events.dropped_by_kind.telemetry as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_kind.command_output",
+                gateway_events.dropped_by_kind.command_output as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_kind.lifecycle",
+                gateway_events.dropped_by_kind.lifecycle as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_kind.terminal_output",
+                gateway_events.dropped_by_kind.terminal_output as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_kind.other",
+                gateway_events.dropped_by_kind.other as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_reason.global_queue_full",
+                gateway_events.dropped_by_reason.global_queue_full as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_reason.target_queue_full",
+                gateway_events.dropped_by_reason.target_queue_full as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_reason.expired",
+                gateway_events.dropped_by_reason.expired as f64,
+            ),
+            sample(
+                "gateway_events.dropped_by_reason.coalesced",
+                gateway_events.dropped_by_reason.coalesced as f64,
+            ),
+            sample(
+                "gateway_events.critical_failures_by_reason.global_queue_full",
+                gateway_events.critical_failures_by_reason.global_queue_full as f64,
+            ),
+            sample(
+                "gateway_events.critical_failures_by_reason.target_queue_full",
+                gateway_events.critical_failures_by_reason.target_queue_full as f64,
+            ),
+            sample(
+                "gateway_events.critical_failures_by_reason.expired",
+                gateway_events.critical_failures_by_reason.expired as f64,
+            ),
+            sample(
+                "gateway_events.retained_output_truncated_events",
+                gateway_events
+                    .retained_output_truncated_events
+                    .unwrap_or_default() as f64,
             ),
         ]);
     }

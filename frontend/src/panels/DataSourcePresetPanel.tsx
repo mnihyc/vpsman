@@ -638,7 +638,7 @@ export function DataSourcePresetPanel({
               Review apply
             </button>
           )}
-          {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} accepted</span>}
+          {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} {lastApplyJob.status}</span>}
         </form>
 
         <form className="compactForm presetForm" onSubmit={(event) => event.preventDefault()}>

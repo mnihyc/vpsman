@@ -486,7 +486,7 @@ partial_job_id="$(jq -r '.job_id' <<<"$partial_job_json")"
 smoke_assert_job_create_queued "$partial_job_json" "$agent_count"
 partial_final="$(smoke_wait_api_job_status "$api_url" "$partial_job_id" "terminal" 120 "$access_token")"
 jq -e --argjson expected "$agent_count" '
-  .status == "partially_completed" and .target_count == $expected
+  .status == "partial_success" and .target_count == $expected
 ' <<<"$partial_final" >/dev/null
 api_get "/api/v1/jobs/$partial_job_id/targets" | jq -e \
   --argjson expected "$agent_count" \
@@ -494,7 +494,7 @@ api_get "/api/v1/jobs/$partial_job_id/targets" | jq -e \
   --argjson failed "${#disconnect_indexes[@]}" '
     length == $expected and
     ([.[] | select(.status == "completed")] | length) == $completed and
-    ([.[] | select(.status == "dispatch_failed" and (.message | contains("agent_not_online")))] | length) == $failed
+    ([.[] | select(.status == "failed" and (.message | contains("agent_not_online")))] | length) == $failed
   ' >/dev/null
 
 for index in 9 10 11 12; do

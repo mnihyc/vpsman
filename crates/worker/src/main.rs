@@ -26,9 +26,8 @@ use vpsman_common::{
 };
 use vpsman_server_core::{
     job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
-    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_PENDING,
-    JOB_STATUS_SKIPPED, JOB_STATUS_SUCCEEDED_WITH_SKIPS, TARGET_STATUS_PENDING,
-    TARGET_STATUS_SKIPPED,
+    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_PARTIAL_SUCCESS,
+    JOB_STATUS_QUEUED, JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
 };
 
 mod alert_notifications;
@@ -1521,12 +1520,12 @@ async fn materialize_due_schedule(
     let status = if targets.is_empty() {
         JOB_STATUS_SKIPPED
     } else if dispatch_targets.is_empty() && !capability_skips.is_empty() {
-        JOB_STATUS_SUCCEEDED_WITH_SKIPS
+        JOB_STATUS_PARTIAL_SUCCESS
     } else {
-        JOB_STATUS_PENDING
+        JOB_STATUS_QUEUED
     };
     let job_completed_immediately =
-        matches!(status, JOB_STATUS_SKIPPED | JOB_STATUS_SUCCEEDED_WITH_SKIPS);
+        matches!(status, JOB_STATUS_SKIPPED | JOB_STATUS_PARTIAL_SUCCESS);
     let command_type = format!(
         "scheduled_{}",
         scheduled_command_type_label(&operation, operation_type)
@@ -1575,7 +1574,7 @@ async fn materialize_due_schedule(
         let target_status = if skip.is_some() {
             TARGET_STATUS_SKIPPED
         } else {
-            TARGET_STATUS_PENDING
+            TARGET_STATUS_QUEUED
         };
         sqlx::query(
             r#"
@@ -1654,7 +1653,7 @@ async fn materialize_due_schedule(
             last_job_status = $3,
             last_job_completed_at = CASE WHEN $4 THEN now() ELSE NULL END,
             last_job_error = CASE
-                WHEN $3 IN ('succeeded', 'succeeded_with_skips', 'skipped') THEN NULL
+                WHEN $3 IN ('completed', 'partial_success', 'skipped') THEN NULL
                 ELSE $3
             END,
             updated_at = now()

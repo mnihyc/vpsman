@@ -554,7 +554,7 @@ impl Repository {
                             && targets.iter().any(|target| {
                                 target.job_id == job.id
                                     && target.client_id == backup_request.client_id
-                                    && target.status == "succeeded"
+                                    && target.status == "completed"
                             })
                     })
                     .map(|job| {
@@ -593,7 +593,7 @@ impl Repository {
                     JOIN job_targets target
                       ON target.job_id = job.id
                      AND target.client_id = $2
-                     AND target.status = 'succeeded'
+                     AND target.status = 'completed'
                     WHERE job.operation->>'type' = 'backup'
                       AND job.payload_hash = $1
                       AND ($3::uuid IS NULL OR job.id = $3)

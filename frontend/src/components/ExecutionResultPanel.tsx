@@ -50,12 +50,12 @@ export function ExecutionResultPanel({
           job
         </span>
         <span>
-          <strong>{progress.accepted}/{progress.expected}</strong>
-          active
+          <strong>{progress.terminal}/{progress.total}</strong>
+          targets
         </span>
         <span>
-          <strong>{progress.doing}</strong>
-          doing
+          <strong>{progress.in_progress}</strong>
+          in progress
         </span>
         <span>
           <strong>{progress.retrieved}</strong>
@@ -63,15 +63,19 @@ export function ExecutionResultPanel({
         </span>
         <span>
           <strong>{progress.completed}</strong>
-          done
+          completed
+        </span>
+        <span>
+          <strong>{progress.skipped}</strong>
+          skipped
         </span>
         <span>
           <strong>{progress.unavailable}</strong>
           unavailable
         </span>
         <span>
-          <strong>{progress.failed}</strong>
-          failed
+          <strong>{progress.unsuccessful}</strong>
+          unsuccessful
         </span>
       </div>
       <p>{bulkProgressLabel(progress)}</p>
@@ -92,7 +96,7 @@ export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] 
         const more = group.targets.length - visibleTargets.length;
         return (
           <div className="executionFailureReason" key={group.reason}>
-            <strong>{group.targets.length} failed</strong>
+            <strong>{group.targets.length} unsuccessful</strong>
             <span title={group.reason}>{group.reason}</span>
             <small title={group.targets.join("\n")}>
               {visibleTargets.join(", ")}

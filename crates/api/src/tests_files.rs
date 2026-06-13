@@ -314,6 +314,7 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         job_output_artifact_min_bytes: usize::MAX,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 

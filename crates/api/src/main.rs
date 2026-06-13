@@ -106,7 +106,7 @@ mod webhook_rules;
 use anyhow::{Context, Result};
 use clap::Parser;
 use fleet_alerts::FleetAlertPolicy;
-use gateway_client::GatewayDispatchClient;
+use gateway_client::{GatewayClientTimeouts, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
@@ -209,6 +209,20 @@ struct Args {
     internal_token: Option<String>,
     #[arg(long, env = "VPSMAN_GATEWAY_CONTROL_URL")]
     gateway_control_url: Option<String>,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_CONNECT_SECS", default_value_t = 10)]
+    internal_http_connect_secs: u64,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_WRITE_SECS", default_value_t = 10)]
+    internal_http_write_secs: u64,
+    #[arg(long, env = "VPSMAN_INTERNAL_HTTP_READ_SECS", default_value_t = 15)]
+    internal_http_read_secs: u64,
+    #[arg(long, env = "VPSMAN_DISPATCH_ACK_SECS", default_value_t = 30)]
+    dispatch_ack_secs: u64,
+    #[arg(long, env = "VPSMAN_EVENT_POST_SECS", default_value_t = 15)]
+    event_post_secs: u64,
+    #[arg(long, env = "VPSMAN_DISPATCHER_BATCH", default_value_t = 128)]
+    dispatcher_batch: i64,
+    #[arg(long, env = "VPSMAN_DISPATCHER_IN_FLIGHT", default_value_t = 64)]
+    dispatcher_in_flight: usize,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
@@ -320,6 +334,44 @@ impl Args {
             &mut self.gateway_control_url,
             "VPSMAN_GATEWAY_CONTROL_URL",
             config.api.gateway_control_url.as_deref(),
+        );
+        if self.gateway_control_url.is_none() && env_absent("VPSMAN_GATEWAY_CONTROL_URL") {
+            self.gateway_control_url = Some("unix:./runtime/gateway-control.sock".to_string());
+        }
+        apply_u64_default(
+            &mut self.internal_http_connect_secs,
+            "VPSMAN_INTERNAL_HTTP_CONNECT_SECS",
+            config.timeout.internal_http_connect_secs,
+        );
+        apply_u64_default(
+            &mut self.internal_http_write_secs,
+            "VPSMAN_INTERNAL_HTTP_WRITE_SECS",
+            config.timeout.internal_http_write_secs,
+        );
+        apply_u64_default(
+            &mut self.internal_http_read_secs,
+            "VPSMAN_INTERNAL_HTTP_READ_SECS",
+            config.timeout.internal_http_read_secs,
+        );
+        apply_u64_default(
+            &mut self.dispatch_ack_secs,
+            "VPSMAN_DISPATCH_ACK_SECS",
+            config.timeout.dispatch_ack_secs,
+        );
+        apply_u64_default(
+            &mut self.event_post_secs,
+            "VPSMAN_EVENT_POST_SECS",
+            config.timeout.event_post_secs,
+        );
+        apply_i64_default(
+            &mut self.dispatcher_batch,
+            "VPSMAN_DISPATCHER_BATCH",
+            config.capacity.dispatcher_batch,
+        );
+        apply_usize_default(
+            &mut self.dispatcher_in_flight,
+            "VPSMAN_DISPATCHER_IN_FLIGHT",
+            config.capacity.dispatcher_in_flight,
         );
         apply_opt_path(
             &mut self.backup_object_store_dir,
@@ -499,6 +551,30 @@ fn apply_bool_default(target: &mut bool, env_name: &str, value: Option<bool>) {
     }
 }
 
+fn apply_u64_default(target: &mut u64, env_name: &str, value: Option<u64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_i64_default(target: &mut i64, env_name: &str, value: Option<i64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_usize_default(target: &mut usize, env_name: &str, value: Option<usize>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -522,9 +598,18 @@ async fn main() -> Result<()> {
     let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
     let (events, _) = broadcast::channel(256);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
-    let gateway = GatewayDispatchClient::new(
+    let gateway = GatewayDispatchClient::new_with_timeouts(
         args.gateway_control_url.clone(),
         Some(internal_token.clone()),
+        GatewayClientTimeouts {
+            connect: std::time::Duration::from_secs(args.internal_http_connect_secs.clamp(1, 300)),
+            write: std::time::Duration::from_secs(args.internal_http_write_secs.clamp(1, 300)),
+            read: std::time::Duration::from_secs(
+                args.internal_http_read_secs
+                    .max(args.dispatch_ack_secs)
+                    .clamp(1, 3600),
+            ),
+        },
     );
     let backup_configured_object_store = build_backup_object_store(&args)?;
     let update_configured_object_store = build_update_object_store(&args)?;
@@ -571,6 +656,13 @@ async fn main() -> Result<()> {
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
         require_registered_agent_updates: args.require_registered_agent_updates,
         suite_config_path: args.suite_config.clone(),
+        dispatcher_config: state::DispatcherRuntimeConfig {
+            batch_limit: args.dispatcher_batch.clamp(1, 500),
+            in_flight: args.dispatcher_in_flight.clamp(1, 512),
+            dispatch_ack_secs: args.dispatch_ack_secs.clamp(1, 3600),
+            event_post_secs: args.event_post_secs.clamp(1, 3600),
+            internal_http_read_secs: args.internal_http_read_secs.clamp(1, 3600),
+        },
     };
     state
         .repo

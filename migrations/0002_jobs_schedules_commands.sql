@@ -74,16 +74,15 @@ CREATE INDEX jobs_scheduled_source_idx
 
 ALTER TABLE jobs
   ADD CONSTRAINT jobs_status_common_check CHECK (status IN (
-    'pending',
+    'queued',
     'running',
-    'succeeded',
-    'succeeded_with_skips',
+    'completed',
     'partial_success',
-    'failed',
-    'agent_timed_out',
-    'control_timed_out',
     'skipped',
     'rejected',
+    'failed',
+    'agent_timeout',
+    'control_timeout',
     'canceled'
   ));
 
@@ -111,24 +110,24 @@ CREATE TABLE job_targets (
 CREATE INDEX job_targets_dispatch_due_idx
     ON job_targets (status, dispatch_lease_until, job_id, client_id)
     WHERE completed_at IS NULL
-      AND status IN ('pending', 'delivering');
+      AND status IN ('queued', 'dispatching');
 
 CREATE INDEX job_targets_deadline_due_idx
     ON job_targets (deadline_at, job_id, client_id)
     WHERE completed_at IS NULL
-      AND status IN ('delivering', 'running');
+      AND status IN ('dispatching', 'running');
 
 ALTER TABLE job_targets
   ADD CONSTRAINT job_targets_status_common_check CHECK (status IN (
-    'pending',
-    'delivering',
+    'queued',
+    'dispatching',
     'running',
-    'succeeded',
-    'failed',
-    'agent_timed_out',
-    'control_timed_out',
+    'completed',
     'skipped',
     'rejected',
+    'failed',
+    'agent_timeout',
+    'control_timeout',
     'canceled'
   ));
 

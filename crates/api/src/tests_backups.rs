@@ -313,9 +313,9 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         .await
         .unwrap();
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.status, "pending");
+    assert_eq!(response.status, "queued");
     let dispatch = gateway_task.await.unwrap();
-    wait_for_job_status(&repo, response.job_id, "succeeded").await;
+    wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
@@ -407,9 +407,9 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let (_status, Json(response)) = create_job(State(state), headers, Json(job_request))
         .await
         .unwrap();
-    assert_eq!(response.status, "pending");
+    assert_eq!(response.status, "queued");
     let _dispatch = gateway_task.await.unwrap();
-    wait_for_job_status(&repo, response.job_id, "succeeded").await;
+    wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
 
     assert_eq!(backups.len(), 1);
@@ -1082,7 +1082,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             privileged: true,
-            status: "succeeded".to_string(),
+            status: "completed".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
             created_at: unix_now().to_string(),
@@ -1099,7 +1099,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
-            status: "succeeded".to_string(),
+            status: "completed".to_string(),
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
@@ -1183,7 +1183,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             privileged: true,
-            status: "succeeded".to_string(),
+            status: "completed".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
             created_at: unix_now().to_string(),
@@ -1200,7 +1200,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
         memory.job_targets.write().await.push(JobTargetView {
             job_id: source_job_id,
             client_id: "client-a".to_string(),
-            status: "succeeded".to_string(),
+            status: "completed".to_string(),
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
@@ -1351,6 +1351,7 @@ fn test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 

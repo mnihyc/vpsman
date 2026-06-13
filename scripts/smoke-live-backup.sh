@@ -190,8 +190,8 @@ targets_json="$(api_auth_get "/api/v1/jobs/$job_id/targets")"
 outputs_json="$(api_auth_get "/api/v1/jobs/$job_id/outputs")"
 audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 
-jq -e '.status == "succeeded" and .command_type == "backup"' <<<"$job_json" >/dev/null
-jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "succeeded" and .exit_code == 0)' <<<"$targets_json" >/dev/null
+jq -e '.status == "completed" and .command_type == "backup"' <<<"$job_json" >/dev/null
+jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
 jq -e --arg path "$selected_file" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)

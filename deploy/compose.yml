@@ -39,6 +39,7 @@ services:
       - "127.0.0.1:9443:9443"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
+      - ./runtime/data:/var/lib/vpsman
       - ../config/vpsman.toml:/etc/vpsman/vpsman.toml:ro
       - ../config/secrets:/run/secrets:ro
     depends_on:

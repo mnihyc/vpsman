@@ -13,10 +13,11 @@ use tracing::{debug, info, warn};
 use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
-    job_command_protocol_version, maybe_compress_payload, payload_hash, AgentCapabilitySnapshot,
-    AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput, Frame, JobAck, JobCancelAck,
-    JobCancelRequest, JobCommand, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
-    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    job_command_protocol_version, job_command_safety, maybe_compress_payload, payload_hash,
+    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput, Frame,
+    JobAck, JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind,
+    NoiseFrameStream, OutputStream, ServerEndpoint, ServerHello, TelemetryEnvelope,
+    TerminalStreamOutput,
 };
 
 use crate::{
@@ -403,6 +404,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
 
 struct ActiveCommand {
     payload_hash: String,
+    safety: JobCommandSafety,
     stream_id: u32,
     task: tokio::task::JoinHandle<()>,
 }
@@ -607,6 +609,21 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         *seq += 1;
         return Ok(false);
     }
+    let safety = job_command_safety(&request.command);
+    if safety == JobCommandSafety::Exclusive
+        && active_commands
+            .values()
+            .any(|active| active.safety == JobCommandSafety::Exclusive)
+    {
+        let ack = JobAck {
+            job_id: request.job_id,
+            accepted: false,
+            message: "exclusive_command_already_active".to_string(),
+        };
+        send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
+        *seq += 1;
+        return Ok(false);
+    }
     let ack = JobAck {
         job_id: request.job_id,
         accepted: true,
@@ -691,6 +708,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         job_id,
         ActiveCommand {
             payload_hash: request_payload_hash,
+            safety,
             stream_id,
             task,
         },

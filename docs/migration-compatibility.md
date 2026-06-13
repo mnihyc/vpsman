@@ -33,3 +33,4 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | `0006_agent_updates.sql` | Initial agent update release schema. Artifact verification remains intentionally scoped to agent update releases only. |
 | `0007_data_sources_file_transfer.sql` | Initial data-source preset, client assignment, and file-transfer source-artifact schema, including built-in presets. |
 | `0008_system_metrics.sql` | Initial durable System Dashboard metric-rollup schema. Adds 60-second control-plane metric buckets and registers `system_metric_rollups` as an explicit history-retention/export domain without destructive changes. |
+| `0009_state_constraints.sql` | Adds fail-fast finite-state CHECK constraints for backup requests, restore plans, migration links, tunnel plans/endpoints, agent update releases, and file transfer sessions. Existing invalid rows abort migration so operators can quarantine data before enforcing the durable state boundary. |

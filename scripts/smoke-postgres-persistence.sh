@@ -554,8 +554,8 @@ scheduled_run_count="0"
 scheduled_run_job_id=""
 deadline=$((SECONDS + 10))
 while (( SECONDS < deadline )); do
-  scheduled_run_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status IN ('pending','running')")"
-  scheduled_run_job_id="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT id FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status IN ('pending','running') ORDER BY created_at DESC, id DESC LIMIT 1")"
+  scheduled_run_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status IN ('queued','running')")"
+  scheduled_run_job_id="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT id FROM jobs WHERE source_schedule_id::text = '$schedule_id' AND command_type LIKE 'scheduled%' AND status IN ('queued','running') ORDER BY created_at DESC, id DESC LIMIT 1")"
   if [[ "$scheduled_run_count" == "2" && -n "$scheduled_run_job_id" ]]; then
     break
   fi
@@ -586,12 +586,12 @@ if [[ "$worker_lease_count" != "2" ]]; then
   exit 1
 fi
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
-  .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "pending" or .status == "running")
+  .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "queued" or .status == "running")
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id/targets" | jq -e '
   length == 2 and
   (map(.client_id) | sort == ["pg-agent-a","pg-agent-b"]) and
-  all(.[]; (.status == "pending" or .status == "delivering") and .completed_at == null)
+  all(.[]; (.status == "queued" or .status == "dispatching") and .completed_at == null)
 ' >/dev/null
 notification_failed_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$queued_notification_id' AND status = 'failed' AND attempt_count = 1 AND error LIKE '%not configured%'")"
 if [[ "$notification_failed_count" != "1" ]]; then
@@ -728,7 +728,7 @@ degraded_update_json="$(vpsctl_json agent-update \
   --clients pg-agent-b \
   --confirmed)"
 degraded_update_job_id="$(jq -r '.job_id' <<<"$degraded_update_json")"
-jq -e '.accepted_targets == 0 and .status == "succeeded_with_skips"' \
+jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "partial_success"' \
   <<<"$degraded_update_json" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
@@ -746,7 +746,7 @@ degraded_process_json="$(vpsctl_json process-start \
   --clients pg-agent-b \
   --confirmed)"
 degraded_process_job_id="$(jq -r '.job_id' <<<"$degraded_process_json")"
-jq -e '.accepted_targets == 0 and .status == "succeeded_with_skips"' \
+jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "partial_success"' \
   <<<"$degraded_process_json" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
@@ -902,12 +902,12 @@ api_get "/api/v1/restore-plans?limit=10" | jq -e --arg restore_id "$restore_id" 
   any(.[]; .id == $restore_id and .source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == "/restore" and .command_scope == "client:pg-agent-b")
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
-  .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "pending" or .status == "running")
+  .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "queued" or .status == "running")
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id/targets" | jq -e '
   length == 2 and
   (map(.client_id) | sort == ["pg-agent-a","pg-agent-b"]) and
-  all(.[]; (.status == "pending" or .status == "delivering") and .completed_at == null)
+  all(.[]; (.status == "queued" or .status == "dispatching") and .completed_at == null)
 ' >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null

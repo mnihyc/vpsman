@@ -36,8 +36,9 @@ import {
   X,
 } from "lucide-react";
 import {
+  buildBulkJobProgress,
   bulkOutcomeSummary,
-  targetPreflightUnavailable,
+  createJobTargetCount,
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
@@ -937,16 +938,12 @@ function FleetInstanceDetail({
       });
       setInterfacePayloadHash(builtPrivilege.payloadHashHex);
       setInterfaceSnapshot(null);
-      setInterfaceProgress({
-        accepted: 0,
-        completed: 0,
-        doing: 0,
-        expected: 1,
-        failed: 0,
+      setInterfaceProgress(buildBulkJobProgress({
         jobId: "",
-        retrieved: 0,
-        unavailable: targetPreflightUnavailable(agent) ? 1 : 0,
-      });
+        targetCount: 1,
+        targetRecords: [],
+        targets: [agent],
+      }));
       const job = await onCreateJob({
         argv: [],
         selector_expression: selectorExpression,
@@ -961,12 +958,13 @@ function FleetInstanceDetail({
         timeout_secs: 30,
       });
       setInterfaceJobId(job.job_id);
+      const targetCount = createJobTargetCount(job);
       const progress = await waitForBulkJobTargets(
         job.job_id,
         onLoadJobTargets,
         {
-          acceptedTargets: job.target_count,
           onProgress: setInterfaceProgress,
+          targetCount,
           targets: [agent],
         },
       );

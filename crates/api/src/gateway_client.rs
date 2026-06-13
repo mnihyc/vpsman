@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpStream, UnixStream},
     time,
 };
 use vpsman_common::{
@@ -13,21 +13,49 @@ use vpsman_common::{
     GatewayPrivilegeVerificationResult, JobCancelRequest, JobRequest, PrivilegeAssertion,
 };
 
-const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct GatewayDispatchClient {
     control_url: Option<String>,
     internal_token: Option<String>,
+    timeouts: GatewayClientTimeouts,
     #[cfg(test)]
     test_privilege_auto_approve: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GatewayClientTimeouts {
+    pub(crate) connect: Duration,
+    pub(crate) write: Duration,
+    pub(crate) read: Duration,
+}
+
+impl Default for GatewayClientTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            write: Duration::from_secs(10),
+            read: Duration::from_secs(30),
+        }
+    }
+}
+
 impl GatewayDispatchClient {
+    #[cfg(test)]
     pub(crate) fn new(control_url: Option<String>, internal_token: Option<String>) -> Self {
+        Self::new_with_timeouts(
+            control_url,
+            internal_token,
+            GatewayClientTimeouts::default(),
+        )
+    }
+
+    pub(crate) fn new_with_timeouts(
+        control_url: Option<String>,
+        internal_token: Option<String>,
+        timeouts: GatewayClientTimeouts,
+    ) -> Self {
         Self {
             control_url: control_url
                 .map(|url| url.trim_end_matches('/').to_string())
@@ -35,6 +63,7 @@ impl GatewayDispatchClient {
             internal_token: internal_token
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
+            timeouts,
             #[cfg(test)]
             test_privilege_auto_approve: false,
         }
@@ -62,6 +91,7 @@ impl GatewayDispatchClient {
         Self {
             control_url: None,
             internal_token: None,
+            timeouts: GatewayClientTimeouts::default(),
             test_privilege_auto_approve: true,
         }
     }
@@ -93,6 +123,7 @@ impl GatewayDispatchClient {
                 request,
             },
             self.internal_token.as_deref(),
+            self.timeouts,
         )
         .await
     }
@@ -114,6 +145,7 @@ impl GatewayDispatchClient {
                 request,
             },
             self.internal_token.as_deref(),
+            self.timeouts,
         )
         .await
     }
@@ -141,6 +173,7 @@ impl GatewayDispatchClient {
             "/internal/v1/gateway/privilege/verify",
             &GatewayPrivilegeVerification { intent, assertion },
             self.internal_token.as_deref(),
+            self.timeouts,
         )
         .await
     }
@@ -155,6 +188,7 @@ impl GatewayDispatchClient {
             "/internal/v1/gateway/metrics",
             &serde_json::json!({}),
             self.internal_token.as_deref(),
+            self.timeouts,
         )
         .await
     }
@@ -164,12 +198,14 @@ async fn post_gateway_command(
     control_url: &str,
     dispatch: &GatewayCommandDispatch,
     internal_token: Option<&str>,
+    timeouts: GatewayClientTimeouts,
 ) -> Result<GatewayCommandDispatchResult> {
     post_gateway_control(
         control_url,
         "/internal/v1/gateway/command",
         dispatch,
         internal_token,
+        timeouts,
     )
     .await
 }
@@ -179,14 +215,35 @@ async fn post_gateway_control<T, R>(
     request_path_suffix: &str,
     body_value: &T,
     internal_token: Option<&str>,
+    timeouts: GatewayClientTimeouts,
 ) -> Result<R>
 where
     T: serde::Serialize,
     R: DeserializeOwned,
 {
+    if let Some(path) = control_url
+        .strip_prefix("unix://")
+        .or_else(|| control_url.strip_prefix("unix:"))
+    {
+        let body = serde_json::to_vec(body_value)?;
+        let token = internal_token.context("gateway internal token is not configured")?;
+        let mut stream = time::timeout(timeouts.connect, UnixStream::connect(path))
+            .await
+            .context("gateway control socket connect timed out")?
+            .with_context(|| format!("failed to connect gateway control socket at {path}"))?;
+        return send_gateway_control_request(
+            &mut stream,
+            "gateway-control",
+            request_path_suffix,
+            &body,
+            token,
+            timeouts,
+        )
+        .await;
+    }
     let without_scheme = control_url
         .strip_prefix("http://")
-        .context("gateway control URL currently supports http:// URLs")?;
+        .context("gateway control URL currently supports http:// or unix: URLs")?;
     let (host_port, prefix) = without_scheme
         .split_once('/')
         .map(|(host, rest)| (host, format!("/{rest}")))
@@ -194,24 +251,47 @@ where
     let request_path = format!("{prefix}{request_path_suffix}");
     let body = serde_json::to_vec(body_value)?;
     let token = internal_token.context("gateway internal token is not configured")?;
-    let auth_header = format!("Authorization: Bearer {token}\r\n");
-    let mut stream = time::timeout(CONTROL_CONNECT_TIMEOUT, TcpStream::connect(host_port))
+    let mut stream = time::timeout(timeouts.connect, TcpStream::connect(host_port))
         .await
         .context("gateway control connect timed out")?
         .with_context(|| format!("failed to connect gateway control at {host_port}"))?;
+    send_gateway_control_request(
+        &mut stream,
+        host_port,
+        &request_path,
+        &body,
+        token,
+        timeouts,
+    )
+    .await
+}
+
+async fn send_gateway_control_request<S, R>(
+    stream: &mut S,
+    host: &str,
+    request_path: &str,
+    body: &[u8],
+    token: &str,
+    timeouts: GatewayClientTimeouts,
+) -> Result<R>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: DeserializeOwned,
+{
+    let auth_header = format!("Authorization: Bearer {token}\r\n");
     let request = format!(
-        "POST {request_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "POST {request_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{auth_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    time::timeout(CONTROL_WRITE_TIMEOUT, stream.write_all(request.as_bytes()))
+    time::timeout(timeouts.write, stream.write_all(request.as_bytes()))
         .await
         .context("gateway control request header write timed out")??;
-    time::timeout(CONTROL_WRITE_TIMEOUT, stream.write_all(&body))
+    time::timeout(timeouts.write, stream.write_all(body))
         .await
         .context("gateway control request body write timed out")??;
 
     let mut response = Vec::new();
-    time::timeout(CONTROL_READ_TIMEOUT, stream.read_to_end(&mut response))
+    time::timeout(timeouts.read, stream.read_to_end(&mut response))
         .await
         .context("gateway control response read timed out")??;
     if response.len() > CONTROL_MAX_RESPONSE_BYTES {

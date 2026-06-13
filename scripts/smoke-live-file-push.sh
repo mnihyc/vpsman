@@ -177,8 +177,8 @@ targets_json="$(api_auth_get "/api/v1/jobs/$job_id/targets")"
 outputs_json="$(api_auth_get "/api/v1/jobs/$job_id/outputs")"
 audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 
-jq -e '.status == "succeeded" and .command_type == "file_push"' <<<"$job_json" >/dev/null
-jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "succeeded" and .exit_code == 0)' <<<"$targets_json" >/dev/null
+jq -e '.status == "completed" and .command_type == "file_push"' <<<"$job_json" >/dev/null
+jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
 jq -e --arg path "$destination_file" --arg sha "$payload_sha" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
@@ -215,7 +215,7 @@ cmp -s "$chunked_source_file" "$chunked_destination_file"
 
 chunked_job_json="$(api_auth_get "/api/v1/jobs/$chunked_job_id")"
 chunked_outputs_json="$(api_auth_get "/api/v1/jobs/$chunked_job_id/outputs")"
-jq -e '.status == "succeeded" and .command_type == "file_push_chunked"' <<<"$chunked_job_json" >/dev/null
+jq -e '.status == "completed" and .command_type == "file_push_chunked"' <<<"$chunked_job_json" >/dev/null
 jq -e --arg path "$chunked_destination_file" --arg sha "$chunked_payload_sha" --argjson size "$chunked_payload_size" '
   .[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)

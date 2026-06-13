@@ -147,8 +147,8 @@ function SystemDashboardPanel({
     ? dashboard.current.db_pool.in_use_connections / dashboard.current.db_pool.max_connections
     : 0;
   const deadlineTimeouts =
-    (dashboard?.current.targets.control_timed_out_last_24h ?? 0) +
-    (dashboard?.current.targets.agent_timed_out_last_24h ?? 0);
+    (dashboard?.current.targets.control_timeout_last_24h ?? 0) +
+    (dashboard?.current.targets.agent_timeout_last_24h ?? 0);
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -220,7 +220,7 @@ function SystemDashboardPanel({
           badge={`${dashboard?.current.dispatch.queue_depth ?? 0} queued`}
           icon={<Activity size={18} />}
           title="Dispatch Lifecycle"
-          subtitle="Pending, delivering, running, retry, and active job pressure."
+          subtitle="Queued, dispatching, running, retry, and active job pressure."
           metrics={[
             { label: "Active jobs", value: String(dashboard?.current.dispatch.active_jobs ?? 0) },
             { label: "Dispatch queue", value: String(dashboard?.current.dispatch.queue_depth ?? 0) },
@@ -229,7 +229,7 @@ function SystemDashboardPanel({
           ]}
           lines={chartLines(series, [
             "dispatch.queue_depth",
-            "targets.delivering",
+            "targets.dispatching",
             "targets.running",
             "dispatch.retried_targets",
           ])}
@@ -243,14 +243,14 @@ function SystemDashboardPanel({
           subtitle="Control deadline expiry, agent timeouts, and canceled outcomes."
           metrics={[
             { label: "Deadline timeouts", value: String(deadlineTimeouts) },
-            { label: "Control timed out", value: String(dashboard?.current.targets.control_timed_out_last_24h ?? 0) },
-            { label: "Agent timed out", value: String(dashboard?.current.targets.agent_timed_out_last_24h ?? 0) },
+            { label: "Control timed out", value: String(dashboard?.current.targets.control_timeout_last_24h ?? 0) },
+            { label: "Agent timed out", value: String(dashboard?.current.targets.agent_timeout_last_24h ?? 0) },
             { label: "Agent offline timeout", value: secondsOrUnset(dashboard?.capacity.agent_offline_secs) },
           ]}
           lines={chartLines(series, [
             "targets.deadline_expired_active",
-            "targets.control_timed_out_last_24h",
-            "targets.agent_timed_out_last_24h",
+            "targets.control_timeout_last_24h",
+            "targets.agent_timeout_last_24h",
             "targets.canceled_last_24h",
           ])}
           valueFormatter={(value) => formatNumber(value)}
@@ -263,15 +263,26 @@ function SystemDashboardPanel({
           subtitle="Gateway-to-API forwarding backlog, deliveries, retries, and per-target queues."
           metrics={[
             { label: "Status", value: dashboard?.current.gateway_events.status ?? "unavailable" },
-            { label: "Queued", value: valueOrUnset(dashboard?.current.gateway_events.queued_events) },
+            { label: "Queue depth", value: valueOrUnset(dashboard?.current.gateway_events.current_queue_depth) },
+            { label: "Oldest age", value: secondsOrUnset(dashboard?.current.gateway_events.oldest_event_age_secs) },
+            { label: "Dropped", value: valueOrUnset(dashboard?.current.gateway_events.dropped_events) },
+            { label: "Critical failures", value: valueOrUnset(dashboard?.current.gateway_events.critical_failures) },
+            { label: "Telemetry coalesced", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.coalesced) },
+            { label: "Target queue full", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.target_queue_full) },
+            { label: "Retained output trunc", value: valueOrUnset(dashboard?.current.gateway_events.retained_output_truncated_events) },
             { label: "Delivered", value: valueOrUnset(dashboard?.current.gateway_events.delivered_events) },
             { label: "Event retries", value: valueOrUnset(dashboard?.current.gateway_events.retry_attempts) },
           ]}
           lines={chartLines(series, [
-            "gateway_events.queued_events",
+            "gateway_events.current_queue_depth",
+            "gateway_events.oldest_event_age_secs",
+            "gateway_events.dropped_events",
+            "gateway_events.critical_failures",
+            "gateway_events.dropped_by_reason.coalesced",
+            "gateway_events.dropped_by_reason.target_queue_full",
+            "gateway_events.retained_output_truncated_events",
             "gateway_events.delivered_events",
             "gateway_events.retry_attempts",
-            "gateway_events.active_queues",
           ])}
           valueFormatter={(value) => formatNumber(value)}
         />

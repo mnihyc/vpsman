@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
-  acceptedDispatchTargetCount,
+  buildBulkJobProgress,
   bulkProgressTimeoutMs,
+  createJobTargetCount,
   formatTargetAvailabilitySummary,
-  targetPreflightUnavailable,
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
@@ -776,22 +776,18 @@ export function JobDispatchPanel({
   }
 
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[]) {
-    const accepted = acceptedDispatchTargetCount(job.target_count, targets);
+    const targetCount = createJobTargetCount(job);
     setLastDispatchProgress(null);
-    setDispatchProgress({
-      accepted,
-      completed: 0,
-      doing: accepted,
-      expected: targets.length,
-      failed: 0,
+    setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,
-      retrieved: 0,
-      unavailable: targets.filter(targetPreflightUnavailable).length,
-    });
+      targetCount,
+      targetRecords: [],
+      targets,
+    }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        acceptedTargets: job.target_count,
         onProgress: setDispatchProgress,
+        targetCount,
         targets,
         timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });

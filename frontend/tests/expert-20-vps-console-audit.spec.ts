@@ -307,14 +307,14 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     resultPanel
       .locator(".executionResultStats span")
-      .filter({ hasText: "active" })
-      .filter({ hasText: "22/24" }),
+      .filter({ hasText: "targets" })
+      .filter({ hasText: "24/24" }),
   ).toBeVisible();
   await expect(
     resultPanel
       .locator(".executionResultStats span")
-      .filter({ hasText: "failed" })
-      .filter({ hasText: "2" }),
+      .filter({ hasText: "unsuccessful" })
+      .filter({ hasText: "4" }),
   ).toBeVisible();
   await expect(
     resultPanel
@@ -323,7 +323,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
       .filter({ hasText: "2" }),
   ).toBeVisible();
   await expect(
-    resultPanel.getByText(/partial success: 20 done, 2 failed, 2 unavailable/),
+    resultPanel.getByText(/partial success: 20 completed, 4 unsuccessful/),
   ).toBeVisible();
   const failedReasons = resultPanel.getByLabel("Failed target reasons");
   await expect(
@@ -334,6 +334,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     failedReasons.getByText(/process_guard: permission denied/),
   ).toBeVisible();
+  await expect(failedReasons.getByText(/agent offline/)).toBeVisible();
 
   const jobRequest = await page.evaluate(() => {
     const requests = (
@@ -495,6 +496,27 @@ async function installTwentyFourVpsExpertMock(page: Page) {
       })),
     );
     const jobTargets: Record<string, unknown[]> = {};
+    const targetCountsFromStatuses = (statuses: string[]) => {
+      const counts = {
+        agent_timeout: 0,
+        canceled: 0,
+        completed: 0,
+        control_timeout: 0,
+        dispatching: 0,
+        failed: 0,
+        queued: 0,
+        rejected: 0,
+        running: 0,
+        skipped: 0,
+        total: statuses.length,
+      };
+      for (const status of statuses) {
+        if (status in counts && status !== "total") {
+          counts[status as keyof Omit<typeof counts, "total">] += 1;
+        }
+      }
+      return counts;
+    };
     const readJsonBody = async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -610,14 +632,10 @@ async function installTwentyFourVpsExpertMock(page: Page) {
         const body = await readJsonBody(input, init);
         requests?.jobs.push(body);
         const targets = resolveTargets(body);
-        const acceptedTargets = targets.filter(
-          (agent) => agent.status !== "offline",
-        );
         const jobId = "24242424-7777-4888-9999-aaaaaaaaaaaa";
         jobTargets[jobId] = targets.map((agent) => ({
           client_id: agent.id,
-          completed_at:
-            agent.status === "offline" ? null : "2026-06-07T04:50:10Z",
+          completed_at: "2026-06-07T04:50:10Z",
           exit_code:
             agent.status === "stale"
               ? 2
@@ -641,14 +659,18 @@ async function installTwentyFourVpsExpertMock(page: Page) {
             agent.status === "stale" || agent.id === "pay-prod-sfo-edge-11"
               ? "failed"
               : agent.status === "offline"
-                ? "dispatch_failed"
+                ? "control_timeout"
                 : "completed",
         }));
         return jsonResponse({
-          accepted_targets: acceptedTargets.length,
           target_count: targets.length,
+          target_counts: targetCountsFromStatuses(
+            jobTargets[jobId].map((target) =>
+              (target as { status: string }).status,
+            ),
+          ),
           job_id: jobId,
-          status: "accepted",
+          status: "running",
         });
       }
       const targetsMatch = pathname.match(
@@ -671,7 +693,7 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           id: jobMatch[1],
           payload_hash: "2".repeat(64),
           privileged: true,
-          status: "partially_completed",
+          status: "partial_success",
           target_count: 24,
         });
       }

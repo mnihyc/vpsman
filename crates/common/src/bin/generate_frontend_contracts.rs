@@ -5,7 +5,10 @@ use std::{
 };
 
 use vpsman_common::{
-    job_command_variant_names, job_privilege_intent_fields, schedule_privilege_intent_fields,
+    create_job_request_fields, job_command_variant_names, job_privilege_intent_fields,
+    job_status_class_by_status, job_status_classes, job_statuses,
+    job_target_status_class_by_status, job_target_status_classes, job_target_statuses,
+    job_target_terminal_statuses, job_terminal_statuses, schedule_privilege_intent_fields,
     CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
     MIN_TERMINAL_ROWS,
 };
@@ -53,10 +56,75 @@ fn main() -> io::Result<()> {
         output,
         "export type GeneratedJobOperationType = typeof JOB_OPERATION_TYPES[number];"
     )?;
+    write_string_array(&mut output, "JOB_STATUSES", job_statuses())?;
+    writeln!(
+        output,
+        "export type GeneratedJobStatus = typeof JOB_STATUSES[number];"
+    )?;
+    write_string_array(
+        &mut output,
+        "JOB_TERMINAL_STATUSES",
+        job_terminal_statuses(),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedJobTerminalStatus = typeof JOB_TERMINAL_STATUSES[number];"
+    )?;
+    write_string_array(&mut output, "JOB_STATUS_CLASSES", job_status_classes())?;
+    writeln!(
+        output,
+        "export type GeneratedJobStatusClass = typeof JOB_STATUS_CLASSES[number];"
+    )?;
+    write_string_map(
+        &mut output,
+        "JOB_STATUS_CLASS_BY_STATUS",
+        job_status_class_by_status(),
+        "GeneratedJobStatus",
+        "GeneratedJobStatusClass",
+    )?;
+    write_string_array(&mut output, "JOB_TARGET_STATUSES", job_target_statuses())?;
+    writeln!(
+        output,
+        "export type GeneratedJobTargetStatus = typeof JOB_TARGET_STATUSES[number];"
+    )?;
+    write_string_array(
+        &mut output,
+        "JOB_TARGET_TERMINAL_STATUSES",
+        job_target_terminal_statuses(),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedJobTargetTerminalStatus = typeof JOB_TARGET_TERMINAL_STATUSES[number];"
+    )?;
+    write_string_array(
+        &mut output,
+        "JOB_TARGET_STATUS_CLASSES",
+        job_target_status_classes(),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedJobTargetStatusClass = typeof JOB_TARGET_STATUS_CLASSES[number];"
+    )?;
+    write_string_map(
+        &mut output,
+        "JOB_TARGET_STATUS_CLASS_BY_STATUS",
+        job_target_status_class_by_status(),
+        "GeneratedJobTargetStatus",
+        "GeneratedJobTargetStatusClass",
+    )?;
     write_string_array(
         &mut output,
         "JOB_PRIVILEGE_INTENT_FIELDS",
         job_privilege_intent_fields(),
+    )?;
+    write_string_array(
+        &mut output,
+        "CREATE_JOB_REQUEST_FIELDS",
+        create_job_request_fields(),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedCreateJobRequestField = typeof CREATE_JOB_REQUEST_FIELDS[number];"
     )?;
     write_string_array(
         &mut output,
@@ -72,6 +140,23 @@ fn write_string_array(output: &mut Vec<u8>, name: &str, values: &[&str]) -> io::
         writeln!(output, "  {value:?},")?;
     }
     writeln!(output, "] as const;")
+}
+
+fn write_string_map(
+    output: &mut Vec<u8>,
+    name: &str,
+    values: &[(&str, &str)],
+    key_type: &str,
+    value_type: &str,
+) -> io::Result<()> {
+    writeln!(output, "\nexport const {name} = {{")?;
+    for (key, value) in values {
+        writeln!(output, "  {key:?}: {value:?},")?;
+    }
+    writeln!(
+        output,
+        "}} as const satisfies Record<{key_type}, {value_type}>;"
+    )
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {

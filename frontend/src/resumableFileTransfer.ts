@@ -9,6 +9,7 @@ import {
   sha256Hex,
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
+import { JOB_TERMINAL_STATUSES } from "./generated/protocolContracts";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privilege";
 import { selectorExpressionForClientIds } from "./searchExpression";
 import type { CreateJobRequest, CreateJobResponse, FileExistingPolicy, JobHistoryRecord, JobOutputRecord, JobOperation } from "./types";
@@ -521,7 +522,7 @@ async function waitForTransferStatus(
     }
     const job = await request.loadJob(jobId);
     if (isTerminalJobStatus(job.status)) {
-      if (job.status !== "succeeded") {
+      if (job.status !== "completed") {
         throw new Error(`${expectedType} job ${jobId} ended ${job.status}`);
       }
       if (statuses.size !== expectedStatusCount) {
@@ -665,26 +666,7 @@ function normalizeTransferAbsolutePath(path: string, label: string): string {
 }
 
 function isTerminalJobStatus(status: string): boolean {
-  return [
-    "agent_timed_out",
-    "canceled",
-    "completed",
-    "control_timed_out",
-    "partially_completed",
-    "partial_success",
-    "failed",
-    "timed_out",
-    "dispatch_failed",
-    "degraded_unprivileged",
-    "accepted",
-    "rejected_authorization_required",
-    "schedule_no_targets",
-    "rejected_by_agent",
-    "rejected",
-    "skipped",
-    "succeeded",
-    "succeeded_with_skips",
-  ].includes(status);
+  return (JOB_TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
 function randomHex(byteLength: number): string {

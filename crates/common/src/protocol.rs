@@ -43,6 +43,418 @@ pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
+pub const JOB_STATUS_QUEUED: &str = "queued";
+pub const JOB_STATUS_RUNNING: &str = "running";
+pub const JOB_STATUS_COMPLETED: &str = "completed";
+pub const JOB_STATUS_PARTIAL_SUCCESS: &str = "partial_success";
+pub const JOB_STATUS_SKIPPED: &str = "skipped";
+pub const JOB_STATUS_REJECTED: &str = "rejected";
+pub const JOB_STATUS_FAILED: &str = "failed";
+pub const JOB_STATUS_AGENT_TIMEOUT: &str = "agent_timeout";
+pub const JOB_STATUS_CONTROL_TIMEOUT: &str = "control_timeout";
+pub const JOB_STATUS_CANCELED: &str = "canceled";
+
+pub const JOB_STATUSES: [&str; 10] = [
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_PARTIAL_SUCCESS,
+    JOB_STATUS_SKIPPED,
+    JOB_STATUS_REJECTED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_AGENT_TIMEOUT,
+    JOB_STATUS_CONTROL_TIMEOUT,
+    JOB_STATUS_CANCELED,
+];
+
+pub const JOB_TERMINAL_STATUSES: [&str; 8] = [
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_PARTIAL_SUCCESS,
+    JOB_STATUS_SKIPPED,
+    JOB_STATUS_REJECTED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_AGENT_TIMEOUT,
+    JOB_STATUS_CONTROL_TIMEOUT,
+    JOB_STATUS_CANCELED,
+];
+
+pub const JOB_STATUS_CLASS_IN_PROGRESS: &str = "in_progress";
+pub const JOB_STATUS_CLASS_SUCCESSFUL: &str = "successful";
+pub const JOB_STATUS_CLASS_PARTIAL_SUCCESS: &str = "partial_success";
+pub const JOB_STATUS_CLASS_SKIPPED: &str = "skipped";
+pub const JOB_STATUS_CLASS_UNSUCCESSFUL: &str = "unsuccessful";
+
+pub const JOB_STATUS_CLASSES: [&str; 5] = [
+    JOB_STATUS_CLASS_IN_PROGRESS,
+    JOB_STATUS_CLASS_SUCCESSFUL,
+    JOB_STATUS_CLASS_PARTIAL_SUCCESS,
+    JOB_STATUS_CLASS_SKIPPED,
+    JOB_STATUS_CLASS_UNSUCCESSFUL,
+];
+
+pub const TARGET_STATUS_QUEUED: &str = "queued";
+pub const TARGET_STATUS_DISPATCHING: &str = "dispatching";
+pub const TARGET_STATUS_RUNNING: &str = "running";
+pub const TARGET_STATUS_COMPLETED: &str = "completed";
+pub const TARGET_STATUS_SKIPPED: &str = "skipped";
+pub const TARGET_STATUS_REJECTED: &str = "rejected";
+pub const TARGET_STATUS_FAILED: &str = "failed";
+pub const TARGET_STATUS_AGENT_TIMEOUT: &str = "agent_timeout";
+pub const TARGET_STATUS_CONTROL_TIMEOUT: &str = "control_timeout";
+pub const TARGET_STATUS_CANCELED: &str = "canceled";
+
+pub const JOB_TARGET_STATUSES: [&str; 10] = [
+    TARGET_STATUS_QUEUED,
+    TARGET_STATUS_DISPATCHING,
+    TARGET_STATUS_RUNNING,
+    TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_SKIPPED,
+    TARGET_STATUS_REJECTED,
+    TARGET_STATUS_FAILED,
+    TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_CANCELED,
+];
+
+pub const JOB_TARGET_TERMINAL_STATUSES: [&str; 7] = [
+    TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_SKIPPED,
+    TARGET_STATUS_REJECTED,
+    TARGET_STATUS_FAILED,
+    TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_CANCELED,
+];
+
+pub const JOB_TARGET_STATUS_CLASS_IN_PROGRESS: &str = "in_progress";
+pub const JOB_TARGET_STATUS_CLASS_SUCCESSFUL: &str = "successful";
+pub const JOB_TARGET_STATUS_CLASS_SKIPPED: &str = "skipped";
+pub const JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL: &str = "unsuccessful";
+
+pub const JOB_TARGET_STATUS_CLASSES: [&str; 4] = [
+    JOB_TARGET_STATUS_CLASS_IN_PROGRESS,
+    JOB_TARGET_STATUS_CLASS_SUCCESSFUL,
+    JOB_TARGET_STATUS_CLASS_SKIPPED,
+    JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
+];
+
+pub const JOB_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
+    (JOB_STATUS_QUEUED, JOB_STATUS_CLASS_IN_PROGRESS),
+    (JOB_STATUS_RUNNING, JOB_STATUS_CLASS_IN_PROGRESS),
+    (JOB_STATUS_COMPLETED, JOB_STATUS_CLASS_SUCCESSFUL),
+    (JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_CLASS_PARTIAL_SUCCESS),
+    (JOB_STATUS_SKIPPED, JOB_STATUS_CLASS_SKIPPED),
+    (JOB_STATUS_REJECTED, JOB_STATUS_CLASS_UNSUCCESSFUL),
+    (JOB_STATUS_FAILED, JOB_STATUS_CLASS_UNSUCCESSFUL),
+    (JOB_STATUS_AGENT_TIMEOUT, JOB_STATUS_CLASS_UNSUCCESSFUL),
+    (JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_CLASS_UNSUCCESSFUL),
+    (JOB_STATUS_CANCELED, JOB_STATUS_CLASS_UNSUCCESSFUL),
+];
+
+pub const JOB_TARGET_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
+    (TARGET_STATUS_QUEUED, JOB_TARGET_STATUS_CLASS_IN_PROGRESS),
+    (
+        TARGET_STATUS_DISPATCHING,
+        JOB_TARGET_STATUS_CLASS_IN_PROGRESS,
+    ),
+    (TARGET_STATUS_RUNNING, JOB_TARGET_STATUS_CLASS_IN_PROGRESS),
+    (TARGET_STATUS_COMPLETED, JOB_TARGET_STATUS_CLASS_SUCCESSFUL),
+    (TARGET_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASS_SKIPPED),
+    (TARGET_STATUS_REJECTED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
+    (TARGET_STATUS_FAILED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
+    (
+        TARGET_STATUS_AGENT_TIMEOUT,
+        JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
+    ),
+    (
+        TARGET_STATUS_CONTROL_TIMEOUT,
+        JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
+    ),
+    (TARGET_STATUS_CANCELED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
+];
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatusClass {
+    InProgress,
+    Successful,
+    PartialSuccess,
+    Skipped,
+    Unsuccessful,
+}
+
+impl JobStatusClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => JOB_STATUS_CLASS_IN_PROGRESS,
+            Self::Successful => JOB_STATUS_CLASS_SUCCESSFUL,
+            Self::PartialSuccess => JOB_STATUS_CLASS_PARTIAL_SUCCESS,
+            Self::Skipped => JOB_STATUS_CLASS_SKIPPED,
+            Self::Unsuccessful => JOB_STATUS_CLASS_UNSUCCESSFUL,
+        }
+    }
+
+    pub fn parse(status_class: &str) -> Option<Self> {
+        match status_class {
+            JOB_STATUS_CLASS_IN_PROGRESS => Some(Self::InProgress),
+            JOB_STATUS_CLASS_SUCCESSFUL => Some(Self::Successful),
+            JOB_STATUS_CLASS_PARTIAL_SUCCESS => Some(Self::PartialSuccess),
+            JOB_STATUS_CLASS_SKIPPED => Some(Self::Skipped),
+            JOB_STATUS_CLASS_UNSUCCESSFUL => Some(Self::Unsuccessful),
+            _ => None,
+        }
+    }
+
+    pub fn is_in_progress(self) -> bool {
+        matches!(self, Self::InProgress)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_in_progress()
+    }
+
+    pub fn is_successful_outcome(self) -> bool {
+        matches!(self, Self::Successful | Self::PartialSuccess)
+    }
+
+    pub fn is_unsuccessful_outcome(self) -> bool {
+        matches!(self, Self::Unsuccessful)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTargetStatusClass {
+    InProgress,
+    Successful,
+    Skipped,
+    Unsuccessful,
+}
+
+impl JobTargetStatusClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => JOB_TARGET_STATUS_CLASS_IN_PROGRESS,
+            Self::Successful => JOB_TARGET_STATUS_CLASS_SUCCESSFUL,
+            Self::Skipped => JOB_TARGET_STATUS_CLASS_SKIPPED,
+            Self::Unsuccessful => JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
+        }
+    }
+
+    pub fn parse(status_class: &str) -> Option<Self> {
+        match status_class {
+            JOB_TARGET_STATUS_CLASS_IN_PROGRESS => Some(Self::InProgress),
+            JOB_TARGET_STATUS_CLASS_SUCCESSFUL => Some(Self::Successful),
+            JOB_TARGET_STATUS_CLASS_SKIPPED => Some(Self::Skipped),
+            JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL => Some(Self::Unsuccessful),
+            _ => None,
+        }
+    }
+
+    pub fn is_in_progress(self) -> bool {
+        matches!(self, Self::InProgress)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_in_progress()
+    }
+
+    pub fn is_successful_outcome(self) -> bool {
+        matches!(self, Self::Successful)
+    }
+
+    pub fn is_unsuccessful_outcome(self) -> bool {
+        matches!(self, Self::Unsuccessful)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Queued,
+    Running,
+    Completed,
+    PartialSuccess,
+    Skipped,
+    Rejected,
+    Failed,
+    AgentTimeout,
+    ControlTimeout,
+    Canceled,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => JOB_STATUS_QUEUED,
+            Self::Running => JOB_STATUS_RUNNING,
+            Self::Completed => JOB_STATUS_COMPLETED,
+            Self::PartialSuccess => JOB_STATUS_PARTIAL_SUCCESS,
+            Self::Skipped => JOB_STATUS_SKIPPED,
+            Self::Rejected => JOB_STATUS_REJECTED,
+            Self::Failed => JOB_STATUS_FAILED,
+            Self::AgentTimeout => JOB_STATUS_AGENT_TIMEOUT,
+            Self::ControlTimeout => JOB_STATUS_CONTROL_TIMEOUT,
+            Self::Canceled => JOB_STATUS_CANCELED,
+        }
+    }
+
+    pub fn parse(status: &str) -> Option<Self> {
+        match status {
+            JOB_STATUS_QUEUED => Some(Self::Queued),
+            JOB_STATUS_RUNNING => Some(Self::Running),
+            JOB_STATUS_COMPLETED => Some(Self::Completed),
+            JOB_STATUS_PARTIAL_SUCCESS => Some(Self::PartialSuccess),
+            JOB_STATUS_SKIPPED => Some(Self::Skipped),
+            JOB_STATUS_REJECTED => Some(Self::Rejected),
+            JOB_STATUS_FAILED => Some(Self::Failed),
+            JOB_STATUS_AGENT_TIMEOUT => Some(Self::AgentTimeout),
+            JOB_STATUS_CONTROL_TIMEOUT => Some(Self::ControlTimeout),
+            JOB_STATUS_CANCELED => Some(Self::Canceled),
+            _ => None,
+        }
+    }
+
+    pub fn class(self) -> JobStatusClass {
+        match self {
+            Self::Queued | Self::Running => JobStatusClass::InProgress,
+            Self::Completed => JobStatusClass::Successful,
+            Self::PartialSuccess => JobStatusClass::PartialSuccess,
+            Self::Skipped => JobStatusClass::Skipped,
+            Self::Rejected
+            | Self::Failed
+            | Self::AgentTimeout
+            | Self::ControlTimeout
+            | Self::Canceled => JobStatusClass::Unsuccessful,
+        }
+    }
+
+    pub fn is_in_progress(self) -> bool {
+        self.class().is_in_progress()
+    }
+
+    pub fn is_terminal(self) -> bool {
+        self.class().is_terminal()
+    }
+
+    pub fn is_success(self) -> bool {
+        self.class().is_successful_outcome()
+    }
+
+    pub fn is_unsuccessful_terminal(self) -> bool {
+        self.class().is_unsuccessful_outcome()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTargetStatus {
+    Queued,
+    Dispatching,
+    Running,
+    Completed,
+    Skipped,
+    Rejected,
+    Failed,
+    AgentTimeout,
+    ControlTimeout,
+    Canceled,
+}
+
+impl JobTargetStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => TARGET_STATUS_QUEUED,
+            Self::Dispatching => TARGET_STATUS_DISPATCHING,
+            Self::Running => TARGET_STATUS_RUNNING,
+            Self::Completed => TARGET_STATUS_COMPLETED,
+            Self::Skipped => TARGET_STATUS_SKIPPED,
+            Self::Rejected => TARGET_STATUS_REJECTED,
+            Self::Failed => TARGET_STATUS_FAILED,
+            Self::AgentTimeout => TARGET_STATUS_AGENT_TIMEOUT,
+            Self::ControlTimeout => TARGET_STATUS_CONTROL_TIMEOUT,
+            Self::Canceled => TARGET_STATUS_CANCELED,
+        }
+    }
+
+    pub fn parse(status: &str) -> Option<Self> {
+        match status {
+            TARGET_STATUS_QUEUED => Some(Self::Queued),
+            TARGET_STATUS_DISPATCHING => Some(Self::Dispatching),
+            TARGET_STATUS_RUNNING => Some(Self::Running),
+            TARGET_STATUS_COMPLETED => Some(Self::Completed),
+            TARGET_STATUS_SKIPPED => Some(Self::Skipped),
+            TARGET_STATUS_REJECTED => Some(Self::Rejected),
+            TARGET_STATUS_FAILED => Some(Self::Failed),
+            TARGET_STATUS_AGENT_TIMEOUT => Some(Self::AgentTimeout),
+            TARGET_STATUS_CONTROL_TIMEOUT => Some(Self::ControlTimeout),
+            TARGET_STATUS_CANCELED => Some(Self::Canceled),
+            _ => None,
+        }
+    }
+
+    pub fn class(self) -> JobTargetStatusClass {
+        match self {
+            Self::Queued | Self::Dispatching | Self::Running => JobTargetStatusClass::InProgress,
+            Self::Completed => JobTargetStatusClass::Successful,
+            Self::Skipped => JobTargetStatusClass::Skipped,
+            Self::Rejected
+            | Self::Failed
+            | Self::AgentTimeout
+            | Self::ControlTimeout
+            | Self::Canceled => JobTargetStatusClass::Unsuccessful,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        self.class().is_in_progress()
+    }
+
+    pub fn is_terminal(self) -> bool {
+        self.class().is_terminal()
+    }
+
+    pub fn is_success(self) -> bool {
+        self.class().is_successful_outcome()
+    }
+
+    pub fn is_unsuccessful_terminal(self) -> bool {
+        self.class().is_unsuccessful_outcome()
+    }
+}
+
+pub fn job_statuses() -> &'static [&'static str] {
+    &JOB_STATUSES
+}
+
+pub fn job_terminal_statuses() -> &'static [&'static str] {
+    &JOB_TERMINAL_STATUSES
+}
+
+pub fn job_status_classes() -> &'static [&'static str] {
+    &JOB_STATUS_CLASSES
+}
+
+pub fn job_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &JOB_STATUS_CLASS_BY_STATUS
+}
+
+pub fn job_target_statuses() -> &'static [&'static str] {
+    &JOB_TARGET_STATUSES
+}
+
+pub fn job_target_terminal_statuses() -> &'static [&'static str] {
+    &JOB_TARGET_TERMINAL_STATUSES
+}
+
+pub fn job_target_status_classes() -> &'static [&'static str] {
+    &JOB_TARGET_STATUS_CLASSES
+}
+
+pub fn job_target_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &JOB_TARGET_STATUS_CLASS_BY_STATUS
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -316,11 +728,69 @@ pub struct GatewayCommandCancelResult {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayForwardEventKindCounters {
+    #[serde(default)]
+    pub telemetry: u64,
+    #[serde(default)]
+    pub command_output: u64,
+    #[serde(default)]
+    pub lifecycle: u64,
+    #[serde(default)]
+    pub terminal_output: u64,
+    #[serde(default)]
+    pub other: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayForwardDropReasonCounters {
+    #[serde(default)]
+    pub global_queue_full: u64,
+    #[serde(default)]
+    pub target_queue_full: u64,
+    #[serde(default)]
+    pub expired: u64,
+    #[serde(default)]
+    pub coalesced: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayForwardCriticalFailureCounters {
+    #[serde(default)]
+    pub global_queue_full: u64,
+    #[serde(default)]
+    pub target_queue_full: u64,
+    #[serde(default)]
+    pub expired: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct GatewayForwardMetricsSnapshot {
     pub queued_events: u64,
     pub delivered_events: u64,
     pub retry_attempts: u64,
     pub active_queues: u64,
+    #[serde(default)]
+    pub current_queue_depth: u64,
+    #[serde(default)]
+    pub oldest_event_age_secs: Option<u64>,
+    #[serde(default)]
+    pub dropped_events: u64,
+    #[serde(default)]
+    pub telemetry_dropped_events: u64,
+    #[serde(default)]
+    pub expired_events: u64,
+    #[serde(default)]
+    pub critical_failures: u64,
+    #[serde(default)]
+    pub dropped_by_kind: GatewayForwardEventKindCounters,
+    #[serde(default)]
+    pub dropped_by_reason: GatewayForwardDropReasonCounters,
+    #[serde(default)]
+    pub critical_failures_by_reason: GatewayForwardCriticalFailureCounters,
+    #[serde(default)]
+    pub retained_output_truncated_events: u64,
+    #[serde(default)]
+    pub unhealthy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -415,6 +885,23 @@ pub fn job_privilege_intent_fields() -> &'static [&'static str] {
         "timeout_secs",
         "force_unprivileged",
         "privileged",
+    ]
+}
+
+pub fn create_job_request_fields() -> &'static [&'static str] {
+    &[
+        "job_id",
+        "selector_expression",
+        "target_client_ids",
+        "destructive",
+        "confirmed",
+        "command",
+        "argv",
+        "operation",
+        "timeout_secs",
+        "force_unprivileged",
+        "privileged",
+        "privilege_assertion",
     ]
 }
 
@@ -921,6 +1408,74 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobCommandSafety {
+    ReadOnly,
+    Exclusive,
+}
+
+pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
+    match command {
+        JobCommand::ConfigRead
+        | JobCommand::FilePull { .. }
+        | JobCommand::FileStat { .. }
+        | JobCommand::FileListDir { .. }
+        | JobCommand::FileReadText { .. }
+        | JobCommand::FileDownload { .. }
+        | JobCommand::FileArchiveTar { .. }
+        | JobCommand::FileTransferDownloadStart { .. }
+        | JobCommand::FileTransferDownloadChunk { .. }
+        | JobCommand::UserSessions
+        | JobCommand::ProcessList { .. }
+        | JobCommand::ProcessStatus { .. }
+        | JobCommand::ProcessLogs { .. }
+        | JobCommand::NetworkStatus { .. }
+        | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkProbe { .. }
+        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::ReadOnly,
+        JobCommand::Shell { .. }
+        | JobCommand::ShellScript { .. }
+        | JobCommand::TerminalOpen { .. }
+        | JobCommand::TerminalInput { .. }
+        | JobCommand::TerminalPoll { .. }
+        | JobCommand::TerminalResize { .. }
+        | JobCommand::TerminalClose { .. }
+        | JobCommand::HotConfig { .. }
+        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::FilePush { .. }
+        | JobCommand::FilePushChunked { .. }
+        | JobCommand::FileTransferStart { .. }
+        | JobCommand::FileTransferChunk { .. }
+        | JobCommand::FileTransferCommit { .. }
+        | JobCommand::FileTransferAbort { .. }
+        | JobCommand::FileWriteText { .. }
+        | JobCommand::FileMkdir { .. }
+        | JobCommand::FileRename { .. }
+        | JobCommand::FileDelete { .. }
+        | JobCommand::FileChmod { .. }
+        | JobCommand::FileChown { .. }
+        | JobCommand::FileCopy { .. }
+        | JobCommand::ProcessStart { .. }
+        | JobCommand::ProcessStop { .. }
+        | JobCommand::ProcessRestart { .. }
+        | JobCommand::Backup { .. }
+        | JobCommand::Restore { .. }
+        | JobCommand::RestoreRollback { .. }
+        | JobCommand::NetworkApply { .. }
+        | JobCommand::NetworkOspfCostUpdate { .. }
+        | JobCommand::NetworkRollback { .. } => JobCommandSafety::Exclusive,
+    }
+}
+
+pub fn job_command_requires_confirmation(command: &JobCommand) -> bool {
+    job_command_safety(command) == JobCommandSafety::Exclusive
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileActionPolicy {
@@ -1040,7 +1595,15 @@ pub fn decode_json<T: DeserializeOwned>(payload: &[u8]) -> Result<T, ProtocolErr
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_build_number, JobCommand, ServerHello};
+    use std::collections::BTreeSet;
+
+    use super::{
+        job_status_class_by_status, job_status_classes, job_statuses,
+        job_target_status_class_by_status, job_target_status_classes, job_target_statuses,
+        parse_build_number, JobCommand, JobStatus, JobStatusClass, JobTargetStatus,
+        JobTargetStatusClass, ServerHello, JOB_STATUS_CLASSES, JOB_STATUS_PARTIAL_SUCCESS,
+        JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES, TARGET_STATUS_SKIPPED,
+    };
 
     #[test]
     fn parses_positive_build_numbers_with_default_fallback() {
@@ -1066,6 +1629,113 @@ mod tests {
         let encoded = serde_json::to_value(&hello).unwrap();
         assert_eq!(encoded["server_version"], "0.1.0");
         assert_eq!(encoded["server_build_number"], 1001);
+    }
+
+    #[test]
+    fn job_status_model_is_total_and_strict() {
+        let mut mapped_statuses = BTreeSet::new();
+        let mut used_classes = BTreeSet::new();
+        for (status, status_class) in job_status_class_by_status() {
+            mapped_statuses.insert(*status);
+            used_classes.insert(*status_class);
+            let parsed_status = JobStatus::parse(status).expect("canonical job status parses");
+            let parsed_class =
+                JobStatusClass::parse(status_class).expect("canonical job status class parses");
+            assert_eq!(parsed_status.as_str(), *status);
+            assert_eq!(parsed_status.class(), parsed_class);
+            assert_eq!(
+                parsed_status.is_in_progress(),
+                parsed_class.is_in_progress()
+            );
+            assert_eq!(parsed_status.is_terminal(), parsed_class.is_terminal());
+            assert_eq!(
+                parsed_status.is_success(),
+                parsed_class.is_successful_outcome()
+            );
+            assert_eq!(
+                parsed_status.is_unsuccessful_terminal(),
+                parsed_class.is_unsuccessful_outcome()
+            );
+        }
+        assert_eq!(
+            mapped_statuses,
+            job_statuses().iter().copied().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            used_classes,
+            job_status_classes()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            job_status_classes(),
+            &JOB_STATUS_CLASSES,
+            "generated helper must expose the canonical class array"
+        );
+        assert!(JobStatus::parse("not_canonical_job_status").is_none());
+        assert_eq!(
+            JobStatus::parse(JOB_STATUS_PARTIAL_SUCCESS)
+                .unwrap()
+                .class(),
+            JobStatusClass::PartialSuccess
+        );
+        assert_eq!(
+            JobStatus::parse(JOB_STATUS_SKIPPED).unwrap().class(),
+            JobStatusClass::Skipped
+        );
+    }
+
+    #[test]
+    fn target_status_model_is_total_and_strict() {
+        let mut mapped_statuses = BTreeSet::new();
+        let mut used_classes = BTreeSet::new();
+        for (status, status_class) in job_target_status_class_by_status() {
+            mapped_statuses.insert(*status);
+            used_classes.insert(*status_class);
+            let parsed_status =
+                JobTargetStatus::parse(status).expect("canonical target status parses");
+            let parsed_class = JobTargetStatusClass::parse(status_class)
+                .expect("canonical target status class parses");
+            assert_eq!(parsed_status.as_str(), *status);
+            assert_eq!(parsed_status.class(), parsed_class);
+            assert_eq!(parsed_status.is_active(), parsed_class.is_in_progress());
+            assert_eq!(parsed_status.is_terminal(), parsed_class.is_terminal());
+            assert_eq!(
+                parsed_status.is_success(),
+                parsed_class.is_successful_outcome()
+            );
+            assert_eq!(
+                parsed_status.is_unsuccessful_terminal(),
+                parsed_class.is_unsuccessful_outcome()
+            );
+        }
+        assert_eq!(
+            mapped_statuses,
+            job_target_statuses()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            used_classes,
+            job_target_status_classes()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            job_target_status_classes(),
+            &JOB_TARGET_STATUS_CLASSES,
+            "generated helper must expose the canonical target class array"
+        );
+        assert!(JobTargetStatus::parse("not_canonical_target_status").is_none());
+        assert_eq!(
+            JobTargetStatus::parse(TARGET_STATUS_SKIPPED)
+                .unwrap()
+                .class(),
+            JobTargetStatusClass::Skipped
+        );
     }
 
     #[test]

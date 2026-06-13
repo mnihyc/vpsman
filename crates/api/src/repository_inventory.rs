@@ -51,7 +51,7 @@ impl Repository {
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'never') AS never,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status = 'stale') AS stale,
                         (SELECT count(*) FROM clients WHERE hidden_at IS NULL AND status IN ('offline', 'never', 'stale')) AS warnings,
-                        (SELECT count(*) FROM jobs WHERE status IN ('pending', 'running')) AS running_jobs
+                        (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')) AS running_jobs
                     "#,
                 )
                 .fetch_one(pool)

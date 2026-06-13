@@ -41,6 +41,11 @@ import type {
   TerminalSessionRecord,
 } from "../typesTerminal";
 import {
+  jobOutputComparisonStatusBadgeClass,
+  jobStatusBadgeClass,
+  jobTargetStatusBadgeClass,
+} from "../jobStatusPresentation";
+import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
   decodeOutputPreview,
@@ -48,7 +53,6 @@ import {
   runPanelAction,
   shortHash,
   shortId,
-  statusClass,
 } from "../utils";
 import {
   JobDispatchPanel,
@@ -334,7 +338,7 @@ export function JobHistoryPanel({
         cell: (job) => (
           <span className="jobStatusCell">
             <span
-              className={`status ${statusClass(job.status)}`}
+              className={`status ${jobStatusBadgeClass(job.status)}`}
               title={job.status}
             >
               {displayToken(job.status)}
@@ -723,7 +727,7 @@ export function JobHistoryPanel({
                           <small>{shortId(target.job_id)}</small>
                         </span>
                         <span
-                          className={`status ${statusClass(target.status)}`}
+                          className={`status ${jobTargetStatusBadgeClass(target.status)}`}
                         >
                           {target.status}
                         </span>
@@ -869,7 +873,7 @@ export function JobHistoryPanel({
                               tabIndex={0}
                             >
                               <span className="historyPrimary">
-                                <strong className={`status ${statusClass(group.status)}`}>
+                                <strong className={`status ${jobOutputComparisonStatusBadgeClass(group.status)}`}>
                                   {group.status}
                                 </strong>
                                 <small>exit {group.exit_code ?? "-"}</small>
@@ -938,7 +942,7 @@ export function JobHistoryPanel({
                                   {row.stream_count} chunks / {formatBytes(row.byte_count)}
                                 </small>
                               </span>
-                              <span className={`status ${statusClass(row.status)}`}>
+                              <span className={`status ${jobOutputComparisonStatusBadgeClass(row.status)}`}>
                                 {row.status} / {row.exit_code ?? "-"}
                               </span>
                               <span className={row.matches_largest_group ? "status ok" : "status warn"}>
@@ -1054,7 +1058,7 @@ export function JobHistoryPanel({
                       <strong>{job.command_type.replace(/^scheduled_/, "")}</strong>
                       <small>{shortId(job.id)} · {shortHash(job.payload_hash)}</small>
                     </span>
-                    <span className={`status ${statusClass(job.status)}`}>{job.status}</span>
+                    <span className={`status ${jobStatusBadgeClass(job.status)}`}>{job.status}</span>
                     <span>{job.target_count}</span>
                     <span>{formatTime(job.created_at)}</span>
                     <span className="inlineActions">

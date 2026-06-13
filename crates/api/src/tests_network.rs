@@ -165,7 +165,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
             bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
         },
-        "succeeded",
+        "completed",
     )
     .await
     .unwrap();
@@ -186,7 +186,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             ifupdown_sha256_hex: payload_hash(right.ifupdown_snippet.as_bytes()),
             bird2_sha256_hex: payload_hash(right.bird2_interface_snippet.as_bytes()),
         },
-        "succeeded",
+        "completed",
     )
     .await
     .unwrap();
@@ -202,7 +202,7 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
             plan: Box::new(plan),
             side: TunnelEndpointSide::Left,
         },
-        "succeeded",
+        "completed",
     )
     .await
     .unwrap();
@@ -661,12 +661,11 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
     let (status, response) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "succeeded_with_skips").await;
+    wait_for_job_status(&repo, response.job_id, "partial_success").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "succeeded_with_skips");
-    assert_eq!(response.accepted_targets, 0);
+    assert_eq!(response.status, "partial_success");
     assert_eq!(targets[0].status, "skipped");
 }
 
@@ -901,6 +900,7 @@ fn test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 

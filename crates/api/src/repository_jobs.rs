@@ -4,16 +4,56 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::JobCommand;
+use vpsman_common::{job_command_safety, JobCommand, JobCommandSafety};
 use vpsman_server_core::{
-    target_status_counts_as_accepted, target_status_is_pending, JOB_STATUS_PENDING,
-    JOB_STATUS_SKIPPED, JOB_STATUS_SUCCEEDED, JOB_STATUS_SUCCEEDED_WITH_SKIPS,
-    TARGET_STATUS_AGENT_TIMED_OUT, TARGET_STATUS_CANCELED, TARGET_STATUS_CONTROL_TIMED_OUT,
-    TARGET_STATUS_DELIVERING, TARGET_STATUS_FAILED, TARGET_STATUS_PENDING, TARGET_STATUS_REJECTED,
-    TARGET_STATUS_RUNNING, TARGET_STATUS_SUCCEEDED,
+    target_status_is_active, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED,
+    JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
+    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
+    TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
 };
 
 pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
+
+const EXCLUSIVE_COMMAND_TYPES: &[&str] = &[
+    "shell_pty",
+    "shell_argv",
+    "shell_script",
+    "terminal_open",
+    "terminal_input",
+    "terminal_poll",
+    "terminal_resize",
+    "terminal_close",
+    "hot_config",
+    "data_source_config_patch",
+    "agent_update",
+    "agent_update_activate",
+    "agent_update_rollback",
+    "agent_update_check",
+    "file_push",
+    "file_push_chunked",
+    "file_transfer_start",
+    "file_transfer_chunk",
+    "file_transfer_commit",
+    "file_transfer_abort",
+    "file_write_text",
+    "file_mkdir",
+    "file_rename",
+    "file_delete",
+    "file_chmod",
+    "file_chown",
+    "file_copy",
+    "process_start",
+    "process_stop",
+    "process_restart",
+    "backup",
+    "restore",
+    "restore_rollback",
+    "network_apply",
+    "network_ospf_cost_update",
+    "network_rollback",
+];
+
+const EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS: i32 = 0x5650_534d;
 
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
@@ -26,8 +66,8 @@ fn agent_update_activation_failure_status(status: &str) -> bool {
         status,
         TARGET_STATUS_FAILED
             | TARGET_STATUS_REJECTED
-            | TARGET_STATUS_AGENT_TIMED_OUT
-            | TARGET_STATUS_CONTROL_TIMED_OUT
+            | TARGET_STATUS_AGENT_TIMEOUT
+            | TARGET_STATUS_CONTROL_TIMEOUT
             | TARGET_STATUS_CANCELED
     )
 }
@@ -35,7 +75,7 @@ fn agent_update_activation_failure_status(status: &str) -> bool {
 fn schedule_job_outcome_error(status: &str) -> Option<&str> {
     if matches!(
         status,
-        JOB_STATUS_SUCCEEDED | JOB_STATUS_SUCCEEDED_WITH_SKIPS | JOB_STATUS_SKIPPED
+        JOB_STATUS_COMPLETED | JOB_STATUS_PARTIAL_SUCCESS | JOB_STATUS_SKIPPED
     ) {
         None
     } else {
@@ -344,34 +384,6 @@ impl Repository {
             .fetch_optional(pool)
             .await
             .map_err(Into::into),
-        }
-    }
-
-    pub(crate) async fn count_job_accepted_targets(&self, job_id: Uuid) -> Result<usize> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .job_targets
-                .read()
-                .await
-                .iter()
-                .filter(|target| {
-                    target.job_id == job_id && target_status_counts_as_accepted(&target.status)
-                })
-                .count()),
-            Self::Postgres(pool) => {
-                let count: i64 = sqlx::query_scalar(
-                    r#"
-                    SELECT count(*)
-                    FROM job_targets
-                    WHERE job_id = $1
-                      AND status IN ('running', 'succeeded', 'failed', 'agent_timed_out', 'control_timed_out', 'canceled')
-                    "#,
-                )
-                .bind(job_id)
-                .fetch_one(pool)
-                .await?;
-                Ok(count.max(0) as usize)
-            }
         }
     }
 
@@ -908,7 +920,7 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     command_type: command_type.clone(),
                     privileged: request.privileged,
-                    status: JOB_STATUS_PENDING.to_string(),
+                    status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
                     created_at: created_at.clone(),
@@ -925,6 +937,11 @@ impl Repository {
                     .await
                     .insert(job_id, operation.clone());
                 memory
+                    .job_timeouts
+                    .write()
+                    .await
+                    .insert(job_id, request.timeout_secs.unwrap_or(30).clamp(1, 3600));
+                memory
                     .job_targets
                     .write()
                     .await
@@ -935,7 +952,7 @@ impl Repository {
                             .map(|client_id| JobTargetView {
                                 job_id,
                                 client_id,
-                                status: TARGET_STATUS_PENDING.to_string(),
+                                status: TARGET_STATUS_QUEUED.to_string(),
                                 message: None,
                                 exit_code: None,
                                 started_at: None,
@@ -968,7 +985,7 @@ impl Repository {
                 .bind(operator.operator.id)
                 .bind(&command_type)
                 .bind(request.privileged)
-                    .bind(JOB_STATUS_PENDING)
+                    .bind(JOB_STATUS_QUEUED)
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
                 .bind(sqlx::types::Json(operation.clone()))
@@ -988,7 +1005,7 @@ impl Repository {
                     )
                     .bind(job_id)
                     .bind(client_id)
-                    .bind(TARGET_STATUS_PENDING)
+                    .bind(TARGET_STATUS_QUEUED)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -1014,7 +1031,7 @@ impl Repository {
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
             command_type: &command_type,
-            status: JOB_STATUS_PENDING,
+            status: JOB_STATUS_QUEUED,
             privileged: request.privileged,
             command_hash,
             resolved_targets,
@@ -1035,13 +1052,30 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let operations = memory.job_operations.read().await.clone();
+                let timeouts = memory.job_timeouts.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
+                let target_snapshot = memory.job_targets.read().await.clone();
+                let mut active_exclusive_clients = target_snapshot
+                    .iter()
+                    .filter(|target| {
+                        target.completed_at.is_none()
+                            && matches!(
+                                target.status.as_str(),
+                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
+                            )
+                    })
+                    .filter_map(|target| {
+                        let operation = operations.get(&target.job_id)?;
+                        (job_command_safety(operation) == JobCommandSafety::Exclusive)
+                            .then(|| target.client_id.clone())
+                    })
+                    .collect::<std::collections::HashSet<_>>();
                 let mut targets = memory.job_targets.write().await;
                 let mut claimed = Vec::new();
                 for target in targets.iter_mut().filter(|target| {
-                    target.completed_at.is_none() && target.status == TARGET_STATUS_PENDING
+                    target.completed_at.is_none() && target.status == TARGET_STATUS_QUEUED
                 }) {
-                    if claimed.len() >= limit.clamp(1, 100) as usize {
+                    if claimed.len() >= limit.clamp(1, 500) as usize {
                         break;
                     }
                     let Some(job) = jobs.iter().find(|job| job.id == target.job_id) else {
@@ -1050,8 +1084,18 @@ impl Repository {
                     let Some(operation) = operations.get(&target.job_id).cloned() else {
                         continue;
                     };
-                    target.status = TARGET_STATUS_DELIVERING.to_string();
+                    if job_command_safety(&operation) == JobCommandSafety::Exclusive
+                        && active_exclusive_clients.contains(&target.client_id)
+                    {
+                        continue;
+                    }
+                    let is_exclusive =
+                        job_command_safety(&operation) == JobCommandSafety::Exclusive;
+                    target.status = TARGET_STATUS_DISPATCHING.to_string();
                     target.started_at.get_or_insert_with(|| now.clone());
+                    if is_exclusive {
+                        active_exclusive_clients.insert(target.client_id.clone());
+                    }
                     claimed.push(ClaimedJobTarget {
                         job_id: target.job_id,
                         client_id: target.client_id.clone(),
@@ -1060,7 +1104,11 @@ impl Repository {
                         payload_hash: job.payload_hash.clone(),
                         operation,
                         source_schedule_id: None,
-                        timeout_secs: 30,
+                        timeout_secs: timeouts
+                            .get(&target.job_id)
+                            .copied()
+                            .unwrap_or(30)
+                            .clamp(1, 3600),
                     });
                 }
                 Ok(claimed)
@@ -1082,25 +1130,81 @@ impl Repository {
                         JOIN jobs job ON job.id = target.job_id
 	                        WHERE target.completed_at IS NULL
                               AND target.cancel_requested_at IS NULL
-	                          AND target.status IN ('pending', 'delivering')
+	                          AND target.status IN ('queued', 'dispatching')
 	                          AND job.completed_at IS NULL
-	                          AND job.status IN ('pending', 'running')
+	                          AND job.status IN ('queued', 'running')
                               AND (
                                 target.deadline_at IS NULL
                                 OR target.deadline_at > now()
                               )
-	                          AND (
-	                            target.status = 'pending'
-	                            OR target.dispatch_lease_until IS NULL
-	                            OR target.dispatch_lease_until < now()
-	                          )
+                              AND (
+                                job.command_type <> ALL($3::text[])
+                                OR (
+                                  pg_try_advisory_xact_lock(
+                                    $4::integer,
+                                    hashtext(target.client_id)
+                                  )
+                                  AND
+                                  NOT EXISTS (
+                                    SELECT 1
+                                    FROM job_targets active_target
+                                    JOIN jobs active_job
+                                      ON active_job.id = active_target.job_id
+                                    WHERE active_target.client_id = target.client_id
+                                      AND active_target.completed_at IS NULL
+                                      AND active_target.status IN ('dispatching', 'running')
+                                      AND active_job.completed_at IS NULL
+                                      AND active_job.command_type = ANY($3::text[])
+                                      AND (
+                                        active_target.job_id <> target.job_id
+                                        OR active_target.client_id <> target.client_id
+                                      )
+                                  )
+                                  AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM job_targets earlier_target
+                                    JOIN jobs earlier_job
+                                      ON earlier_job.id = earlier_target.job_id
+                                    WHERE earlier_target.client_id = target.client_id
+                                      AND earlier_target.completed_at IS NULL
+                                      AND earlier_target.cancel_requested_at IS NULL
+                                      AND earlier_target.status IN ('queued', 'dispatching')
+                                      AND earlier_job.completed_at IS NULL
+                                      AND earlier_job.status IN ('queued', 'running')
+                                      AND earlier_job.command_type = ANY($3::text[])
+                                      AND (
+                                        earlier_target.deadline_at IS NULL
+                                        OR earlier_target.deadline_at > now()
+                                      )
+                                      AND (
+                                        earlier_target.status = 'queued'
+                                        OR earlier_target.dispatch_lease_until IS NULL
+                                        OR earlier_target.dispatch_lease_until < now()
+                                      )
+                                      AND (
+                                        earlier_job.created_at,
+                                        earlier_target.job_id,
+                                        earlier_target.client_id
+                                      ) < (
+                                        job.created_at,
+                                        target.job_id,
+                                        target.client_id
+                                      )
+                                  )
+                                )
+                              )
+                              AND (
+                                target.status = 'queued'
+                                OR target.dispatch_lease_until IS NULL
+                                OR target.dispatch_lease_until < now()
+                              )
                         ORDER BY job.created_at ASC, target.client_id ASC
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE job_targets target
                     SET
-	                        status = 'delivering',
+	                        status = 'dispatching',
 	                        started_at = COALESCE(target.started_at, now()),
 	                        dispatch_attempts = target.dispatch_attempts + 1,
 	                        dispatch_lease_until = now() + make_interval(secs => $2::integer),
@@ -1120,8 +1224,10 @@ impl Repository {
                         due.timeout_secs
                     "#,
                 )
-                .bind(limit.clamp(1, 100))
+                .bind(limit.clamp(1, 500))
                 .bind(lease_secs.clamp(1, 3600) as i32)
+                .bind(EXCLUSIVE_COMMAND_TYPES.to_vec())
+                .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -1148,11 +1254,10 @@ impl Repository {
     pub(crate) async fn refresh_job_status_from_targets(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<(String, usize)>> {
+    ) -> Result<Option<String>> {
         let Some(job) = self.get_job(job_id).await? else {
             return Ok(None);
         };
-        let accepted_targets = self.count_job_accepted_targets(job_id).await?;
         if job.completed_at.is_some() {
             return Ok(None);
         }
@@ -1160,13 +1265,13 @@ impl Repository {
         if targets.is_empty()
             || targets
                 .iter()
-                .any(|target| target_status_is_pending(&target.status))
+                .any(|target| target_status_is_active(&target.status))
         {
-            return Ok(Some((job.status, accepted_targets)));
+            return Ok(Some(job.status));
         }
         let status = aggregate_job_status_from_targets(&targets);
         self.finish_job(job_id, status).await?;
-        Ok(Some((status.to_string(), accepted_targets)))
+        Ok(Some(status.to_string()))
     }
 
     pub(crate) async fn mark_job_target_running(
@@ -1228,7 +1333,7 @@ impl Repository {
                     SET status = 'running'
                     WHERE id = $1
                       AND completed_at IS NULL
-                      AND status = 'pending'
+                      AND status = 'queued'
                     "#,
                 )
                 .bind(job_id)
@@ -1268,12 +1373,54 @@ impl Repository {
         Ok(())
     }
 
-    pub(crate) async fn expire_control_timed_out_targets(
+    pub(crate) async fn expire_control_timeout_targets(
         &self,
         limit: i64,
     ) -> Result<Vec<DeadlineExpiredJobTarget>> {
         match self {
-            Self::Memory(_) => Ok(Vec::new()),
+            Self::Memory(memory) => {
+                let now = unix_now();
+                let completed_at = now.to_string();
+                let timeouts = memory.job_timeouts.read().await.clone();
+                let mut expired = Vec::new();
+                let mut targets = memory.job_targets.write().await;
+                for target in targets
+                    .iter_mut()
+                    .filter(|target| {
+                        target.completed_at.is_none()
+                            && matches!(
+                                target.status.as_str(),
+                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
+                            )
+                    })
+                    .take(limit.clamp(1, 500) as usize)
+                {
+                    let Some(started_at) = target
+                        .started_at
+                        .as_deref()
+                        .and_then(|value| value.parse::<u64>().ok())
+                    else {
+                        continue;
+                    };
+                    let timeout_secs = timeouts
+                        .get(&target.job_id)
+                        .copied()
+                        .unwrap_or(30)
+                        .clamp(1, 3600);
+                    if now.saturating_sub(started_at) < timeout_secs {
+                        continue;
+                    }
+                    target.status = TARGET_STATUS_CONTROL_TIMEOUT.to_string();
+                    target.message =
+                        Some("control deadline elapsed before final command output".to_string());
+                    target.completed_at = Some(completed_at.clone());
+                    expired.push(DeadlineExpiredJobTarget {
+                        job_id: target.job_id,
+                        client_id: target.client_id.clone(),
+                    });
+                }
+                Ok(expired)
+            }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
@@ -1281,7 +1428,7 @@ impl Repository {
                         SELECT job_id, client_id
                         FROM job_targets
                         WHERE completed_at IS NULL
-                          AND status IN ('delivering', 'running')
+                          AND status IN ('dispatching', 'running')
                           AND deadline_at IS NOT NULL
                           AND deadline_at <= now()
                         ORDER BY deadline_at ASC, job_id, client_id
@@ -1289,7 +1436,7 @@ impl Repository {
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE job_targets target
-                    SET status = 'control_timed_out',
+                    SET status = 'control_timeout',
                         message = COALESCE(target.last_dispatch_error, 'control deadline elapsed before final command output'),
                         completed_at = now(),
                         dispatch_lease_until = NULL,
@@ -1338,13 +1485,13 @@ impl Repository {
                     .filter(|target| target.job_id == job_id && target.completed_at.is_none())
                 {
                     match target.status.as_str() {
-                        TARGET_STATUS_PENDING => {
+                        TARGET_STATUS_QUEUED => {
                             target.status = TARGET_STATUS_CANCELED.to_string();
                             target.message = Some(message.to_string());
                             target.completed_at = Some(now.clone());
                             pending_canceled += 1;
                         }
-                        TARGET_STATUS_DELIVERING | TARGET_STATUS_RUNNING => {
+                        TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING => {
                             cancel_targets.push(target.client_id.clone());
                         }
                         _ => {}
@@ -1382,7 +1529,7 @@ impl Repository {
                         cancel_requested_at = COALESCE(cancel_requested_at, now())
                     WHERE job_id = $1
                       AND completed_at IS NULL
-                      AND status = 'pending'
+                      AND status = 'queued'
                     RETURNING client_id
                     "#,
                 )
@@ -1398,7 +1545,7 @@ impl Repository {
                         message = COALESCE(message, $2)
                     WHERE job_id = $1
                       AND completed_at IS NULL
-                      AND status IN ('delivering', 'running')
+                      AND status IN ('dispatching', 'running')
                     RETURNING client_id
                     "#,
                 )
@@ -1481,7 +1628,7 @@ impl Repository {
                       AND client_id = $2
                       AND (
                         completed_at IS NULL
-                        OR status IN ('control_timed_out', 'canceled')
+                        OR status IN ('control_timeout', 'canceled')
                       )
                     "#,
                 )
@@ -1513,7 +1660,7 @@ impl Repository {
                       AND client_id = $2
                       AND (
                         completed_at IS NULL
-                        OR status IN ('control_timed_out', 'canceled')
+                        OR status IN ('control_timeout', 'canceled')
                       )
                     "#,
                 )
@@ -1566,7 +1713,7 @@ impl Repository {
                     }),
                     created_at: completed_at,
                 });
-                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_SUCCEEDED
+                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
                     || agent_update_activation_failure_status(&outcome.status)
                 {
                     match memory.job_operations.read().await.get(&job_id).cloned() {
@@ -1582,7 +1729,7 @@ impl Repository {
                 match update_lifecycle_operation {
                     Some(JobCommand::AgentUpdateActivate {
                         staged_sha256_hex, ..
-                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
                         self.record_agent_update_activation_completed(
                             client_id,
                             job_id,
@@ -1605,7 +1752,7 @@ impl Repository {
                     }
                     Some(JobCommand::AgentUpdateRollback {
                         rollback_sha256_hex,
-                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
                         self.record_agent_update_rollback_completed(
                             client_id,
                             job_id,
@@ -1640,7 +1787,7 @@ impl Repository {
                         completed_at = now(),
                         result_received_at = COALESCE($6::timestamptz, now()),
                         dispatch_lease_until = NULL,
-                        last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timed_out') THEN $4 ELSE NULL END
+                        last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout') THEN $4 ELSE NULL END
                     WHERE job_id = $1
                       AND client_id = $2
                       AND (
@@ -1649,7 +1796,7 @@ impl Repository {
                       )
                       AND (
                         completed_at IS NULL
-                        OR status = 'control_timed_out'
+                        OR status = 'control_timeout'
                       )
                     "#,
                 )
@@ -1685,7 +1832,7 @@ impl Repository {
                 }))
                 .execute(pool)
                 .await?;
-                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_SUCCEEDED
+                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
                     || agent_update_activation_failure_status(&outcome.status)
                 {
                     let row = sqlx::query(
@@ -1716,7 +1863,7 @@ impl Repository {
                 match update_lifecycle_operation {
                     Some(JobCommand::AgentUpdateActivate {
                         staged_sha256_hex, ..
-                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
                         self.record_agent_update_activation_completed(
                             client_id,
                             job_id,
@@ -1739,7 +1886,7 @@ impl Repository {
                     }
                     Some(JobCommand::AgentUpdateRollback {
                         rollback_sha256_hex,
-                    }) if outcome.status == TARGET_STATUS_SUCCEEDED => {
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
                         self.record_agent_update_rollback_completed(
                             client_id,
                             job_id,
@@ -1783,7 +1930,7 @@ impl Repository {
                     job.status = status.to_string();
                     job.completed_at = Some(completed_at);
                 }
-                if status == JOB_STATUS_SUCCEEDED {
+                if status == JOB_STATUS_COMPLETED {
                     memory.job_operations.read().await.get(&job_id).cloned()
                 } else {
                     None
@@ -1801,7 +1948,7 @@ impl Repository {
                 .bind(status)
                 .execute(pool)
                 .await?;
-                if status == JOB_STATUS_SUCCEEDED {
+                if status == JOB_STATUS_COMPLETED {
                     let row = sqlx::query(
                         r#"
                         SELECT operation

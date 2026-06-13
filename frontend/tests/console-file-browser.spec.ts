@@ -107,7 +107,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "2 VPSs" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
-  await expect(page.getByLabel("Execution result").getByText("partial success: 2 done, 1 failed", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Execution result").getByText("partial success: 2 completed, 1 unsuccessful", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download Archive" })).toHaveCount(1);
 
   await activate(page.getByRole("button", { name: "Upload files" }));

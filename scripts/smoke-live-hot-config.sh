@@ -142,10 +142,10 @@ assert_hot_config_persisted() {
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=20")"
 
-  jq -e '.status == "succeeded" and .command_type == "hot_config" and .target_count == 1' \
+  jq -e '.status == "completed" and .command_type == "hot_config" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)

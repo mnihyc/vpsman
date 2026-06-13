@@ -765,7 +765,6 @@ pub(crate) enum WsEvent {
     },
     JobRejected {
         job_id: Uuid,
-        accepted_targets: usize,
         status: String,
     },
     JobOutputRecorded {
@@ -784,7 +783,6 @@ pub(crate) enum WsEvent {
     },
     JobFinished {
         job_id: Uuid,
-        accepted_targets: usize,
         status: String,
     },
     BackupArtifactRecorded {
@@ -823,16 +821,15 @@ pub(crate) struct CreateJobRequest {
 #[derive(Debug, Serialize)]
 pub(crate) struct CreateJobTargetCounts {
     pub(crate) total: usize,
-    pub(crate) runnable: usize,
-    pub(crate) skipped: usize,
-    pub(crate) rejected_unavailable: usize,
-    pub(crate) pending: usize,
-    pub(crate) delivering: usize,
+    pub(crate) queued: usize,
+    pub(crate) dispatching: usize,
     pub(crate) running: usize,
-    pub(crate) succeeded: usize,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) rejected: usize,
     pub(crate) failed: usize,
-    pub(crate) agent_timed_out: usize,
-    pub(crate) control_timed_out: usize,
+    pub(crate) agent_timeout: usize,
+    pub(crate) control_timeout: usize,
     pub(crate) canceled: usize,
 }
 
@@ -840,7 +837,6 @@ pub(crate) struct CreateJobTargetCounts {
 pub(crate) struct CreateJobResponse {
     pub(crate) job_id: Uuid,
     pub(crate) target_count: usize,
-    pub(crate) accepted_targets: usize,
     pub(crate) status: String,
     pub(crate) target_counts: CreateJobTargetCounts,
 }
@@ -868,7 +864,6 @@ pub(crate) struct CancelJobResponse {
     pub(crate) pending_canceled: usize,
     pub(crate) cancel_acks: Vec<CancelJobTargetResult>,
     pub(crate) status: Option<String>,
-    pub(crate) accepted_targets: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]

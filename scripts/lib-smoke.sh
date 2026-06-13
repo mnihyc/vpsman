@@ -331,15 +331,10 @@ smoke_wait_api_job_status() {
     status="$(jq -r '.status // empty' <<<"$job_json")"
     if [[ "$expected_status" == "terminal" ]]; then
       case "$status" in
-        queued|dispatching|pending|delivering|running|accepted) ;;
+        queued|running) ;;
         *) printf '%s\n' "$job_json"; return 0 ;;
       esac
-    elif [[ "$status" == "$expected_status" ]] \
-      || [[ "$expected_status" == "completed" && "$status" == "succeeded" ]] \
-      || [[ "$expected_status" == "partially_completed" && "$status" == "partial_success" ]] \
-      || [[ "$expected_status" == "timed_out" && ( "$status" == "agent_timed_out" || "$status" == "control_timed_out" ) ]] \
-      || [[ "$expected_status" == "degraded_unprivileged" && "$status" == "succeeded_with_skips" ]] \
-      || [[ "$expected_status" == "dispatch_failed" && "$status" == "failed" ]]; then
+    elif [[ "$status" == "$expected_status" ]]; then
       printf '%s\n' "$job_json"
       return 0
     fi
@@ -359,24 +354,23 @@ smoke_assert_job_create_queued() {
   jq -e --argjson expected_targets "$expected_targets" '
     (.job_id | length == 36)
     and .target_count == $expected_targets
-    and (.accepted_targets == 0 or .accepted_targets <= .target_count)
+    and (has("accepted" + "_targets") | not)
+    and .target_counts.total == $expected_targets
     and (
-      .status == "pending"
+      .target_counts
+      | (.queued + .dispatching + .running + .completed + .skipped + .rejected + .failed + .agent_timeout + .control_timeout + .canceled) == .total
+    )
+    and (
+      .status == "queued"
       or .status == "running"
-      or .status == "succeeded"
-      or .status == "succeeded_with_skips"
+      or .status == "completed"
       or .status == "partial_success"
       or .status == "failed"
-      or .status == "agent_timed_out"
-      or .status == "control_timed_out"
+      or .status == "agent_timeout"
+      or .status == "control_timeout"
       or .status == "skipped"
       or .status == "rejected"
       or .status == "canceled"
-      or .status == "dispatching"
-      or .status == "queued"
-      or .status == "completed"
-      or .status == "timed_out"
-      or .status == "degraded_unprivileged"
     )
   ' <<<"$create_json" >/dev/null
 }

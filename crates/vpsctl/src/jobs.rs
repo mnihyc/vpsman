@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::JobCommand;
+use vpsman_common::{job_command_requires_confirmation, JobCommand};
 
 use crate::{
     commands_schedules::selector_expression_from_targets,
@@ -98,7 +98,7 @@ pub(crate) fn submit_privileged_operation(
             "selector_expression": selector_expression,
             "target_client_ids": target_ids,
             "privileged": true,
-            "destructive": false,
+            "destructive": job_command_requires_confirmation(request.operation),
             "confirmed": request.confirmed,
             "force_unprivileged": request.force_unprivileged,
             "timeout_secs": request.timeout_secs,

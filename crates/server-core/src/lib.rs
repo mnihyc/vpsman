@@ -1,30 +1,18 @@
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentPrivilegeMode, JobCommand, TunnelEndpointSide,
+    AgentCapabilitySnapshot, AgentPrivilegeMode, JobCommand, JobTargetStatus, TunnelEndpointSide,
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
-pub const JOB_STATUS_PENDING: &str = "pending";
-pub const JOB_STATUS_RUNNING: &str = "running";
-pub const JOB_STATUS_SUCCEEDED: &str = "succeeded";
-pub const JOB_STATUS_SUCCEEDED_WITH_SKIPS: &str = "succeeded_with_skips";
-pub const JOB_STATUS_PARTIAL_SUCCESS: &str = "partial_success";
-pub const JOB_STATUS_FAILED: &str = "failed";
-pub const JOB_STATUS_AGENT_TIMED_OUT: &str = "agent_timed_out";
-pub const JOB_STATUS_CONTROL_TIMED_OUT: &str = "control_timed_out";
-pub const JOB_STATUS_SKIPPED: &str = "skipped";
-pub const JOB_STATUS_REJECTED: &str = "rejected";
-pub const JOB_STATUS_CANCELED: &str = "canceled";
-
-pub const TARGET_STATUS_PENDING: &str = "pending";
-pub const TARGET_STATUS_DELIVERING: &str = "delivering";
-pub const TARGET_STATUS_RUNNING: &str = "running";
-pub const TARGET_STATUS_SUCCEEDED: &str = "succeeded";
-pub const TARGET_STATUS_FAILED: &str = "failed";
-pub const TARGET_STATUS_AGENT_TIMED_OUT: &str = "agent_timed_out";
-pub const TARGET_STATUS_CONTROL_TIMED_OUT: &str = "control_timed_out";
-pub const TARGET_STATUS_SKIPPED: &str = "skipped";
-pub const TARGET_STATUS_REJECTED: &str = "rejected";
-pub const TARGET_STATUS_CANCELED: &str = "canceled";
+pub use vpsman_common::{
+    job_statuses, job_target_statuses, job_target_terminal_statuses, job_terminal_statuses,
+    JobStatus, JobStatusClass, JobTargetStatusClass, JOB_STATUSES, JOB_STATUS_AGENT_TIMEOUT,
+    JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
+    JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED, JOB_STATUS_REJECTED, JOB_STATUS_RUNNING,
+    JOB_STATUS_SKIPPED, JOB_TARGET_STATUSES, JOB_TARGET_TERMINAL_STATUSES, JOB_TERMINAL_STATUSES,
+    TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED,
+    TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
+};
 
 pub const STATUS_OUTPUT_MAX_BYTES: usize = 32 * 1024;
 pub const INLINE_OUTPUT_PREVIEW_BYTES: usize = 32 * 1024;
@@ -320,23 +308,10 @@ pub fn target_lacks_privileged_host_mutation_capability(
     }
 }
 
-pub fn target_status_counts_as_accepted(status: &str) -> bool {
-    matches!(
-        status,
-        TARGET_STATUS_RUNNING
-            | TARGET_STATUS_SUCCEEDED
-            | TARGET_STATUS_FAILED
-            | TARGET_STATUS_AGENT_TIMED_OUT
-            | TARGET_STATUS_CONTROL_TIMED_OUT
-            | TARGET_STATUS_CANCELED
-    )
-}
-
-pub fn target_status_is_pending(status: &str) -> bool {
-    matches!(
-        status,
-        TARGET_STATUS_PENDING | TARGET_STATUS_DELIVERING | TARGET_STATUS_RUNNING
-    )
+pub fn target_status_is_active(status: &str) -> bool {
+    JobTargetStatus::parse(status)
+        .map(|status| status.class().is_in_progress())
+        .unwrap_or(false)
 }
 
 pub fn aggregate_job_status_from_statuses(
@@ -348,59 +323,42 @@ pub fn aggregate_job_status_from_statuses(
     }
     if target_statuses
         .iter()
-        .any(|status| target_status_is_pending(status))
+        .any(|status| target_status_is_active(status))
     {
         return JOB_STATUS_RUNNING;
     }
 
-    let succeeded = target_statuses
+    let parsed_statuses = target_statuses
         .iter()
-        .filter(|status| status.as_str() == TARGET_STATUS_SUCCEEDED)
-        .count();
-    let skipped = target_statuses
+        .filter_map(|status| JobTargetStatus::parse(status))
+        .collect::<Vec<_>>();
+    let completed = parsed_statuses
         .iter()
-        .filter(|status| status.as_str() == TARGET_STATUS_SKIPPED)
+        .filter(|status| status.class() == JobTargetStatusClass::Successful)
         .count();
-    if succeeded == target_count {
-        return JOB_STATUS_SUCCEEDED;
+    let skipped = parsed_statuses
+        .iter()
+        .filter(|status| status.class() == JobTargetStatusClass::Skipped)
+        .count();
+    if completed == target_count {
+        return JOB_STATUS_COMPLETED;
     }
-    if succeeded > 0 && succeeded + skipped == target_count {
-        return JOB_STATUS_SUCCEEDED_WITH_SKIPS;
-    }
-    if succeeded > 0 {
+    if completed > 0 || skipped == target_count {
         return JOB_STATUS_PARTIAL_SUCCESS;
     }
-    if skipped == target_count {
-        return JOB_STATUS_SUCCEEDED_WITH_SKIPS;
+    if parsed_statuses.contains(&JobTargetStatus::ControlTimeout) {
+        return JOB_STATUS_CONTROL_TIMEOUT;
     }
-    if target_statuses
-        .iter()
-        .any(|status| matches!(status.as_str(), TARGET_STATUS_CONTROL_TIMED_OUT))
-    {
-        return JOB_STATUS_CONTROL_TIMED_OUT;
+    if parsed_statuses.contains(&JobTargetStatus::AgentTimeout) {
+        return JOB_STATUS_AGENT_TIMEOUT;
     }
-    if target_statuses
-        .iter()
-        .any(|status| matches!(status.as_str(), TARGET_STATUS_AGENT_TIMED_OUT))
-    {
-        return JOB_STATUS_AGENT_TIMED_OUT;
-    }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == TARGET_STATUS_FAILED)
-    {
+    if parsed_statuses.contains(&JobTargetStatus::Failed) {
         return JOB_STATUS_FAILED;
     }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == TARGET_STATUS_CANCELED)
-    {
+    if parsed_statuses.contains(&JobTargetStatus::Canceled) {
         return JOB_STATUS_CANCELED;
     }
-    if target_statuses
-        .iter()
-        .any(|status| status.as_str() == TARGET_STATUS_REJECTED)
-    {
+    if parsed_statuses.contains(&JobTargetStatus::Rejected) {
         return JOB_STATUS_REJECTED;
     }
     JOB_STATUS_FAILED
@@ -504,16 +462,16 @@ mod tests {
     #[test]
     fn aggregate_status_preserves_existing_ordering() {
         assert_eq!(
-            aggregate_job_status_from_statuses(&["succeeded".to_string()], 1),
-            "succeeded"
+            aggregate_job_status_from_statuses(&["completed".to_string()], 1),
+            "completed"
         );
         assert_eq!(
-            aggregate_job_status_from_statuses(&["succeeded".to_string(), "failed".to_string()], 2,),
+            aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2,),
             "partial_success"
         );
         assert_eq!(
             aggregate_job_status_from_statuses(&["skipped".to_string(), "skipped".to_string()], 2,),
-            "succeeded_with_skips"
+            "partial_success"
         );
     }
 }

@@ -1610,7 +1610,7 @@ test("previews degraded update targets and sends explicit force override", async
   await expect(impact.getByText("Needs review")).toBeVisible();
   await dispatchWithPrompt(page.locator(".commandComposer"));
   await expect(
-    page.getByLabel("Execution result").getByText(/failed on 1 VPS/),
+    page.getByLabel("Execution result").getByText(/unsuccessful on 1 VPS/),
   ).toBeVisible();
   await expect(
     page
@@ -1723,7 +1723,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
       .getByRole("button", { name: "Run restore" }),
   );
 
-  await expect(page.getByText(/Restore job 11111111 accepted/)).toBeVisible();
+  await expect(page.getByText(/Restore job 11111111 running/)).toBeVisible();
   const prepareRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
@@ -1833,7 +1833,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
       .getByRole("button", { name: "Rollback restore" }),
   );
   await expect(
-    page.getByText(/Restore rollback job 11111111 accepted/),
+    page.getByText(/Restore rollback job 11111111 running/),
   ).toBeVisible();
   const rollbackRequest = await page.evaluate(() => {
     const requests = (

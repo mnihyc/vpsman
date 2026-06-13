@@ -567,7 +567,7 @@ const systemDashboard = {
     },
     dispatch: {
       active_jobs: 2,
-      pending_jobs: 1,
+      queued_jobs: 1,
       queue_depth: 4,
       retried_targets: 2,
       running_jobs: 1,
@@ -575,19 +575,44 @@ const systemDashboard = {
     },
     gateway_events: {
       active_queues: 3,
+      critical_failures: 0,
+      current_queue_depth: 0,
       delivered_events: 928,
+      critical_failures_by_reason: {
+        expired: 0,
+        global_queue_full: 0,
+        target_queue_full: 0,
+      },
+      dropped_by_kind: {
+        command_output: 0,
+        lifecycle: 0,
+        other: 0,
+        telemetry: 1,
+        terminal_output: 0,
+      },
+      dropped_by_reason: {
+        coalesced: 1,
+        expired: 0,
+        global_queue_full: 0,
+        target_queue_full: 0,
+      },
+      dropped_events: 1,
+      expired_events: 0,
+      oldest_event_age_secs: null,
       queued_events: 0,
+      retained_output_truncated_events: 0,
       retry_attempts: 2,
       status: "live",
+      telemetry_dropped_events: 1,
     },
     targets: {
       active: 3,
-      agent_timed_out_last_24h: 1,
+      agent_timeout_last_24h: 1,
       canceled_last_24h: 1,
-      control_timed_out_last_24h: 1,
+      control_timeout_last_24h: 1,
       deadline_expired_active: 0,
-      delivering: 1,
-      pending: 1,
+      dispatching: 1,
+      queued: 1,
       running: 2,
     },
   },
@@ -599,17 +624,27 @@ const systemDashboard = {
     systemSeries("db_pool.idle_connections", "DB idle connections", "connections", [16, 17, 18]),
     systemSeries("db_pool.max_connections", "DB max connections", "connections", [32, 32, 32]),
     systemSeries("dispatch.queue_depth", "Dispatch queue depth", "targets", [1, 2, 4]),
-    systemSeries("targets.delivering", "Delivering targets", "targets", [0, 1, 1]),
+    systemSeries("targets.dispatching", "Dispatching targets", "targets", [0, 1, 1]),
     systemSeries("targets.running", "Running targets", "targets", [1, 2, 2]),
     systemSeries("dispatch.retried_targets", "Retried targets", "targets", [0, 1, 2]),
     systemSeries("targets.deadline_expired_active", "Expired active targets", "targets", [0, 0, 0]),
-    systemSeries("targets.control_timed_out_last_24h", "Control timeouts", "targets", [0, 1, 1]),
-    systemSeries("targets.agent_timed_out_last_24h", "Agent timeouts", "targets", [0, 0, 1]),
+    systemSeries("targets.control_timeout_last_24h", "Control timeouts", "targets", [0, 1, 1]),
+    systemSeries("targets.agent_timeout_last_24h", "Agent timeouts", "targets", [0, 0, 1]),
     systemSeries("targets.canceled_last_24h", "Canceled targets", "targets", [0, 1, 1]),
     systemSeries("gateway_events.queued_events", "Gateway queued events", "events", [2, 1, 0]),
     systemSeries("gateway_events.delivered_events", "Gateway delivered events", "events", [900, 918, 928]),
     systemSeries("gateway_events.retry_attempts", "Gateway retry attempts", "attempts", [0, 1, 2]),
     systemSeries("gateway_events.active_queues", "Gateway active queues", "queues", [2, 3, 3]),
+    systemSeries("gateway_events.current_queue_depth", "Gateway queue depth", "events", [2, 1, 0]),
+    systemSeries("gateway_events.oldest_event_age_secs", "Gateway oldest event age", "seconds", [0, 2, 0]),
+    systemSeries("gateway_events.dropped_events", "Gateway dropped events", "events", [0, 0, 1]),
+    systemSeries("gateway_events.telemetry_dropped_events", "Gateway telemetry drops", "events", [0, 0, 1]),
+    systemSeries("gateway_events.expired_events", "Gateway expired events", "events", [0, 0, 0]),
+    systemSeries("gateway_events.critical_failures", "Gateway critical failures", "events", [0, 0, 0]),
+    systemSeries("gateway_events.dropped_by_kind.telemetry", "Gateway telemetry drops by kind", "events", [0, 0, 1]),
+    systemSeries("gateway_events.dropped_by_reason.coalesced", "Gateway coalesced telemetry", "events", [0, 0, 1]),
+    systemSeries("gateway_events.dropped_by_reason.target_queue_full", "Gateway target queue full drops", "events", [0, 0, 0]),
+    systemSeries("gateway_events.retained_output_truncated_events", "Gateway retained output truncations", "events", [0, 0, 0]),
     systemSeries("cancellations.requested", "Cancel requested", "targets", [0, 1, 1]),
     systemSeries("cancellations.sent", "Cancel sent", "targets", [0, 1, 1]),
     systemSeries("cancellations.acked", "Cancel acked", "targets", [0, 1, 1]),
@@ -622,13 +657,13 @@ const suiteConfigToml = `version = 1
 
 [api]
 bind = "0.0.0.0:8080"
-gateway_control_url = "http://gateway:9444"
+gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 require_registered_agent_updates = false
 
 [gateway]
 bind = "0.0.0.0:9443"
-control_bind = "0.0.0.0:9444"
+control_bind = "unix:/var/lib/vpsman/gateway-control.sock"
 api_url = "http://api:8080"
 gateway_id = "compose-gateway"
 reconnect_grace_secs = 60
@@ -663,7 +698,7 @@ privilege_verifier_key_file = "/run/secrets/vpsman_privilege_verifier_key_hex"
 const suiteConfigRedacted = {
   api: {
     bind: "0.0.0.0:8080",
-    gateway_control_url: "http://gateway:9444",
+    gateway_control_url: "unix:/var/lib/vpsman/gateway-control.sock",
     job_output_artifact_min_bytes: 32768,
     require_registered_agent_updates: false,
   },
@@ -676,7 +711,7 @@ const suiteConfigRedacted = {
   gateway: {
     api_url: "http://api:8080",
     bind: "0.0.0.0:9443",
-    control_bind: "0.0.0.0:9444",
+    control_bind: "unix:/var/lib/vpsman/gateway-control.sock",
     gateway_id: "compose-gateway",
     reconnect_grace_secs: 60,
   },
@@ -689,8 +724,8 @@ const suiteConfigRedacted = {
 };
 
 const suiteConfigValidation = {
-  hot_reload_fields: ["capacity.api_db_pool", "capacity.dispatcher_in_flight", "timeout.*"],
-  restart_required_fields: ["api.bind", "gateway.bind", "database.postgres_url", "secrets.*"],
+  hot_reload_fields: ["capacity.api_db_pool", "capacity.worker_db_pool", "worker.schedule_command_timeout_secs", "api.alert_*"],
+  restart_required_fields: ["api.bind", "gateway.bind", "gateway.control_bind", "database.postgres_url", "secrets.*", "storage.object_endpoint", "storage.update_object_endpoint", "capacity.dispatcher_batch", "capacity.dispatcher_in_flight", "timeout.*"],
   valid: true,
   version: 1,
 };
@@ -1854,6 +1889,29 @@ export async function installConsoleApiMock(page: Page) {
       webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
+      const targetCountsFromStatuses = (statuses: string[]) => {
+        const counts = {
+          agent_timeout: 0,
+          canceled: 0,
+          completed: 0,
+          control_timeout: 0,
+          dispatching: 0,
+          failed: 0,
+          queued: 0,
+          rejected: 0,
+          running: 0,
+          skipped: 0,
+          total: statuses.length,
+        };
+        for (const status of statuses) {
+          if (status in counts && status !== "total") {
+            counts[status as keyof Omit<typeof counts, "total">] += 1;
+          }
+        }
+        return counts;
+      };
+      const queuedTargetCounts = (total: number) =>
+        targetCountsFromStatuses(Array.from({ length: total }, () => "queued"));
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
       let currentSuiteConfigToml = suiteConfigTomlFixture;
       const deletedAgentIds = new Set<string>();
@@ -3550,11 +3608,11 @@ export async function installConsoleApiMock(page: Page) {
               : scheduleTargetIdsFromSelector(schedule.selector_expression);
             const selectedTargets = visibleAgents().filter((agent) => fixedTargetIds.includes(agent.id));
             return jsonResponse({
-              accepted_targets: selectedTargets.filter((agent) => agent.status !== "offline").length,
               target_count: fixedTargetIds.length,
+              target_counts: queuedTargetCounts(fixedTargetIds.length),
               job_id: "abababab-2323-4545-8989-cdcdcdcdcdcd",
               schedule_id: schedule.id,
-              status: "accepted",
+              status: selectedTargets.length === 0 ? "skipped" : "running",
             });
           }
         }
@@ -3785,13 +3843,9 @@ export async function installConsoleApiMock(page: Page) {
           const targets = resolveBulkTargets(body);
           const commandType =
             (body as { command?: string } | null)?.command ?? "job";
-          const acceptedTargets = targets.filter(
-            (agent) => agent.status !== "offline",
-          );
           const targetRecords = targets.map((agent) => ({
             client_id: agent.id,
-            completed_at:
-              agent.status === "offline" ? null : "2026-05-31T10:09:00Z",
+            completed_at: "2026-05-31T10:09:00Z",
             exit_code:
               agent.status === "stale"
                 ? 2
@@ -3810,16 +3864,18 @@ export async function installConsoleApiMock(page: Page) {
               agent.status === "stale"
                 ? "failed"
                 : agent.status === "offline"
-                  ? "dispatch_failed"
+                  ? "control_timeout"
                   : "completed",
           }));
           const jobId = "11111111-2222-4333-8444-555555555555";
           createdJobTargets.set(jobId, targetRecords);
           return jsonResponse({
-            accepted_targets: acceptedTargets.length,
             target_count: targets.length,
+            target_counts: targetCountsFromStatuses(
+              targetRecords.map((target) => target.status),
+            ),
             job_id: jobId,
-            status: "accepted",
+            status: "running",
           });
         }
         return originalFetch(input, init);

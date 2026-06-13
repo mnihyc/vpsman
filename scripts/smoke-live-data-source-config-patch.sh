@@ -167,10 +167,10 @@ assert_patch_persisted() {
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=30")"
 
-  jq -e '.status == "succeeded" and .command_type == "data_source_config_patch" and .target_count == 1' \
+  jq -e '.status == "completed" and .command_type == "data_source_config_patch" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "succeeded" and .[0].exit_code == 0
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
     .[] | select(.stream == "status" and .done == true and .exit_code == 0)
@@ -245,19 +245,19 @@ assert_execution_policy_applied() {
       --timeout-secs 1 \
       --confirmed)"
   execution_timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
-  if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_timeout_job_id" timed_out 45 >/dev/null; then
+  if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_timeout_job_id" terminal 45 >/dev/null; then
     dump_job_diagnostics "direct-child execution policy timeout did not report a terminal timeout" \
       "$execution_timeout_job_id"
     exit 1
   fi
   timeout_job_json="$(api_get "/api/v1/jobs/$execution_timeout_job_id")"
   timeout_targets="$(api_get "/api/v1/jobs/$execution_timeout_job_id/targets")"
-  jq -e '.status == "agent_timed_out" or .status == "control_timed_out"' \
+  jq -e '.status == "agent_timeout" or .status == "control_timeout"' \
     <<<"$timeout_job_json" >/dev/null
   jq -e --arg client "$client_id" '
     length == 1
     and .[0].client_id == $client
-    and (. [0].status == "agent_timed_out" or .[0].status == "control_timed_out")
+    and (. [0].status == "agent_timeout" or .[0].status == "control_timeout")
   ' <<<"$timeout_targets" >/dev/null
   timeout_outputs="$(api_get "/api/v1/jobs/$execution_timeout_job_id/outputs")"
   if [[ "$(jq 'length' <<<"$timeout_outputs")" != "0" ]]; then

@@ -2,7 +2,7 @@ version = 1
 
 [api]
 bind = "0.0.0.0:8080"
-gateway_control_url = "http://gateway:9444"
+gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 require_registered_agent_updates = false
 alert_memory_available_warning_ratio = 0.20
@@ -14,7 +14,7 @@ alert_cpu_load_critical = 4.0
 
 [gateway]
 bind = "0.0.0.0:9443"
-control_bind = "0.0.0.0:9444"
+control_bind = "unix:/var/lib/vpsman/gateway-control.sock"
 api_url = "http://api:8080"
 gateway_id = "compose-gateway"
 reconnect_grace_secs = 60

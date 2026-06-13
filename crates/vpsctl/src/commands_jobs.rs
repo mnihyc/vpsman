@@ -415,24 +415,14 @@ fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "succeeded"
-            | "succeeded_with_skips"
+        "completed"
             | "partial_success"
-            | "agent_timed_out"
-            | "control_timed_out"
             | "skipped"
             | "rejected"
-            | "canceled"
-            | "completed"
-            | "partially_completed"
             | "failed"
-            | "timed_out"
-            | "dispatch_failed"
-            | "degraded_unprivileged"
-            | "accepted"
-            | "rejected_authorization_required"
-            | "schedule_no_targets"
-            | "rejected_by_agent"
+            | "agent_timeout"
+            | "control_timeout"
+            | "canceled"
     )
 }
 
@@ -691,28 +681,18 @@ mod tests {
     #[test]
     fn classifies_terminal_follow_statuses() {
         for status in [
-            "succeeded",
-            "succeeded_with_skips",
+            "completed",
             "partial_success",
-            "agent_timed_out",
-            "control_timed_out",
             "skipped",
             "rejected",
-            "canceled",
-            "completed",
-            "partially_completed",
             "failed",
-            "timed_out",
-            "dispatch_failed",
-            "degraded_unprivileged",
-            "accepted",
-            "rejected_authorization_required",
-            "schedule_no_targets",
-            "rejected_by_agent",
+            "agent_timeout",
+            "control_timeout",
+            "canceled",
         ] {
             assert!(is_terminal_job_status(status));
         }
-        for status in ["dispatching", "pending", "running"] {
+        for status in ["dispatching", "queued", "running"] {
             assert!(!is_terminal_job_status(status));
         }
     }

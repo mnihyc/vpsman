@@ -226,7 +226,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
             ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
             bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         },
-        "succeeded",
+        "completed",
     )
     .await
     .unwrap();
@@ -692,5 +692,6 @@ fn test_state(repo: Repository) -> AppState {
         job_output_artifact_min_bytes: 32768,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }

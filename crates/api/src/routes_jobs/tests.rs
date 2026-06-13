@@ -29,12 +29,12 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
         }],
     });
 
-    assert_eq!(outcome.status, "agent_timed_out");
+    assert_eq!(outcome.status, "agent_timeout");
     assert_eq!(outcome.exit_code, Some(124));
     assert!(outcome.accepted);
     assert_eq!(
         aggregate_job_status_from_statuses(&[outcome.status], 1),
-        "agent_timed_out"
+        "agent_timeout"
     );
 }
 
@@ -164,11 +164,11 @@ fn stale_target_message_keeps_failure_reason_explicit() {
 #[test]
 fn aggregate_job_status_uses_terminal_target_states() {
     assert_eq!(
-        aggregate_job_status_from_statuses(&["succeeded".to_string(), "succeeded".to_string()], 2),
-        "succeeded"
+        aggregate_job_status_from_statuses(&["completed".to_string(), "completed".to_string()], 2),
+        "completed"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["succeeded".to_string(), "failed".to_string()], 2),
+        aggregate_job_status_from_statuses(&["completed".to_string(), "failed".to_string()], 2),
         "partial_success"
     );
     assert_eq!(
@@ -176,16 +176,16 @@ fn aggregate_job_status_uses_terminal_target_states() {
         "failed"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["control_timed_out".to_string()], 1),
-        "control_timed_out"
+        aggregate_job_status_from_statuses(&["control_timeout".to_string()], 1),
+        "control_timeout"
     );
     assert_eq!(
         aggregate_job_status_from_statuses(&["skipped".to_string()], 1),
-        "succeeded_with_skips"
+        "partial_success"
     );
     assert_eq!(
-        aggregate_job_status_from_statuses(&["succeeded".to_string(), "skipped".to_string()], 2,),
-        "succeeded_with_skips"
+        aggregate_job_status_from_statuses(&["completed".to_string(), "skipped".to_string()], 2,),
+        "partial_success"
     );
 }
 
