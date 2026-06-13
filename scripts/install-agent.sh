@@ -17,12 +17,11 @@ is_true() {
   esac
 }
 
-INSTALLER_PRESET_ROOT_INSTALL_DIR="/opt/vpsman"
-INSTALLER_PRESET_ROOT_CONFIG_DIR="/etc/vpsman"
-INSTALLER_PRESET_ROOT_STATE_DIR="/var/lib/vpsman"
-INSTALLER_PRESET_ROOT_LOG_DIR="/var/log/vpsman"
-INSTALLER_PRESET_SYSTEMD_DIR="/etc/systemd/system"
-INSTALLER_PRESET_INITD_DIR="/etc/init.d"
+service_enable_requested() {
+  is_true "${VPSMAN_ENABLE_SERVICE:-${VPSMAN_AGENT_ENABLE_SERVICE:-0}}"
+}
+
+INSTALLER_PRESET_ROOT_WORK_DIR="/opt/vpsman-agent"
 
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"
@@ -75,11 +74,17 @@ root_path() {
 }
 
 service_management_enabled() {
-  [[ "$install_root" == "/" ]] && [[ "$install_mode" == "root" ]] && ! is_true "${VPSMAN_SKIP_SERVICE_ENABLE:-0}"
+  [[ "$install_root" == "/" ]] \
+    && [[ "$install_mode" == "root" ]] \
+    && service_enable_requested \
+    && ! is_true "${VPSMAN_SKIP_SERVICE_ENABLE:-0}"
 }
 
 user_service_management_enabled() {
-  [[ "$install_root" == "/" ]] && [[ "$install_mode" == "unprivileged" ]] && ! is_true "${VPSMAN_SKIP_SERVICE_ENABLE:-0}"
+  [[ "$install_root" == "/" ]] \
+    && [[ "$install_mode" == "unprivileged" ]] \
+    && service_enable_requested \
+    && ! is_true "${VPSMAN_SKIP_SERVICE_ENABLE:-0}"
 }
 
 remove_empty_dir() {
@@ -152,7 +157,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$install_dir
+WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Restart=always
 RestartSec=5
@@ -175,7 +180,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$install_dir
+WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Restart=always
 RestartSec=5
@@ -203,7 +208,7 @@ write_sysv_init() {
 
 DAEMON="$install_dir/vpsman-agent"
 CONFIG="$config_dir/agent.toml"
-PIDFILE="/run/vpsman-agent.pid"
+PIDFILE="$state_dir/vpsman-agent.pid"
 
 case "\$1" in
   start)
@@ -274,39 +279,31 @@ validate_install_mode() {
 }
 
 default_install_dir() {
-  if [[ "$install_mode" == "unprivileged" ]]; then
-    printf '%s\n' "$service_home/.local/lib/vpsman"
-  else
-    printf '%s\n' "$INSTALLER_PRESET_ROOT_INSTALL_DIR"
-  fi
+  printf '%s\n' "$work_dir/bin"
 }
 
 default_config_dir() {
-  if [[ "$install_mode" == "unprivileged" ]]; then
-    printf '%s\n' "$service_home/.config/vpsman"
-  else
-    printf '%s\n' "$INSTALLER_PRESET_ROOT_CONFIG_DIR"
-  fi
+  printf '%s\n' "$work_dir/config"
 }
 
 default_state_dir() {
-  if [[ "$install_mode" == "unprivileged" ]]; then
-    printf '%s\n' "$service_home/.local/state/vpsman"
-  else
-    printf '%s\n' "$INSTALLER_PRESET_ROOT_STATE_DIR"
-  fi
+  printf '%s\n' "$work_dir/state"
 }
 
 default_log_dir() {
-  if [[ "$install_mode" == "unprivileged" ]]; then
-    printf '%s\n' "$service_home/.local/state/vpsman/log"
-  else
-    printf '%s\n' "$INSTALLER_PRESET_ROOT_LOG_DIR"
-  fi
+  printf '%s\n' "$work_dir/log"
+}
+
+default_systemd_dir() {
+  printf '%s\n' "$work_dir/systemd"
+}
+
+default_initd_dir() {
+  printf '%s\n' "$work_dir/init.d"
 }
 
 default_user_systemd_dir() {
-  printf '%s\n' "$service_home/.config/systemd/user"
+  printf '%s\n' "$work_dir/systemd/user"
 }
 
 write_requested_config() {
@@ -326,10 +323,16 @@ write_requested_config() {
 
 install_mode="${VPSMAN_INSTALL_MODE:-root}"
 validate_install_mode
+if [[ "$install_mode" == "unprivileged" ]]; then
+  work_dir="${VPSMAN_WORK_DIR:-$PWD/vpsman-agent}"
+else
+  work_dir="${VPSMAN_WORK_DIR:-$INSTALLER_PRESET_ROOT_WORK_DIR}"
+fi
 service_home="${VPSMAN_SERVICE_HOME:-${HOME:-}}"
 if [[ "$install_mode" == "unprivileged" ]]; then
-  [[ -n "$service_home" ]] || fail "VPSMAN_SERVICE_HOME or HOME is required for unprivileged install"
-  require_absolute "VPSMAN_SERVICE_HOME" "$service_home"
+  if [[ -n "${VPSMAN_SERVICE_HOME:-}" ]]; then
+    require_absolute "VPSMAN_SERVICE_HOME" "$service_home"
+  fi
 fi
 install_root="${VPSMAN_INSTALL_ROOT:-/}"
 install_dir="${VPSMAN_INSTALL_DIR:-$(default_install_dir)}"
@@ -337,18 +340,26 @@ config_dir="${VPSMAN_CONFIG_DIR:-$(default_config_dir)}"
 service_name="${VPSMAN_SERVICE_NAME:-vpsman-agent}"
 state_dir="${VPSMAN_STATE_DIR:-$(default_state_dir)}"
 log_dir="${VPSMAN_LOG_DIR:-$(default_log_dir)}"
+systemd_dir="${VPSMAN_SYSTEMD_DIR:-$(default_systemd_dir)}"
+initd_dir="${VPSMAN_INITD_DIR:-$(default_initd_dir)}"
 user_systemd_dir="${VPSMAN_USER_SYSTEMD_DIR:-$(default_user_systemd_dir)}"
 
 require_absolute "VPSMAN_INSTALL_ROOT" "$install_root"
+require_absolute "VPSMAN_WORK_DIR" "$work_dir"
 require_absolute "VPSMAN_INSTALL_DIR" "$install_dir"
 require_absolute "VPSMAN_CONFIG_DIR" "$config_dir"
 require_absolute "VPSMAN_STATE_DIR" "$state_dir"
 require_absolute "VPSMAN_LOG_DIR" "$log_dir"
+require_absolute "VPSMAN_SYSTEMD_DIR" "$systemd_dir"
+require_absolute "VPSMAN_INITD_DIR" "$initd_dir"
 require_absolute "VPSMAN_USER_SYSTEMD_DIR" "$user_systemd_dir"
+require_not_root_dir "VPSMAN_WORK_DIR" "$work_dir"
 require_not_root_dir "VPSMAN_INSTALL_DIR" "$install_dir"
 require_not_root_dir "VPSMAN_CONFIG_DIR" "$config_dir"
 require_not_root_dir "VPSMAN_STATE_DIR" "$state_dir"
 require_not_root_dir "VPSMAN_LOG_DIR" "$log_dir"
+require_not_root_dir "VPSMAN_SYSTEMD_DIR" "$systemd_dir"
+require_not_root_dir "VPSMAN_INITD_DIR" "$initd_dir"
 require_tool install
 
 if [[ "$install_root" == "/" && "$install_mode" == "root" && "$(id -u)" != "0" ]]; then
@@ -357,8 +368,8 @@ fi
 
 stage_install_dir="$(root_path "$install_dir")"
 stage_config_dir="$(root_path "$config_dir")"
-stage_systemd_dir="$(root_path "$INSTALLER_PRESET_SYSTEMD_DIR")"
-stage_initd_dir="$(root_path "$INSTALLER_PRESET_INITD_DIR")"
+stage_systemd_dir="$(root_path "$systemd_dir")"
+stage_initd_dir="$(root_path "$initd_dir")"
 stage_user_systemd_dir="$(root_path "$user_systemd_dir")"
 stage_var_dir="$(root_path "$state_dir")"
 stage_log_dir="$(root_path "$log_dir")"
@@ -448,8 +459,12 @@ verify_service_assets
 
 if is_true "${VPSMAN_SKIP_SERVICE_ENABLE:-0}" || [[ "$install_root" != "/" ]]; then
   info "service enable/start skipped"
+elif [[ "$install_mode" == "unprivileged" ]] && ! service_enable_requested; then
+  info "service enable/start skipped; user unit written to $user_systemd_unit"
+  info "set VPSMAN_ENABLE_SERVICE=1 to link and enable it with systemctl --user"
 elif [[ "$install_mode" == "unprivileged" ]]; then
   if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user link "$user_systemd_unit"
     systemctl --user daemon-reload || true
     if systemctl --user enable --now "$service_name.service"; then
       info "user systemd service enabled and started"
@@ -459,11 +474,15 @@ elif [[ "$install_mode" == "unprivileged" ]]; then
   else
     info "no supported user service manager detected; run $install_dir/vpsman-agent --config $config_dir/agent.toml run manually"
   fi
+elif ! service_enable_requested; then
+  info "service enable/start skipped; systemd unit written to $systemd_unit"
+  info "set VPSMAN_ENABLE_SERVICE=1 to link and enable it with systemctl"
 elif command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  systemctl link "$systemd_unit"
   systemctl daemon-reload
   systemctl enable --now "$service_name.service"
   info "systemd service enabled and started"
-elif command -v update-rc.d >/dev/null 2>&1 && command -v service >/dev/null 2>&1; then
+elif [[ "$initd_dir" == "/etc/init.d" ]] && command -v update-rc.d >/dev/null 2>&1 && command -v service >/dev/null 2>&1; then
   update-rc.d "$service_name" defaults
   service "$service_name" restart
   info "sysvinit service enabled and restarted"
