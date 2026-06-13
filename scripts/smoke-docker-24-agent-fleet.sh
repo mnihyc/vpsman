@@ -18,7 +18,8 @@ if ((agent_count < 20)); then
 fi
 long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
 simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
-agent_command_timeout_secs=30
+bulk_job_timeout_secs=45
+agent_command_timeout_secs=$((bulk_job_timeout_secs + 15))
 if ((long_running_secs > 0)); then
   agent_command_timeout_secs=$((long_running_secs + 120))
 fi
@@ -547,7 +548,7 @@ api_put "/api/v1/auth/preferences" '{
 job_json="$(vpsctl_json job-shell \
   --script 'printf "docker-bulk-ok\n"' \
   --tags provider:alpha \
-  --timeout-secs 45 \
+  --timeout-secs "$bulk_job_timeout_secs" \
   --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$job_json")"
 jq -e --argjson alpha_count "$provider_alpha_count" '

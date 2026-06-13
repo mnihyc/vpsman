@@ -121,7 +121,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     scopeValue: "US",
   });
   await maybeScreenshot(page, testInfo.project.name, "dashboard");
-  await expectLiveSystemDashboardTelemetry(page);
+  await expectLiveSystemDashboardTelemetry(page, testInfo.project.name);
   if (isMobile) {
     writeScreenshotManifest(testInfo.project.name);
     await expectCleanLayout(page);
@@ -242,6 +242,11 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await exerciseServerJobsCleanup(page, testInfo.project.name);
 
   await verifyDesktopSubpages(page, testInfo.project.name);
+  expectExtendedScreenshotNames(testInfo.project.name, [
+    "extended-page-system-dashboard",
+    "extended-page-system-config",
+    "extended-page-system-preferences",
+  ]);
   await openConsoleSubpage(page, "System", "Preferences");
   const preferencesPanel = page.locator(".preferencesPanel");
   await expect(
@@ -348,7 +353,10 @@ async function expectLiveDashboardTelemetry(page: Page) {
   ).toBeGreaterThan(0);
 }
 
-async function expectLiveSystemDashboardTelemetry(page: Page) {
+async function expectLiveSystemDashboardTelemetry(
+  page: Page,
+  projectName: string,
+) {
   await openConsoleSubpage(page, "System", "Dashboard");
   await expect(
     page.getByRole("heading", { name: "System dashboard", exact: true }),
@@ -388,6 +396,13 @@ async function expectLiveSystemDashboardTelemetry(page: Page) {
   });
   await expect(gatewayEvents).toContainText("Event retries");
   await expect(gatewayEvents).not.toContainText(/unavailable/i);
+  await expectCleanLayout(page);
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "page-system-dashboard",
+    "System / Dashboard page with live control-plane capacity, dispatch, deadline, cancellation, and gateway event metrics.",
+  );
 }
 
 async function expectLiveFleetTelemetry(detail: Locator) {
@@ -975,6 +990,18 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       marker: "Privilege unlock",
       screenshot: "page-access-privilege-unlock",
     },
+    {
+      view: "System",
+      subpage: "Config",
+      marker: "System config",
+      screenshot: "page-system-config",
+    },
+    {
+      view: "System",
+      subpage: "Preferences",
+      marker: "System preferences",
+      screenshot: "page-system-preferences",
+    },
   ] as const;
 
   for (const entry of subpages) {
@@ -1109,6 +1136,20 @@ function writeScreenshotManifest(projectName: string) {
       2,
     )}\n`,
   );
+}
+
+function expectExtendedScreenshotNames(projectName: string, names: string[]) {
+  if (!extendedReview || !screenshotDir) {
+    return;
+  }
+  const captured = new Set(
+    screenshotManifest
+      .filter((entry) => entry.project === projectName)
+      .map((entry) => entry.name),
+  );
+  for (const name of names) {
+    expect(captured).toContain(name);
+  }
 }
 
 function actionableConsoleErrors(errors: string[]): string[] {
