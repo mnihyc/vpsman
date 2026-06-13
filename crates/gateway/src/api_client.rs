@@ -115,10 +115,15 @@ impl GatewayControlClient {
 
 #[derive(Default)]
 struct GatewayEventForwarder {
-    queues: Mutex<HashMap<String, mpsc::Sender<GatewayForwardQueueItem>>>,
+    queues: Mutex<HashMap<String, GatewayForwardQueue>>,
     telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
     critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
     metrics: Arc<GatewayForwardMetrics>,
+}
+
+struct GatewayForwardQueue {
+    sender: mpsc::Sender<GatewayForwardQueueItem>,
+    last_enqueue_unix: u64,
 }
 
 #[derive(Default)]
@@ -219,6 +224,7 @@ impl Default for GatewayHttpTimeouts {
 
 const PER_TARGET_QUEUE_CAPACITY: usize = 512;
 const GLOBAL_QUEUE_CAPACITY: u64 = 10_000;
+const QUEUE_IDLE_REAP_SECS: u64 = 600;
 const TELEMETRY_EVENT_TTL: Duration = Duration::from_secs(60);
 const CRITICAL_EVENT_TTL: Duration = Duration::from_secs(300);
 const NONCRITICAL_EVENT_TTL: Duration = Duration::from_secs(120);
@@ -315,27 +321,38 @@ impl GatewayEventForwarder {
         item: GatewayForwardQueueItem,
         timeouts: GatewayHttpTimeouts,
     ) -> Result<()> {
-        let mut queues = self.queues.lock().await;
-        if !queues.contains_key(&target_key) {
-            let (sender, receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
-            let metrics = self.metrics.clone();
-            let telemetry_pending = self.telemetry_pending.clone();
-            let critical_failure_handler = self.critical_failure_handler.clone();
-            self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(run_forward_queue(
-                target_key.clone(),
-                receiver,
-                telemetry_pending,
-                metrics,
-                critical_failure_handler,
-                timeouts,
-            ));
-            queues.insert(target_key.clone(), sender);
-        }
-        let sender = queues
-            .get(&target_key)
-            .expect("queue sender exists after creation");
         let event_unix = item.created_unix();
+        let sender = {
+            let mut queues = self.queues.lock().await;
+            self.reap_idle_queues_locked(&mut queues, unix_now());
+            if !queues.contains_key(&target_key) {
+                let (sender, receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+                let metrics = self.metrics.clone();
+                let telemetry_pending = self.telemetry_pending.clone();
+                let critical_failure_handler = self.critical_failure_handler.clone();
+                self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(run_forward_queue(
+                    target_key.clone(),
+                    receiver,
+                    telemetry_pending,
+                    metrics,
+                    critical_failure_handler,
+                    timeouts,
+                ));
+                queues.insert(
+                    target_key.clone(),
+                    GatewayForwardQueue {
+                        sender,
+                        last_enqueue_unix: event_unix,
+                    },
+                );
+            }
+            let queue = queues
+                .get_mut(&target_key)
+                .expect("queue sender exists after creation");
+            queue.last_enqueue_unix = event_unix;
+            queue.sender.clone()
+        };
         let previous_depth = self
             .metrics
             .current_queue_depth
@@ -374,6 +391,18 @@ impl GatewayEventForwarder {
                 }
             }
         }
+    }
+
+    fn reap_idle_queues_locked(
+        &self,
+        queues: &mut HashMap<String, GatewayForwardQueue>,
+        now_unix: u64,
+    ) {
+        queues.retain(|_, queue| {
+            let idle = now_unix.saturating_sub(queue.last_enqueue_unix) >= QUEUE_IDLE_REAP_SECS;
+            let empty = queue.sender.capacity() == queue.sender.max_capacity();
+            !(idle && empty)
+        });
     }
 
     async fn drop_enqueue_event(
@@ -879,11 +908,13 @@ mod tests {
     async fn telemetry_enqueue_keeps_latest_pending_event() {
         let forwarder = GatewayEventForwarder::default();
         let (sender, _receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
-        forwarder
-            .queues
-            .lock()
-            .await
-            .insert("client-a".to_string(), sender);
+        forwarder.queues.lock().await.insert(
+            "client-a".to_string(),
+            GatewayForwardQueue {
+                sender,
+                last_enqueue_unix: unix_now(),
+            },
+        );
 
         forwarder
             .enqueue(
@@ -914,6 +945,32 @@ mod tests {
         assert_eq!(snapshot.telemetry_dropped_events, 1);
         assert_eq!(snapshot.dropped_by_kind.telemetry, 1);
         assert_eq!(snapshot.dropped_by_reason.coalesced, 1);
+    }
+
+    #[tokio::test]
+    async fn idle_forward_queue_is_reaped_on_next_enqueue() {
+        let forwarder = GatewayEventForwarder::default();
+        let (sender, _receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+        forwarder.queues.lock().await.insert(
+            "idle-client".to_string(),
+            GatewayForwardQueue {
+                sender,
+                last_enqueue_unix: unix_now().saturating_sub(QUEUE_IDLE_REAP_SECS + 1),
+            },
+        );
+
+        forwarder
+            .enqueue(
+                "active-client".to_string(),
+                test_event("/internal/v1/gateway/session-started", br#"{}"#),
+                GatewayHttpTimeouts::default(),
+            )
+            .await
+            .unwrap();
+
+        let queues = forwarder.queues.lock().await;
+        assert!(!queues.contains_key("idle-client"));
+        assert!(queues.contains_key("active-client"));
     }
 
     #[tokio::test]

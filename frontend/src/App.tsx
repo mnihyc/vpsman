@@ -423,6 +423,7 @@ export function App() {
                 onEnableSchedule={dashboard.enableSchedule}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadSchedules}
+                onResolveTargets={dashboard.resolveJobTargets}
                 onUpdateSchedule={dashboard.updateSchedule}
                 onUpdateScheduleTargets={dashboard.updateScheduleTargets}
                 privilegeMaterial={privilegeMaterial}

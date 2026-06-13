@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, UnixListener},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time,
 };
 use tracing::{info, warn};
@@ -259,11 +259,18 @@ async fn dispatch_gateway_command(
         {
             let (response_tx, response_rx) = oneshot::channel();
             sender
-                .send(GatewaySessionMessage::Command(GatewayCommand {
+                .try_send(GatewaySessionMessage::Command(GatewayCommand {
                     request: dispatch.request.clone(),
                     response: response_tx,
                 }))
-                .map_err(|_| anyhow!("agent_session_closed:{}", dispatch.client_id))?;
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => {
+                        anyhow!("agent_session_command_queue_full:{}", dispatch.client_id)
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        anyhow!("agent_session_closed:{}", dispatch.client_id)
+                    }
+                })?;
             return time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
                 .await
                 .context("gateway command ack timed out")?
@@ -303,11 +310,18 @@ async fn cancel_gateway_command(
     };
     let (response_tx, response_rx) = oneshot::channel();
     sender
-        .send(GatewaySessionMessage::Cancel(GatewayCancelCommand {
+        .try_send(GatewaySessionMessage::Cancel(GatewayCancelCommand {
             request: cancel.request.clone(),
             response: response_tx,
         }))
-        .map_err(|_| anyhow!("agent_session_closed:{}", cancel.client_id))?;
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                anyhow!("agent_session_command_queue_full:{}", cancel.client_id)
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow!("agent_session_closed:{}", cancel.client_id)
+            }
+        })?;
     time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
         .await
         .context("gateway command cancel timed out")?
@@ -321,6 +335,8 @@ where
     let message = error.to_string();
     let status = if message.contains("agent_not_online") {
         "404 Not Found"
+    } else if message.contains("agent_session_command_queue_full") {
+        "503 Service Unavailable"
     } else if message.contains("timed out") {
         "504 Gateway Timeout"
     } else {
@@ -459,6 +475,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{GatewaySession, SESSION_COMMAND_QUEUE_CAPACITY};
+    use vpsman_common::{JobCommand, JobRequest};
 
     #[test]
     fn internal_control_auth_checks_bearer_token_when_configured() {
@@ -480,5 +498,52 @@ mod tests {
     fn http_header_end_detects_complete_header_block() {
         assert_eq!(find_header_end(b"POST / HTTP/1.1\r\n\r\nbody"), Some(15));
         assert_eq!(find_header_end(b"POST / HTTP/1.1\r\n"), None);
+    }
+
+    #[tokio::test]
+    async fn full_session_command_queue_returns_busy_error() {
+        let state = GatewayState::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        for _ in 0..SESSION_COMMAND_QUEUE_CAPACITY {
+            let (response, _response_rx) = tokio::sync::oneshot::channel();
+            sender
+                .try_send(GatewaySessionMessage::Command(GatewayCommand {
+                    request: test_job_request(),
+                    response,
+                }))
+                .unwrap();
+        }
+        state.sessions.write().await.insert(
+            "client-a".to_string(),
+            GatewaySession {
+                session_id: uuid::Uuid::new_v4(),
+                sender,
+            },
+        );
+
+        let error = dispatch_gateway_command(
+            &state,
+            GatewayCommandDispatch {
+                client_id: "client-a".to_string(),
+                request: test_job_request(),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("agent_session_command_queue_full:client-a"));
+    }
+
+    fn test_job_request() -> JobRequest {
+        JobRequest {
+            job_id: uuid::Uuid::new_v4(),
+            command_version: 1,
+            command: JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+            timeout_secs: 30,
+        }
     }
 }

@@ -1490,7 +1490,6 @@ async fn materialize_due_schedule(
     run_count: i64,
     dispatch_config: &ScheduleDispatchConfig,
 ) -> Result<bool> {
-    let timeout_secs = dispatch_config.timeout_secs;
     let mut targets = schedule
         .target_client_ids
         .iter()
@@ -1516,6 +1515,11 @@ async fn materialize_due_schedule(
         bail!("registered agent update release missing");
     }
     let target_capabilities = load_schedule_target_capabilities(tx, &targets).await?;
+    let timeout_secs = effective_schedule_timeout_secs(
+        dispatch_config.timeout_secs,
+        &targets,
+        &target_capabilities,
+    );
     let (dispatch_targets, capability_skips) =
         split_targets_by_capability(&operation, &targets, &target_capabilities, false);
     let operation_type = schedule
@@ -1544,7 +1548,7 @@ async fn materialize_due_schedule(
         "command_type": &command_type,
         "operation_payload_hash": &command_hash,
         "targets": fingerprint_targets,
-        "timeout_secs": timeout_secs.clamp(1, 3600),
+        "timeout_secs": timeout_secs,
         "privileged": true,
         "force_unprivileged": false,
         "source_schedule_id": schedule.id,
@@ -1569,7 +1573,7 @@ async fn materialize_due_schedule(
     .bind(SqlJson(&schedule.operation))
     .bind(schedule.id)
     .bind(&request_fingerprint)
-    .bind(timeout_secs.clamp(1, 3600) as i64)
+    .bind(timeout_secs as i64)
     .bind(job_completed_immediately)
     .execute(&mut **tx)
     .await?;
@@ -1738,6 +1742,22 @@ async fn load_schedule_target_capabilities(
         }
     }
     Ok(capabilities)
+}
+
+fn effective_schedule_timeout_secs(
+    configured_timeout_secs: u64,
+    targets: &[String],
+    capabilities: &[TargetCapability],
+) -> u64 {
+    targets
+        .iter()
+        .filter_map(|client_id| {
+            capabilities
+                .iter()
+                .find(|capability| capability.client_id == *client_id)
+                .map(|capability| capability.capabilities.command_timeout_secs.clamp(1, 3600))
+        })
+        .fold(configured_timeout_secs.clamp(1, 3600), u64::min)
 }
 
 async fn scheduled_agent_update_release_policy_allows(
@@ -2238,6 +2258,37 @@ mod schedule_tests {
     fn schedule_error_is_bounded() {
         let error = "x".repeat(1200);
         assert_eq!(truncate_schedule_error(&error).len(), 1024);
+    }
+
+    #[test]
+    fn schedule_timeout_clamps_to_target_capabilities() {
+        let targets = vec!["edge-a".to_string(), "edge-b".to_string()];
+        let capabilities = vec![
+            TargetCapability {
+                client_id: "edge-a".to_string(),
+                capabilities: AgentCapabilitySnapshot {
+                    command_timeout_secs: 20,
+                    ..AgentCapabilitySnapshot::default()
+                },
+            },
+            TargetCapability {
+                client_id: "edge-b".to_string(),
+                capabilities: AgentCapabilitySnapshot {
+                    command_timeout_secs: 120,
+                    ..AgentCapabilitySnapshot::default()
+                },
+            },
+        ];
+
+        assert_eq!(
+            effective_schedule_timeout_secs(90, &targets, &capabilities),
+            20
+        );
+        assert_eq!(
+            effective_schedule_timeout_secs(10, &targets, &capabilities),
+            10
+        );
+        assert_eq!(effective_schedule_timeout_secs(90, &[], &[]), 90);
     }
 
     #[test]

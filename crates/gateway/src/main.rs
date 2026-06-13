@@ -29,7 +29,7 @@ use crate::{
     control::run_control_listener,
     state::{
         cancel_ack_result, finish_pending_command_response, GatewaySession, GatewaySessionMessage,
-        GatewayState, PendingCommand,
+        GatewayState, PendingCommand, SESSION_COMMAND_QUEUE_CAPACITY,
     },
 };
 
@@ -338,7 +338,8 @@ async fn handle_agent(
     let remote_ip = peer.ip().to_string();
     let session_id = uuid::Uuid::new_v4();
     let mut client_id = None::<String>;
-    let (command_tx, mut command_rx) = mpsc::unbounded_channel::<GatewaySessionMessage>();
+    let (command_tx, mut command_rx) =
+        mpsc::channel::<GatewaySessionMessage>(SESSION_COMMAND_QUEUE_CAPACITY);
     let mut outbound_seq = 2_u64;
     let mut pending_commands = HashMap::<uuid::Uuid, PendingCommand>::new();
     let mut pending_cancels = HashMap::new();
@@ -476,7 +477,7 @@ async fn request_agent_disconnect(state: &GatewayState, client_id: &str, reason:
         return;
     };
     if sender
-        .send(GatewaySessionMessage::Disconnect(reason.to_string()))
+        .try_send(GatewaySessionMessage::Disconnect(reason.to_string()))
         .is_err()
     {
         warn!(
@@ -507,7 +508,7 @@ struct AgentFrameContext<'a> {
     noise_public_key_hex: Option<String>,
     remote_ip: &'a str,
     session_id: uuid::Uuid,
-    command_tx: &'a mpsc::UnboundedSender<GatewaySessionMessage>,
+    command_tx: &'a mpsc::Sender<GatewaySessionMessage>,
 }
 
 async fn handle_agent_frame(
@@ -785,8 +786,8 @@ mod tests {
         let state = GatewayState::default();
         let older_session_id = uuid::Uuid::new_v4();
         let newer_session_id = uuid::Uuid::new_v4();
-        let (older_tx, _older_rx) = mpsc::unbounded_channel();
-        let (newer_tx, _newer_rx) = mpsc::unbounded_channel();
+        let (older_tx, _older_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (newer_tx, _newer_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
         state.sessions.write().await.insert(
             "client-a".to_string(),
             GatewaySession {

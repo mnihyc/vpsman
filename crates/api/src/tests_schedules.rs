@@ -236,9 +236,16 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
 
     let state = schedule_test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
-    let (status, Json(response)) = apply_schedule_now(State(state), headers, Path(schedule.id))
-        .await
-        .unwrap();
+    let (status, Json(response)) = apply_schedule_now(
+        State(state),
+        headers,
+        Path(schedule.id),
+        Json(SchedulePrivilegeMutationRequest {
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(response.status, "partial_success");

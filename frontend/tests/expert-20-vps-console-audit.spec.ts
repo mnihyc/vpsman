@@ -90,7 +90,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     "Schedule target expression",
     "provider:alpha && country:US",
   );
-  await expect(page.getByText("1 VPSs will be fixed on save")).toBeVisible();
+  await expect(page.getByText("1 VPSs in local preview")).toBeVisible();
   await activate(page.getByRole("button", { name: "Review update", exact: true }));
   await expect(page.getByText("Confirm schedule update")).toBeVisible();
   await activate(
@@ -190,6 +190,13 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     "POST /api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef/apply-now",
     "DELETE /api/v1/schedules/51515151-6161-4717-8abc-defdefdefdef",
   ]);
+  const applyNow = actions.find((action) => action.path.endsWith("/apply-now"));
+  expect(applyNow?.body).toMatchObject({
+    privilege_assertion: expect.objectContaining({
+      assertion_hex: expect.any(String),
+      nonce_hex: expect.any(String),
+    }),
+  });
   expect(JSON.stringify(actions)).not.toContain("local-super-password");
   expect(JSON.stringify(actions)).not.toContain("envelope");
 });

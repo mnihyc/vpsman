@@ -28,7 +28,6 @@ use crate::{
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_job_outputs::JobOutputPersistConfig,
-    selector_expression::parse_selector_expression,
     state::AppState,
 };
 
@@ -174,10 +173,10 @@ enum JobPrivilegeSource {
 async fn create_job_inner(
     state: &AppState,
     operator: &AuthContext,
-    request: CreateJobRequest,
+    mut request: CreateJobRequest,
     privilege_source: JobPrivilegeSource,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
-    validate_selector_expression(&request.selector_expression)?;
+    validate_job_audit_selector(&request.selector_expression)?;
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
@@ -209,10 +208,17 @@ async fn create_job_inner(
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
-    let source_schedule_id = match privilege_source {
+    let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
-        JobPrivilegeSource::SavedSchedule(schedule_id) => Some(schedule_id),
+        JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
     };
+    let effective_timeout_secs = effective_job_timeout_secs(
+        request.timeout_secs.unwrap_or(30),
+        &resolved_targets,
+        &resolved_agents,
+        &privilege_source,
+    )?;
+    request.timeout_secs = Some(effective_timeout_secs);
     let request_fingerprint = request_fingerprint_for_job(
         &request,
         &command_hash,
@@ -252,11 +258,6 @@ async fn create_job_inner(
         .await;
     }
     validate_network_apply_target(&job_command, &resolved_targets)?;
-    validate_agent_command_timeout_cap(
-        request.timeout_secs.unwrap_or(30),
-        &resolved_targets,
-        &resolved_agents,
-    )?;
     if !agent_update_release_policy_allows(state, &job_command).await? {
         return reject_job(
             state,
@@ -685,14 +686,52 @@ async fn reject_job(
     ))
 }
 
-fn validate_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
+fn validate_job_audit_selector(selector_expression: &str) -> Result<(), ApiError> {
     let selector_expression = selector_expression.trim();
-    if selector_expression.is_empty() {
-        return Ok(());
+    if selector_expression.len() > 2048 || selector_expression.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("invalid_selector_expression"));
     }
-    parse_selector_expression(selector_expression)
-        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     Ok(())
+}
+
+fn effective_job_timeout_secs(
+    requested_timeout_secs: u64,
+    resolved_targets: &[String],
+    resolved_agents: &[AgentView],
+    privilege_source: &JobPrivilegeSource,
+) -> Result<u64, ApiError> {
+    let requested_timeout_secs = requested_timeout_secs.clamp(1, 3600);
+    match privilege_source {
+        JobPrivilegeSource::RequestAssertion => {
+            validate_agent_command_timeout_cap(
+                requested_timeout_secs,
+                resolved_targets,
+                resolved_agents,
+            )?;
+            Ok(requested_timeout_secs)
+        }
+        JobPrivilegeSource::SavedSchedule(_) => Ok(clamp_timeout_to_agent_caps(
+            requested_timeout_secs,
+            resolved_targets,
+            resolved_agents,
+        )),
+    }
+}
+
+fn clamp_timeout_to_agent_caps(
+    requested_timeout_secs: u64,
+    resolved_targets: &[String],
+    resolved_agents: &[AgentView],
+) -> u64 {
+    resolved_targets
+        .iter()
+        .filter_map(|client_id| {
+            resolved_agents
+                .iter()
+                .find(|agent| agent.id == *client_id)
+                .map(|agent| agent.capabilities.command_timeout_secs.clamp(1, 3600))
+        })
+        .fold(requested_timeout_secs.clamp(1, 3600), u64::min)
 }
 
 fn validate_agent_command_timeout_cap(
@@ -751,7 +790,9 @@ pub(crate) fn target_outcome_from_gateway(
     }
     let final_output = result.outputs.iter().rev().find(|output| output.done);
     let exit_code = final_output.and_then(|output| output.exit_code);
-    let status = if final_output.is_some_and(output_indicates_timeout) {
+    let status = if final_output.is_some_and(output_indicates_rejected) {
+        TARGET_STATUS_REJECTED
+    } else if final_output.is_some_and(output_indicates_timeout) {
         TARGET_STATUS_AGENT_TIMEOUT
     } else {
         match exit_code {
@@ -826,6 +867,24 @@ pub(crate) fn output_indicates_timeout(output: &CommandOutput) -> bool {
                 .map(str::to_string)
         })
         .is_some_and(|kind| kind == "command_timeout")
+}
+
+pub(crate) fn output_indicates_rejected(output: &CommandOutput) -> bool {
+    if output.stream != OutputStream::Status {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.data)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|status| status == TARGET_STATUS_REJECTED)
+                || value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind == "unsupported_command_version")
+        })
 }
 
 #[cfg(test)]

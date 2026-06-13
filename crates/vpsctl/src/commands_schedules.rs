@@ -282,13 +282,25 @@ pub(crate) fn schedule_apply_now(
     token: Option<&str>,
     schedule_id: String,
 ) -> Result<()> {
+    let schedule = schedule_by_id(api_url, token, &schedule_id)?;
+    let privilege_assertion = schedule_privilege_for_record(
+        api_url,
+        token,
+        "schedule.apply_now",
+        &schedule,
+        schedule.enabled,
+        schedule.deferred_until.as_deref(),
+        false,
+    )?;
     println!(
         "{}",
         http_post_json(
             api_url,
             &format!("/api/v1/schedules/{schedule_id}/apply-now"),
             token,
-            &serde_json::json!({}),
+            &serde_json::json!({
+                "privilege_assertion": privilege_assertion,
+            }),
         )?
     );
     Ok(())

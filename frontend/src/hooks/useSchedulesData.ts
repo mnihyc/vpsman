@@ -90,8 +90,8 @@ export function useSchedulesData(
   );
 
   const applyScheduleNow = useCallback(
-    async (scheduleId: string) => {
-      await apiPost(`/api/v1/schedules/${scheduleId}/apply-now`, apiToken, {});
+    async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
+      await apiPost(`/api/v1/schedules/${scheduleId}/apply-now`, apiToken, request);
       await Promise.all([loadSchedules(), onAuditChanged()]);
     },
     [apiToken, loadSchedules, onAuditChanged],

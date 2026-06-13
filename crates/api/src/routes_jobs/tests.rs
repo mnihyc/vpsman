@@ -39,6 +39,38 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
 }
 
 #[test]
+fn gateway_unsupported_command_output_maps_to_rejected_target_status() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        command_version: 1,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "unsupported_command_version",
+                "status": "rejected",
+                "command_type": "shell_argv",
+            }))
+            .unwrap(),
+            exit_code: Some(1),
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "rejected");
+    assert_eq!(outcome.exit_code, Some(1));
+    assert!(outcome.accepted);
+    assert_eq!(
+        aggregate_job_status_from_statuses(&[outcome.status], 1),
+        "rejected"
+    );
+}
+
+#[test]
 fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
     let job_id = Uuid::new_v4();
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
@@ -523,6 +555,50 @@ fn job_timeout_must_fit_selected_agent_caps() {
     )
     .is_err());
     validate_agent_command_timeout_cap(45, &["long-cap".to_string()], &agents).unwrap();
+}
+
+#[test]
+fn saved_schedule_timeout_clamps_to_selected_agent_caps() {
+    let agents = vec![
+        test_agent(
+            "short-cap",
+            AgentCapabilitySnapshot {
+                command_timeout_secs: 12,
+                ..AgentCapabilitySnapshot::default()
+            },
+        ),
+        test_agent(
+            "long-cap",
+            AgentCapabilitySnapshot {
+                command_timeout_secs: 600,
+                ..AgentCapabilitySnapshot::default()
+            },
+        ),
+    ];
+
+    assert_eq!(
+        clamp_timeout_to_agent_caps(
+            90,
+            &["short-cap".to_string(), "long-cap".to_string()],
+            &agents,
+        ),
+        12
+    );
+    assert_eq!(
+        clamp_timeout_to_agent_caps(90, &["long-cap".to_string()], &agents),
+        90
+    );
+}
+
+#[test]
+fn job_selector_expression_is_audit_text_not_target_parser_input() {
+    validate_job_audit_selector("operator note: prod wave 1 (ticket OPS-123)").unwrap();
+    assert_eq!(
+        validate_job_audit_selector("bad\nselector")
+            .unwrap_err()
+            .code,
+        "invalid_selector_expression"
+    );
 }
 
 fn skipped_client_ids(skipped: &[CapabilitySkip]) -> Vec<&str> {

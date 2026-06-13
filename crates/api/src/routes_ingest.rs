@@ -10,7 +10,7 @@ use vpsman_common::{
 };
 use vpsman_server_core::{
     JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_COMPLETED,
-    TARGET_STATUS_FAILED, TARGET_STATUS_RUNNING,
+    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
 };
 
 use crate::{
@@ -231,9 +231,12 @@ fn target_outcome_from_done_output(
     output: &CommandOutput,
     received_at: String,
 ) -> TargetDispatchOutcome {
+    let rejected = crate::routes_jobs::output_indicates_rejected(output);
     let timed_out = crate::routes_jobs::output_indicates_timeout(output);
     let exit_code = output.exit_code;
-    let status = if timed_out {
+    let status = if rejected {
+        TARGET_STATUS_REJECTED
+    } else if timed_out {
         TARGET_STATUS_AGENT_TIMEOUT
     } else if exit_code.unwrap_or(0) == 0 {
         TARGET_STATUS_COMPLETED

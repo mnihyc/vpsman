@@ -10,6 +10,7 @@ use crate::api_client::GatewayForwardMetrics;
 
 const MAX_RETAINED_COMMAND_OUTPUTS: usize = 256;
 const MAX_RETAINED_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const SESSION_COMMAND_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) struct GatewayState {
@@ -37,7 +38,7 @@ impl Default for GatewayState {
 #[derive(Clone)]
 pub(crate) struct GatewaySession {
     pub(crate) session_id: uuid::Uuid,
-    pub(crate) sender: mpsc::UnboundedSender<GatewaySessionMessage>,
+    pub(crate) sender: mpsc::Sender<GatewaySessionMessage>,
 }
 
 pub(crate) enum GatewaySessionMessage {

@@ -31,9 +31,11 @@ import {
 } from "../searchExpression";
 import type {
   AgentView,
+  BulkResolveResponse,
   CommandTemplateRecord,
   CreateScheduleRequest,
   DeferScheduleRequest,
+  JobTargetSelection,
   JobOperation,
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
@@ -63,6 +65,7 @@ export function SchedulesPanel({
   onEnableSchedule,
   onOpenPrivilegeUnlock,
   onRefresh,
+  onResolveTargets,
   onUpdateSchedule,
   onUpdateScheduleTargets,
   privilegeMaterial,
@@ -73,7 +76,10 @@ export function SchedulesPanel({
   commandTemplates: CommandTemplateRecord[];
   error: string | null;
   loading: boolean;
-  onApplyScheduleNow: (scheduleId: string) => Promise<void>;
+  onApplyScheduleNow: (
+    scheduleId: string,
+    request: SchedulePrivilegeMutationRequest,
+  ) => Promise<void>;
   onCreateSchedule: (request: CreateScheduleRequest) => Promise<void>;
   onDeferSchedule: (
     scheduleId: string,
@@ -93,6 +99,9 @@ export function SchedulesPanel({
   ) => Promise<void>;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => Promise<void>;
+  onResolveTargets: (
+    selection: JobTargetSelection,
+  ) => Promise<BulkResolveResponse>;
   onUpdateSchedule: (
     scheduleId: string,
     request: UpdateScheduleRequest,
@@ -117,6 +126,8 @@ export function SchedulesPanel({
     readLocalString(SCHEDULE_SELECTOR_STORAGE_KEY, ""),
   );
   const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [pendingScheduleSnapshot, setPendingScheduleSnapshot] =
+    useState<ScheduleDraftSnapshot | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [editingScheduleId, setEditingScheduleId] = useState<string | null>(
@@ -173,62 +184,75 @@ export function SchedulesPanel({
     scheduleOperation !== null &&
     nextRuns.length > 0 &&
     selectorExpression.trim().length > 0 &&
-    !selectorParse.error &&
-    selectedTargetCount > 0;
+    !selectorParse.error;
   const status =
     actionError ??
     error ??
     (loading ? "Loading" : `${schedules.length} schedules`);
-
-  function resolvedTargetIdsForSchedule(schedule: ScheduleRecord): string[] {
-    if (!schedule.selector_expression.trim()) {
-      return [];
-    }
-    const parsed = parseSearchExpression(schedule.selector_expression);
-    if (parsed.error) {
-      return [];
-    }
-    return agentsMatchingExpression(agents, schedule.selector_expression).map(
-      (agent) => agent.id,
-    );
-  }
-
-  function scheduleTargetDrifted(schedule: ScheduleRecord): boolean {
-    const currentIds = resolvedTargetIdsForSchedule(schedule);
-    return (
-      currentIds.length > 0 &&
-      !sameStringSet(fixedTargetIds(schedule), currentIds)
-    );
-  }
+  const confirmationNextRun =
+    pendingScheduleSnapshot?.nextRun ?? nextRuns[0] ?? null;
 
   const confirmationItems = [
-    { label: "Name", value: name.trim() || "-" },
-    { label: "Audit selector", value: selectorExpression.trim() || "-" },
+    {
+      label: "Name",
+      value: (pendingScheduleSnapshot?.name ?? name.trim()) || "-",
+    },
+    {
+      label: "Audit selector",
+      value:
+        (pendingScheduleSnapshot?.selectorExpression ??
+          selectorExpression.trim()) ||
+        "-",
+    },
     {
       label: "Fixed targets",
-      value: `${selectedTargetCount} resolved and saved`,
+      value: `${pendingScheduleSnapshot?.targetClientIds.length ?? selectedTargetCount} resolved and saved`,
     },
     {
       label: "Target preview",
-      value: selectedTargetIds.slice(0, 8).join(", ") || "-",
+      value:
+        pendingScheduleSnapshot?.targetClientIds.slice(0, 8).join(", ") ||
+        selectedTargetIds.slice(0, 8).join(", ") ||
+        "-",
     },
     {
       label: "Operation",
-      value: selectedTemplate
+      value: pendingScheduleSnapshot
+        ? pendingScheduleSnapshot.selectedTemplateName ??
+          operationSummary(pendingScheduleSnapshot.operation)
+        : selectedTemplate
         ? selectedTemplate.name
         : operationSummary(scheduleOperation),
     },
-    { label: "Cron", value: `${cronExpr.trim()} UTC` },
+    {
+      label: "Cron",
+      value: `${pendingScheduleSnapshot?.cronExpr ?? cronExpr.trim()} UTC`,
+    },
     {
       label: "Next",
-      value: nextRuns[0] ? formatCompactTime(nextRuns[0]) : "invalid",
+      value: confirmationNextRun
+        ? formatCompactTime(confirmationNextRun)
+        : "invalid",
     },
-    { label: "Catch-up", value: formatCatchUpPolicy(catchUpPolicy) },
+    {
+      label: "Catch-up",
+      value: formatCatchUpPolicy(
+        pendingScheduleSnapshot?.catchUpPolicy ?? catchUpPolicy,
+      ),
+    },
     {
       label: "Retry",
-      value: formatInterval(clampInteger(retryDelaySecs, 1, 86_400)),
+      value: formatInterval(
+        pendingScheduleSnapshot?.retryDelaySecs ??
+          clampInteger(retryDelaySecs, 1, 86_400),
+      ),
     },
-    { label: "State", value: enabled ? "Enabled" : "Disabled" },
+    {
+      label: "State",
+      value: (pendingScheduleSnapshot?.enabled ?? enabled)
+        ? "Enabled"
+        : "Disabled",
+    },
   ];
 
   const scheduleColumns = useMemo<ConsoleDataGridColumn<ScheduleRecord>[]>(
@@ -266,16 +290,13 @@ export function SchedulesPanel({
           `${schedule.selector_expression} ${fixedTargetIds(schedule).join(" ")}`,
         cell: (schedule) => {
           const fixedIds = fixedTargetIds(schedule);
-          const currentIds = resolvedTargetIdsForSchedule(schedule);
-          const drifted =
-            currentIds.length > 0 && !sameStringSet(fixedIds, currentIds);
           return (
             <span className="historyPrimary">
               <strong>{fixedIds.length} fixed VPSs</strong>
               <small className="mutedText">
-                {drifted
-                  ? `${currentIds.length} current · target update available`
-                  : `${currentIds.length || fixedIds.length} current · aligned`}
+                {schedule.selector_expression.trim()
+                  ? "audit selector retained"
+                  : "no audit selector"}
               </small>
             </span>
           );
@@ -357,58 +378,65 @@ export function SchedulesPanel({
       setActionError("Schedule is incomplete");
       return;
     }
-    blurActiveElement();
-    window.setTimeout(() => setConfirmationOpen(true), 140);
+    await runPanelAction(setPending, setActionError, async () => {
+      const snapshot = await buildScheduleDraftSnapshot();
+      setPendingScheduleSnapshot(snapshot);
+      blurActiveElement();
+      window.setTimeout(() => setConfirmationOpen(true), 140);
+    });
   }
 
   async function saveScheduleNow() {
     setConfirmationOpen(false);
     await runPanelAction(setPending, setActionError, async () => {
-      if (!ready || !scheduleOperation) {
+      const snapshot = pendingScheduleSnapshot;
+      if (!snapshot) {
         throw new Error("Schedule is incomplete");
       }
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required");
       }
-      const operationHash = await operationPayloadHashHex(scheduleOperation);
+      const operationHash = await operationPayloadHashHex(snapshot.operation);
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalSchedulePrivilegeIntent({
-          action: editingScheduleId ? "schedule.update" : "schedule.create",
-          scheduleId: editingScheduleId,
-          name: name.trim(),
-          commandType: commandTypeForApi(scheduleOperation),
+          action: snapshot.editingScheduleId
+            ? "schedule.update"
+            : "schedule.create",
+          scheduleId: snapshot.editingScheduleId,
+          name: snapshot.name,
+          commandType: snapshot.commandType,
           operationPayloadHash: operationHash,
-          selectorExpression: selectorExpression.trim(),
-          resolvedTargets: selectedTargetIds,
-          cronExpr: cronExpr.trim(),
+          selectorExpression: snapshot.selectorExpression,
+          resolvedTargets: snapshot.targetClientIds,
+          cronExpr: snapshot.cronExpr,
           timezone: "UTC",
-          enabled,
-          catchUpPolicy,
-          catchUpLimit: clampInteger(catchUpLimit, 1, 25),
-          retryDelaySecs: clampInteger(retryDelaySecs, 1, 86_400),
-          maxFailures: clampInteger(maxFailures, 1, 100),
+          enabled: snapshot.enabled,
+          catchUpPolicy: snapshot.catchUpPolicy,
+          catchUpLimit: snapshot.catchUpLimit,
+          retryDelaySecs: snapshot.retryDelaySecs,
+          maxFailures: snapshot.maxFailures,
           deferredUntil: null,
           deleted: false,
         }),
         privilegeMaterial,
       });
       const request: CreateScheduleRequest = {
-        name: name.trim(),
-        operation: scheduleOperation,
-        selector_expression: selectorExpression.trim(),
-        target_client_ids: selectedTargetIds,
-        cron_expr: cronExpr.trim(),
+        name: snapshot.name,
+        operation: snapshot.operation,
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: snapshot.targetClientIds,
+        cron_expr: snapshot.cronExpr,
         timezone: "UTC",
-        enabled,
-        catch_up_policy: catchUpPolicy,
-        catch_up_limit: clampInteger(catchUpLimit, 1, 25),
-        retry_delay_secs: clampInteger(retryDelaySecs, 1, 86_400),
-        max_failures: clampInteger(maxFailures, 1, 100),
+        enabled: snapshot.enabled,
+        catch_up_policy: snapshot.catchUpPolicy,
+        catch_up_limit: snapshot.catchUpLimit,
+        retry_delay_secs: snapshot.retryDelaySecs,
+        max_failures: snapshot.maxFailures,
         privilege_assertion: privilegeAssertion,
       };
-      if (editingScheduleId) {
-        await onUpdateSchedule(editingScheduleId, request);
+      if (snapshot.editingScheduleId) {
+        await onUpdateSchedule(snapshot.editingScheduleId, request);
       } else {
         await onCreateSchedule(request);
       }
@@ -416,10 +444,40 @@ export function SchedulesPanel({
       setCommandText("");
       setSelectedTemplateId("");
       setEditingScheduleId(null);
+      setPendingScheduleSnapshot(null);
     });
   }
 
+  async function buildScheduleDraftSnapshot(): Promise<ScheduleDraftSnapshot> {
+    if (!ready || !scheduleOperation) {
+      throw new Error("Schedule is incomplete");
+    }
+    const selector = selectorExpression.trim();
+    const resolved = await onResolveTargets({ selector_expression: selector });
+    const targetClientIds = resolved.targets.map((target) => target.id);
+    if (!targetClientIds.length) {
+      throw new Error("Schedule confirmation resolved no VPSs");
+    }
+    return {
+      editingScheduleId,
+      name: name.trim(),
+      operation: scheduleOperation,
+      commandType: commandTypeForApi(scheduleOperation),
+      selectorExpression: selector,
+      targetClientIds,
+      cronExpr: cronExpr.trim(),
+      enabled,
+      catchUpPolicy,
+      catchUpLimit: clampInteger(catchUpLimit, 1, 25),
+      retryDelaySecs: clampInteger(retryDelaySecs, 1, 86_400),
+      maxFailures: clampInteger(maxFailures, 1, 100),
+      nextRun: nextRuns[0] ?? null,
+      selectedTemplateName: selectedTemplate?.name ?? null,
+    };
+  }
+
   function editSchedule(schedule: ScheduleRecord) {
+    setPendingScheduleSnapshot(null);
     const matchingTemplate = commandTemplates.find(
       (template) =>
         JSON.stringify(template.operation) ===
@@ -462,17 +520,22 @@ export function SchedulesPanel({
     setScheduleAction(action);
   }
 
+  function reviewApplyNow(schedule: ScheduleRecord) {
+    setScheduleActionError(null);
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      setActionError("Privilege unlock is required");
+      return;
+    }
+    openScheduleAction({ type: "applyNow", schedule });
+  }
+
   async function runScheduleAction(action: ScheduleAction) {
     if (pending) return;
     setPending(true);
     setActionError(null);
     setScheduleActionError(null);
     try {
-      if (action.type === "applyNow") {
-        await onApplyScheduleNow(action.schedule.id);
-        setScheduleAction(null);
-        return;
-      }
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required");
@@ -522,6 +585,10 @@ export function SchedulesPanel({
         await onDeleteSchedule(action.schedule.id, {
           privilege_assertion: privilegeAssertion,
         });
+      } else if (action.type === "applyNow") {
+        await onApplyScheduleNow(action.schedule.id, {
+          privilege_assertion: privilegeAssertion,
+        });
       } else if (action.type === "targetUpdate") {
         await onUpdateScheduleTargets(action.schedule.id, {
           selector_expression: action.selectorExpression,
@@ -533,6 +600,44 @@ export function SchedulesPanel({
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Schedule action failed";
+      setActionError(message);
+      setScheduleActionError(message);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function reviewScheduleTargetUpdate(schedule: ScheduleRecord) {
+    if (pending) return;
+    setPending(true);
+    setActionError(null);
+    setScheduleActionError(null);
+    try {
+      const selectorExpressionForIntent = schedule.selector_expression.trim();
+      if (!selectorExpressionForIntent) {
+        throw new Error("Schedule has no audit selector");
+      }
+      const resolved = await onResolveTargets({
+        selector_expression: selectorExpressionForIntent,
+      });
+      const targetClientIds = resolved.targets.map((target) => target.id);
+      if (!targetClientIds.length) {
+        throw new Error("Schedule audit selector resolved no VPSs");
+      }
+      if (sameStringSet(fixedTargetIds(schedule), targetClientIds)) {
+        throw new Error(
+          "Saved fixed targets already match current audit selector resolution",
+        );
+      }
+      openScheduleAction({
+        type: "targetUpdate",
+        schedule,
+        selectorExpression: selectorExpressionForIntent,
+        targetClientIds,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Target update review failed";
       setActionError(message);
       setScheduleActionError(message);
     } finally {
@@ -698,25 +803,18 @@ export function SchedulesPanel({
       label: "Review apply",
       disabled: (rows) => rows.length !== 1 || rows[0]?.enabled !== true,
       icon: <Play size={14} />,
-      onSelect: (rows) =>
-        rows[0] &&
-        openScheduleAction({ type: "applyNow", schedule: rows[0] }),
+      onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
     },
     {
       description: (rows) => describeScheduleTargetUpdate(rows),
       label: "Review target update",
       disabled: (rows) =>
-        rows.length !== 1 || !rows[0] || !scheduleTargetDrifted(rows[0]),
+        rows.length !== 1 || !rows[0]?.selector_expression.trim(),
       icon: <Target size={14} />,
       onSelect: (rows) => {
         const schedule = rows[0];
         if (!schedule) return;
-        openScheduleAction({
-          type: "targetUpdate",
-          schedule,
-          selectorExpression: schedule.selector_expression,
-          targetClientIds: resolvedTargetIdsForSchedule(schedule),
-        });
+        void reviewScheduleTargetUpdate(schedule);
       },
     },
     {
@@ -910,7 +1008,7 @@ export function SchedulesPanel({
           defaultOpen={false}
           forceOpenKey={editingScheduleId}
           storageKey="vpsman.panel.schedules.create"
-          summary={`${selectedTargetCount} fixed targets after confirmation`}
+          summary={`${selectedTargetCount} matching VPSs in local preview`}
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
           <form className="dispatchForm" onSubmit={submitSchedule}>
@@ -1028,7 +1126,7 @@ export function SchedulesPanel({
             <div className="targetSelector">
               <div className="targetSelectorHeader">
                 <strong>Audit selector</strong>
-                <span>{selectedTargetCount} VPSs will be fixed on save</span>
+                <span>{selectedTargetCount} VPSs in local preview</span>
               </div>
               <SearchExpressionInput
                 agents={agents}
@@ -1068,7 +1166,7 @@ export function SchedulesPanel({
                 ))}
               </div>
               <small>
-                {selectedTargetCount} fixed targets from current confirmation;{" "}
+                {selectedTargetCount} matching VPSs in local preview;{" "}
                 {selectedTemplate
                   ? selectedTemplate.name
                   : operationSummary(scheduleOperation)}
@@ -1086,16 +1184,29 @@ export function SchedulesPanel({
             )}
             <ConfirmationPrompt
               confirmLabel={
-                editingScheduleId ? "Update schedule" : "Save schedule"
+                pendingScheduleSnapshot?.editingScheduleId
+                  ? "Update schedule"
+                  : "Save schedule"
               }
-              detail={`Recurring ${selectedTemplate ? selectedTemplate.name : operationSummary(scheduleOperation)} on ${vpsCountLabel(selectedTargetCount)}. The current target preview is saved as a fixed snapshot; the selector is retained for audit and future manual Target update.`}
+              detail={`Recurring ${
+                pendingScheduleSnapshot?.selectedTemplateName ??
+                operationSummary(
+                  pendingScheduleSnapshot?.operation ?? scheduleOperation,
+                )
+              } on ${vpsCountLabel(
+                pendingScheduleSnapshot?.targetClientIds.length ??
+                  selectedTargetCount,
+              )}. The resolved target list is saved as a fixed snapshot; the selector is retained for audit and future manual Target update.`}
               items={confirmationItems}
-              onCancel={() => setConfirmationOpen(false)}
+              onCancel={() => {
+                setConfirmationOpen(false);
+                setPendingScheduleSnapshot(null);
+              }}
               onConfirm={() => void saveScheduleNow()}
               open={confirmationOpen}
               pending={pending}
               title={
-                editingScheduleId
+                pendingScheduleSnapshot?.editingScheduleId
                   ? "Confirm schedule update"
                   : "Confirm schedule"
               }
@@ -1138,6 +1249,23 @@ type ScheduleAction =
       deferredUntil: string;
       reason: string;
     };
+
+type ScheduleDraftSnapshot = {
+  editingScheduleId: string | null;
+  name: string;
+  operation: JobOperation;
+  commandType: string;
+  selectorExpression: string;
+  targetClientIds: string[];
+  cronExpr: string;
+  enabled: boolean;
+  catchUpPolicy: string;
+  catchUpLimit: number;
+  retryDelaySecs: number;
+  maxFailures: number;
+  nextRun: string | null;
+  selectedTemplateName: string | null;
+};
 
 function actionName(action: ScheduleAction): string {
   switch (action.type) {

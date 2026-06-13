@@ -21,6 +21,7 @@ use crate::{
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository_schedules::next_cron_runs,
     routes_jobs::create_job_from_saved_schedule,
+    security::operator_has_scope,
     selector_expression::parse_selector_expression,
     state::AppState,
 };
@@ -197,15 +198,29 @@ pub(crate) async fn apply_schedule_now(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(schedule_id): Path<Uuid>,
+    Json(request): Json<SchedulePrivilegeMutationRequest>,
 ) -> Result<(StatusCode, Json<crate::model::CreateJobResponse>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
+    if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     if !schedule.enabled {
         return Err(ApiError::conflict("schedule_apply_now_requires_enabled"));
     }
-    let request = CreateJobRequest {
+    verify_schedule_privilege_for_view(
+        &state,
+        "schedule.apply_now",
+        &schedule,
+        schedule.enabled,
+        schedule.deferred_until.as_deref(),
+        false,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
+    let job_request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
         selector_expression: schedule.selector_expression.clone(),
         target_client_ids: schedule.target_client_ids.clone(),
@@ -219,7 +234,7 @@ pub(crate) async fn apply_schedule_now(
         privileged: true,
         privilege_assertion: None,
     };
-    create_job_from_saved_schedule(&state, &operator, request, schedule_id).await
+    create_job_from_saved_schedule(&state, &operator, job_request, schedule_id).await
 }
 
 fn schedule_apply_now_timeout_secs() -> u64 {

@@ -940,12 +940,12 @@ test("creates a cron schedule from a command template with target preview", asyn
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
   await page.getByLabel("Schedule cron expression").fill("*/15 * * * *");
   await page.getByLabel("Schedule target expression").fill("country:US");
-  await expect(page.getByText("2 VPSs will be fixed on save")).toBeVisible();
+  await expect(page.getByText("2 VPSs in local preview")).toBeVisible();
   await expect(
     page.getByText(/UTC schedule, displayed in browser timezone/),
   ).toBeVisible();
   await expect(
-    page.getByText(/2 fixed targets from current confirmation; edge-health-check/),
+    page.getByText(/2 matching VPSs in local preview; edge-health-check/),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Review save", exact: true }));
   await expect(page.getByText("Confirm schedule")).toBeVisible();
