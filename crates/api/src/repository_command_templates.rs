@@ -3,6 +3,7 @@ use base64::Engine as _;
 use sqlx::{types::Json as SqlJson, Row};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+use vpsman_common::{job_command_display_group, job_command_type_label, JobCommand};
 
 use crate::{
     model::{AuditLogView, AuthContext, JobOutputView},
@@ -21,6 +22,7 @@ impl Repository {
         scope_kind: Option<&str>,
         scope_value: Option<&str>,
         command_type: Option<&str>,
+        display_group: Option<&str>,
     ) -> Result<Vec<CommandTemplateView>> {
         let limit = limit.clamp(1, 200);
         match self {
@@ -30,6 +32,8 @@ impl Repository {
                     scope_kind.is_none_or(|value| row.scope_kind == value)
                         && scope_value.is_none_or(|value| row.scope_value.as_deref() == Some(value))
                         && command_type.is_none_or(|value| row.command_type == value)
+                        && display_group
+                            .is_none_or(|value| row.display_group.as_deref() == Some(value))
                 });
                 rows.sort_by(|left, right| {
                     right
@@ -48,6 +52,7 @@ impl Repository {
                         scope_kind,
                         scope_value,
                         command_type,
+                        display_group,
                         operation,
                         defaults,
                         actor_id,
@@ -57,6 +62,7 @@ impl Repository {
                     WHERE ($2::text IS NULL OR scope_kind = $2)
                       AND ($3::text IS NULL OR scope_value = $3)
                       AND ($4::text IS NULL OR command_type = $4)
+                      AND ($5::text IS NULL OR display_group = $5)
                     ORDER BY updated_at DESC, name ASC
                     LIMIT $1
                     "#,
@@ -65,6 +71,7 @@ impl Repository {
                 .bind(scope_kind)
                 .bind(scope_value)
                 .bind(command_type)
+                .bind(display_group)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -81,6 +88,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<CommandTemplateView> {
         let now = unix_now().to_string();
+        let parts = command_template_parts(request)?;
         match self {
             Self::Memory(memory) => {
                 let mut rows = memory.command_templates.write().await;
@@ -89,8 +97,9 @@ impl Repository {
                         && row.scope_kind == request.scope_kind
                         && row.scope_value == request.scope_value
                 }) {
-                    existing.command_type = request.command_type.clone();
-                    existing.operation = request.operation.clone();
+                    existing.command_type = parts.command_type.clone();
+                    existing.display_group = parts.display_group.clone();
+                    existing.operation = parts.operation.clone();
                     existing.defaults = normalized_defaults(request);
                     existing.actor_id = Some(operator.operator.id);
                     existing.updated_at = now.clone();
@@ -104,8 +113,9 @@ impl Repository {
                     name: request.name.clone(),
                     scope_kind: request.scope_kind.clone(),
                     scope_value: request.scope_value.clone(),
-                    command_type: request.command_type.clone(),
-                    operation: request.operation.clone(),
+                    command_type: parts.command_type.clone(),
+                    display_group: parts.display_group.clone(),
+                    operation: parts.operation.clone(),
                     defaults: normalized_defaults(request),
                     actor_id: Some(operator.operator.id),
                     created_at: now.clone(),
@@ -140,9 +150,10 @@ impl Repository {
                         r#"
                         UPDATE command_templates
                         SET command_type = $2,
-                            operation = $3,
-                            defaults = $4,
-                            actor_id = $5,
+                            display_group = $3,
+                            operation = $4,
+                            defaults = $5,
+                            actor_id = $6,
                             updated_at = now()
                         WHERE id = $1
                         RETURNING
@@ -151,6 +162,7 @@ impl Repository {
                             scope_kind,
                             scope_value,
                             command_type,
+                            display_group,
                             operation,
                             defaults,
                             actor_id,
@@ -159,8 +171,9 @@ impl Repository {
                         "#,
                     )
                     .bind(existing_id)
-                    .bind(&request.command_type)
-                    .bind(SqlJson(&request.operation))
+                    .bind(&parts.command_type)
+                    .bind(&parts.display_group)
+                    .bind(SqlJson(&parts.operation))
                     .bind(SqlJson(normalized_defaults(request)))
                     .bind(operator.operator.id)
                     .fetch_one(&mut *tx)
@@ -174,17 +187,19 @@ impl Repository {
                             scope_kind,
                             scope_value,
                             command_type,
+                            display_group,
                             operation,
                             defaults,
                             actor_id
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         RETURNING
                             id,
                             name,
                             scope_kind,
                             scope_value,
                             command_type,
+                            display_group,
                             operation,
                             defaults,
                             actor_id,
@@ -196,8 +211,9 @@ impl Repository {
                     .bind(&request.name)
                     .bind(&request.scope_kind)
                     .bind(&request.scope_value)
-                    .bind(&request.command_type)
-                    .bind(SqlJson(&request.operation))
+                    .bind(&parts.command_type)
+                    .bind(&parts.display_group)
+                    .bind(SqlJson(&parts.operation))
                     .bind(SqlJson(normalized_defaults(request)))
                     .bind(operator.operator.id)
                     .fetch_one(&mut *tx)
@@ -527,6 +543,7 @@ fn command_template_from_row(
         scope_kind: row.try_get("scope_kind")?,
         scope_value: row.try_get("scope_value")?,
         command_type: row.try_get("command_type")?,
+        display_group: row.try_get("display_group")?,
         operation: operation.0,
         defaults: defaults.0,
         actor_id: row.try_get("actor_id")?,
@@ -554,6 +571,7 @@ async fn record_command_template_audit(
         "scope_kind": template.scope_kind,
         "scope_value": template.scope_value,
         "command_type": template.command_type,
+        "display_group": template.display_group,
         "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,
     });
@@ -609,16 +627,48 @@ pub(crate) fn validate_command_template_request(
             validate_template_token(value, 128, "scope_value")?;
         }
     }
-    validate_template_token(&request.command_type, 64, "command_type")?;
+    if let Some(display_group) = request.display_group.as_deref() {
+        validate_template_token(display_group, 64, "display_group")?;
+    }
     ensure!(
         request.operation.is_object(),
         "command template operation must be a JSON object"
     );
+    let _ = parsed_template_operation(request)?;
     ensure!(
         request.defaults.is_null() || request.defaults.is_object(),
         "command template defaults must be a JSON object"
     );
     Ok(())
+}
+
+struct CommandTemplateParts {
+    command_type: String,
+    display_group: Option<String>,
+    operation: serde_json::Value,
+}
+
+fn command_template_parts(request: &UpsertCommandTemplateRequest) -> Result<CommandTemplateParts> {
+    let command = parsed_template_operation(request)?;
+    let command_type = job_command_type_label(&command).to_string();
+    let display_group = request
+        .display_group
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| job_command_display_group(&command_type).map(ToString::to_string));
+    Ok(CommandTemplateParts {
+        command_type,
+        display_group,
+        operation: request.operation.clone(),
+    })
+}
+
+fn parsed_template_operation(request: &UpsertCommandTemplateRequest) -> Result<JobCommand> {
+    Ok(serde_json::from_value::<JobCommand>(
+        request.operation.clone(),
+    )?)
 }
 
 fn validate_template_token(value: &str, max_len: usize, label: &str) -> Result<()> {

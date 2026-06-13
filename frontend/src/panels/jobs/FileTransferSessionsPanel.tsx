@@ -2,13 +2,14 @@ import { Database, Download, FileArchive, RefreshCw, Upload } from "lucide-react
 import { useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { CrudPager } from "../../components/CrudPager";
+import { fileTransferSessionStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   FileTransferHandoffRecord,
   FileTransferSessionRecord,
   FileTransferSourceArtifactRecord,
   UploadFileTransferSourceArtifactRequest,
 } from "../../typesFileTransfer";
-import { formatTime, shortHash, shortId, statusClass } from "../../utils";
+import { formatTime, shortHash, shortId } from "../../utils";
 
 const MAX_SOURCE_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
@@ -370,7 +371,7 @@ export function FileTransferSessionsPanel({
                     <small>{clientLabel(transfer.client_id)} / {shortId(transfer.session_id)}</small>
                   </span>
                   <span className="historyPrimary">
-                    <span className={`status ${statusClass(transfer.status)}`}>{transfer.status}</span>
+                    <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transfer.status}</span>
                     <small>{transfer.resumed ? "resumed" : transfer.last_event}</small>
                   </span>
                   <span className="transferProgressCell">

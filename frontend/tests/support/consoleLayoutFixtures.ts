@@ -9,6 +9,9 @@ import {
   terminalSessions,
 } from "./jobSessionFixtures";
 import { installTransferJobApiMock } from "./transferJobMock";
+import {
+  JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
+} from "../../src/generated/protocolContracts";
 
 export {
   buildEncryptedBackupArtifactFixture,
@@ -1426,9 +1429,10 @@ const networkJobs = [
 const commandTemplates = [
   {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    command_type: "shell",
+    command_type: "shell_argv",
     created_at: "2026-05-31T10:04:00Z",
     defaults: { timeout_secs: 30 },
+    display_group: "shell",
     id: "46464646-5656-4789-8abc-defdefdefdef",
     name: "edge-health-check",
     operation: { argv: ["uptime"], pty: false, type: "shell" },
@@ -1442,7 +1446,7 @@ const schedules = [
   {
     catch_up_limit: 1,
     catch_up_policy: "run_once",
-    command_type: "shell",
+    command_type: "shell_argv",
     created_at: "2026-05-31T09:00:00Z",
     cron_expr: "0 * * * *",
     enabled: true,
@@ -1857,6 +1861,7 @@ export async function installConsoleApiMock(page: Page) {
       dataSourcePresetsFixture,
       dataSourceStatusFixture,
       hotConfigRuleTemplatesFixture,
+      jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
       keyLifecycleReportFixture,
@@ -1972,13 +1977,18 @@ export async function installConsoleApiMock(page: Page) {
       const commandTypeForOperation = (
         operation: Record<string, unknown> | undefined,
       ): string | null => {
-        if (!operation || typeof operation.type !== "string") {
+        if (!operation) {
           return null;
         }
-        if (operation.type === "shell") {
+        const operationType = typeof operation.type === "string" ? operation.type : "shell";
+        if (operationType === "shell") {
           return operation.pty ? "shell_pty" : "shell_argv";
         }
-        return operation.type;
+        const commandType = (jobCommandTypeByOperationTypeFixture as Record<string, string>)[operationType];
+        if (!commandType) {
+          throw new Error(`unknown mock job operation type: ${operationType}`);
+        }
+        return commandType;
       };
       const scheduleTargetIdsFromSelector = (selector: unknown): string[] => {
         const expression = typeof selector === "string" ? selector : "";
@@ -3187,7 +3197,7 @@ export async function installConsoleApiMock(page: Page) {
           const body = await readJsonBody(input, init);
           requests.commandTemplates.push(body);
           const request = body as {
-            command_type?: string;
+            display_group?: string | null;
             defaults?: Record<string, unknown> | null;
             name?: string;
             operation?: Record<string, unknown>;
@@ -3196,9 +3206,10 @@ export async function installConsoleApiMock(page: Page) {
           };
           return jsonResponse({
             actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-            command_type: request.command_type ?? "shell",
+            command_type: commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             defaults: request.defaults ?? {},
+            display_group: request.display_group ?? "shell",
             id: "47474747-5656-4789-8abc-defdefdefdef",
             name: request.name ?? "saved-template",
             operation: request.operation ?? {
@@ -3452,7 +3463,6 @@ export async function installConsoleApiMock(page: Page) {
           const request = body as {
             catch_up_limit?: number;
             catch_up_policy?: string;
-            command_type?: string;
             cron_expr?: string;
             enabled?: boolean;
             max_failures?: number;
@@ -3467,7 +3477,7 @@ export async function installConsoleApiMock(page: Page) {
           const schedule = normalizeScheduleRecord({
             catch_up_limit: request.catch_up_limit ?? 1,
             catch_up_policy: request.catch_up_policy ?? "run_once",
-            command_type: request.command_type ?? "shell",
+            command_type: commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             cron_expr: cronExpr,
             deferred_until: null,
@@ -3922,6 +3932,7 @@ export async function installConsoleApiMock(page: Page) {
       dataSourcePresetsFixture: dataSourcePresets,
       dataSourceStatusFixture: dataSourceStatus,
       hotConfigRuleTemplatesFixture: hotConfigRuleTemplates,
+      jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,
       keyLifecycleReportFixture: keyLifecycleReport,

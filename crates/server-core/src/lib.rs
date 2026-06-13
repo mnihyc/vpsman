@@ -53,83 +53,11 @@ pub struct TargetCapability {
 }
 
 pub fn job_command_type_label(command: &JobCommand) -> &'static str {
-    match command {
-        JobCommand::Shell { pty: true, .. } => "shell_pty",
-        JobCommand::Shell { .. } => "shell_argv",
-        JobCommand::ShellScript { .. } => "shell_script",
-        JobCommand::TerminalOpen { .. } => "terminal_open",
-        JobCommand::TerminalInput { .. } => "terminal_input",
-        JobCommand::TerminalPoll { .. } => "terminal_poll",
-        JobCommand::TerminalResize { .. } => "terminal_resize",
-        JobCommand::TerminalClose { .. } => "terminal_close",
-        JobCommand::FilePull { .. } => "file_pull",
-        JobCommand::FilePush { .. } => "file_push",
-        JobCommand::FilePushChunked { .. } => "file_push_chunked",
-        JobCommand::FileTransferStart { .. } => "file_transfer_start",
-        JobCommand::FileTransferChunk { .. } => "file_transfer_chunk",
-        JobCommand::FileTransferCommit { .. } => "file_transfer_commit",
-        JobCommand::FileTransferAbort { .. } => "file_transfer_abort",
-        JobCommand::FileTransferDownloadStart { .. } => "file_transfer_download_start",
-        JobCommand::FileTransferDownloadChunk { .. } => "file_transfer_download_chunk",
-        JobCommand::FileStat { .. } => "file_stat",
-        JobCommand::FileListDir { .. } => "file_list_dir",
-        JobCommand::FileReadText { .. } => "file_read_text",
-        JobCommand::FileWriteText { .. } => "file_write_text",
-        JobCommand::FileMkdir { .. } => "file_mkdir",
-        JobCommand::FileRename { .. } => "file_rename",
-        JobCommand::FileDelete { .. } => "file_delete",
-        JobCommand::FileChmod { .. } => "file_chmod",
-        JobCommand::FileChown { .. } => "file_chown",
-        JobCommand::FileCopy { .. } => "file_copy",
-        JobCommand::FileDownload { .. } => "file_download",
-        JobCommand::FileArchiveTar { .. } => "file_archive_tar",
-        JobCommand::ConfigRead => "config_read",
-        JobCommand::HotConfig { .. } => "hot_config",
-        JobCommand::DataSourceConfigPatch { .. } => "data_source_config_patch",
-        JobCommand::UpdateAgent { .. } => "agent_update",
-        JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
-        JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
-        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
-        JobCommand::UserSessions => "user_sessions",
-        JobCommand::ProcessList { .. } => "process_list",
-        JobCommand::ProcessStart { .. } => "process_start",
-        JobCommand::ProcessStop { .. } => "process_stop",
-        JobCommand::ProcessRestart { .. } => "process_restart",
-        JobCommand::ProcessStatus { .. } => "process_status",
-        JobCommand::ProcessLogs { .. } => "process_logs",
-        JobCommand::Backup { .. } => "backup",
-        JobCommand::Restore { .. } => "restore",
-        JobCommand::RestoreRollback { .. } => "restore_rollback",
-        JobCommand::NetworkApply { .. } => "network_apply",
-        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
-        JobCommand::NetworkRollback { .. } => "network_rollback",
-        JobCommand::NetworkStatus { .. } => "network_status",
-        JobCommand::NetworkInterfaces => "network_interfaces",
-        JobCommand::NetworkProbe { .. } => "network_probe",
-        JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
-    }
+    vpsman_common::job_command_type_label(command)
 }
 
 pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
-    match command {
-        JobCommand::Shell { .. }
-        | JobCommand::ShellScript { .. }
-        | JobCommand::Backup { .. }
-        | JobCommand::Restore { .. }
-        | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
-        | JobCommand::NetworkStatus { .. }
-        | JobCommand::NetworkInterfaces
-        | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. }
-        | JobCommand::UpdateAgent { .. }
-        | JobCommand::AgentUpdateActivate { .. }
-        | JobCommand::AgentUpdateRollback { .. }
-        | JobCommand::AgentUpdateCheck { .. } => job_command_type_label(command).to_string(),
-        _ => fallback.to_string(),
-    }
+    vpsman_common::scheduled_command_type_label(command, fallback)
 }
 
 pub fn validate_network_apply_target(

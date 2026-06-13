@@ -39,3 +39,13 @@ Target statuses are:
 - `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets, or all skipped targets, aggregate to `partial_success`.
 - Availability is contextual display only. Offline fixed targets remain target records until backend deadline, then become `control_timeout`.
 - Frontend TypeScript status unions come from `vpsman_common` via `frontend/src/generated/protocolContracts.ts`; frontend code must not maintain separate status alias lists.
+
+## Shared Workflow Contracts
+
+The same ownership rule applies to command and adjacent workflow models:
+
+- Command safety, confirmation requirements, canonical command type labels, and command-template display groups are defined in `vpsman_common` and generated into frontend contracts.
+- Command templates store backend-derived `command_type`; user-facing grouping is `display_group`.
+- Terminal session state/status/event, file-transfer direction/status/event/command type, backup/restore/migration/tunnel/update-release statuses, data-source readiness, and topology evidence statuses are closed generated vocabularies.
+- Generated frontend contracts also include status-class maps for closed workflow domains. Frontend code may use generic `statusClass` only for free-form display values outside these canonical models.
+- API, CLI, agent, worker, database constraints, frontend types, mocks, and tests must update through `vpsman_common` first. Adding a new workflow state without regenerating contracts and updating constraints is a contract drift bug.

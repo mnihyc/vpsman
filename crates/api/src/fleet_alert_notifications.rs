@@ -5,7 +5,13 @@ use reqwest::{redirect::Policy, Url};
 use serde_json::json;
 use tokio::time::Duration;
 use uuid::Uuid;
-use vpsman_common::payload_hash;
+use vpsman_common::{
+    is_fleet_alert_notification_delivery_process_status, payload_hash,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+};
 
 use crate::{
     fleet_alerts::{build_agent_alert_scopes, AgentAlertScope},
@@ -72,9 +78,12 @@ impl AppState {
             dry_run || request.confirmed,
             "fleet_alert_notification_process_confirmation_required"
         );
-        let status = request.status.as_deref().unwrap_or("queued");
+        let status = request
+            .status
+            .as_deref()
+            .unwrap_or(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED);
         anyhow::ensure!(
-            matches!(status, "queued" | "failed"),
+            is_fleet_alert_notification_delivery_process_status(status),
             "fleet alert notification process status must be queued or failed"
         );
         let limit = request.limit.unwrap_or(50).clamp(1, 200);
@@ -98,8 +107,11 @@ impl AppState {
             }
             let result = deliver_notification(&client, &delivery).await;
             let (status, error) = match result {
-                Ok(()) => ("delivered", None),
-                Err(error) => ("failed", Some(error.to_string())),
+                Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+                Err(error) => (
+                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                    Some(error.to_string()),
+                ),
             };
             processed.push(
                 self.repo
@@ -252,7 +264,7 @@ fn dry_run_delivery(
         alert_id: candidate.alert_id.clone(),
         alert_severity: candidate.alert_severity.clone(),
         alert_category: candidate.alert_category.clone(),
-        status: "matched_dry_run".to_string(),
+        status: FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN.to_string(),
         delivery_kind: candidate.delivery_kind.clone(),
         target: candidate.target.clone(),
         dedupe_key: candidate.dedupe_key.clone(),

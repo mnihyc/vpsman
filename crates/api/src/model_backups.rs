@@ -2,68 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::PrivilegeAssertion;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BackupRequestStatus {
-    RequestedMetadataOnly,
-    ArtifactMetadataRecorded,
-}
-
-impl BackupRequestStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::RequestedMetadataOnly => "requested_metadata_only",
-            Self::ArtifactMetadataRecorded => "artifact_metadata_recorded",
-        }
-    }
-
-    pub(crate) fn from_storage(value: &str) -> Option<Self> {
-        match value {
-            "requested_metadata_only" => Some(Self::RequestedMetadataOnly),
-            "artifact_metadata_recorded" => Some(Self::ArtifactMetadataRecorded),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RestorePlanStatus {
-    PlannedMetadataOnly,
-}
-
-impl RestorePlanStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::PlannedMetadataOnly => "planned_metadata_only",
-        }
-    }
-
-    pub(crate) fn from_storage(value: &str) -> Option<Self> {
-        match value {
-            "planned_metadata_only" => Some(Self::PlannedMetadataOnly),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MigrationLinkStatus {
-    LinkedMetadataOnly,
-}
-
-impl MigrationLinkStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::LinkedMetadataOnly => "linked_metadata_only",
-        }
-    }
-
-    pub(crate) fn from_storage(value: &str) -> Option<Self> {
-        match value {
-            "linked_metadata_only" => Some(Self::LinkedMetadataOnly),
-            _ => None,
-        }
-    }
-}
+pub(crate) use vpsman_common::{BackupRequestStatus, MigrationLinkStatus, RestorePlanStatus};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct BackupRequestView {

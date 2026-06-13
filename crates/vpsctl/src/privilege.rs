@@ -1,7 +1,9 @@
 use anyhow::{ensure, Context, Result};
 use vpsman_common::{
-    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_assertion,
-    JobCommand, PrivilegeAssertion,
+    canonical_db_privilege_intent, canonical_job_privilege_intent,
+    canonical_schedule_privilege_intent, derive_super_key, encode_json, payload_hash, random_nonce,
+    sign_privilege_assertion, JobCommand, JobPrivilegeIntentInput, PrivilegeAssertion,
+    SchedulePrivilegeIntentInput,
 };
 
 use crate::unix_now;
@@ -120,7 +122,24 @@ pub(crate) fn build_privilege_for_schedule(
     ttl_secs: u64,
 ) -> Result<PrivilegeAssertion> {
     let payload_hash_hex = payload_hash(&encode_json(request.command)?);
-    let intent = canonical_schedule_privilege_intent(&request, &payload_hash_hex)?;
+    let intent = canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
+        action: request.action,
+        schedule_id: request.schedule_id,
+        name: request.name,
+        command_type: request.command_type,
+        operation_payload_hash: &payload_hash_hex,
+        selector_expression: request.selector_expression,
+        resolved_targets: request.resolved_targets,
+        cron_expr: request.cron_expr,
+        timezone: request.timezone,
+        enabled: request.enabled,
+        catch_up_policy: request.catch_up_policy,
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+        deferred_until: request.deferred_until,
+        deleted: request.deleted,
+    })?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }
 
@@ -146,133 +165,6 @@ pub(crate) fn build_privilege_for_db(
         request.confirmed,
     )?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
-}
-
-#[derive(serde::Serialize)]
-struct JobPrivilegeIntent<'a> {
-    version: u8,
-    action: &'static str,
-    selector_expression: &'a str,
-    command_type: &'a str,
-    operation_payload_hash: &'a str,
-    resolved_targets: Vec<&'a str>,
-    timeout_secs: u64,
-    force_unprivileged: bool,
-    privileged: bool,
-}
-
-#[derive(serde::Serialize)]
-struct SchedulePrivilegeIntent<'a> {
-    version: u8,
-    action: &'a str,
-    schedule_id: Option<&'a str>,
-    name: &'a str,
-    command_type: &'a str,
-    operation_payload_hash: &'a str,
-    selector_expression: &'a str,
-    resolved_targets: Vec<&'a str>,
-    cron_expr: &'a str,
-    timezone: &'a str,
-    enabled: bool,
-    catch_up_policy: &'a str,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
-    max_failures: i32,
-    deferred_until: Option<&'a str>,
-    deleted: bool,
-}
-
-#[derive(serde::Serialize)]
-struct DbPrivilegeIntent<'a> {
-    version: u8,
-    action: &'a str,
-    target: &'a str,
-    selector_expression: Option<&'a str>,
-    resolved_targets: Vec<&'a str>,
-    confirmed: bool,
-}
-
-struct JobPrivilegeIntentInput<'a> {
-    selector_expression: &'a str,
-    command_type: &'a str,
-    operation_payload_hash: &'a str,
-    resolved_targets: &'a [String],
-    timeout_secs: u64,
-    force_unprivileged: bool,
-    privileged: bool,
-}
-
-fn canonical_job_privilege_intent(input: JobPrivilegeIntentInput<'_>) -> Result<String> {
-    let mut resolved_targets = input
-        .resolved_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    resolved_targets.sort_unstable();
-    Ok(serde_json::to_string(&JobPrivilegeIntent {
-        version: 1,
-        action: "job.dispatch",
-        selector_expression: input.selector_expression.trim(),
-        command_type: input.command_type,
-        operation_payload_hash: input.operation_payload_hash,
-        resolved_targets,
-        timeout_secs: input.timeout_secs.clamp(1, 3600),
-        force_unprivileged: input.force_unprivileged,
-        privileged: input.privileged,
-    })?)
-}
-
-fn canonical_db_privilege_intent(
-    action: &str,
-    target: &str,
-    selector_expression: Option<&str>,
-    resolved_targets: &[String],
-    confirmed: bool,
-) -> Result<String> {
-    let mut resolved_targets = resolved_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    resolved_targets.sort_unstable();
-    Ok(serde_json::to_string(&DbPrivilegeIntent {
-        version: 1,
-        action,
-        target,
-        selector_expression: selector_expression.map(str::trim),
-        resolved_targets,
-        confirmed,
-    })?)
-}
-
-fn canonical_schedule_privilege_intent(
-    request: &SchedulePrivilegeRequest<'_>,
-    operation_payload_hash: &str,
-) -> Result<String> {
-    let mut resolved_targets = request
-        .resolved_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    resolved_targets.sort_unstable();
-    Ok(serde_json::to_string(&SchedulePrivilegeIntent {
-        version: 1,
-        action: request.action,
-        schedule_id: request.schedule_id,
-        name: request.name.trim(),
-        command_type: request.command_type,
-        operation_payload_hash,
-        selector_expression: request.selector_expression.trim(),
-        resolved_targets,
-        cron_expr: request.cron_expr.trim(),
-        timezone: request.timezone,
-        enabled: request.enabled,
-        catch_up_policy: request.catch_up_policy,
-        catch_up_limit: request.catch_up_limit,
-        retry_delay_secs: request.retry_delay_secs,
-        max_failures: request.max_failures,
-        deferred_until: request.deferred_until,
-        deleted: request.deleted,
-    })?)
 }
 
 fn normalize_sha256_hex(value: &str) -> Result<String> {

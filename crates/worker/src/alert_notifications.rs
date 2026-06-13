@@ -4,6 +4,10 @@ use serde_json::{json, Value};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
 use tokio::time::Duration;
 use uuid::Uuid;
+use vpsman_common::{
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+};
 
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
@@ -133,8 +137,11 @@ async fn process_queued_deliveries(
         let delivery = delivery_from_row(row)?;
         let result = deliver_notification(&client, &delivery).await;
         let (status, error) = match result {
-            Ok(()) => ("delivered", None),
-            Err(error) => ("failed", Some(truncate_error(&error.to_string()))),
+            Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+            Err(error) => (
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                Some(truncate_error(&error.to_string())),
+            ),
         };
         let next_attempt_count = delivery.attempt_count.saturating_add(1);
         let updated = sqlx::query(
@@ -177,7 +184,7 @@ async fn process_queued_deliveries(
 
     let delivered = outcomes
         .iter()
-        .filter(|outcome| outcome.status == "delivered")
+        .filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
         .count();
     let failed = outcomes.len().saturating_sub(delivered);
     Ok((outcomes.len(), delivered, failed))
@@ -288,8 +295,8 @@ async fn insert_process_audit(
     .bind(json!({
         "worker": "alert_notification_worker",
         "delivery_count": outcomes.len(),
-        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == "delivered").count(),
-        "failed_count": outcomes.iter().filter(|outcome| outcome.status == "failed").count(),
+        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED).count(),
+        "failed_count": outcomes.iter().filter(|outcome| outcome.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED).count(),
         "deliveries": outcomes.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|outcome| json!({
             "id": outcome.id,
             "channel_id": outcome.channel_id,

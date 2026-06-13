@@ -173,6 +173,193 @@ pub const JOB_TARGET_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
     (TARGET_STATUS_CANCELED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
 ];
 
+pub const WORKFLOW_STATUS_CLASS_IN_PROGRESS: &str = "in_progress";
+pub const WORKFLOW_STATUS_CLASS_SUCCESSFUL: &str = "successful";
+pub const WORKFLOW_STATUS_CLASS_WARNING: &str = "warning";
+pub const WORKFLOW_STATUS_CLASS_NEUTRAL: &str = "neutral";
+
+pub const WORKFLOW_STATUS_CLASSES: [&str; 4] = [
+    WORKFLOW_STATUS_CLASS_IN_PROGRESS,
+    WORKFLOW_STATUS_CLASS_SUCCESSFUL,
+    WORKFLOW_STATUS_CLASS_WARNING,
+    WORKFLOW_STATUS_CLASS_NEUTRAL,
+];
+
+pub const TERMINAL_SESSION_STATE_CLASS_BY_STATE: [(&str, &str); 6] = [
+    ("open", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("closed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("missing", WORKFLOW_STATUS_CLASS_WARNING),
+    ("rejected", WORKFLOW_STATUS_CLASS_WARNING),
+    ("exited", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
+    ("opened", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("attached", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("rejected", WORKFLOW_STATUS_CLASS_WARNING),
+    ("accepted", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("duplicate_ignored", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("polled", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("resized", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("closed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("missing", WORKFLOW_STATUS_CLASS_WARNING),
+    ("streaming", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("exited", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("idle_timeout", WORKFLOW_STATUS_CLASS_WARNING),
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("started", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("transferring", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("completed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("aborted", WORKFLOW_STATUS_CLASS_WARNING),
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const BACKUP_REQUEST_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+    ("requested_metadata_only", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    (
+        "artifact_metadata_recorded",
+        WORKFLOW_STATUS_CLASS_SUCCESSFUL,
+    ),
+];
+
+pub const RESTORE_PLAN_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
+    [("planned_metadata_only", WORKFLOW_STATUS_CLASS_NEUTRAL)];
+
+pub const MIGRATION_LINK_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
+    [("linked_metadata_only", WORKFLOW_STATUS_CLASS_SUCCESSFUL)];
+
+pub const TUNNEL_PLAN_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("partially_applied", WORKFLOW_STATUS_CLASS_WARNING),
+    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("partially_rolled_back", WORKFLOW_STATUS_CLASS_WARNING),
+];
+
+pub const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS: [(&str, &str); 3] = [
+    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+    ("published_metadata_only", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("artifact_hosted", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+];
+
+pub const SERVER_JOB_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("running", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("completed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("canceled", WORKFLOW_STATUS_CLASS_WARNING),
+];
+
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("matched_dry_run", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+];
+
+pub const WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("permanently_failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("matched_dry_run", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("permanently_failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+];
+
+pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+    ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+];
+
+pub const DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
+    ("agent_offline", WORKFLOW_STATUS_CLASS_WARNING),
+    ("selected", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("selected_workflow", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("unknown_domain", WORKFLOW_STATUS_CLASS_WARNING),
+    ("ready_on_demand", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("ready", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("metadata_only", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("selected_no_store", WORKFLOW_STATUS_CLASS_WARNING),
+    ("selected_no_artifacts", WORKFLOW_STATUS_CLASS_WARNING),
+    ("selected_no_limits", WORKFLOW_STATUS_CLASS_WARNING),
+    ("selected_no_samples", WORKFLOW_STATUS_CLASS_WARNING),
+    ("needs_promotion", WORKFLOW_STATUS_CLASS_WARNING),
+    ("ok", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
+];
+
+pub const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("online", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("offline", WORKFLOW_STATUS_CLASS_WARNING),
+    ("never", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("stale", WORKFLOW_STATUS_CLASS_WARNING),
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+    ("planned", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("applied", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("healthy", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
+    ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE: [(&str, &str); 5] = [
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("healthy", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("kernel_probe_success", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("kernel_probe_failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("not_probed", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TOPOLOGY_PROBE_STATE_CLASS_BY_STATE: [(&str, &str); 4] = [
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("success", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("skipped", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE: [(&str, &str); 11] = [
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("adapter_unhealthy", WORKFLOW_STATUS_CLASS_WARNING),
+    ("routing_unhealthy", WORKFLOW_STATUS_CLASS_WARNING),
+    ("drift", WORKFLOW_STATUS_CLASS_WARNING),
+    ("unhealthy", WORKFLOW_STATUS_CLASS_WARNING),
+    ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
+    ("observed", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("healthy", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("not_applicable", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("not_configured", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("skipped", WORKFLOW_STATUS_CLASS_NEUTRAL),
+];
+
+pub const TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE: [(&str, &str); 4] = [
+    ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
+    ("healthy", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("degraded", WORKFLOW_STATUS_CLASS_WARNING),
+    ("recorded", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+];
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatusClass {
@@ -453,6 +640,102 @@ pub fn job_target_status_classes() -> &'static [&'static str] {
 
 pub fn job_target_status_class_by_status() -> &'static [(&'static str, &'static str)] {
     &JOB_TARGET_STATUS_CLASS_BY_STATUS
+}
+
+pub fn workflow_status_classes() -> &'static [&'static str] {
+    &WORKFLOW_STATUS_CLASSES
+}
+
+pub fn terminal_session_state_class_by_state() -> &'static [(&'static str, &'static str)] {
+    &TERMINAL_SESSION_STATE_CLASS_BY_STATE
+}
+
+pub fn terminal_session_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &TERMINAL_SESSION_STATUS_CLASS_BY_STATUS
+}
+
+pub fn file_transfer_session_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS
+}
+
+pub fn backup_request_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &BACKUP_REQUEST_STATUS_CLASS_BY_STATUS
+}
+
+pub fn restore_plan_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &RESTORE_PLAN_STATUS_CLASS_BY_STATUS
+}
+
+pub fn migration_link_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &MIGRATION_LINK_STATUS_CLASS_BY_STATUS
+}
+
+pub fn tunnel_plan_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &TUNNEL_PLAN_STATUS_CLASS_BY_STATUS
+}
+
+pub fn tunnel_endpoint_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS
+}
+
+pub fn agent_update_release_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS
+}
+
+pub fn server_job_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &SERVER_JOB_STATUS_CLASS_BY_STATUS
+}
+
+pub fn fleet_alert_notification_delivery_status_class_by_status(
+) -> &'static [(&'static str, &'static str)] {
+    &FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS
+}
+
+pub fn fleet_alert_notification_delivery_process_status_class_by_status(
+) -> &'static [(&'static str, &'static str)] {
+    &FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS
+}
+
+pub fn webhook_rule_delivery_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS
+}
+
+pub fn webhook_rule_delivery_history_status_class_by_status(
+) -> &'static [(&'static str, &'static str)] {
+    &WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS
+}
+
+pub fn webhook_rule_delivery_process_status_class_by_status(
+) -> &'static [(&'static str, &'static str)] {
+    &WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS
+}
+
+pub fn data_source_readiness_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS
+}
+
+pub fn topology_node_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS
+}
+
+pub fn topology_edge_health_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS
+}
+
+pub fn topology_neighbor_state_class_by_state() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE
+}
+
+pub fn topology_probe_state_class_by_state() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_PROBE_STATE_CLASS_BY_STATE
+}
+
+pub fn topology_runtime_state_class_by_state() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE
+}
+
+pub fn topology_observation_state_class_by_state() -> &'static [(&'static str, &'static str)] {
+    &TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE
 }
 
 fn is_false(value: &bool) -> bool {
@@ -874,6 +1157,273 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
     ]
 }
 
+pub const JOB_COMMAND_SAFETY_READ_ONLY: &str = "read_only";
+pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
+
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
+    "shell_argv",
+    "shell_pty",
+    "shell_script",
+    "terminal_open",
+    "terminal_input",
+    "terminal_poll",
+    "terminal_resize",
+    "terminal_close",
+    "config_read",
+    "hot_config",
+    "data_source_config_patch",
+    "agent_update",
+    "agent_update_activate",
+    "agent_update_rollback",
+    "agent_update_check",
+    "file_pull",
+    "file_push",
+    "file_push_chunked",
+    "file_transfer_start",
+    "file_transfer_chunk",
+    "file_transfer_commit",
+    "file_transfer_abort",
+    "file_transfer_download_start",
+    "file_transfer_download_chunk",
+    "file_stat",
+    "file_list_dir",
+    "file_read_text",
+    "file_mkdir",
+    "file_write_text",
+    "file_rename",
+    "file_delete",
+    "file_chmod",
+    "file_chown",
+    "file_copy",
+    "file_download",
+    "file_archive_tar",
+    "user_sessions",
+    "process_list",
+    "process_start",
+    "process_stop",
+    "process_restart",
+    "process_status",
+    "process_logs",
+    "backup",
+    "restore",
+    "restore_rollback",
+    "network_apply",
+    "network_ospf_cost_update",
+    "network_rollback",
+    "network_status",
+    "network_interfaces",
+    "network_probe",
+    "network_speed_test",
+];
+
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+    ("shell", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("shell_script", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("terminal_open", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("terminal_input", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("terminal_poll", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("terminal_resize", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("terminal_close", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("config_read", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("hot_config", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("data_source_config_patch", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_update_activate", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_update_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_update_check", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_pull", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_push", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_push_chunked", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_transfer_start", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_transfer_chunk", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_transfer_commit", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_transfer_abort", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_transfer_download_start", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_transfer_download_chunk", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_stat", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_list_dir", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_read_text", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_mkdir", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_write_text", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_rename", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_delete", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_chmod", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_chown", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_copy", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_download", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("file_archive_tar", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("user_sessions", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("process_list", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("process_start", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("process_stop", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("process_restart", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("process_status", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("process_logs", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("backup", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("restore", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("restore_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("network_apply", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("network_ospf_cost_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("network_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("network_status", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("network_interfaces", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("network_probe", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("network_speed_test", JOB_COMMAND_SAFETY_READ_ONLY),
+];
+
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+    ("shell", "shell_argv"),
+    ("shell_script", "shell_script"),
+    ("terminal_open", "terminal_open"),
+    ("terminal_input", "terminal_input"),
+    ("terminal_poll", "terminal_poll"),
+    ("terminal_resize", "terminal_resize"),
+    ("terminal_close", "terminal_close"),
+    ("config_read", "config_read"),
+    ("hot_config", "hot_config"),
+    ("data_source_config_patch", "data_source_config_patch"),
+    ("agent_update", "agent_update"),
+    ("agent_update_activate", "agent_update_activate"),
+    ("agent_update_rollback", "agent_update_rollback"),
+    ("agent_update_check", "agent_update_check"),
+    ("file_pull", "file_pull"),
+    ("file_push", "file_push"),
+    ("file_push_chunked", "file_push_chunked"),
+    ("file_transfer_start", "file_transfer_start"),
+    ("file_transfer_chunk", "file_transfer_chunk"),
+    ("file_transfer_commit", "file_transfer_commit"),
+    ("file_transfer_abort", "file_transfer_abort"),
+    (
+        "file_transfer_download_start",
+        "file_transfer_download_start",
+    ),
+    (
+        "file_transfer_download_chunk",
+        "file_transfer_download_chunk",
+    ),
+    ("file_stat", "file_stat"),
+    ("file_list_dir", "file_list_dir"),
+    ("file_read_text", "file_read_text"),
+    ("file_mkdir", "file_mkdir"),
+    ("file_write_text", "file_write_text"),
+    ("file_rename", "file_rename"),
+    ("file_delete", "file_delete"),
+    ("file_chmod", "file_chmod"),
+    ("file_chown", "file_chown"),
+    ("file_copy", "file_copy"),
+    ("file_download", "file_download"),
+    ("file_archive_tar", "file_archive_tar"),
+    ("user_sessions", "user_sessions"),
+    ("process_list", "process_list"),
+    ("process_start", "process_start"),
+    ("process_stop", "process_stop"),
+    ("process_restart", "process_restart"),
+    ("process_status", "process_status"),
+    ("process_logs", "process_logs"),
+    ("backup", "backup"),
+    ("restore", "restore"),
+    ("restore_rollback", "restore_rollback"),
+    ("network_apply", "network_apply"),
+    ("network_ospf_cost_update", "network_ospf_cost_update"),
+    ("network_rollback", "network_rollback"),
+    ("network_status", "network_status"),
+    ("network_interfaces", "network_interfaces"),
+    ("network_probe", "network_probe"),
+    ("network_speed_test", "network_speed_test"),
+];
+
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
+    ("shell_argv", "shell"),
+    ("shell_pty", "shell"),
+    ("shell_script", "shell"),
+    ("terminal_open", "terminal"),
+    ("terminal_input", "terminal"),
+    ("terminal_poll", "terminal"),
+    ("terminal_resize", "terminal"),
+    ("terminal_close", "terminal"),
+    ("config_read", "config"),
+    ("hot_config", "config"),
+    ("data_source_config_patch", "config"),
+    ("agent_update", "agent_update"),
+    ("agent_update_activate", "agent_update"),
+    ("agent_update_rollback", "agent_update"),
+    ("agent_update_check", "agent_update"),
+    ("file_pull", "file"),
+    ("file_push", "file"),
+    ("file_push_chunked", "file"),
+    ("file_transfer_start", "file_transfer"),
+    ("file_transfer_chunk", "file_transfer"),
+    ("file_transfer_commit", "file_transfer"),
+    ("file_transfer_abort", "file_transfer"),
+    ("file_transfer_download_start", "file_transfer"),
+    ("file_transfer_download_chunk", "file_transfer"),
+    ("file_stat", "file"),
+    ("file_list_dir", "file"),
+    ("file_read_text", "file"),
+    ("file_mkdir", "file"),
+    ("file_write_text", "file"),
+    ("file_rename", "file"),
+    ("file_delete", "file"),
+    ("file_chmod", "file"),
+    ("file_chown", "file"),
+    ("file_copy", "file"),
+    ("file_download", "file"),
+    ("file_archive_tar", "file"),
+    ("user_sessions", "inventory"),
+    ("process_list", "process"),
+    ("process_start", "process"),
+    ("process_stop", "process"),
+    ("process_restart", "process"),
+    ("process_status", "process"),
+    ("process_logs", "process"),
+    ("backup", "backup"),
+    ("restore", "restore"),
+    ("restore_rollback", "restore"),
+    ("network_apply", "network"),
+    ("network_ospf_cost_update", "network"),
+    ("network_rollback", "network"),
+    ("network_status", "network"),
+    ("network_interfaces", "network"),
+    ("network_probe", "network"),
+    ("network_speed_test", "network"),
+];
+
+pub fn job_command_type_labels() -> &'static [&'static str] {
+    &JOB_COMMAND_TYPE_LABELS
+}
+
+pub fn job_command_safety_by_operation_type() -> &'static [(&'static str, &'static str)] {
+    &JOB_COMMAND_SAFETY_BY_OPERATION_TYPE
+}
+
+pub fn job_command_type_by_operation_type() -> &'static [(&'static str, &'static str)] {
+    &JOB_COMMAND_TYPE_BY_OPERATION_TYPE
+}
+
+pub fn job_command_display_group_by_command_type() -> &'static [(&'static str, &'static str)] {
+    &JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE
+}
+
+pub fn job_command_requires_confirmation_by_operation_type(operation_type: &str) -> Option<bool> {
+    JOB_COMMAND_SAFETY_BY_OPERATION_TYPE
+        .iter()
+        .find_map(|(candidate, safety)| {
+            (*candidate == operation_type).then_some(*safety == JOB_COMMAND_SAFETY_EXCLUSIVE)
+        })
+}
+
+pub fn job_command_type_label_from_operation_type(operation_type: &str) -> Option<&'static str> {
+    JOB_COMMAND_TYPE_BY_OPERATION_TYPE
+        .iter()
+        .find_map(|(candidate, label)| (*candidate == operation_type).then_some(*label))
+}
+
+pub fn job_command_display_group(command_type: &str) -> Option<&'static str> {
+    JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE
+        .iter()
+        .find_map(|(candidate, group)| (*candidate == command_type).then_some(*group))
+}
+
 pub fn job_privilege_intent_fields() -> &'static [&'static str] {
     &[
         "version",
@@ -925,6 +1475,751 @@ pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
         "deferred_until",
         "deleted",
     ]
+}
+
+#[derive(Serialize)]
+pub struct JobPrivilegeIntent<'a> {
+    version: u8,
+    action: &'static str,
+    selector_expression: &'a str,
+    command_type: &'a str,
+    operation_payload_hash: &'a str,
+    resolved_targets: Vec<&'a str>,
+    timeout_secs: u64,
+    force_unprivileged: bool,
+    privileged: bool,
+}
+
+impl<'a> JobPrivilegeIntent<'a> {
+    pub fn new(input: JobPrivilegeIntentInput<'a>) -> Self {
+        Self {
+            version: 1,
+            action: "job.dispatch",
+            selector_expression: input.selector_expression.trim(),
+            command_type: input.command_type,
+            operation_payload_hash: input.operation_payload_hash,
+            resolved_targets: sorted_str_refs(input.resolved_targets),
+            timeout_secs: input.timeout_secs.clamp(1, 3600),
+            force_unprivileged: input.force_unprivileged,
+            privileged: input.privileged,
+        }
+    }
+}
+
+pub struct JobPrivilegeIntentInput<'a> {
+    pub selector_expression: &'a str,
+    pub command_type: &'a str,
+    pub operation_payload_hash: &'a str,
+    pub resolved_targets: &'a [String],
+    pub timeout_secs: u64,
+    pub force_unprivileged: bool,
+    pub privileged: bool,
+}
+
+#[derive(Serialize)]
+pub struct SchedulePrivilegeIntent<'a> {
+    version: u8,
+    action: &'a str,
+    schedule_id: Option<&'a str>,
+    name: &'a str,
+    command_type: &'a str,
+    operation_payload_hash: &'a str,
+    selector_expression: &'a str,
+    resolved_targets: Vec<&'a str>,
+    cron_expr: &'a str,
+    timezone: &'a str,
+    enabled: bool,
+    catch_up_policy: &'a str,
+    catch_up_limit: i32,
+    retry_delay_secs: i64,
+    max_failures: i32,
+    deferred_until: Option<&'a str>,
+    deleted: bool,
+}
+
+impl<'a> SchedulePrivilegeIntent<'a> {
+    pub fn new(input: SchedulePrivilegeIntentInput<'a>) -> Self {
+        Self {
+            version: 1,
+            action: input.action,
+            schedule_id: input.schedule_id,
+            name: input.name.trim(),
+            command_type: input.command_type,
+            operation_payload_hash: input.operation_payload_hash,
+            selector_expression: input.selector_expression.trim(),
+            resolved_targets: sorted_str_refs(input.resolved_targets),
+            cron_expr: input.cron_expr.trim(),
+            timezone: input.timezone,
+            enabled: input.enabled,
+            catch_up_policy: input.catch_up_policy,
+            catch_up_limit: input.catch_up_limit,
+            retry_delay_secs: input.retry_delay_secs,
+            max_failures: input.max_failures,
+            deferred_until: input.deferred_until,
+            deleted: input.deleted,
+        }
+    }
+}
+
+pub struct SchedulePrivilegeIntentInput<'a> {
+    pub action: &'a str,
+    pub schedule_id: Option<&'a str>,
+    pub name: &'a str,
+    pub command_type: &'a str,
+    pub operation_payload_hash: &'a str,
+    pub selector_expression: &'a str,
+    pub resolved_targets: &'a [String],
+    pub cron_expr: &'a str,
+    pub timezone: &'a str,
+    pub enabled: bool,
+    pub catch_up_policy: &'a str,
+    pub catch_up_limit: i32,
+    pub retry_delay_secs: i64,
+    pub max_failures: i32,
+    pub deferred_until: Option<&'a str>,
+    pub deleted: bool,
+}
+
+#[derive(Serialize)]
+pub struct DbPrivilegeIntent<'a> {
+    version: u8,
+    action: &'a str,
+    target: &'a str,
+    selector_expression: Option<&'a str>,
+    resolved_targets: Vec<&'a str>,
+    confirmed: bool,
+}
+
+impl<'a> DbPrivilegeIntent<'a> {
+    pub fn new(
+        action: &'a str,
+        target: &'a str,
+        selector_expression: Option<&'a str>,
+        resolved_targets: &'a [String],
+        confirmed: bool,
+    ) -> Self {
+        Self {
+            version: 1,
+            action,
+            target,
+            selector_expression: selector_expression.map(str::trim),
+            resolved_targets: sorted_str_refs(resolved_targets),
+            confirmed,
+        }
+    }
+}
+
+pub fn canonical_job_privilege_intent(
+    input: JobPrivilegeIntentInput<'_>,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&JobPrivilegeIntent::new(input))
+}
+
+pub fn canonical_schedule_privilege_intent(
+    input: SchedulePrivilegeIntentInput<'_>,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&SchedulePrivilegeIntent::new(input))
+}
+
+pub fn canonical_db_privilege_intent(
+    action: &str,
+    target: &str,
+    selector_expression: Option<&str>,
+    resolved_targets: &[String],
+    confirmed: bool,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&DbPrivilegeIntent::new(
+        action,
+        target,
+        selector_expression,
+        resolved_targets,
+        confirmed,
+    ))
+}
+
+fn sorted_str_refs(values: &[String]) -> Vec<&str> {
+    let mut values = values.iter().map(String::as_str).collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
+pub const TERMINAL_COMMAND_TYPES: &[&str] = &[
+    "terminal_open",
+    "terminal_input",
+    "terminal_poll",
+    "terminal_resize",
+    "terminal_close",
+];
+
+pub const TERMINAL_SESSION_EVENTS: &[&str] = &[
+    "terminal_open",
+    "terminal_input",
+    "terminal_poll",
+    "terminal_resize",
+    "terminal_close",
+    "terminal_stream",
+];
+
+pub const TERMINAL_SESSION_STATUSES: &[&str] = &[
+    "opened",
+    "attached",
+    "rejected",
+    "accepted",
+    "duplicate_ignored",
+    "polled",
+    "resized",
+    "closed",
+    "missing",
+    "streaming",
+    "exited",
+    "idle_timeout",
+    "unknown",
+];
+
+pub const TERMINAL_SESSION_STATES: &[&str] =
+    &["open", "closed", "missing", "rejected", "exited", "unknown"];
+
+pub const FILE_TRANSFER_COMMAND_TYPES: &[&str] = &[
+    "file_transfer_start",
+    "file_transfer_chunk",
+    "file_transfer_commit",
+    "file_transfer_abort",
+    "file_transfer_download_start",
+    "file_transfer_download_chunk",
+];
+
+pub const FILE_TRANSFER_DIRECTIONS: &[&str] = &["upload", "download"];
+
+pub const FILE_TRANSFER_SESSION_EVENTS: &[&str] = &[
+    "file_transfer_start",
+    "file_transfer_chunk_ack",
+    "file_transfer_commit",
+    "file_transfer_abort",
+    "file_transfer_download_start",
+    "file_transfer_download_chunk",
+];
+
+pub const FILE_TRANSFER_SESSION_STATUSES: &[&str] =
+    &["started", "transferring", "completed", "aborted", "unknown"];
+
+pub const BACKUP_REQUEST_STATUSES: &[&str] =
+    &["requested_metadata_only", "artifact_metadata_recorded"];
+pub const RESTORE_PLAN_STATUSES: &[&str] = &["planned_metadata_only"];
+pub const MIGRATION_LINK_STATUSES: &[&str] = &["linked_metadata_only"];
+pub const TUNNEL_PLAN_STATUSES: &[&str] = &[
+    "planned",
+    "applied",
+    "partially_applied",
+    "rolled_back",
+    "partially_rolled_back",
+];
+pub const TUNNEL_ENDPOINT_STATUSES: &[&str] = &["planned", "applied", "rolled_back"];
+pub const AGENT_UPDATE_RELEASE_STATUSES: &[&str] = &["published_metadata_only", "artifact_hosted"];
+
+pub const SERVER_JOB_TYPE_ARTIFACT_CLEANUP: &str = "artifact_cleanup";
+pub const SERVER_JOB_STATUS_QUEUED: &str = "queued";
+pub const SERVER_JOB_STATUS_RUNNING: &str = "running";
+pub const SERVER_JOB_STATUS_COMPLETED: &str = "completed";
+pub const SERVER_JOB_STATUS_FAILED: &str = "failed";
+pub const SERVER_JOB_STATUS_CANCELED: &str = "canceled";
+pub const SERVER_JOB_TYPES: &[&str] = &[SERVER_JOB_TYPE_ARTIFACT_CLEANUP];
+pub const SERVER_JOB_STATUSES: &[&str] = &[
+    SERVER_JOB_STATUS_QUEUED,
+    SERVER_JOB_STATUS_RUNNING,
+    SERVER_JOB_STATUS_COMPLETED,
+    SERVER_JOB_STATUS_FAILED,
+    SERVER_JOB_STATUS_CANCELED,
+];
+
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED: &str = "queued";
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED: &str = "failed";
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED: &str = "delivered";
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN: &str = "matched_dry_run";
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES: &[&str] = &[
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN,
+];
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES: &[&str] = &[
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+];
+
+pub const WEBHOOK_RULE_DELIVERY_STATUS_QUEUED: &str = "queued";
+pub const WEBHOOK_RULE_DELIVERY_STATUS_FAILED: &str = "failed";
+pub const WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED: &str = "permanently_failed";
+pub const WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED: &str = "delivered";
+pub const WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN: &str = "matched_dry_run";
+pub const WEBHOOK_RULE_DELIVERY_STATUSES: &[&str] = &[
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
+];
+pub const WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES: &[&str] = &[
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+];
+pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES: &[&str] = &[
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+];
+
+pub const DATA_SOURCE_READINESS_STATUSES: &[&str] = &[
+    "agent_offline",
+    "selected",
+    "selected_workflow",
+    "unknown_domain",
+    "ready_on_demand",
+    "ready",
+    "metadata_only",
+    "selected_no_store",
+    "selected_no_artifacts",
+    "selected_no_limits",
+    "selected_no_samples",
+    "needs_promotion",
+    "ok",
+    "degraded",
+];
+
+pub const TOPOLOGY_NODE_STATUSES: &[&str] = &["online", "offline", "never", "stale", "unknown"];
+pub const TOPOLOGY_EDGE_HEALTH_STATUSES: &[&str] =
+    &["planned", "applied", "healthy", "degraded", "rolled_back"];
+pub const TOPOLOGY_NEIGHBOR_STATES: &[&str] = &[
+    "unknown",
+    "healthy",
+    "kernel_probe_success",
+    "kernel_probe_failed",
+    "not_probed",
+];
+pub const TOPOLOGY_PROBE_STATES: &[&str] = &["unknown", "success", "failed", "skipped"];
+pub const TOPOLOGY_RUNTIME_STATES: &[&str] = &[
+    "unknown",
+    "adapter_unhealthy",
+    "routing_unhealthy",
+    "drift",
+    "unhealthy",
+    "degraded",
+    "observed",
+    "healthy",
+    "not_applicable",
+    "not_configured",
+    "skipped",
+];
+pub const TOPOLOGY_OBSERVATION_STATES: &[&str] = &["unknown", "healthy", "degraded", "recorded"];
+pub const TOPOLOGY_DRIFT_POLICIES: &[&str] = &[
+    "hold_convergence_until_endpoints_online",
+    "observe_only_until_import_promoted",
+    "observe_runtime_drift_before_apply",
+    "observe_and_recommend",
+    "eligible_for_apply",
+];
+pub const TOPOLOGY_DRIFT_ACTIONS: &[&str] = &[
+    "wait_for_reconnect",
+    "promote_observed_first",
+    "inspect_runtime_status",
+    "inspect_degraded_samples",
+    "none",
+];
+
+pub fn terminal_command_types() -> &'static [&'static str] {
+    TERMINAL_COMMAND_TYPES
+}
+
+pub fn terminal_session_events() -> &'static [&'static str] {
+    TERMINAL_SESSION_EVENTS
+}
+
+pub fn terminal_session_statuses() -> &'static [&'static str] {
+    TERMINAL_SESSION_STATUSES
+}
+
+pub fn terminal_session_states() -> &'static [&'static str] {
+    TERMINAL_SESSION_STATES
+}
+
+pub fn file_transfer_command_types() -> &'static [&'static str] {
+    FILE_TRANSFER_COMMAND_TYPES
+}
+
+pub fn file_transfer_directions() -> &'static [&'static str] {
+    FILE_TRANSFER_DIRECTIONS
+}
+
+pub fn file_transfer_session_events() -> &'static [&'static str] {
+    FILE_TRANSFER_SESSION_EVENTS
+}
+
+pub fn file_transfer_session_statuses() -> &'static [&'static str] {
+    FILE_TRANSFER_SESSION_STATUSES
+}
+
+pub fn backup_request_statuses() -> &'static [&'static str] {
+    BACKUP_REQUEST_STATUSES
+}
+
+pub fn restore_plan_statuses() -> &'static [&'static str] {
+    RESTORE_PLAN_STATUSES
+}
+
+pub fn migration_link_statuses() -> &'static [&'static str] {
+    MIGRATION_LINK_STATUSES
+}
+
+pub fn tunnel_plan_statuses() -> &'static [&'static str] {
+    TUNNEL_PLAN_STATUSES
+}
+
+pub fn tunnel_endpoint_statuses() -> &'static [&'static str] {
+    TUNNEL_ENDPOINT_STATUSES
+}
+
+pub fn agent_update_release_statuses() -> &'static [&'static str] {
+    AGENT_UPDATE_RELEASE_STATUSES
+}
+
+pub fn server_job_types() -> &'static [&'static str] {
+    SERVER_JOB_TYPES
+}
+
+pub fn server_job_statuses() -> &'static [&'static str] {
+    SERVER_JOB_STATUSES
+}
+
+pub fn fleet_alert_notification_delivery_statuses() -> &'static [&'static str] {
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES
+}
+
+pub fn fleet_alert_notification_delivery_process_statuses() -> &'static [&'static str] {
+    FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES
+}
+
+pub fn webhook_rule_delivery_statuses() -> &'static [&'static str] {
+    WEBHOOK_RULE_DELIVERY_STATUSES
+}
+
+pub fn webhook_rule_delivery_history_statuses() -> &'static [&'static str] {
+    WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES
+}
+
+pub fn webhook_rule_delivery_process_statuses() -> &'static [&'static str] {
+    WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES
+}
+
+pub fn data_source_readiness_statuses() -> &'static [&'static str] {
+    DATA_SOURCE_READINESS_STATUSES
+}
+
+pub fn topology_node_statuses() -> &'static [&'static str] {
+    TOPOLOGY_NODE_STATUSES
+}
+
+pub fn topology_edge_health_statuses() -> &'static [&'static str] {
+    TOPOLOGY_EDGE_HEALTH_STATUSES
+}
+
+pub fn topology_neighbor_states() -> &'static [&'static str] {
+    TOPOLOGY_NEIGHBOR_STATES
+}
+
+pub fn topology_probe_states() -> &'static [&'static str] {
+    TOPOLOGY_PROBE_STATES
+}
+
+pub fn topology_runtime_states() -> &'static [&'static str] {
+    TOPOLOGY_RUNTIME_STATES
+}
+
+pub fn topology_observation_states() -> &'static [&'static str] {
+    TOPOLOGY_OBSERVATION_STATES
+}
+
+pub fn topology_drift_policies() -> &'static [&'static str] {
+    TOPOLOGY_DRIFT_POLICIES
+}
+
+pub fn topology_drift_actions() -> &'static [&'static str] {
+    TOPOLOGY_DRIFT_ACTIONS
+}
+
+fn contains_static(values: &'static [&'static str], value: &str) -> bool {
+    values.contains(&value)
+}
+
+pub fn is_terminal_command_type(command_type: &str) -> bool {
+    contains_static(TERMINAL_COMMAND_TYPES, command_type)
+}
+
+pub fn is_terminal_session_event(event_type: &str) -> bool {
+    contains_static(TERMINAL_SESSION_EVENTS, event_type)
+}
+
+pub fn terminal_session_state(
+    event_type: &str,
+    status: &str,
+    session_exited: bool,
+) -> &'static str {
+    match (event_type, status) {
+        ("terminal_close", "closed") => "closed",
+        ("terminal_close", "missing") | (_, "missing") => "missing",
+        ("terminal_open", "rejected") => "rejected",
+        _ if session_exited => "exited",
+        ("terminal_open", "opened" | "attached") => "open",
+        ("terminal_input", "accepted" | "duplicate_ignored") => "open",
+        ("terminal_poll", "polled") => "open",
+        ("terminal_resize", "resized") => "open",
+        ("terminal_stream", "streaming") => "open",
+        ("terminal_stream", "closed" | "exited" | "idle_timeout") => "closed",
+        _ => "unknown",
+    }
+}
+
+pub fn is_file_transfer_command_type(command_type: &str) -> bool {
+    contains_static(FILE_TRANSFER_COMMAND_TYPES, command_type)
+}
+
+pub fn is_file_transfer_session_event(event_type: &str) -> bool {
+    contains_static(FILE_TRANSFER_SESSION_EVENTS, event_type)
+}
+
+pub fn file_transfer_session_status(event_type: &str, download_complete: bool) -> &'static str {
+    match event_type {
+        "file_transfer_commit" => "completed",
+        "file_transfer_abort" => "aborted",
+        "file_transfer_download_chunk" if download_complete => "completed",
+        "file_transfer_chunk_ack" | "file_transfer_download_chunk" => "transferring",
+        "file_transfer_start" | "file_transfer_download_start" => "started",
+        _ => "unknown",
+    }
+}
+
+pub fn is_data_source_readiness_status(status: &str) -> bool {
+    contains_static(DATA_SOURCE_READINESS_STATUSES, status)
+}
+
+pub fn is_topology_node_status(status: &str) -> bool {
+    contains_static(TOPOLOGY_NODE_STATUSES, status)
+}
+
+pub fn is_topology_edge_health_status(status: &str) -> bool {
+    contains_static(TOPOLOGY_EDGE_HEALTH_STATUSES, status)
+}
+
+pub fn is_topology_neighbor_state(status: &str) -> bool {
+    contains_static(TOPOLOGY_NEIGHBOR_STATES, status)
+}
+
+pub fn is_topology_probe_state(status: &str) -> bool {
+    contains_static(TOPOLOGY_PROBE_STATES, status)
+}
+
+pub fn is_topology_runtime_state(status: &str) -> bool {
+    contains_static(TOPOLOGY_RUNTIME_STATES, status)
+}
+
+pub fn is_topology_observation_state(status: &str) -> bool {
+    contains_static(TOPOLOGY_OBSERVATION_STATES, status)
+}
+
+pub fn is_server_job_type(job_type: &str) -> bool {
+    contains_static(SERVER_JOB_TYPES, job_type)
+}
+
+pub fn is_server_job_status(status: &str) -> bool {
+    contains_static(SERVER_JOB_STATUSES, status)
+}
+
+pub fn is_fleet_alert_notification_delivery_status(status: &str) -> bool {
+    contains_static(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES, status)
+}
+
+pub fn is_fleet_alert_notification_delivery_process_status(status: &str) -> bool {
+    contains_static(FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES, status)
+}
+
+pub fn is_webhook_rule_delivery_status(status: &str) -> bool {
+    contains_static(WEBHOOK_RULE_DELIVERY_STATUSES, status)
+}
+
+pub fn is_webhook_rule_delivery_history_status(status: &str) -> bool {
+    contains_static(WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES, status)
+}
+
+pub fn is_webhook_rule_delivery_process_status(status: &str) -> bool {
+    contains_static(WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES, status)
+}
+
+pub fn is_topology_drift_policy(status: &str) -> bool {
+    contains_static(TOPOLOGY_DRIFT_POLICIES, status)
+}
+
+pub fn is_topology_drift_action(status: &str) -> bool {
+    contains_static(TOPOLOGY_DRIFT_ACTIONS, status)
+}
+
+pub fn normalize_topology_runtime_state(value: &str) -> &'static str {
+    match value {
+        "adapter_unhealthy" => "adapter_unhealthy",
+        "routing_unhealthy" => "routing_unhealthy",
+        "drift" => "drift",
+        "unhealthy" => "unhealthy",
+        "degraded" => "degraded",
+        "observed" => "observed",
+        "healthy" => "healthy",
+        "not_applicable" => "not_applicable",
+        "not_configured" => "not_configured",
+        "skipped" => "skipped",
+        _ => "unknown",
+    }
+}
+
+pub fn topology_runtime_state_rank(value: &str) -> u8 {
+    match value {
+        "adapter_unhealthy" | "routing_unhealthy" | "drift" | "unhealthy" => 5,
+        "degraded" => 4,
+        "observed" | "unknown" => 3,
+        "healthy" => 2,
+        "not_applicable" | "not_configured" | "skipped" => 1,
+        _ => 0,
+    }
+}
+
+pub fn aggregate_topology_runtime_state(current: &str, next: &str) -> &'static str {
+    if current == "unknown" && next != "unknown" {
+        return normalize_topology_runtime_state(next);
+    }
+    if next == "unknown" {
+        return normalize_topology_runtime_state(current);
+    }
+    if topology_runtime_state_rank(next) >= topology_runtime_state_rank(current) {
+        normalize_topology_runtime_state(next)
+    } else {
+        normalize_topology_runtime_state(current)
+    }
+}
+
+pub fn topology_runtime_state_is_degraded(value: &str) -> bool {
+    matches!(
+        value,
+        "adapter_unhealthy" | "routing_unhealthy" | "drift" | "unhealthy" | "degraded"
+    )
+}
+
+pub fn normalize_topology_probe_state(value: &str) -> &'static str {
+    match value {
+        "failed" => "failed",
+        "success" => "success",
+        "skipped" => "skipped",
+        _ => "unknown",
+    }
+}
+
+pub fn topology_probe_state_rank(value: &str) -> u8 {
+    match value {
+        "failed" => 4,
+        "success" => 3,
+        "skipped" => 2,
+        "unknown" => 1,
+        _ => 0,
+    }
+}
+
+pub fn aggregate_topology_probe_state(current: &str, next: &str) -> &'static str {
+    if topology_probe_state_rank(next) >= topology_probe_state_rank(current) {
+        normalize_topology_probe_state(next)
+    } else {
+        normalize_topology_probe_state(current)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRequestStatus {
+    RequestedMetadataOnly,
+    ArtifactMetadataRecorded,
+}
+
+impl BackupRequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestedMetadataOnly => "requested_metadata_only",
+            Self::ArtifactMetadataRecorded => "artifact_metadata_recorded",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "requested_metadata_only" => Some(Self::RequestedMetadataOnly),
+            "artifact_metadata_recorded" => Some(Self::ArtifactMetadataRecorded),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestorePlanStatus {
+    PlannedMetadataOnly,
+}
+
+impl RestorePlanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlannedMetadataOnly => "planned_metadata_only",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "planned_metadata_only" => Some(Self::PlannedMetadataOnly),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationLinkStatus {
+    LinkedMetadataOnly,
+}
+
+impl MigrationLinkStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LinkedMetadataOnly => "linked_metadata_only",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "linked_metadata_only" => Some(Self::LinkedMetadataOnly),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentUpdateReleaseStatus {
+    PublishedMetadataOnly,
+    ArtifactHosted,
+}
+
+impl AgentUpdateReleaseStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PublishedMetadataOnly => "published_metadata_only",
+            Self::ArtifactHosted => "artifact_hosted",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "published_metadata_only" => Some(Self::PublishedMetadataOnly),
+            "artifact_hosted" => Some(Self::ArtifactHosted),
+            _ => None,
+        }
+    }
 }
 
 pub fn parse_build_number(value: Option<&str>) -> u64 {
@@ -993,7 +2288,7 @@ pub enum JobCommand {
     DataSourceConfigPatch {
         toml: String,
     },
-    #[serde(rename = "agent_update", alias = "update_agent")]
+    #[serde(rename = "agent_update")]
     UpdateAgent {
         artifact_url: String,
         sha256_hex: String,
@@ -1408,6 +2703,86 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
     }
 }
 
+pub fn job_command_type_label(command: &JobCommand) -> &'static str {
+    match command {
+        JobCommand::Shell { pty: true, .. } => "shell_pty",
+        JobCommand::Shell { .. } => "shell_argv",
+        JobCommand::ShellScript { .. } => "shell_script",
+        JobCommand::TerminalOpen { .. } => "terminal_open",
+        JobCommand::TerminalInput { .. } => "terminal_input",
+        JobCommand::TerminalPoll { .. } => "terminal_poll",
+        JobCommand::TerminalResize { .. } => "terminal_resize",
+        JobCommand::TerminalClose { .. } => "terminal_close",
+        JobCommand::ConfigRead => "config_read",
+        JobCommand::HotConfig { .. } => "hot_config",
+        JobCommand::DataSourceConfigPatch { .. } => "data_source_config_patch",
+        JobCommand::UpdateAgent { .. } => "agent_update",
+        JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
+        JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
+        JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
+        JobCommand::FilePull { .. } => "file_pull",
+        JobCommand::FilePush { .. } => "file_push",
+        JobCommand::FilePushChunked { .. } => "file_push_chunked",
+        JobCommand::FileTransferStart { .. } => "file_transfer_start",
+        JobCommand::FileTransferChunk { .. } => "file_transfer_chunk",
+        JobCommand::FileTransferCommit { .. } => "file_transfer_commit",
+        JobCommand::FileTransferAbort { .. } => "file_transfer_abort",
+        JobCommand::FileTransferDownloadStart { .. } => "file_transfer_download_start",
+        JobCommand::FileTransferDownloadChunk { .. } => "file_transfer_download_chunk",
+        JobCommand::FileStat { .. } => "file_stat",
+        JobCommand::FileListDir { .. } => "file_list_dir",
+        JobCommand::FileReadText { .. } => "file_read_text",
+        JobCommand::FileWriteText { .. } => "file_write_text",
+        JobCommand::FileMkdir { .. } => "file_mkdir",
+        JobCommand::FileRename { .. } => "file_rename",
+        JobCommand::FileDelete { .. } => "file_delete",
+        JobCommand::FileChmod { .. } => "file_chmod",
+        JobCommand::FileChown { .. } => "file_chown",
+        JobCommand::FileCopy { .. } => "file_copy",
+        JobCommand::FileDownload { .. } => "file_download",
+        JobCommand::FileArchiveTar { .. } => "file_archive_tar",
+        JobCommand::UserSessions => "user_sessions",
+        JobCommand::ProcessList { .. } => "process_list",
+        JobCommand::ProcessStart { .. } => "process_start",
+        JobCommand::ProcessStop { .. } => "process_stop",
+        JobCommand::ProcessRestart { .. } => "process_restart",
+        JobCommand::ProcessStatus { .. } => "process_status",
+        JobCommand::ProcessLogs { .. } => "process_logs",
+        JobCommand::Backup { .. } => "backup",
+        JobCommand::Restore { .. } => "restore",
+        JobCommand::RestoreRollback { .. } => "restore_rollback",
+        JobCommand::NetworkApply { .. } => "network_apply",
+        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
+        JobCommand::NetworkRollback { .. } => "network_rollback",
+        JobCommand::NetworkStatus { .. } => "network_status",
+        JobCommand::NetworkInterfaces => "network_interfaces",
+        JobCommand::NetworkProbe { .. } => "network_probe",
+        JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
+    }
+}
+
+pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
+    match command {
+        JobCommand::Shell { .. }
+        | JobCommand::ShellScript { .. }
+        | JobCommand::Backup { .. }
+        | JobCommand::Restore { .. }
+        | JobCommand::RestoreRollback { .. }
+        | JobCommand::NetworkApply { .. }
+        | JobCommand::NetworkOspfCostUpdate { .. }
+        | JobCommand::NetworkRollback { .. }
+        | JobCommand::NetworkStatus { .. }
+        | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkProbe { .. }
+        | JobCommand::NetworkSpeedTest { .. }
+        | JobCommand::UpdateAgent { .. }
+        | JobCommand::AgentUpdateActivate { .. }
+        | JobCommand::AgentUpdateRollback { .. }
+        | JobCommand::AgentUpdateCheck { .. } => job_command_type_label(command).to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobCommandSafety {
@@ -1598,11 +2973,34 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        job_status_class_by_status, job_status_classes, job_statuses,
-        job_target_status_class_by_status, job_target_status_classes, job_target_statuses,
-        parse_build_number, JobCommand, JobStatus, JobStatusClass, JobTargetStatus,
-        JobTargetStatusClass, ServerHello, JOB_STATUS_CLASSES, JOB_STATUS_PARTIAL_SUCCESS,
-        JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES, TARGET_STATUS_SKIPPED,
+        agent_update_release_statuses, backup_request_statuses, file_transfer_command_types,
+        file_transfer_session_events, file_transfer_session_status, file_transfer_session_statuses,
+        fleet_alert_notification_delivery_process_statuses,
+        fleet_alert_notification_delivery_statuses, is_file_transfer_command_type,
+        is_file_transfer_session_event, is_fleet_alert_notification_delivery_process_status,
+        is_fleet_alert_notification_delivery_status, is_server_job_status, is_server_job_type,
+        is_terminal_command_type, is_terminal_session_event, is_topology_drift_action,
+        is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
+        is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
+        is_topology_runtime_state, is_webhook_rule_delivery_history_status,
+        is_webhook_rule_delivery_process_status, is_webhook_rule_delivery_status,
+        job_command_requires_confirmation_by_operation_type, job_command_safety_by_operation_type,
+        job_command_type_by_operation_type, job_command_type_label_from_operation_type,
+        job_command_type_labels, job_command_variant_names, job_status_class_by_status,
+        job_status_classes, job_statuses, job_target_status_class_by_status,
+        job_target_status_classes, job_target_statuses, migration_link_statuses,
+        parse_build_number, restore_plan_statuses, server_job_statuses, server_job_types,
+        terminal_command_types, terminal_session_events, terminal_session_state,
+        terminal_session_states, terminal_session_statuses, topology_drift_actions,
+        topology_drift_policies, topology_edge_health_statuses, topology_neighbor_states,
+        topology_node_statuses, topology_observation_states, topology_probe_states,
+        topology_runtime_states, webhook_rule_delivery_history_statuses,
+        webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses,
+        AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
+        JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
+        JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_READ_ONLY, JOB_STATUS_CLASSES,
+        JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES,
+        TARGET_STATUS_SKIPPED,
     };
 
     #[test]
@@ -1739,7 +3137,290 @@ mod tests {
     }
 
     #[test]
-    fn serializes_agent_update_with_canonical_name_and_accepts_legacy_alias() {
+    fn command_contracts_are_total_and_strict() {
+        let operation_types = job_command_variant_names()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let safety_keys = job_command_safety_by_operation_type()
+            .iter()
+            .map(|(operation_type, _)| *operation_type)
+            .collect::<BTreeSet<_>>();
+        let command_type_keys = job_command_type_by_operation_type()
+            .iter()
+            .map(|(operation_type, _)| *operation_type)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(operation_types, safety_keys);
+        assert_eq!(operation_types, command_type_keys);
+        assert!(job_command_type_labels().contains(&"shell_pty"));
+        assert_eq!(
+            job_command_requires_confirmation_by_operation_type("shell"),
+            Some(true)
+        );
+        assert_eq!(
+            job_command_requires_confirmation_by_operation_type("file_transfer_download_start"),
+            Some(false)
+        );
+        assert_eq!(
+            job_command_requires_confirmation_by_operation_type("process_logs"),
+            Some(false)
+        );
+        assert_eq!(
+            job_command_type_label_from_operation_type("shell"),
+            Some("shell_argv")
+        );
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(operation_type, _)| *operation_type == "backup")
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
+        );
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(operation_type, _)| *operation_type == "network_status")
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_READ_ONLY)
+        );
+    }
+
+    #[test]
+    fn terminal_and_file_transfer_contracts_are_closed() {
+        for command_type in terminal_command_types() {
+            assert!(is_terminal_command_type(command_type));
+        }
+        for event in terminal_session_events() {
+            assert!(is_terminal_session_event(event));
+        }
+        for command_type in file_transfer_command_types() {
+            assert!(is_file_transfer_command_type(command_type));
+        }
+        for event in file_transfer_session_events() {
+            assert!(is_file_transfer_session_event(event));
+        }
+        assert!(terminal_session_states().contains(&terminal_session_state(
+            "terminal_open",
+            "opened",
+            false
+        )));
+        assert!(terminal_session_statuses().contains(&"idle_timeout"));
+        assert!(
+            file_transfer_session_statuses().contains(&file_transfer_session_status(
+                "file_transfer_download_chunk",
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn topology_contracts_are_closed_and_separate_observation_from_probe_states() {
+        for status in topology_node_statuses() {
+            assert!(is_topology_node_status(status));
+        }
+        for status in topology_edge_health_statuses() {
+            assert!(is_topology_edge_health_status(status));
+        }
+        for status in topology_neighbor_states() {
+            assert!(is_topology_neighbor_state(status));
+        }
+        for status in topology_probe_states() {
+            assert!(is_topology_probe_state(status));
+        }
+        for status in topology_runtime_states() {
+            assert!(is_topology_runtime_state(status));
+        }
+        for status in topology_observation_states() {
+            assert!(is_topology_observation_state(status));
+        }
+        for status in topology_drift_policies() {
+            assert!(is_topology_drift_policy(status));
+        }
+        for status in topology_drift_actions() {
+            assert!(is_topology_drift_action(status));
+        }
+        assert!(is_topology_observation_state("recorded"));
+        assert!(!is_topology_probe_state("recorded"));
+    }
+
+    #[test]
+    fn operator_queue_contracts_are_closed() {
+        for job_type in server_job_types() {
+            assert!(is_server_job_type(job_type));
+        }
+        for status in server_job_statuses() {
+            assert!(is_server_job_status(status));
+        }
+        for status in fleet_alert_notification_delivery_statuses() {
+            assert!(is_fleet_alert_notification_delivery_status(status));
+        }
+        for status in fleet_alert_notification_delivery_process_statuses() {
+            assert!(is_fleet_alert_notification_delivery_process_status(status));
+            assert!(is_fleet_alert_notification_delivery_status(status));
+        }
+        for status in webhook_rule_delivery_statuses() {
+            assert!(is_webhook_rule_delivery_status(status));
+        }
+        for status in webhook_rule_delivery_history_statuses() {
+            assert!(is_webhook_rule_delivery_history_status(status));
+            assert!(is_webhook_rule_delivery_status(status));
+        }
+        for status in webhook_rule_delivery_process_statuses() {
+            assert!(is_webhook_rule_delivery_process_status(status));
+            assert!(is_webhook_rule_delivery_status(status));
+        }
+        assert!(is_webhook_rule_delivery_status("permanently_failed"));
+        assert!(is_webhook_rule_delivery_history_status(
+            "permanently_failed"
+        ));
+        assert!(!is_webhook_rule_delivery_process_status(
+            "permanently_failed"
+        ));
+        assert!(!is_webhook_rule_delivery_history_status("matched_dry_run"));
+        assert!(is_fleet_alert_notification_delivery_status(
+            "matched_dry_run"
+        ));
+        assert!(!is_fleet_alert_notification_delivery_process_status(
+            "matched_dry_run"
+        ));
+    }
+
+    #[test]
+    fn domain_status_class_maps_are_total() {
+        assert_status_class_map_total(
+            terminal_session_states(),
+            super::terminal_session_state_class_by_state(),
+        );
+        assert_status_class_map_total(
+            terminal_session_statuses(),
+            super::terminal_session_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            file_transfer_session_statuses(),
+            super::file_transfer_session_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            backup_request_statuses(),
+            super::backup_request_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            restore_plan_statuses(),
+            super::restore_plan_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            migration_link_statuses(),
+            super::migration_link_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            super::tunnel_plan_statuses(),
+            super::tunnel_plan_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            super::tunnel_endpoint_statuses(),
+            super::tunnel_endpoint_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            super::agent_update_release_statuses(),
+            super::agent_update_release_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            server_job_statuses(),
+            super::server_job_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            fleet_alert_notification_delivery_statuses(),
+            super::fleet_alert_notification_delivery_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            fleet_alert_notification_delivery_process_statuses(),
+            super::fleet_alert_notification_delivery_process_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            webhook_rule_delivery_statuses(),
+            super::webhook_rule_delivery_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            webhook_rule_delivery_history_statuses(),
+            super::webhook_rule_delivery_history_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            webhook_rule_delivery_process_statuses(),
+            super::webhook_rule_delivery_process_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            super::data_source_readiness_statuses(),
+            super::data_source_readiness_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            topology_node_statuses(),
+            super::topology_node_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            topology_edge_health_statuses(),
+            super::topology_edge_health_status_class_by_status(),
+        );
+        assert_status_class_map_total(
+            topology_neighbor_states(),
+            super::topology_neighbor_state_class_by_state(),
+        );
+        assert_status_class_map_total(
+            topology_probe_states(),
+            super::topology_probe_state_class_by_state(),
+        );
+        assert_status_class_map_total(
+            topology_runtime_states(),
+            super::topology_runtime_state_class_by_state(),
+        );
+        assert_status_class_map_total(
+            topology_observation_states(),
+            super::topology_observation_state_class_by_state(),
+        );
+    }
+
+    fn assert_status_class_map_total(statuses: &[&str], status_class_by_status: &[(&str, &str)]) {
+        let expected = statuses.iter().copied().collect::<BTreeSet<_>>();
+        let actual = status_class_by_status
+            .iter()
+            .map(|(status, _)| *status)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected, actual);
+        for (_, status_class) in status_class_by_status {
+            assert!(super::workflow_status_classes().contains(status_class));
+        }
+    }
+
+    #[test]
+    fn finite_storage_status_contracts_parse() {
+        for status in backup_request_statuses() {
+            assert_eq!(
+                BackupRequestStatus::from_storage(status).map(BackupRequestStatus::as_str),
+                Some(*status)
+            );
+        }
+        for status in restore_plan_statuses() {
+            assert_eq!(
+                RestorePlanStatus::from_storage(status).map(RestorePlanStatus::as_str),
+                Some(*status)
+            );
+        }
+        for status in migration_link_statuses() {
+            assert_eq!(
+                MigrationLinkStatus::from_storage(status).map(MigrationLinkStatus::as_str),
+                Some(*status)
+            );
+        }
+        for status in agent_update_release_statuses() {
+            assert_eq!(
+                AgentUpdateReleaseStatus::from_storage(status)
+                    .map(AgentUpdateReleaseStatus::as_str),
+                Some(*status)
+            );
+        }
+        assert!(BackupRequestStatus::from_storage("old_backup_status").is_none());
+    }
+
+    #[test]
+    fn serializes_agent_update_with_canonical_name_and_rejects_legacy_alias() {
         let command = JobCommand::UpdateAgent {
             artifact_url: "https://updates.example/vpsman-agent".to_string(),
             sha256_hex: "ab".repeat(32),
@@ -1755,10 +3436,7 @@ mod tests {
             "artifact_url": "https://updates.example/vpsman-agent",
             "sha256_hex": "ab".repeat(32),
         });
-        assert!(matches!(
-            serde_json::from_value::<JobCommand>(legacy).unwrap(),
-            JobCommand::UpdateAgent { .. }
-        ));
+        assert!(serde_json::from_value::<JobCommand>(legacy).is_err());
     }
 
     #[test]

@@ -62,6 +62,290 @@ export const JOB_OPERATION_TYPES = [
 ] as const;
 export type GeneratedJobOperationType = typeof JOB_OPERATION_TYPES[number];
 
+export const JOB_COMMAND_TYPES = [
+  "shell_argv",
+  "shell_pty",
+  "shell_script",
+  "terminal_open",
+  "terminal_input",
+  "terminal_poll",
+  "terminal_resize",
+  "terminal_close",
+  "config_read",
+  "hot_config",
+  "data_source_config_patch",
+  "agent_update",
+  "agent_update_activate",
+  "agent_update_rollback",
+  "agent_update_check",
+  "file_pull",
+  "file_push",
+  "file_push_chunked",
+  "file_transfer_start",
+  "file_transfer_chunk",
+  "file_transfer_commit",
+  "file_transfer_abort",
+  "file_transfer_download_start",
+  "file_transfer_download_chunk",
+  "file_stat",
+  "file_list_dir",
+  "file_read_text",
+  "file_mkdir",
+  "file_write_text",
+  "file_rename",
+  "file_delete",
+  "file_chmod",
+  "file_chown",
+  "file_copy",
+  "file_download",
+  "file_archive_tar",
+  "user_sessions",
+  "process_list",
+  "process_start",
+  "process_stop",
+  "process_restart",
+  "process_status",
+  "process_logs",
+  "backup",
+  "restore",
+  "restore_rollback",
+  "network_apply",
+  "network_ospf_cost_update",
+  "network_rollback",
+  "network_status",
+  "network_interfaces",
+  "network_probe",
+  "network_speed_test",
+] as const;
+export type GeneratedJobCommandType = typeof JOB_COMMAND_TYPES[number];
+
+export const JOB_COMMAND_SAFETY_CLASSES = [
+  "read_only",
+  "exclusive",
+] as const;
+export type GeneratedJobCommandSafety = typeof JOB_COMMAND_SAFETY_CLASSES[number];
+
+export const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE = {
+  "shell": "exclusive",
+  "shell_script": "exclusive",
+  "terminal_open": "exclusive",
+  "terminal_input": "exclusive",
+  "terminal_poll": "exclusive",
+  "terminal_resize": "exclusive",
+  "terminal_close": "exclusive",
+  "config_read": "read_only",
+  "hot_config": "exclusive",
+  "data_source_config_patch": "exclusive",
+  "agent_update": "exclusive",
+  "agent_update_activate": "exclusive",
+  "agent_update_rollback": "exclusive",
+  "agent_update_check": "exclusive",
+  "file_pull": "read_only",
+  "file_push": "exclusive",
+  "file_push_chunked": "exclusive",
+  "file_transfer_start": "exclusive",
+  "file_transfer_chunk": "exclusive",
+  "file_transfer_commit": "exclusive",
+  "file_transfer_abort": "exclusive",
+  "file_transfer_download_start": "read_only",
+  "file_transfer_download_chunk": "read_only",
+  "file_stat": "read_only",
+  "file_list_dir": "read_only",
+  "file_read_text": "read_only",
+  "file_mkdir": "exclusive",
+  "file_write_text": "exclusive",
+  "file_rename": "exclusive",
+  "file_delete": "exclusive",
+  "file_chmod": "exclusive",
+  "file_chown": "exclusive",
+  "file_copy": "exclusive",
+  "file_download": "read_only",
+  "file_archive_tar": "read_only",
+  "user_sessions": "read_only",
+  "process_list": "read_only",
+  "process_start": "exclusive",
+  "process_stop": "exclusive",
+  "process_restart": "exclusive",
+  "process_status": "read_only",
+  "process_logs": "read_only",
+  "backup": "exclusive",
+  "restore": "exclusive",
+  "restore_rollback": "exclusive",
+  "network_apply": "exclusive",
+  "network_ospf_cost_update": "exclusive",
+  "network_rollback": "exclusive",
+  "network_status": "read_only",
+  "network_interfaces": "read_only",
+  "network_probe": "read_only",
+  "network_speed_test": "read_only",
+} as const satisfies Record<GeneratedJobOperationType, GeneratedJobCommandSafety>;
+
+export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
+  "shell": true,
+  "shell_script": true,
+  "terminal_open": true,
+  "terminal_input": true,
+  "terminal_poll": true,
+  "terminal_resize": true,
+  "terminal_close": true,
+  "config_read": false,
+  "hot_config": true,
+  "data_source_config_patch": true,
+  "agent_update": true,
+  "agent_update_activate": true,
+  "agent_update_rollback": true,
+  "agent_update_check": true,
+  "file_pull": false,
+  "file_push": true,
+  "file_push_chunked": true,
+  "file_transfer_start": true,
+  "file_transfer_chunk": true,
+  "file_transfer_commit": true,
+  "file_transfer_abort": true,
+  "file_transfer_download_start": false,
+  "file_transfer_download_chunk": false,
+  "file_stat": false,
+  "file_list_dir": false,
+  "file_read_text": false,
+  "file_mkdir": true,
+  "file_write_text": true,
+  "file_rename": true,
+  "file_delete": true,
+  "file_chmod": true,
+  "file_chown": true,
+  "file_copy": true,
+  "file_download": false,
+  "file_archive_tar": false,
+  "user_sessions": false,
+  "process_list": false,
+  "process_start": true,
+  "process_stop": true,
+  "process_restart": true,
+  "process_status": false,
+  "process_logs": false,
+  "backup": true,
+  "restore": true,
+  "restore_rollback": true,
+  "network_apply": true,
+  "network_ospf_cost_update": true,
+  "network_rollback": true,
+  "network_status": false,
+  "network_interfaces": false,
+  "network_probe": false,
+  "network_speed_test": false,
+} as const satisfies Record<GeneratedJobOperationType, boolean>;
+
+export const JOB_COMMAND_TYPE_BY_OPERATION_TYPE = {
+  "shell": "shell_argv",
+  "shell_script": "shell_script",
+  "terminal_open": "terminal_open",
+  "terminal_input": "terminal_input",
+  "terminal_poll": "terminal_poll",
+  "terminal_resize": "terminal_resize",
+  "terminal_close": "terminal_close",
+  "config_read": "config_read",
+  "hot_config": "hot_config",
+  "data_source_config_patch": "data_source_config_patch",
+  "agent_update": "agent_update",
+  "agent_update_activate": "agent_update_activate",
+  "agent_update_rollback": "agent_update_rollback",
+  "agent_update_check": "agent_update_check",
+  "file_pull": "file_pull",
+  "file_push": "file_push",
+  "file_push_chunked": "file_push_chunked",
+  "file_transfer_start": "file_transfer_start",
+  "file_transfer_chunk": "file_transfer_chunk",
+  "file_transfer_commit": "file_transfer_commit",
+  "file_transfer_abort": "file_transfer_abort",
+  "file_transfer_download_start": "file_transfer_download_start",
+  "file_transfer_download_chunk": "file_transfer_download_chunk",
+  "file_stat": "file_stat",
+  "file_list_dir": "file_list_dir",
+  "file_read_text": "file_read_text",
+  "file_mkdir": "file_mkdir",
+  "file_write_text": "file_write_text",
+  "file_rename": "file_rename",
+  "file_delete": "file_delete",
+  "file_chmod": "file_chmod",
+  "file_chown": "file_chown",
+  "file_copy": "file_copy",
+  "file_download": "file_download",
+  "file_archive_tar": "file_archive_tar",
+  "user_sessions": "user_sessions",
+  "process_list": "process_list",
+  "process_start": "process_start",
+  "process_stop": "process_stop",
+  "process_restart": "process_restart",
+  "process_status": "process_status",
+  "process_logs": "process_logs",
+  "backup": "backup",
+  "restore": "restore",
+  "restore_rollback": "restore_rollback",
+  "network_apply": "network_apply",
+  "network_ospf_cost_update": "network_ospf_cost_update",
+  "network_rollback": "network_rollback",
+  "network_status": "network_status",
+  "network_interfaces": "network_interfaces",
+  "network_probe": "network_probe",
+  "network_speed_test": "network_speed_test",
+} as const satisfies Record<GeneratedJobOperationType, GeneratedJobCommandType>;
+
+export const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE = {
+  "shell_argv": "shell",
+  "shell_pty": "shell",
+  "shell_script": "shell",
+  "terminal_open": "terminal",
+  "terminal_input": "terminal",
+  "terminal_poll": "terminal",
+  "terminal_resize": "terminal",
+  "terminal_close": "terminal",
+  "config_read": "config",
+  "hot_config": "config",
+  "data_source_config_patch": "config",
+  "agent_update": "agent_update",
+  "agent_update_activate": "agent_update",
+  "agent_update_rollback": "agent_update",
+  "agent_update_check": "agent_update",
+  "file_pull": "file",
+  "file_push": "file",
+  "file_push_chunked": "file",
+  "file_transfer_start": "file_transfer",
+  "file_transfer_chunk": "file_transfer",
+  "file_transfer_commit": "file_transfer",
+  "file_transfer_abort": "file_transfer",
+  "file_transfer_download_start": "file_transfer",
+  "file_transfer_download_chunk": "file_transfer",
+  "file_stat": "file",
+  "file_list_dir": "file",
+  "file_read_text": "file",
+  "file_mkdir": "file",
+  "file_write_text": "file",
+  "file_rename": "file",
+  "file_delete": "file",
+  "file_chmod": "file",
+  "file_chown": "file",
+  "file_copy": "file",
+  "file_download": "file",
+  "file_archive_tar": "file",
+  "user_sessions": "inventory",
+  "process_list": "process",
+  "process_start": "process",
+  "process_stop": "process",
+  "process_restart": "process",
+  "process_status": "process",
+  "process_logs": "process",
+  "backup": "backup",
+  "restore": "restore",
+  "restore_rollback": "restore",
+  "network_apply": "network",
+  "network_ospf_cost_update": "network",
+  "network_rollback": "network",
+  "network_status": "network",
+  "network_interfaces": "network",
+  "network_probe": "network",
+  "network_speed_test": "network",
+} as const satisfies Record<GeneratedJobCommandType, string>;
+
 export const JOB_STATUSES = [
   "queued",
   "running",
@@ -156,6 +440,14 @@ export const JOB_TARGET_STATUS_CLASS_BY_STATUS = {
   "canceled": "unsuccessful",
 } as const satisfies Record<GeneratedJobTargetStatus, GeneratedJobTargetStatusClass>;
 
+export const WORKFLOW_STATUS_CLASSES = [
+  "in_progress",
+  "successful",
+  "warning",
+  "neutral",
+] as const;
+export type GeneratedWorkflowStatusClass = typeof WORKFLOW_STATUS_CLASSES[number];
+
 export const JOB_PRIVILEGE_INTENT_FIELDS = [
   "version",
   "action",
@@ -203,3 +495,448 @@ export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "deferred_until",
   "deleted",
 ] as const;
+
+export const TERMINAL_COMMAND_TYPES = [
+  "terminal_open",
+  "terminal_input",
+  "terminal_poll",
+  "terminal_resize",
+  "terminal_close",
+] as const;
+export type GeneratedTerminalCommandType = typeof TERMINAL_COMMAND_TYPES[number];
+
+export const TERMINAL_SESSION_EVENTS = [
+  "terminal_open",
+  "terminal_input",
+  "terminal_poll",
+  "terminal_resize",
+  "terminal_close",
+  "terminal_stream",
+] as const;
+export type GeneratedTerminalSessionEvent = typeof TERMINAL_SESSION_EVENTS[number];
+
+export const TERMINAL_SESSION_STATUSES = [
+  "opened",
+  "attached",
+  "rejected",
+  "accepted",
+  "duplicate_ignored",
+  "polled",
+  "resized",
+  "closed",
+  "missing",
+  "streaming",
+  "exited",
+  "idle_timeout",
+  "unknown",
+] as const;
+export type GeneratedTerminalSessionStatus = typeof TERMINAL_SESSION_STATUSES[number];
+
+export const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS = {
+  "opened": "in_progress",
+  "attached": "in_progress",
+  "rejected": "warning",
+  "accepted": "successful",
+  "duplicate_ignored": "successful",
+  "polled": "successful",
+  "resized": "successful",
+  "closed": "successful",
+  "missing": "warning",
+  "streaming": "in_progress",
+  "exited": "successful",
+  "idle_timeout": "warning",
+  "unknown": "neutral",
+} as const satisfies Record<GeneratedTerminalSessionStatus, GeneratedWorkflowStatusClass>;
+
+export const TERMINAL_SESSION_STATES = [
+  "open",
+  "closed",
+  "missing",
+  "rejected",
+  "exited",
+  "unknown",
+] as const;
+export type GeneratedTerminalSessionState = typeof TERMINAL_SESSION_STATES[number];
+
+export const TERMINAL_SESSION_STATE_CLASS_BY_STATE = {
+  "open": "in_progress",
+  "closed": "successful",
+  "missing": "warning",
+  "rejected": "warning",
+  "exited": "successful",
+  "unknown": "neutral",
+} as const satisfies Record<GeneratedTerminalSessionState, GeneratedWorkflowStatusClass>;
+
+export const FILE_TRANSFER_COMMAND_TYPES = [
+  "file_transfer_start",
+  "file_transfer_chunk",
+  "file_transfer_commit",
+  "file_transfer_abort",
+  "file_transfer_download_start",
+  "file_transfer_download_chunk",
+] as const;
+export type GeneratedFileTransferCommandType = typeof FILE_TRANSFER_COMMAND_TYPES[number];
+
+export const FILE_TRANSFER_DIRECTIONS = [
+  "upload",
+  "download",
+] as const;
+export type GeneratedFileTransferDirection = typeof FILE_TRANSFER_DIRECTIONS[number];
+
+export const FILE_TRANSFER_SESSION_EVENTS = [
+  "file_transfer_start",
+  "file_transfer_chunk_ack",
+  "file_transfer_commit",
+  "file_transfer_abort",
+  "file_transfer_download_start",
+  "file_transfer_download_chunk",
+] as const;
+export type GeneratedFileTransferSessionEvent = typeof FILE_TRANSFER_SESSION_EVENTS[number];
+
+export const FILE_TRANSFER_SESSION_STATUSES = [
+  "started",
+  "transferring",
+  "completed",
+  "aborted",
+  "unknown",
+] as const;
+export type GeneratedFileTransferSessionStatus = typeof FILE_TRANSFER_SESSION_STATUSES[number];
+
+export const FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS = {
+  "started": "in_progress",
+  "transferring": "in_progress",
+  "completed": "successful",
+  "aborted": "warning",
+  "unknown": "neutral",
+} as const satisfies Record<GeneratedFileTransferSessionStatus, GeneratedWorkflowStatusClass>;
+
+export const BACKUP_REQUEST_STATUSES = [
+  "requested_metadata_only",
+  "artifact_metadata_recorded",
+] as const;
+export type GeneratedBackupRequestStatus = typeof BACKUP_REQUEST_STATUSES[number];
+
+export const BACKUP_REQUEST_STATUS_CLASS_BY_STATUS = {
+  "requested_metadata_only": "in_progress",
+  "artifact_metadata_recorded": "successful",
+} as const satisfies Record<GeneratedBackupRequestStatus, GeneratedWorkflowStatusClass>;
+
+export const RESTORE_PLAN_STATUSES = [
+  "planned_metadata_only",
+] as const;
+export type GeneratedRestorePlanStatus = typeof RESTORE_PLAN_STATUSES[number];
+
+export const RESTORE_PLAN_STATUS_CLASS_BY_STATUS = {
+  "planned_metadata_only": "neutral",
+} as const satisfies Record<GeneratedRestorePlanStatus, GeneratedWorkflowStatusClass>;
+
+export const MIGRATION_LINK_STATUSES = [
+  "linked_metadata_only",
+] as const;
+export type GeneratedMigrationLinkStatus = typeof MIGRATION_LINK_STATUSES[number];
+
+export const MIGRATION_LINK_STATUS_CLASS_BY_STATUS = {
+  "linked_metadata_only": "successful",
+} as const satisfies Record<GeneratedMigrationLinkStatus, GeneratedWorkflowStatusClass>;
+
+export const TUNNEL_PLAN_STATUSES = [
+  "planned",
+  "applied",
+  "partially_applied",
+  "rolled_back",
+  "partially_rolled_back",
+] as const;
+export type GeneratedTunnelPlanStatus = typeof TUNNEL_PLAN_STATUSES[number];
+
+export const TUNNEL_PLAN_STATUS_CLASS_BY_STATUS = {
+  "planned": "neutral",
+  "applied": "successful",
+  "partially_applied": "warning",
+  "rolled_back": "neutral",
+  "partially_rolled_back": "warning",
+} as const satisfies Record<GeneratedTunnelPlanStatus, GeneratedWorkflowStatusClass>;
+
+export const TUNNEL_ENDPOINT_STATUSES = [
+  "planned",
+  "applied",
+  "rolled_back",
+] as const;
+export type GeneratedTunnelEndpointStatus = typeof TUNNEL_ENDPOINT_STATUSES[number];
+
+export const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS = {
+  "planned": "neutral",
+  "applied": "successful",
+  "rolled_back": "neutral",
+} as const satisfies Record<GeneratedTunnelEndpointStatus, GeneratedWorkflowStatusClass>;
+
+export const AGENT_UPDATE_RELEASE_STATUSES = [
+  "published_metadata_only",
+  "artifact_hosted",
+] as const;
+export type GeneratedAgentUpdateReleaseStatus = typeof AGENT_UPDATE_RELEASE_STATUSES[number];
+
+export const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS = {
+  "published_metadata_only": "neutral",
+  "artifact_hosted": "successful",
+} as const satisfies Record<GeneratedAgentUpdateReleaseStatus, GeneratedWorkflowStatusClass>;
+
+export const SERVER_JOB_TYPES = [
+  "artifact_cleanup",
+] as const;
+export type GeneratedServerJobType = typeof SERVER_JOB_TYPES[number];
+
+export const SERVER_JOB_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "canceled",
+] as const;
+export type GeneratedServerJobStatus = typeof SERVER_JOB_STATUSES[number];
+
+export const SERVER_JOB_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "running": "in_progress",
+  "completed": "successful",
+  "failed": "warning",
+  "canceled": "warning",
+} as const satisfies Record<GeneratedServerJobStatus, GeneratedWorkflowStatusClass>;
+
+export const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES = [
+  "queued",
+  "failed",
+  "delivered",
+  "matched_dry_run",
+] as const;
+export type GeneratedFleetAlertNotificationDeliveryStatus = typeof FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES[number];
+
+export const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "failed": "warning",
+  "delivered": "successful",
+  "matched_dry_run": "neutral",
+} as const satisfies Record<GeneratedFleetAlertNotificationDeliveryStatus, GeneratedWorkflowStatusClass>;
+
+export const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES = [
+  "queued",
+  "failed",
+] as const;
+export type GeneratedFleetAlertNotificationDeliveryProcessStatus = typeof FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES[number];
+
+export const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "failed": "warning",
+} as const satisfies Record<GeneratedFleetAlertNotificationDeliveryProcessStatus, GeneratedWorkflowStatusClass>;
+
+export const WEBHOOK_RULE_DELIVERY_STATUSES = [
+  "queued",
+  "failed",
+  "permanently_failed",
+  "delivered",
+  "matched_dry_run",
+] as const;
+export type GeneratedWebhookRuleDeliveryStatus = typeof WEBHOOK_RULE_DELIVERY_STATUSES[number];
+
+export const WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "failed": "warning",
+  "permanently_failed": "warning",
+  "delivered": "successful",
+  "matched_dry_run": "neutral",
+} as const satisfies Record<GeneratedWebhookRuleDeliveryStatus, GeneratedWorkflowStatusClass>;
+
+export const WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES = [
+  "queued",
+  "failed",
+  "permanently_failed",
+  "delivered",
+] as const;
+export type GeneratedWebhookRuleDeliveryHistoryStatus = typeof WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES[number];
+
+export const WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "failed": "warning",
+  "permanently_failed": "warning",
+  "delivered": "successful",
+} as const satisfies Record<GeneratedWebhookRuleDeliveryHistoryStatus, GeneratedWorkflowStatusClass>;
+
+export const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES = [
+  "queued",
+  "failed",
+] as const;
+export type GeneratedWebhookRuleDeliveryProcessStatus = typeof WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES[number];
+
+export const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS = {
+  "queued": "in_progress",
+  "failed": "warning",
+} as const satisfies Record<GeneratedWebhookRuleDeliveryProcessStatus, GeneratedWorkflowStatusClass>;
+
+export const DATA_SOURCE_READINESS_STATUSES = [
+  "agent_offline",
+  "selected",
+  "selected_workflow",
+  "unknown_domain",
+  "ready_on_demand",
+  "ready",
+  "metadata_only",
+  "selected_no_store",
+  "selected_no_artifacts",
+  "selected_no_limits",
+  "selected_no_samples",
+  "needs_promotion",
+  "ok",
+  "degraded",
+] as const;
+export type GeneratedDataSourceReadinessStatus = typeof DATA_SOURCE_READINESS_STATUSES[number];
+
+export const DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS = {
+  "agent_offline": "warning",
+  "selected": "neutral",
+  "selected_workflow": "neutral",
+  "unknown_domain": "warning",
+  "ready_on_demand": "successful",
+  "ready": "successful",
+  "metadata_only": "neutral",
+  "selected_no_store": "warning",
+  "selected_no_artifacts": "warning",
+  "selected_no_limits": "warning",
+  "selected_no_samples": "warning",
+  "needs_promotion": "warning",
+  "ok": "successful",
+  "degraded": "warning",
+} as const satisfies Record<GeneratedDataSourceReadinessStatus, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_NODE_STATUSES = [
+  "online",
+  "offline",
+  "never",
+  "stale",
+  "unknown",
+] as const;
+export type GeneratedTopologyNodeStatus = typeof TOPOLOGY_NODE_STATUSES[number];
+
+export const TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS = {
+  "online": "successful",
+  "offline": "warning",
+  "never": "neutral",
+  "stale": "warning",
+  "unknown": "neutral",
+} as const satisfies Record<GeneratedTopologyNodeStatus, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_EDGE_HEALTH_STATUSES = [
+  "planned",
+  "applied",
+  "healthy",
+  "degraded",
+  "rolled_back",
+] as const;
+export type GeneratedTopologyEdgeHealthStatus = typeof TOPOLOGY_EDGE_HEALTH_STATUSES[number];
+
+export const TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS = {
+  "planned": "neutral",
+  "applied": "successful",
+  "healthy": "successful",
+  "degraded": "warning",
+  "rolled_back": "neutral",
+} as const satisfies Record<GeneratedTopologyEdgeHealthStatus, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_NEIGHBOR_STATES = [
+  "unknown",
+  "healthy",
+  "kernel_probe_success",
+  "kernel_probe_failed",
+  "not_probed",
+] as const;
+export type GeneratedTopologyNeighborState = typeof TOPOLOGY_NEIGHBOR_STATES[number];
+
+export const TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE = {
+  "unknown": "neutral",
+  "healthy": "successful",
+  "kernel_probe_success": "successful",
+  "kernel_probe_failed": "warning",
+  "not_probed": "neutral",
+} as const satisfies Record<GeneratedTopologyNeighborState, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_PROBE_STATES = [
+  "unknown",
+  "success",
+  "failed",
+  "skipped",
+] as const;
+export type GeneratedTopologyProbeState = typeof TOPOLOGY_PROBE_STATES[number];
+
+export const TOPOLOGY_PROBE_STATE_CLASS_BY_STATE = {
+  "unknown": "neutral",
+  "success": "successful",
+  "failed": "warning",
+  "skipped": "neutral",
+} as const satisfies Record<GeneratedTopologyProbeState, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_RUNTIME_STATES = [
+  "unknown",
+  "adapter_unhealthy",
+  "routing_unhealthy",
+  "drift",
+  "unhealthy",
+  "degraded",
+  "observed",
+  "healthy",
+  "not_applicable",
+  "not_configured",
+  "skipped",
+] as const;
+export type GeneratedTopologyRuntimeState = typeof TOPOLOGY_RUNTIME_STATES[number];
+
+export const TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE = {
+  "unknown": "neutral",
+  "adapter_unhealthy": "warning",
+  "routing_unhealthy": "warning",
+  "drift": "warning",
+  "unhealthy": "warning",
+  "degraded": "warning",
+  "observed": "neutral",
+  "healthy": "successful",
+  "not_applicable": "neutral",
+  "not_configured": "neutral",
+  "skipped": "neutral",
+} as const satisfies Record<GeneratedTopologyRuntimeState, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_OBSERVATION_STATES = [
+  "unknown",
+  "healthy",
+  "degraded",
+  "recorded",
+] as const;
+export type GeneratedTopologyObservationState = typeof TOPOLOGY_OBSERVATION_STATES[number];
+
+export const TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE = {
+  "unknown": "neutral",
+  "healthy": "successful",
+  "degraded": "warning",
+  "recorded": "successful",
+} as const satisfies Record<GeneratedTopologyObservationState, GeneratedWorkflowStatusClass>;
+
+export const TOPOLOGY_DRIFT_POLICIES = [
+  "hold_convergence_until_endpoints_online",
+  "observe_only_until_import_promoted",
+  "observe_runtime_drift_before_apply",
+  "observe_and_recommend",
+  "eligible_for_apply",
+] as const;
+export type GeneratedTopologyDriftPolicy = typeof TOPOLOGY_DRIFT_POLICIES[number];
+
+export const TOPOLOGY_DRIFT_ACTIONS = [
+  "wait_for_reconnect",
+  "promote_observed_first",
+  "inspect_runtime_status",
+  "inspect_degraded_samples",
+  "none",
+] as const;
+export type GeneratedTopologyDriftAction = typeof TOPOLOGY_DRIFT_ACTIONS[number];
+
+export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
+  { command_type: "shell_argv", canonical_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}" },
+  { command_type: "terminal_open", canonical_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":1800,\"flow_window_bytes\":65536}" },
+  { command_type: "file_transfer_start", canonical_json: "{\"type\":\"file_transfer_start\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"path\":\"/tmp/upload.bin\",\"mode\":416,\"size_bytes\":4,\"sha256_hex\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"chunk_size_bytes\":65536,\"rate_limit_kbps\":0,\"resume_token_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"}" },
+  { command_type: "backup", canonical_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false}" },
+] as const satisfies readonly { command_type: string; canonical_json: string }[];

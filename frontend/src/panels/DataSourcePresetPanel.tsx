@@ -4,6 +4,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import { dataSourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import {
@@ -37,7 +38,6 @@ import {
   formatVpsName,
   runPanelAction,
   shortId,
-  statusClass,
 } from "../utils";
 
 const DATA_SOURCE_DOMAINS = [
@@ -789,7 +789,7 @@ export function DataSourcePresetPanel({
                     <small>{row.preset_scope}</small>
                   </span>
                   <span>{row.source_kind}</span>
-                  <span className={`status ${statusClass(row.status)}`} title={row.status_reason}>
+                  <span className={`status ${dataSourceReadinessStatusBadgeClass(row.status)}`} title={row.status_reason}>
                     {row.status}
                   </span>
                   <span>{sourceEvidenceSummary(row)}</span>

@@ -2,7 +2,7 @@ use anyhow::{ensure, Result};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::payload_hash;
+use vpsman_common::{payload_hash, AgentUpdateReleaseStatus};
 
 use crate::{
     model::{
@@ -12,9 +12,6 @@ use crate::{
     repository::Repository,
     unix_now,
 };
-
-const RELEASE_STATUS_METADATA_ONLY: &str = "published_metadata_only";
-const RELEASE_STATUS_ARTIFACT_HOSTED: &str = "artifact_hosted";
 
 #[derive(Clone, Debug)]
 pub(crate) struct HostedAgentUpdateArtifactRef {
@@ -390,8 +387,11 @@ impl Repository {
                     .iter()
                     .any(|release| {
                         matches!(
-                            release.status.as_str(),
-                            RELEASE_STATUS_METADATA_ONLY | RELEASE_STATUS_ARTIFACT_HOSTED
+                            AgentUpdateReleaseStatus::from_storage(&release.status),
+                            Some(
+                                AgentUpdateReleaseStatus::PublishedMetadataOnly
+                                    | AgentUpdateReleaseStatus::ArtifactHosted
+                            )
                         ) && release.artifact_sha256_hex == artifact_sha256_hex
                             && release.artifact_signing_key_sha256_hex == signing_key_sha256_hex
                     }))
@@ -408,8 +408,8 @@ impl Repository {
                     )
                     "#,
                 )
-                .bind(RELEASE_STATUS_METADATA_ONLY)
-                .bind(RELEASE_STATUS_ARTIFACT_HOSTED)
+                .bind(AgentUpdateReleaseStatus::PublishedMetadataOnly.as_str())
+                .bind(AgentUpdateReleaseStatus::ArtifactHosted.as_str())
                 .bind(artifact_sha256_hex)
                 .bind(signing_key_sha256_hex)
                 .fetch_one(pool)
@@ -432,7 +432,7 @@ impl Repository {
                 .iter()
                 .rev()
                 .find(|release| {
-                    release.status == RELEASE_STATUS_ARTIFACT_HOSTED
+                    release.status == AgentUpdateReleaseStatus::ArtifactHosted.as_str()
                         && ((release.artifact_sha256_hex == artifact_sha256_hex
                             && release.artifact_object_key.is_some())
                             || (release
@@ -484,7 +484,7 @@ impl Repository {
                     LIMIT 1
                     "#,
                 )
-                .bind(RELEASE_STATUS_ARTIFACT_HOSTED)
+                .bind(AgentUpdateReleaseStatus::ArtifactHosted.as_str())
                 .bind(artifact_sha256_hex)
                 .fetch_optional(pool)
                 .await?;
@@ -606,7 +606,9 @@ fn agent_update_release_view(
         name: request.name.trim().to_string(),
         version: request.version.trim().to_string(),
         channel: request.channel.trim().to_ascii_lowercase(),
-        status: RELEASE_STATUS_METADATA_ONLY.to_string(),
+        status: AgentUpdateReleaseStatus::PublishedMetadataOnly
+            .as_str()
+            .to_string(),
         artifact_sha256_hex: request.artifact_sha256_hex.trim().to_ascii_lowercase(),
         artifact_signature_provided: true,
         artifact_signature_sha256_hex: Some(payload_hash(
@@ -684,7 +686,9 @@ fn uploaded_agent_update_release_view(
         name: metadata.name.trim().to_string(),
         version: metadata.version.trim().to_string(),
         channel: metadata.channel.trim().to_ascii_lowercase(),
-        status: RELEASE_STATUS_ARTIFACT_HOSTED.to_string(),
+        status: AgentUpdateReleaseStatus::ArtifactHosted
+            .as_str()
+            .to_string(),
         artifact_sha256_hex: artifacts.primary.artifact_sha256_hex.to_ascii_lowercase(),
         artifact_signature_provided: true,
         artifact_signature_sha256_hex: Some(payload_hash(

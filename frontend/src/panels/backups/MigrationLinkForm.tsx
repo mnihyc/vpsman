@@ -1,6 +1,7 @@
 import { CheckCircle2, CircleDashed, TriangleAlert } from "lucide-react";
+import { restorePlanStatusBadgeClass } from "../../jobStatusPresentation";
 import type { BackupRequestRecord, MigrationLinkRecord, RestorePlanRecord } from "../../types";
-import { shortId, statusClass } from "../../utils";
+import { shortId } from "../../utils";
 
 type MigrationLinkFormProps = {
   linkConfirmationOpen: boolean;
@@ -146,7 +147,7 @@ export function MigrationLinkForm({
             </div>
             <div>
               <span>Status</span>
-              <strong className={`status ${statusClass(selectedPlan.status)}`}>{selectedPlan.status}</strong>
+              <strong className={`status ${restorePlanStatusBadgeClass(selectedPlan.status)}`}>{selectedPlan.status}</strong>
             </div>
             <div>
               <span>Last link</span>

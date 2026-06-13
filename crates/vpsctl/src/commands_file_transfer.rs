@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vpsman_common::{
     payload_hash, validate_file_transfer_session, FileExistingPolicy, FilePushChunk, JobCommand,
-    FILE_TRANSFER_CHUNK_BYTES, MAX_FILE_TRANSFER_RESUME_TOKEN_BYTES, MAX_RESUMABLE_FILE_PUSH_BYTES,
+    JobStatus, FILE_TRANSFER_CHUNK_BYTES, MAX_FILE_TRANSFER_RESUME_TOKEN_BYTES,
+    MAX_RESUMABLE_FILE_PUSH_BYTES,
 };
 
 use crate::{
@@ -583,7 +584,7 @@ pub(crate) fn wait_for_transfer_status(
         let job_json = http_get(api_url, &format!("/api/v1/jobs/{job_id}"), token)?;
         let job =
             serde_json::from_str::<JobRecord>(&job_json).context("failed to parse transfer job")?;
-        if is_terminal_job_status(&job.status) {
+        if JobStatus::parse(&job.status).is_some_and(JobStatus::is_terminal) {
             anyhow::ensure!(
                 job.status == "completed",
                 "{expected_status_type} job {job_id} ended with status {}; outputs: {}",
@@ -871,20 +872,6 @@ pub(crate) fn push_event(events: &mut String, event: serde_json::Value) -> Resul
     events.push_str(&serde_json::to_string(&event)?);
     events.push('\n');
     Ok(())
-}
-
-fn is_terminal_job_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed"
-            | "partial_success"
-            | "skipped"
-            | "rejected"
-            | "failed"
-            | "agent_timeout"
-            | "control_timeout"
-            | "canceled"
-    )
 }
 
 #[cfg(test)]

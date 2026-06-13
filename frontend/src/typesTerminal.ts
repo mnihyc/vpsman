@@ -1,8 +1,15 @@
+import type {
+  GeneratedTerminalCommandType,
+  GeneratedTerminalSessionEvent,
+  GeneratedTerminalSessionState,
+  GeneratedTerminalSessionStatus,
+} from "./generated/protocolContracts";
+
 export type TerminalSessionRecord = {
   session_id: string;
   client_id: string;
-  state: string;
-  last_status: string;
+  state: GeneratedTerminalSessionState;
+  last_status: GeneratedTerminalSessionStatus;
   argv: string[];
   cwd: string | null;
   cols: number | null;
@@ -19,9 +26,9 @@ export type TerminalSessionRecord = {
   last_input_seq: number | null;
   session_exited: boolean;
   close_reason: string | null;
-  last_event: string;
+  last_event: GeneratedTerminalSessionEvent;
   last_job_id: string;
-  last_command_type: string;
+  last_command_type: GeneratedTerminalCommandType;
   last_seq: number;
   observed_at: string;
 };

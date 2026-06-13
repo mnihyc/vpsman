@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
-use vpsman_common::{BandwidthTier, TunnelKind};
+use anyhow::{ensure, Result};
+use vpsman_common::{
+    aggregate_topology_probe_state, aggregate_topology_runtime_state, is_topology_drift_action,
+    is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
+    is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
+    is_topology_runtime_state, topology_runtime_state_is_degraded, BandwidthTier, TunnelKind,
+};
 
 use crate::{
     model::{AgentView, NetworkObservationTrendView, NetworkObservationView},
@@ -128,6 +133,7 @@ impl Repository {
                 .then_with(|| right.status.cmp(&left.status))
                 .then_with(|| left.plan_name.cmp(&right.plan_name))
         });
+        validate_topology_contract(&nodes, &edges)?;
 
         Ok(TopologyGraphView {
             nodes,
@@ -135,6 +141,46 @@ impl Repository {
             generated_at: unix_now().to_string(),
         })
     }
+}
+
+fn validate_topology_contract(
+    nodes: &[TopologyGraphNodeView],
+    edges: &[TopologyGraphEdgeView],
+) -> Result<()> {
+    for node in nodes {
+        ensure!(
+            is_topology_node_status(&node.status),
+            "topology node status contract drift: {}",
+            node.status
+        );
+    }
+    for edge in edges {
+        ensure!(
+            vpsman_common::TUNNEL_ENDPOINT_STATUSES.contains(&edge.left_status.as_str())
+                && vpsman_common::TUNNEL_ENDPOINT_STATUSES.contains(&edge.right_status.as_str())
+                && vpsman_common::TUNNEL_PLAN_STATUSES.contains(&edge.status.as_str()),
+            "topology tunnel status contract drift: left={} right={} status={}",
+            edge.left_status,
+            edge.right_status,
+            edge.status
+        );
+        ensure!(
+            is_topology_edge_health_status(&edge.health)
+                && is_topology_drift_policy(&edge.topology_drift_policy)
+                && is_topology_drift_action(&edge.topology_drift_action)
+                && is_topology_neighbor_state(&edge.neighbor_state)
+                && is_topology_observation_state(&edge.probe_state)
+                && is_topology_runtime_state(&edge.runtime_state)
+                && is_topology_runtime_state(&edge.adapter_state)
+                && is_topology_runtime_state(&edge.routing_state)
+                && is_topology_probe_state(&edge.kernel_link_probe_state)
+                && is_topology_probe_state(&edge.kernel_neighbor_probe_state)
+                && is_topology_probe_state(&edge.kernel_route_probe_state),
+            "topology evidence status contract drift for plan {}",
+            edge.plan_id
+        );
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -452,82 +498,15 @@ fn summarize_edge_observations(
 }
 
 fn aggregate_runtime_state(current: &str, next: &str) -> &'static str {
-    if current == "unknown" && next != "unknown" {
-        return normalize_runtime_state(next);
-    }
-    if next == "unknown" {
-        return normalize_runtime_state(current);
-    }
-    let current_rank = runtime_state_rank(current);
-    let next_rank = runtime_state_rank(next);
-    if next_rank >= current_rank {
-        normalize_runtime_state(next)
-    } else {
-        normalize_runtime_state(current)
-    }
-}
-
-fn runtime_state_rank(value: &str) -> u8 {
-    match value {
-        "adapter_unhealthy" | "routing_unhealthy" | "drift" | "unhealthy" => 5,
-        "degraded" => 4,
-        "observed" | "unknown" => 3,
-        "healthy" => 2,
-        "not_applicable" | "not_configured" | "skipped" => 1,
-        _ => 0,
-    }
-}
-
-fn normalize_runtime_state(value: &str) -> &'static str {
-    match value {
-        "adapter_unhealthy" => "adapter_unhealthy",
-        "routing_unhealthy" => "routing_unhealthy",
-        "drift" => "drift",
-        "unhealthy" => "unhealthy",
-        "degraded" => "degraded",
-        "observed" => "observed",
-        "healthy" => "healthy",
-        "not_applicable" => "not_applicable",
-        "not_configured" => "not_configured",
-        "skipped" => "skipped",
-        _ => "unknown",
-    }
+    aggregate_topology_runtime_state(current, next)
 }
 
 fn runtime_state_is_degraded(value: &str) -> bool {
-    matches!(
-        value,
-        "adapter_unhealthy" | "routing_unhealthy" | "drift" | "unhealthy" | "degraded"
-    )
+    topology_runtime_state_is_degraded(value)
 }
 
 fn aggregate_probe_state(current: &str, next: &str) -> &'static str {
-    let current_rank = probe_state_rank(current);
-    let next_rank = probe_state_rank(next);
-    if next_rank >= current_rank {
-        normalize_probe_state(next)
-    } else {
-        normalize_probe_state(current)
-    }
-}
-
-fn probe_state_rank(value: &str) -> u8 {
-    match value {
-        "failed" => 4,
-        "success" => 3,
-        "skipped" => 2,
-        "unknown" => 1,
-        _ => 0,
-    }
-}
-
-fn normalize_probe_state(value: &str) -> &'static str {
-    match value {
-        "failed" => "failed",
-        "success" => "success",
-        "skipped" => "skipped",
-        _ => "unknown",
-    }
+    aggregate_topology_probe_state(current, next)
 }
 
 fn weighted_average(

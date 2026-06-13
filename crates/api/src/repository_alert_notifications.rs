@@ -2,6 +2,11 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
+use vpsman_common::{
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+};
 
 use crate::{
     model::{AuditLogView, AuthContext},
@@ -25,9 +30,6 @@ const MAX_SCOPE_VALUE_BYTES: usize = 128;
 const MAX_DELIVERY_KIND_BYTES: usize = 64;
 const MAX_TARGET_BYTES: usize = 512;
 const MAX_NOTES_BYTES: usize = 1024;
-const STATUS_DELIVERED: &str = "delivered";
-const STATUS_FAILED: &str = "failed";
-const STATUS_QUEUED: &str = "queued";
 
 impl Repository {
     pub(crate) async fn list_fleet_alert_notification_channels(
@@ -547,14 +549,19 @@ impl Repository {
                     .find(|delivery| delivery.id == delivery_id)
                     .context("fleet alert notification delivery not found")?;
                 anyhow::ensure!(
-                    matches!(delivery.status.as_str(), STATUS_QUEUED | STATUS_FAILED),
+                    matches!(
+                        delivery.status.as_str(),
+                        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
+                            | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                    ),
                     "fleet alert notification delivery is not retryable"
                 );
                 delivery.status = status.to_string();
                 delivery.error = error;
                 delivery.attempt_count = delivery.attempt_count.saturating_add(1);
                 delivery.last_attempt_at = Some(now.clone());
-                delivery.delivered_at = (status == STATUS_DELIVERED).then_some(now);
+                delivery.delivered_at =
+                    (status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED).then_some(now);
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
@@ -643,9 +650,9 @@ impl Repository {
 
 pub(crate) fn notification_status_for_kind(delivery_kind: &str) -> &'static str {
     if delivery_kind == "audit_log" {
-        STATUS_DELIVERED
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED
     } else {
-        STATUS_QUEUED
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
     }
 }
 
@@ -724,7 +731,8 @@ fn delivery_from_candidate(
         cooldown_until_unix: candidate.cooldown_until_unix,
         actor_id: Some(operator.operator.id),
         created_at: now.to_string(),
-        delivered_at: (candidate.status == STATUS_DELIVERED).then(|| now.to_string()),
+        delivered_at: (candidate.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
+            .then(|| now.to_string()),
     }
 }
 
@@ -959,8 +967,12 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
 
 fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {
     match status.trim() {
-        STATUS_DELIVERED => Ok(STATUS_DELIVERED),
-        STATUS_FAILED => Ok(STATUS_FAILED),
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED => {
+            Ok(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
+        }
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED => {
+            Ok(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED)
+        }
         _ => anyhow::bail!("fleet alert notification delivery attempt status is invalid"),
     }
 }

@@ -4,6 +4,7 @@ use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, Expression, ExpressionContext,
+    SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 use crate::{
@@ -106,8 +107,8 @@ impl Repository {
                 let now = unix_now().to_string();
                 let view = ServerJobView {
                     id: job_id,
-                    job_type: "artifact_cleanup".to_string(),
-                    status: "queued".to_string(),
+                    job_type: SERVER_JOB_TYPE_ARTIFACT_CLEANUP.to_string(),
+                    status: SERVER_JOB_STATUS_QUEUED.to_string(),
                     expression: Some(preview.expression),
                     preview_hash: Some(preview.preview_hash),
                     matched_count: preview.matched_count,
@@ -139,7 +140,7 @@ impl Repository {
                         created_by,
                         metadata
                     )
-                    VALUES ($1, 'artifact_cleanup', 'queued', $2, $3, $4, $5, $6, '{}'::jsonb)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb)
                     RETURNING
                         id,
                         job_type,
@@ -160,6 +161,8 @@ impl Repository {
                     "#,
                 )
                 .bind(job_id)
+                .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
+                .bind(SERVER_JOB_STATUS_QUEUED)
                 .bind(&preview.expression)
                 .bind(&preview.preview_hash)
                 .bind(preview.matched_count)
@@ -227,8 +230,8 @@ impl Repository {
                 let Some(job) = jobs.iter_mut().find(|job| job.id == job_id) else {
                     return Ok(None);
                 };
-                if job.status == "queued" {
-                    job.status = "canceled".to_string();
+                if job.status == SERVER_JOB_STATUS_QUEUED {
+                    job.status = SERVER_JOB_STATUS_CANCELED.to_string();
                     job.canceled_at = Some(unix_now().to_string());
                     job.completed_at = job.canceled_at.clone();
                 }

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { PackageCheck } from "lucide-react";
 import { CrudPager } from "../../components/CrudPager";
+import { agentUpdateReleaseStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   AgentUpdateReleaseRecord,
   CreateAgentUpdateReleaseRequest,
   UploadAgentUpdateArtifactRequest,
 } from "../../types";
-import { formatTime, runPanelAction, shortHash, statusClass } from "../../utils";
+import { formatTime, runPanelAction, shortHash } from "../../utils";
 
 async function fileToBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -357,7 +358,7 @@ export function AgentUpdateReleasesPanel({
                     {release.version} / {release.channel}
                   </small>
                 </span>
-                <span className={`status ${statusClass(release.status)}`}>{release.status}</span>
+                <span className={`status ${agentUpdateReleaseStatusBadgeClass(release.status)}`}>{release.status}</span>
                 <span className="monoValue">{shortHash(release.artifact_sha256_hex)}</span>
                 <span className="monoValue">
                   {release.rollback_artifact_sha256_hex ? shortHash(release.rollback_artifact_sha256_hex) : "none"}

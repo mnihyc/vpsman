@@ -4,19 +4,13 @@ use serde_json::Value;
 use sqlx::{postgres::PgRow, PgPool, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
+use vpsman_common::{
+    file_transfer_session_status, is_file_transfer_command_type, is_file_transfer_session_event,
+};
 
 use crate::{
     model::JobOutputView, model_file_transfer::FileTransferSessionView, repository::Repository,
 };
-
-const FILE_TRANSFER_COMMAND_TYPES: &[&str] = &[
-    "file_transfer_start",
-    "file_transfer_chunk",
-    "file_transfer_commit",
-    "file_transfer_abort",
-    "file_transfer_download_start",
-    "file_transfer_download_chunk",
-];
 
 impl Repository {
     pub(crate) async fn list_file_transfer_sessions(
@@ -645,21 +639,13 @@ fn parse_file_transfer_event(output: FileTransferStatusOutput) -> Option<FileTra
 }
 
 fn transfer_status(event_type: &str, extra: &Value) -> &'static str {
-    match event_type {
-        "file_transfer_commit" => "completed",
-        "file_transfer_abort" => "aborted",
-        "file_transfer_download_chunk"
-            if extra
-                .get("complete")
-                .and_then(Value::as_bool)
-                .unwrap_or(false) =>
-        {
-            "completed"
-        }
-        "file_transfer_chunk_ack" | "file_transfer_download_chunk" => "transferring",
-        "file_transfer_start" | "file_transfer_download_start" => "started",
-        _ => "unknown",
-    }
+    file_transfer_session_status(
+        event_type,
+        extra
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
 }
 
 fn first_json_string(value: &Value, fields: &[&str]) -> Option<String> {
@@ -682,19 +668,11 @@ fn json_i64(value: &Value) -> Option<i64> {
 }
 
 fn is_file_transfer_command(command_type: &str) -> bool {
-    FILE_TRANSFER_COMMAND_TYPES.contains(&command_type)
+    is_file_transfer_command_type(command_type)
 }
 
 fn is_file_transfer_status_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "file_transfer_start"
-            | "file_transfer_chunk_ack"
-            | "file_transfer_commit"
-            | "file_transfer_abort"
-            | "file_transfer_download_start"
-            | "file_transfer_download_chunk"
-    )
+    is_file_transfer_session_event(event_type)
 }
 
 fn build_file_transfer_download_handoff_chunks(

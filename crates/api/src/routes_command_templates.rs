@@ -29,6 +29,7 @@ pub(crate) async fn list_command_templates(
                 query.scope_kind.as_deref(),
                 query.scope_value.as_deref(),
                 query.command_type.as_deref(),
+                query.display_group.as_deref(),
             )
             .await?,
     ))
@@ -60,6 +61,11 @@ fn validate_template_query(query: &CommandTemplateQuery) -> Result<(), ApiError>
         if !matches!(scope_kind, "global" | "provider" | "tag" | "client") {
             return Err(ApiError::bad_request("command_template_scope_invalid"));
         }
+    }
+    if query.command_type.as_deref().is_some_and(str::is_empty)
+        || query.display_group.as_deref().is_some_and(str::is_empty)
+    {
+        return Err(ApiError::bad_request("command_template_filter_invalid"));
     }
     Ok(())
 }

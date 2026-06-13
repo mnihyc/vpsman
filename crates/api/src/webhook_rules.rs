@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
-    expression_referenced_roots, payload_hash, render_template_with_limit,
+    expression_referenced_roots, is_webhook_rule_delivery_process_status, payload_hash,
+    render_template_with_limit, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
 
 use crate::{
@@ -145,9 +147,12 @@ impl AppState {
             dry_run || request.confirmed,
             "webhook_rule_delivery_process_confirmation_required"
         );
-        let status = request.status.as_deref().unwrap_or("queued");
+        let status = request
+            .status
+            .as_deref()
+            .unwrap_or(WEBHOOK_RULE_DELIVERY_STATUS_QUEUED);
         anyhow::ensure!(
-            matches!(status, "queued" | "failed"),
+            is_webhook_rule_delivery_process_status(status),
             "webhook rule delivery process status must be queued or failed"
         );
         let deliveries = self
@@ -174,8 +179,8 @@ impl AppState {
             }
             let result = deliver_webhook_rule(&client, &delivery).await;
             let (status, error) = match result {
-                Ok(()) => ("delivered", None),
-                Err(error) => ("failed", Some(error.to_string())),
+                Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None),
+                Err(error) => (WEBHOOK_RULE_DELIVERY_STATUS_FAILED, Some(error.to_string())),
             };
             processed.push(
                 self.repo

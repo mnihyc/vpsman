@@ -48,6 +48,7 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
@@ -94,6 +95,7 @@ import type {
   FleetAlertStateRequest,
   FleetSummary,
   WebhookRuleDeliveryRecord,
+  WebhookRuleDeliveryHistoryStatus,
   WebhookDeliveryRotationRequest,
   WebhookDeliveryRotationResponse,
   WebhookRuleDispatchRequest,
@@ -5095,7 +5097,8 @@ function WebhookDeliveryMaintenancePanel({
   rules: WebhookRuleRecord[];
 }) {
   const [rotationDays, setRotationDays] = useState("90");
-  const [rotationStatus, setRotationStatus] = useState("delivered");
+  const [rotationStatus, setRotationStatus] =
+    useState<WebhookRuleDeliveryHistoryStatus>("delivered");
   const [rotationRuleId, setRotationRuleId] = useState("");
   const [rotationPreview, setRotationPreview] =
     useState<WebhookDeliveryRotationResponse | null>(null);
@@ -5116,7 +5119,7 @@ function WebhookDeliveryMaintenancePanel({
     try {
       const response = await onRotate({
         older_than_days: optionalInteger(rotationDays),
-        status: rotationStatus.trim() || null,
+        status: rotationStatus,
         rule_id: rotationRuleId || null,
         confirmed,
       });
@@ -5176,12 +5179,19 @@ function WebhookDeliveryMaintenancePanel({
             />
           </ConsoleField>
           <ConsoleField label="Status">
-            <input
+            <select
               aria-label="Webhook rotation status"
               value={rotationStatus}
-              onChange={(event) => setRotationStatus(event.target.value)}
-              placeholder="delivered"
-            />
+              onChange={(event) =>
+                setRotationStatus(event.target.value as WebhookRuleDeliveryHistoryStatus)
+              }
+            >
+              {WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES.map((status) => (
+                <option key={status} value={status}>
+                  {status.replace(/_/g, " ")}
+                </option>
+              ))}
+            </select>
           </ConsoleField>
           <ConsoleField label="Rule">
             <select

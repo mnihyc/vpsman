@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::JobCommand;
+use vpsman_common::{JobCommand, JobStatus};
 
 use crate::{
     commands_schedules::selector_expression_from_targets,
@@ -234,7 +234,7 @@ pub(crate) fn job_follow_output(
         let job =
             serde_json::from_str::<JobHistoryRecord>(&job_json).context("failed to parse job")?;
         last_status = Some(job.status.clone());
-        if is_terminal_job_status(&job.status) {
+        if JobStatus::parse(&job.status).is_some_and(JobStatus::is_terminal) {
             if json {
                 rendered.push_str(
                     &serde_json::json!({
@@ -410,20 +410,6 @@ fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {
         "data_base64": &output.data_base64,
         "done": output.done,
     })
-}
-
-fn is_terminal_job_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed"
-            | "partial_success"
-            | "skipped"
-            | "rejected"
-            | "failed"
-            | "agent_timeout"
-            | "control_timeout"
-            | "canceled"
-    )
 }
 
 fn percent_encode_path_segment(value: &str) -> String {
@@ -679,21 +665,15 @@ mod tests {
     }
 
     #[test]
-    fn classifies_terminal_follow_statuses() {
-        for status in [
-            "completed",
-            "partial_success",
-            "skipped",
-            "rejected",
-            "failed",
-            "agent_timeout",
-            "control_timeout",
-            "canceled",
-        ] {
-            assert!(is_terminal_job_status(status));
+    fn job_follow_uses_common_terminal_statuses() {
+        for status in vpsman_common::job_terminal_statuses() {
+            assert!(JobStatus::parse(status).is_some_and(JobStatus::is_terminal));
         }
-        for status in ["dispatching", "queued", "running"] {
-            assert!(!is_terminal_job_status(status));
+        for status in vpsman_common::job_statuses()
+            .iter()
+            .filter(|status| !vpsman_common::job_terminal_statuses().contains(status))
+        {
+            assert!(!JobStatus::parse(status).is_some_and(JobStatus::is_terminal));
         }
     }
 }

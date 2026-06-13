@@ -17,7 +17,10 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
-use vpsman_common::validate_template;
+use vpsman_common::{
+    is_webhook_rule_delivery_history_status, is_webhook_rule_delivery_process_status,
+    validate_template,
+};
 
 pub(crate) async fn list_webhook_rules(
     State(state): State<AppState>,
@@ -240,10 +243,7 @@ fn validate_webhook_rule_delivery_query(query: &WebhookRuleDeliveryQuery) -> Res
         validate_required_text(event_kind, 128, "webhook_rule_event_kind_invalid")?;
     }
     if let Some(status) = query.status.as_deref() {
-        if !matches!(
-            status,
-            "queued" | "failed" | "delivered" | "permanently_failed"
-        ) {
+        if !is_webhook_rule_delivery_history_status(status) {
             return Err(ApiError::bad_request(
                 "webhook_rule_delivery_status_invalid",
             ));
@@ -282,10 +282,7 @@ fn validate_webhook_delivery_rotation_request(
         }
     }
     if let Some(status) = request.status.as_deref() {
-        if !matches!(
-            status,
-            "queued" | "failed" | "delivered" | "permanently_failed"
-        ) {
+        if !is_webhook_rule_delivery_history_status(status) {
             return Err(ApiError::bad_request(
                 "webhook_delivery_rotation_status_invalid",
             ));
@@ -310,7 +307,7 @@ fn validate_webhook_rule_process_request(
         }
     }
     if let Some(status) = request.status.as_deref() {
-        if !matches!(status, "queued" | "failed") {
+        if !is_webhook_rule_delivery_process_status(status) {
             return Err(ApiError::bad_request(
                 "webhook_rule_delivery_process_status_invalid",
             ));

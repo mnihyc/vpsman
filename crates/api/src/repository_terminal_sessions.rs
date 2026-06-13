@@ -4,20 +4,13 @@ use serde_json::Value;
 use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
+use vpsman_common::{is_terminal_command_type, is_terminal_session_event, terminal_session_state};
 
 use crate::{
     model::JobOutputView,
     model_terminal::{TerminalReplayChunkView, TerminalReplayView, TerminalSessionView},
     repository::Repository,
 };
-
-const TERMINAL_COMMAND_TYPES: &[&str] = &[
-    "terminal_open",
-    "terminal_input",
-    "terminal_poll",
-    "terminal_resize",
-    "terminal_close",
-];
 
 impl Repository {
     pub(crate) async fn list_terminal_sessions(
@@ -686,19 +679,7 @@ fn parse_terminal_event(output: TerminalStatusOutput) -> Option<TerminalEvent> {
 }
 
 fn terminal_state(event_type: &str, status: &str, session_exited: bool) -> &'static str {
-    match (event_type, status) {
-        ("terminal_close", "closed") => "closed",
-        ("terminal_close", "missing") | (_, "missing") => "missing",
-        ("terminal_open", "rejected") => "rejected",
-        _ if session_exited => "exited",
-        ("terminal_open", "opened" | "attached") => "open",
-        ("terminal_input", "accepted" | "duplicate_ignored") => "open",
-        ("terminal_poll", "polled") => "open",
-        ("terminal_resize", "resized") => "open",
-        ("terminal_stream", "streaming") => "open",
-        ("terminal_stream", "closed" | "exited" | "idle_timeout") => "closed",
-        _ => "unknown",
-    }
+    terminal_session_state(event_type, status, session_exited)
 }
 
 fn json_string(value: &Value, field: &str) -> Option<String> {
@@ -715,19 +696,11 @@ fn json_i64(value: &Value) -> Option<i64> {
 }
 
 fn is_terminal_command(command_type: &str) -> bool {
-    TERMINAL_COMMAND_TYPES.contains(&command_type)
+    is_terminal_command_type(command_type)
 }
 
 fn is_terminal_status_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "terminal_open"
-            | "terminal_input"
-            | "terminal_poll"
-            | "terminal_resize"
-            | "terminal_close"
-            | "terminal_stream"
-    )
+    is_terminal_session_event(event_type)
 }
 
 #[derive(Clone, Debug)]

@@ -3,6 +3,11 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import {
+  backupRequestStatusBadgeClass,
+  migrationLinkStatusBadgeClass,
+  restorePlanStatusBadgeClass,
+} from "../../jobStatusPresentation";
 import type {
   BackupArtifactRecord,
   BackupPolicyRecord,
@@ -15,7 +20,6 @@ import {
   formatTime,
   shortHash,
   shortId,
-  statusClass,
 } from "../../utils";
 
 export function BackupHistoryTables({
@@ -242,7 +246,7 @@ function BackupRequestsTable({
       searchValue: (backup) => backup.status,
       cell: (backup) => (
         <span
-          className={`status ${statusClass(backup.status)}`}
+          className={`status ${backupRequestStatusBadgeClass(backup.status)}`}
           title={backup.status}
         >
           {backupStatusLabel(backup.status)}
@@ -481,7 +485,7 @@ function RestorePlansTable({
       searchValue: (plan) => plan.status,
       cell: (plan) => (
         <span
-          className={`status ${statusClass(plan.status)}`}
+          className={`status ${restorePlanStatusBadgeClass(plan.status)}`}
           title={plan.status}
         >
           {backupStatusLabel(plan.status)}
@@ -599,7 +603,7 @@ function MigrationLinksTable({
       searchValue: (link) => link.status,
       cell: (link) => (
         <span
-          className={`status ${statusClass(link.status)}`}
+          className={`status ${migrationLinkStatusBadgeClass(link.status)}`}
           title={link.status}
         >
           {backupStatusLabel(link.status)}

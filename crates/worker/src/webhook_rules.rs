@@ -9,7 +9,8 @@ use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, parse_expression, payload_hash, render_template_with_limit,
-    ExpressionContext, VpsMetadata,
+    ExpressionContext, VpsMetadata, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
 
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
@@ -725,14 +726,14 @@ async fn process_queued_deliveries(
         let result = deliver_webhook(&client, &delivery).await;
         let next_attempt_count = delivery.attempt_count.saturating_add(1);
         let (status, error, next_attempt_after_secs) = match result {
-            Ok(()) => ("delivered", None, None),
+            Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None, None),
             Err(error) if next_attempt_count >= MAX_DELIVERY_ATTEMPTS => (
-                "permanently_failed",
+                WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
                 Some(truncate_error(&error.to_string())),
                 None,
             ),
             Err(error) => (
-                "failed",
+                WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
                 Some(truncate_error(&error.to_string())),
                 retry_backoff_secs(next_attempt_count),
             ),
@@ -764,7 +765,7 @@ async fn process_queued_deliveries(
         if updated.rows_affected() == 0 {
             continue;
         }
-        if status == "permanently_failed" {
+        if status == WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED {
             insert_permanent_failure_alert(&mut tx, &delivery, error.clone()).await?;
         }
         outcomes.push(DeliveryOutcome {
@@ -786,7 +787,7 @@ async fn process_queued_deliveries(
 
     let delivered = outcomes
         .iter()
-        .filter(|outcome| outcome.status == "delivered")
+        .filter(|outcome| outcome.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
         .count();
     let failed = outcomes.len().saturating_sub(delivered);
     Ok((outcomes.len(), delivered, failed))
@@ -934,8 +935,8 @@ async fn insert_process_audit(
     .bind(json!({
         "worker": "webhook_rule_worker",
         "delivery_count": outcomes.len(),
-        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == "delivered").count(),
-        "failed_count": outcomes.iter().filter(|outcome| outcome.status != "delivered").count(),
+        "delivered_count": outcomes.iter().filter(|outcome| outcome.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
+        "failed_count": outcomes.iter().filter(|outcome| outcome.status != WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
         "deliveries": outcomes.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|outcome| json!({
             "id": outcome.id,
             "rule_id": outcome.rule_id,

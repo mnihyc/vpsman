@@ -258,6 +258,7 @@ CREATE TABLE command_templates (
     scope_kind TEXT NOT NULL,
     scope_value TEXT,
     command_type TEXT NOT NULL,
+    display_group TEXT,
     operation JSONB NOT NULL,
     defaults JSONB NOT NULL DEFAULT '{}'::jsonb,
     actor_id UUID REFERENCES operators(id),
@@ -268,6 +269,7 @@ CREATE TABLE command_templates (
         (scope_kind = 'global' AND scope_value IS NULL)
         OR (scope_kind <> 'global' AND scope_value IS NOT NULL)
     ),
+    CHECK (display_group IS NULL OR length(display_group) BETWEEN 1 AND 64),
     CHECK (jsonb_typeof(operation) = 'object'),
     CHECK (jsonb_typeof(defaults) = 'object')
 );
@@ -282,3 +284,7 @@ CREATE UNIQUE INDEX command_templates_scoped_name_idx
 
 CREATE INDEX command_templates_lookup_idx
     ON command_templates (scope_kind, scope_value, command_type, updated_at DESC);
+
+CREATE INDEX command_templates_display_group_idx
+    ON command_templates (scope_kind, scope_value, display_group, updated_at DESC)
+    WHERE display_group IS NOT NULL;

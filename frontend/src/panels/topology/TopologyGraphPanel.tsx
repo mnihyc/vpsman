@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { GitGraph, RefreshCcw, Search } from "lucide-react";
+import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import type { TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
-import { formatTime, formatVpsName, statusClass, type VpsNameDisplayMode } from "../../utils";
+import { formatTime, formatVpsName, type VpsNameDisplayMode } from "../../utils";
 
 type PositionedNode = TopologyGraphNode & {
   x: number;
@@ -199,7 +200,7 @@ export function TopologyGraphPanel({
                     {edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}
                   </small>
                 </span>
-                <span className={`status ${statusClass(edge.health)}`}>{edge.health}</span>
+                <span className={`status ${topologyEdgeHealthStatusBadgeClass(edge.health)}`}>{edge.health}</span>
                 <span className="topologyMetric">
                   <strong>{edgeMetric(edge)}</strong>
                   <small>{edgeStatusDetail(edge)}</small>

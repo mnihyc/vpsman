@@ -22,7 +22,9 @@ use uuid::Uuid;
 use vpsman_common::VpsMetadata;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, AgentCapabilitySnapshot, Expression,
-    ExpressionContext, JobCommand, SuiteConfig,
+    ExpressionContext, JobCommand, SuiteConfig, SERVER_JOB_STATUS_COMPLETED,
+    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING,
+    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 use vpsman_server_core::{
     job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
@@ -886,12 +888,12 @@ async fn process_artifact_cleanup_jobs(
                 r#"
                 UPDATE server_jobs
                 SET
-                    status = 'completed',
-                    deleted_count = $2,
-                    deleted_bytes = $3,
+                    status = $2,
+                    deleted_count = $3,
+                    deleted_bytes = $4,
                     metadata = metadata || jsonb_build_object(
-                        'tombstoned_count', $4::bigint,
-                        'tombstoned_bytes', $5::bigint
+                        'tombstoned_count', $5::bigint,
+                        'tombstoned_bytes', $6::bigint
                     ),
                     completed_at = now(),
                     error = NULL
@@ -899,6 +901,7 @@ async fn process_artifact_cleanup_jobs(
                 "#,
             )
             .bind(job.id)
+            .bind(SERVER_JOB_STATUS_COMPLETED)
             .bind(run.deleted_rows)
             .bind(run.deleted_bytes)
             .bind(run.tombstoned_rows)
@@ -912,13 +915,14 @@ async fn process_artifact_cleanup_jobs(
                 r#"
                 UPDATE server_jobs
                 SET
-                    status = 'failed',
-                    error = $2,
+                    status = $2,
+                    error = $3,
                     completed_at = now()
                 WHERE id = $1
                 "#,
             )
             .bind(job.id)
+            .bind(SERVER_JOB_STATUS_FAILED)
             .bind(error.to_string())
             .execute(pool)
             .await?;
@@ -933,19 +937,22 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
         WITH claimed AS (
             SELECT id
             FROM server_jobs
-            WHERE job_type = 'artifact_cleanup'
-              AND status = 'queued'
+            WHERE job_type = $1
+              AND status = $2
             ORDER BY created_at ASC, id ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
         UPDATE server_jobs job
-        SET status = 'running', started_at = now()
+        SET status = $3, started_at = now()
         FROM claimed
         WHERE job.id = claimed.id
         RETURNING job.id, job.expression
         "#,
     )
+    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
+    .bind(SERVER_JOB_STATUS_QUEUED)
+    .bind(SERVER_JOB_STATUS_RUNNING)
     .fetch_optional(pool)
     .await?;
     row.map(|row| {

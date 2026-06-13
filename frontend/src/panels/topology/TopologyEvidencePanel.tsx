@@ -1,14 +1,22 @@
 import { useMemo, useState } from "react";
 import { Activity, RefreshCcw } from "lucide-react";
+import {
+  jobStatusBadgeClass,
+  topologyObservationStateBadgeClass,
+  topologyRuntimeStateBadgeClass,
+} from "../../jobStatusPresentation";
 import type {
   JobHistoryRecord,
   JobOutputRecord,
+  JobStatus,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
+  TopologyObservationState,
+  TopologyRuntimeState,
 } from "../../types";
-import { decodeOutputPreview, formatTime, shortId, statusClass } from "../../utils";
+import { decodeOutputPreview, formatTime, shortId } from "../../utils";
 
 const networkCommands = new Set([
   "network_apply",
@@ -172,7 +180,7 @@ export function TopologyEvidencePanel({
                 <strong>{row.planName}</strong>
                 <small>{row.interfaceName}</small>
               </span>
-              <span className={`status ${statusClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -201,7 +209,7 @@ export function TopologyEvidencePanel({
                 <strong>{row.planName}</strong>
                 <small>{row.interfaceName}</small>
               </span>
-              <span className={`status ${statusClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -230,7 +238,7 @@ export function TopologyEvidencePanel({
                 <strong>{row.kind}</strong>
                 <small>{row.sampleCount} samples</small>
               </span>
-              <span className={`status ${statusClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -259,7 +267,7 @@ export function TopologyEvidencePanel({
                 <strong>{row.kind}</strong>
                 <small>{shortId(row.jobId)}</small>
               </span>
-              <span className={`status ${statusClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -287,7 +295,7 @@ export function TopologyEvidencePanel({
               <strong>{row.job.command_type}</strong>
               <small>{shortId(row.job.id)}</small>
             </span>
-            <span className={`status ${statusClass(row.signalStatus)}`}>{row.signalStatus}</span>
+            <span className={`status ${evidenceStatusBadgeClass(row)}`}>{row.signalStatus}</span>
             <span className="topologyMetric">
               <strong>{row.metric}</strong>
               <small>{row.metricDetail}</small>
@@ -314,7 +322,8 @@ export function TopologyEvidencePanel({
 type EvidenceRow = {
   job: JobHistoryRecord;
   kind: string;
-  signalStatus: string;
+  signalKind: "job" | "observation" | "runtime";
+  signalStatus: JobStatus | TopologyObservationState | TopologyRuntimeState;
   metric: string;
   metricDetail: string;
   target: string;
@@ -338,7 +347,7 @@ type ObservationRow = {
   id: string;
   jobId: string;
   kind: string;
-  signalStatus: string;
+  signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
   target: string;
@@ -350,7 +359,7 @@ type TrendRow = {
   id: string;
   kind: string;
   sampleCount: number;
-  signalStatus: string;
+  signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
   target: string;
@@ -362,7 +371,7 @@ type OspfRecommendationRow = {
   id: string;
   planName: string;
   interfaceName: string;
-  signalStatus: string;
+  signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
   target: string;
@@ -374,7 +383,7 @@ type OspfUpdatePlanRow = {
   id: string;
   planName: string;
   interfaceName: string;
-  signalStatus: string;
+  signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
   target: string;
@@ -389,7 +398,7 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
       : plan.status === "review_degraded"
         ? "degraded"
         : plan.status === "needs_observation"
-          ? "pending"
+          ? "unknown"
           : "recorded";
   const delta = plan.cost_delta === 0 ? "unchanged" : plan.cost_delta > 0 ? `+${plan.cost_delta}` : String(plan.cost_delta);
   const privilegeState = plan.privilege_required ? "privilege-unlocked" : "read-only";
@@ -413,7 +422,7 @@ function buildOspfRecommendationRow(recommendation: NetworkOspfRecommendationRec
         ? "degraded"
         : "healthy"
       : recommendation.confidence === "no_recent_observations"
-        ? "pending"
+        ? "unknown"
         : "recorded";
   const delta = recommendation.cost_delta === 0
     ? "unchanged"
@@ -585,6 +594,7 @@ function buildEvidenceRow(
     return {
       job,
       kind: "network_probe",
+      signalKind: "observation",
       signalStatus: asBoolean(parsed.healthy) ? "healthy" : "degraded",
       metric: latencyAvgMs === null ? "No latency" : `${formatMetric(latencyAvgMs)} ms`,
       metricDetail: lossRatio === null ? "loss unavailable" : `${formatMetric(lossRatio * 100)}% loss`,
@@ -613,7 +623,8 @@ function buildEvidenceRow(
     return {
       job,
       kind: "network_status",
-      signalStatus: applied && statusHealthy ? "applied" : statusHealthy ? "healthy" : "drift",
+      signalKind: "runtime",
+      signalStatus: statusHealthy ? "healthy" : "drift",
       metric:
         applied && statusHealthy
           ? "Managed blocks match"
@@ -635,6 +646,7 @@ function buildEvidenceRow(
     return {
       job,
       kind: "network_speed_test",
+      signalKind: "observation",
       signalStatus: allSucceeded ? "healthy" : "degraded",
       metric: throughputMbps === null ? "No throughput" : `${formatMetric(throughputMbps)} Mbps`,
       metricDetail: bytes === null ? "bytes unavailable" : `${formatBytes(bytes)} sent`,
@@ -650,12 +662,24 @@ function buildEvidenceRow(
   return {
     job,
     kind: job.command_type,
+    signalKind: "job",
     signalStatus: job.status,
     metric: outputs.length === 0 ? "Output not loaded" : `${outputs.length} chunks`,
     metricDetail: outputs.length === 0 ? "Refresh evidence to load retained output" : "Retained job output",
     target: `${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
     targetDetail: shortId(job.payload_hash),
   };
+}
+
+function evidenceStatusBadgeClass(row: EvidenceRow): string {
+  switch (row.signalKind) {
+    case "job":
+      return jobStatusBadgeClass(row.signalStatus as JobStatus);
+    case "observation":
+      return topologyObservationStateBadgeClass(row.signalStatus as TopologyObservationState);
+    case "runtime":
+      return topologyRuntimeStateBadgeClass(row.signalStatus as TopologyRuntimeState);
+  }
 }
 
 function endpointLabel(

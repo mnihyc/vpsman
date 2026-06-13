@@ -3,6 +3,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use vpsman_common::{
+    is_fleet_alert_notification_delivery_process_status,
+    is_fleet_alert_notification_delivery_status,
+};
 
 use crate::{
     error::ApiError,
@@ -424,7 +428,11 @@ fn validate_alert_notification_delivery_query(
         validate_alert_id(alert_id)?;
     }
     if let Some(status) = query.status.as_deref() {
-        validate_alert_token(status, "fleet_alert_notification_status_invalid")?;
+        if !is_fleet_alert_notification_delivery_status(status) {
+            return Err(ApiError::bad_request(
+                "fleet_alert_notification_status_invalid",
+            ));
+        }
     }
     Ok(())
 }
@@ -464,7 +472,7 @@ fn validate_alert_notification_process_request(
         }
     }
     if let Some(status) = request.status.as_deref() {
-        if !matches!(status, "queued" | "failed") {
+        if !is_fleet_alert_notification_delivery_process_status(status) {
             return Err(ApiError::bad_request(
                 "fleet_alert_notification_process_status_invalid",
             ));

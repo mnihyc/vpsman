@@ -3,10 +3,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CrudPager } from "../../components/CrudPager";
+import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import type { TerminalAction } from "../jobDispatchModel";
 import type { WsTerminalOutputEvent } from "../../types";
 import type { TerminalReplayRecord, TerminalSessionRecord } from "../../typesTerminal";
-import { formatTime, shortId, statusClass } from "../../utils";
+import { formatTime, shortId } from "../../utils";
 
 export function TerminalSessionsPanel({
   clientLabel,
@@ -210,7 +211,7 @@ export function TerminalSessionsPanel({
                     <small>{shortId(session.session_id)}</small>
                   </span>
                   <span className="historyPrimary">
-                    <span className={`status ${statusClass(session.state)}`}>{session.state}</span>
+                    <span className={`status ${terminalSessionStateBadgeClass(session.state)}`}>{session.state}</span>
                     <small>{session.last_status}</small>
                   </span>
                   <span className="historyPrimary">

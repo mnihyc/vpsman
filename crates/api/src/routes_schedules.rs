@@ -374,9 +374,10 @@ async fn verify_schedule_privilege_for_definition(
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     let operation_payload_hash = payload_hash(&operation_payload);
     let command_type = job_command_type_label(request.operation);
+    let schedule_id = schedule_id.map(|id| id.to_string());
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
         action,
-        schedule_id,
+        schedule_id: schedule_id.as_deref(),
         name: request.name,
         command_type,
         operation_payload_hash: &operation_payload_hash,

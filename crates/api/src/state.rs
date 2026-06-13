@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
@@ -211,6 +211,13 @@ impl AppState {
             let recommendations = self.repo.list_network_ospf_recommendations(1000).await?;
             enrich_runtime_tunnel_status_rows(&mut rows, &plans, &trends, &recommendations);
             enrich_runtime_traffic_status_rows(&mut rows, &plans);
+        }
+        for row in &rows {
+            ensure!(
+                vpsman_common::is_data_source_readiness_status(&row.status),
+                "data source status contract drift: {}",
+                row.status
+            );
         }
         Ok(rows)
     }

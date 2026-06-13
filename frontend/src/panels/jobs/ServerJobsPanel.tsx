@@ -2,11 +2,12 @@ import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { CrudPager } from "../../components/CrudPager";
+import { serverJobStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
 } from "../../types";
-import { formatTime, shortHash, shortId, statusClass } from "../../utils";
+import { formatTime, shortHash, shortId } from "../../utils";
 
 export function ServerJobsPanel({
   jobs,
@@ -240,7 +241,7 @@ export function ServerJobsPanel({
                     <small>{shortId(job.id)}</small>
                   </span>
                   <span className="historyPrimary">
-                    <span className={`status ${statusClass(job.status)}`}>
+                    <span className={`status ${serverJobStatusBadgeClass(job.status)}`}>
                       {displayToken(job.status)}
                     </span>
                     <small>{job.error ?? job.expression ?? "no details"}</small>

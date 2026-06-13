@@ -8,6 +8,7 @@ pub(crate) struct CommandTemplateView {
     pub(crate) scope_kind: String,
     pub(crate) scope_value: Option<String>,
     pub(crate) command_type: String,
+    pub(crate) display_group: Option<String>,
     pub(crate) operation: serde_json::Value,
     pub(crate) defaults: serde_json::Value,
     pub(crate) actor_id: Option<Uuid>,
@@ -21,15 +22,18 @@ pub(crate) struct CommandTemplateQuery {
     pub(crate) scope_kind: Option<String>,
     pub(crate) scope_value: Option<String>,
     pub(crate) command_type: Option<String>,
+    pub(crate) display_group: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UpsertCommandTemplateRequest {
     pub(crate) name: String,
     pub(crate) scope_kind: String,
     #[serde(default)]
     pub(crate) scope_value: Option<String>,
-    pub(crate) command_type: String,
+    #[serde(default)]
+    pub(crate) display_group: Option<String>,
     pub(crate) operation: serde_json::Value,
     #[serde(default)]
     pub(crate) defaults: serde_json::Value,

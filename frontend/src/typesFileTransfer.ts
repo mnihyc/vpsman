@@ -1,8 +1,15 @@
+import type {
+  GeneratedFileTransferCommandType,
+  GeneratedFileTransferDirection,
+  GeneratedFileTransferSessionEvent,
+  GeneratedFileTransferSessionStatus,
+} from "./generated/protocolContracts";
+
 export type FileTransferSessionRecord = {
   session_id: string;
   client_id: string;
-  direction: "upload" | "download";
-  status: string;
+  direction: GeneratedFileTransferDirection;
+  status: GeneratedFileTransferSessionStatus;
   path: string;
   size_bytes: number | null;
   progress_bytes: number;
@@ -13,9 +20,9 @@ export type FileTransferSessionRecord = {
   last_chunk_sha256_hex: string | null;
   rate_limit_kbps: number | null;
   resumed: boolean | null;
-  last_event: string;
+  last_event: GeneratedFileTransferSessionEvent;
   last_job_id: string;
-  last_command_type: string;
+  last_command_type: GeneratedFileTransferCommandType;
   last_seq: number;
   observed_at: string;
   handoff_available: boolean;

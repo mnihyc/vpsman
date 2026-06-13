@@ -347,8 +347,8 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   expect(jobRequest).toMatchObject({
     argv: ["/usr/local/bin/check-payment-edge", "--scope", "eu-west", "--json"],
     command: "shell_argv",
-    confirmed: false,
-    destructive: false,
+    confirmed: true,
+    destructive: true,
     privileged: true,
     selector_expression: "provider:acmecloud && tag:payments",
     timeout_secs: 120,

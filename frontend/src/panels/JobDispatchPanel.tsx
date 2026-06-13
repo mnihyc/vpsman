@@ -13,6 +13,12 @@ import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { readFilePushPayload, sha256Hex } from "../fileTransfer";
 import {
+  JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
+  JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE,
+  JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
+  type GeneratedJobCommandType,
+} from "../generated/protocolContracts";
+import {
   buildPrivilegeAssertion,
   canonicalJobPrivilegeIntent,
   operationPayloadHashHex,
@@ -80,14 +86,21 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function commandTypeForApi(operation: CreateJobRequest["operation"]): string {
+function commandTypeForApi(operation: CreateJobRequest["operation"]): GeneratedJobCommandType {
   if (!operation) {
     return "shell_argv";
   }
   if (operation.type === "shell") {
     return operation.pty ? "shell_pty" : "shell_argv";
   }
-  return operation.type;
+  return JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
+}
+
+function displayGroupForOperation(operation: CreateJobRequest["operation"]): string | null {
+  if (!operation) {
+    return JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE.shell_argv;
+  }
+  return JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE[commandTypeForApi(operation)] ?? null;
 }
 
 function readLocalString(key: string): string {
@@ -385,7 +398,7 @@ export function JobDispatchPanel({
   const selectedTargetCount = expressionTargets.length;
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
-  const operationNeedsConfirmation = operationRequiresConfirmation(mode);
+  const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction);
   const impactTargets = preview?.targets ?? expressionTargets;
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const confirmationTargets = preview?.targets ?? expressionTargets;
@@ -604,7 +617,7 @@ export function JobDispatchPanel({
         name,
         scope_kind: templateScopeKind,
         scope_value: scopeValue,
-        command_type: operationCommandLabel(mode, commandText),
+        display_group: displayGroupForOperation(operation),
         operation,
         defaults: {
           confirmed: operationNeedsConfirmation,
@@ -1093,18 +1106,26 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function operationRequiresConfirmation(mode: DispatchMode): boolean {
-  return (
-    mode === "file_push" ||
-    mode === "file_transfer_upload" ||
-    mode === "file_transfer_download" ||
-    mode === "hot_config" ||
-    mode === "agent_update" ||
-    mode === "agent_update_check" ||
-    mode === "agent_update_activate" ||
-    mode === "agent_update_rollback" ||
-    mode === "backup"
-  );
+function generatedConfirmationRequiredForMode(mode: DispatchMode, supervisorAction: SupervisorAction): boolean {
+  const operationType =
+    mode === "terminal_session"
+      ? "terminal_open"
+      : mode === "file_transfer_upload"
+        ? "file_transfer_start"
+        : mode === "file_transfer_download"
+          ? "file_transfer_download_start"
+          : mode === "process_supervisor"
+            ? supervisorAction === "start"
+              ? "process_start"
+              : supervisorAction === "stop"
+                ? "process_stop"
+                : supervisorAction === "restart"
+                  ? "process_restart"
+                  : supervisorAction === "logs"
+                    ? "process_logs"
+                    : "process_status"
+            : mode;
+  return JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE[operationType];
 }
 
 function blurActiveElement() {

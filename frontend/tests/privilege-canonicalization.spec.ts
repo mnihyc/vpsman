@@ -1,6 +1,43 @@
 import { expect, test } from "@playwright/test";
+import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
 import { buildPrivilegeForJobOperation, canonicalOperationJson } from "../src/privilege";
 import type { JobOperation } from "../src/types";
+
+const goldenOperations: Record<string, JobOperation> = {
+  shell_argv: { type: "shell", argv: ["/bin/true"], pty: false },
+  terminal_open: {
+    type: "terminal_open",
+    session_id: "61616161-2222-4333-8444-555555555555",
+    argv: ["/bin/sh", "-l"],
+    cols: 120,
+    rows: 30,
+    idle_timeout_secs: 1800,
+    flow_window_bytes: 65536,
+  },
+  file_transfer_start: {
+    type: "file_transfer_start",
+    session_id: "61616161-2222-4333-8444-555555555555",
+    path: "/tmp/upload.bin",
+    mode: 0o640,
+    size_bytes: 4,
+    sha256_hex: "11".repeat(32),
+    chunk_size_bytes: 65536,
+    rate_limit_kbps: 0,
+    existing_policy: "skip",
+    resume_token_hash: "22".repeat(32),
+  },
+  backup: {
+    type: "backup",
+    paths: ["/etc/app.conf"],
+    include_config: false,
+  },
+};
+
+test("frontend operation canonicalization matches Rust-generated golden vectors", () => {
+  for (const vector of PRIVILEGE_OPERATION_GOLDEN_VECTORS) {
+    expect(canonicalOperationJson(goldenOperations[vector.command_type])).toBe(vector.canonical_json);
+  }
+});
 
 test("canonical privilege payload omits skipped optional fields", () => {
   const terminalOpen: JobOperation = {

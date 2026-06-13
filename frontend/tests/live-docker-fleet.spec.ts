@@ -548,7 +548,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
 
   await notifications.getByRole("tab", { name: "Maintenance" }).click();
   await notifications.getByLabel("Webhook rotation days").fill("7");
-  await notifications.getByLabel("Webhook rotation status").fill("delivered");
+  await notifications.getByLabel("Webhook rotation status").selectOption("delivered");
   await notifications.getByRole("button", { name: "Review rotation" }).click();
   await expect(
     notifications.locator(".fleetPolicyStatus", {

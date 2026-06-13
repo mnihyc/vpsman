@@ -4,11 +4,39 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use uuid::Uuid;
 use vpsman_common::{
-    create_job_request_fields, job_command_variant_names, job_privilege_intent_fields,
+    agent_update_release_status_class_by_status, agent_update_release_statuses,
+    backup_request_status_class_by_status, backup_request_statuses, create_job_request_fields,
+    data_source_readiness_status_class_by_status, data_source_readiness_statuses, encode_json,
+    file_transfer_command_types, file_transfer_directions, file_transfer_session_events,
+    file_transfer_session_status_class_by_status, file_transfer_session_statuses,
+    fleet_alert_notification_delivery_process_status_class_by_status,
+    fleet_alert_notification_delivery_process_statuses,
+    fleet_alert_notification_delivery_status_class_by_status,
+    fleet_alert_notification_delivery_statuses, job_command_display_group_by_command_type,
+    job_command_safety_by_operation_type, job_command_type_by_operation_type,
+    job_command_type_labels, job_command_variant_names, job_privilege_intent_fields,
     job_status_class_by_status, job_status_classes, job_statuses,
     job_target_status_class_by_status, job_target_status_classes, job_target_statuses,
-    job_target_terminal_statuses, job_terminal_statuses, schedule_privilege_intent_fields,
+    job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
+    migration_link_statuses, restore_plan_status_class_by_status, restore_plan_statuses,
+    schedule_privilege_intent_fields, server_job_status_class_by_status, server_job_statuses,
+    server_job_types, terminal_command_types, terminal_session_events,
+    terminal_session_state_class_by_state, terminal_session_states,
+    terminal_session_status_class_by_status, terminal_session_statuses, topology_drift_actions,
+    topology_drift_policies, topology_edge_health_status_class_by_status,
+    topology_edge_health_statuses, topology_neighbor_state_class_by_state,
+    topology_neighbor_states, topology_node_status_class_by_status, topology_node_statuses,
+    topology_observation_state_class_by_state, topology_observation_states,
+    topology_probe_state_class_by_state, topology_probe_states,
+    topology_runtime_state_class_by_state, topology_runtime_states,
+    tunnel_endpoint_status_class_by_status, tunnel_endpoint_statuses,
+    tunnel_plan_status_class_by_status, tunnel_plan_statuses,
+    webhook_rule_delivery_history_status_class_by_status, webhook_rule_delivery_history_statuses,
+    webhook_rule_delivery_process_status_class_by_status, webhook_rule_delivery_process_statuses,
+    webhook_rule_delivery_status_class_by_status, webhook_rule_delivery_statuses,
+    workflow_status_classes, FileExistingPolicy, JobCommand, TerminalUserPolicy,
     CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
     MIN_TERMINAL_ROWS,
 };
@@ -55,6 +83,47 @@ fn main() -> io::Result<()> {
     writeln!(
         output,
         "export type GeneratedJobOperationType = typeof JOB_OPERATION_TYPES[number];"
+    )?;
+    write_string_array(&mut output, "JOB_COMMAND_TYPES", job_command_type_labels())?;
+    writeln!(
+        output,
+        "export type GeneratedJobCommandType = typeof JOB_COMMAND_TYPES[number];"
+    )?;
+    write_string_array(
+        &mut output,
+        "JOB_COMMAND_SAFETY_CLASSES",
+        &["read_only", "exclusive"],
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedJobCommandSafety = typeof JOB_COMMAND_SAFETY_CLASSES[number];"
+    )?;
+    write_string_map(
+        &mut output,
+        "JOB_COMMAND_SAFETY_BY_OPERATION_TYPE",
+        job_command_safety_by_operation_type(),
+        "GeneratedJobOperationType",
+        "GeneratedJobCommandSafety",
+    )?;
+    write_bool_map(
+        &mut output,
+        "JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE",
+        job_command_safety_by_operation_type(),
+        "GeneratedJobOperationType",
+    )?;
+    write_string_map(
+        &mut output,
+        "JOB_COMMAND_TYPE_BY_OPERATION_TYPE",
+        job_command_type_by_operation_type(),
+        "GeneratedJobOperationType",
+        "GeneratedJobCommandType",
+    )?;
+    write_string_map(
+        &mut output,
+        "JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE",
+        job_command_display_group_by_command_type(),
+        "GeneratedJobCommandType",
+        "string",
     )?;
     write_string_array(&mut output, "JOB_STATUSES", job_statuses())?;
     writeln!(
@@ -114,6 +183,15 @@ fn main() -> io::Result<()> {
     )?;
     write_string_array(
         &mut output,
+        "WORKFLOW_STATUS_CLASSES",
+        workflow_status_classes(),
+    )?;
+    writeln!(
+        output,
+        "export type GeneratedWorkflowStatusClass = typeof WORKFLOW_STATUS_CLASSES[number];"
+    )?;
+    write_string_array(
+        &mut output,
         "JOB_PRIVILEGE_INTENT_FIELDS",
         job_privilege_intent_fields(),
     )?;
@@ -131,7 +209,345 @@ fn main() -> io::Result<()> {
         "SCHEDULE_PRIVILEGE_INTENT_FIELDS",
         schedule_privilege_intent_fields(),
     )?;
+    write_domain_array(
+        &mut output,
+        "TERMINAL_COMMAND_TYPES",
+        "GeneratedTerminalCommandType",
+        terminal_command_types(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "TERMINAL_SESSION_EVENTS",
+        "GeneratedTerminalSessionEvent",
+        terminal_session_events(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "TERMINAL_SESSION_STATUSES",
+        "GeneratedTerminalSessionStatus",
+        terminal_session_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TERMINAL_SESSION_STATUS_CLASS_BY_STATUS",
+        terminal_session_status_class_by_status(),
+        "GeneratedTerminalSessionStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TERMINAL_SESSION_STATES",
+        "GeneratedTerminalSessionState",
+        terminal_session_states(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TERMINAL_SESSION_STATE_CLASS_BY_STATE",
+        terminal_session_state_class_by_state(),
+        "GeneratedTerminalSessionState",
+    )?;
+    write_domain_array(
+        &mut output,
+        "FILE_TRANSFER_COMMAND_TYPES",
+        "GeneratedFileTransferCommandType",
+        file_transfer_command_types(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "FILE_TRANSFER_DIRECTIONS",
+        "GeneratedFileTransferDirection",
+        file_transfer_directions(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "FILE_TRANSFER_SESSION_EVENTS",
+        "GeneratedFileTransferSessionEvent",
+        file_transfer_session_events(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "FILE_TRANSFER_SESSION_STATUSES",
+        "GeneratedFileTransferSessionStatus",
+        file_transfer_session_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS",
+        file_transfer_session_status_class_by_status(),
+        "GeneratedFileTransferSessionStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "BACKUP_REQUEST_STATUSES",
+        "GeneratedBackupRequestStatus",
+        backup_request_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "BACKUP_REQUEST_STATUS_CLASS_BY_STATUS",
+        backup_request_status_class_by_status(),
+        "GeneratedBackupRequestStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "RESTORE_PLAN_STATUSES",
+        "GeneratedRestorePlanStatus",
+        restore_plan_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "RESTORE_PLAN_STATUS_CLASS_BY_STATUS",
+        restore_plan_status_class_by_status(),
+        "GeneratedRestorePlanStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "MIGRATION_LINK_STATUSES",
+        "GeneratedMigrationLinkStatus",
+        migration_link_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "MIGRATION_LINK_STATUS_CLASS_BY_STATUS",
+        migration_link_status_class_by_status(),
+        "GeneratedMigrationLinkStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TUNNEL_PLAN_STATUSES",
+        "GeneratedTunnelPlanStatus",
+        tunnel_plan_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TUNNEL_PLAN_STATUS_CLASS_BY_STATUS",
+        tunnel_plan_status_class_by_status(),
+        "GeneratedTunnelPlanStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TUNNEL_ENDPOINT_STATUSES",
+        "GeneratedTunnelEndpointStatus",
+        tunnel_endpoint_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS",
+        tunnel_endpoint_status_class_by_status(),
+        "GeneratedTunnelEndpointStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "AGENT_UPDATE_RELEASE_STATUSES",
+        "GeneratedAgentUpdateReleaseStatus",
+        agent_update_release_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS",
+        agent_update_release_status_class_by_status(),
+        "GeneratedAgentUpdateReleaseStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "SERVER_JOB_TYPES",
+        "GeneratedServerJobType",
+        server_job_types(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "SERVER_JOB_STATUSES",
+        "GeneratedServerJobStatus",
+        server_job_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "SERVER_JOB_STATUS_CLASS_BY_STATUS",
+        server_job_status_class_by_status(),
+        "GeneratedServerJobStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES",
+        "GeneratedFleetAlertNotificationDeliveryStatus",
+        fleet_alert_notification_delivery_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS",
+        fleet_alert_notification_delivery_status_class_by_status(),
+        "GeneratedFleetAlertNotificationDeliveryStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES",
+        "GeneratedFleetAlertNotificationDeliveryProcessStatus",
+        fleet_alert_notification_delivery_process_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS",
+        fleet_alert_notification_delivery_process_status_class_by_status(),
+        "GeneratedFleetAlertNotificationDeliveryProcessStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_STATUSES",
+        "GeneratedWebhookRuleDeliveryStatus",
+        webhook_rule_delivery_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS",
+        webhook_rule_delivery_status_class_by_status(),
+        "GeneratedWebhookRuleDeliveryStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES",
+        "GeneratedWebhookRuleDeliveryHistoryStatus",
+        webhook_rule_delivery_history_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS",
+        webhook_rule_delivery_history_status_class_by_status(),
+        "GeneratedWebhookRuleDeliveryHistoryStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES",
+        "GeneratedWebhookRuleDeliveryProcessStatus",
+        webhook_rule_delivery_process_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS",
+        webhook_rule_delivery_process_status_class_by_status(),
+        "GeneratedWebhookRuleDeliveryProcessStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "DATA_SOURCE_READINESS_STATUSES",
+        "GeneratedDataSourceReadinessStatus",
+        data_source_readiness_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS",
+        data_source_readiness_status_class_by_status(),
+        "GeneratedDataSourceReadinessStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_NODE_STATUSES",
+        "GeneratedTopologyNodeStatus",
+        topology_node_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_NODE_STATUS_CLASS_BY_STATUS",
+        topology_node_status_class_by_status(),
+        "GeneratedTopologyNodeStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_EDGE_HEALTH_STATUSES",
+        "GeneratedTopologyEdgeHealthStatus",
+        topology_edge_health_statuses(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_EDGE_HEALTH_STATUS_CLASS_BY_STATUS",
+        topology_edge_health_status_class_by_status(),
+        "GeneratedTopologyEdgeHealthStatus",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_NEIGHBOR_STATES",
+        "GeneratedTopologyNeighborState",
+        topology_neighbor_states(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_NEIGHBOR_STATE_CLASS_BY_STATE",
+        topology_neighbor_state_class_by_state(),
+        "GeneratedTopologyNeighborState",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_PROBE_STATES",
+        "GeneratedTopologyProbeState",
+        topology_probe_states(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_PROBE_STATE_CLASS_BY_STATE",
+        topology_probe_state_class_by_state(),
+        "GeneratedTopologyProbeState",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_RUNTIME_STATES",
+        "GeneratedTopologyRuntimeState",
+        topology_runtime_states(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_RUNTIME_STATE_CLASS_BY_STATE",
+        topology_runtime_state_class_by_state(),
+        "GeneratedTopologyRuntimeState",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_OBSERVATION_STATES",
+        "GeneratedTopologyObservationState",
+        topology_observation_states(),
+    )?;
+    write_status_class_map(
+        &mut output,
+        "TOPOLOGY_OBSERVATION_STATE_CLASS_BY_STATE",
+        topology_observation_state_class_by_state(),
+        "GeneratedTopologyObservationState",
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_DRIFT_POLICIES",
+        "GeneratedTopologyDriftPolicy",
+        topology_drift_policies(),
+    )?;
+    write_domain_array(
+        &mut output,
+        "TOPOLOGY_DRIFT_ACTIONS",
+        "GeneratedTopologyDriftAction",
+        topology_drift_actions(),
+    )?;
+    write_contract_golden_vectors(&mut output)?;
     atomic_write(&output_path, &output)
+}
+
+fn write_domain_array(
+    output: &mut Vec<u8>,
+    name: &str,
+    type_name: &str,
+    values: &[&str],
+) -> io::Result<()> {
+    write_string_array(output, name, values)?;
+    writeln!(output, "export type {type_name} = typeof {name}[number];")
+}
+
+fn write_status_class_map(
+    output: &mut Vec<u8>,
+    name: &str,
+    values: &[(&str, &str)],
+    key_type: &str,
+) -> io::Result<()> {
+    write_string_map(
+        output,
+        name,
+        values,
+        key_type,
+        "GeneratedWorkflowStatusClass",
+    )
 }
 
 fn write_string_array(output: &mut Vec<u8>, name: &str, values: &[&str]) -> io::Result<()> {
@@ -157,6 +573,88 @@ fn write_string_map(
         output,
         "}} as const satisfies Record<{key_type}, {value_type}>;"
     )
+}
+
+fn write_bool_map(
+    output: &mut Vec<u8>,
+    name: &str,
+    values: &[(&str, &str)],
+    key_type: &str,
+) -> io::Result<()> {
+    writeln!(output, "\nexport const {name} = {{")?;
+    for (key, value) in values {
+        let required = *value == "exclusive";
+        writeln!(output, "  {key:?}: {required},")?;
+    }
+    writeln!(output, "}} as const satisfies Record<{key_type}, boolean>;")
+}
+
+fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
+    let session_id =
+        Uuid::parse_str("61616161-2222-4333-8444-555555555555").expect("static UUID is valid");
+    let vectors = [
+        (
+            "shell_argv",
+            JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
+        ),
+        (
+            "terminal_open",
+            JobCommand::TerminalOpen {
+                session_id,
+                argv: vec!["/bin/sh".to_string(), "-l".to_string()],
+                cwd: None,
+                user: None,
+                user_policy: TerminalUserPolicy::Fail,
+                cols: 120,
+                rows: 30,
+                replay_from_seq: None,
+                idle_timeout_secs: 1800,
+                flow_window_bytes: 64 * 1024,
+            },
+        ),
+        (
+            "file_transfer_start",
+            JobCommand::FileTransferStart {
+                session_id,
+                path: "/tmp/upload.bin".to_string(),
+                mode: 0o640,
+                size_bytes: 4,
+                sha256_hex: "11".repeat(32),
+                chunk_size_bytes: 64 * 1024,
+                rate_limit_kbps: 0,
+                existing_policy: FileExistingPolicy::Skip,
+                resume_token_hash: "22".repeat(32),
+            },
+        ),
+        (
+            "backup",
+            JobCommand::Backup {
+                paths: vec!["/etc/app.conf".to_string()],
+                include_config: false,
+                recipient_public_key_hex: None,
+            },
+        ),
+    ];
+    writeln!(
+        output,
+        "\nexport const PRIVILEGE_OPERATION_GOLDEN_VECTORS = ["
+    )?;
+    for (command_type, operation) in vectors {
+        let payload = String::from_utf8(encode_json(&operation).map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+        writeln!(
+            output,
+            "  {{ command_type: {command_type:?}, canonical_json: {payload:?} }},"
+        )?;
+    }
+    writeln!(
+        output,
+        "] as const satisfies readonly {{ command_type: string; canonical_json: string }}[];"
+    )?;
+    Ok(())
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {

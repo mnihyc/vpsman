@@ -1,12 +1,59 @@
 import type {
   GeneratedCreateJobRequestField,
+  GeneratedAgentUpdateReleaseStatus,
+  GeneratedBackupRequestStatus,
+  GeneratedDataSourceReadinessStatus,
+  GeneratedFleetAlertNotificationDeliveryProcessStatus,
+  GeneratedFleetAlertNotificationDeliveryStatus,
+  GeneratedMigrationLinkStatus,
+  GeneratedJobCommandType,
   GeneratedJobOperationType,
   GeneratedJobStatus,
   GeneratedJobTargetStatus,
+  GeneratedRestorePlanStatus,
+  GeneratedServerJobStatus,
+  GeneratedServerJobType,
+  GeneratedTopologyDriftAction,
+  GeneratedTopologyDriftPolicy,
+  GeneratedTopologyEdgeHealthStatus,
+  GeneratedTopologyNeighborState,
+  GeneratedTopologyNodeStatus,
+  GeneratedTopologyObservationState,
+  GeneratedTopologyProbeState,
+  GeneratedTopologyRuntimeState,
+  GeneratedTunnelEndpointStatus,
+  GeneratedTunnelPlanStatus,
+  GeneratedWebhookRuleDeliveryHistoryStatus,
+  GeneratedWebhookRuleDeliveryProcessStatus,
+  GeneratedWebhookRuleDeliveryStatus,
 } from "./generated/protocolContracts";
 
 export type JobStatus = GeneratedJobStatus;
 export type JobTargetStatus = GeneratedJobTargetStatus;
+export type JobCommandType = GeneratedJobCommandType;
+export type AgentUpdateReleaseStatus = GeneratedAgentUpdateReleaseStatus;
+export type BackupRequestStatus = GeneratedBackupRequestStatus;
+export type DataSourceReadinessStatus = GeneratedDataSourceReadinessStatus;
+export type FleetAlertNotificationDeliveryProcessStatus =
+  GeneratedFleetAlertNotificationDeliveryProcessStatus;
+export type FleetAlertNotificationDeliveryStatus = GeneratedFleetAlertNotificationDeliveryStatus;
+export type MigrationLinkStatus = GeneratedMigrationLinkStatus;
+export type RestorePlanStatus = GeneratedRestorePlanStatus;
+export type ServerJobStatus = GeneratedServerJobStatus;
+export type ServerJobType = GeneratedServerJobType;
+export type TopologyDriftAction = GeneratedTopologyDriftAction;
+export type TopologyDriftPolicy = GeneratedTopologyDriftPolicy;
+export type TopologyEdgeHealthStatus = GeneratedTopologyEdgeHealthStatus;
+export type TopologyNeighborState = GeneratedTopologyNeighborState;
+export type TopologyNodeStatus = GeneratedTopologyNodeStatus;
+export type TopologyObservationState = GeneratedTopologyObservationState;
+export type TopologyProbeState = GeneratedTopologyProbeState;
+export type TopologyRuntimeState = GeneratedTopologyRuntimeState;
+export type TunnelEndpointStatus = GeneratedTunnelEndpointStatus;
+export type TunnelPlanStatus = GeneratedTunnelPlanStatus;
+export type WebhookRuleDeliveryHistoryStatus = GeneratedWebhookRuleDeliveryHistoryStatus;
+export type WebhookRuleDeliveryProcessStatus = GeneratedWebhookRuleDeliveryProcessStatus;
+export type WebhookRuleDeliveryStatus = GeneratedWebhookRuleDeliveryStatus;
 
 export type FleetSummary = {
   total: number;
@@ -382,7 +429,7 @@ export type DashboardAlertSummaryRecord = {
 export type DashboardAgentSummaryRecord = {
   client_id: string;
   label: string;
-  status: string;
+  status: FleetAlertNotificationDeliveryStatus;
   tags: string[];
   drilldown: DashboardDrilldownRecord;
 };
@@ -503,7 +550,7 @@ export type FleetAlertNotificationDeliveryRecord = {
   alert_id: string;
   alert_severity: string;
   alert_category: string;
-  status: string;
+  status: FleetAlertNotificationDeliveryStatus;
   delivery_kind: string;
   target: string;
   dedupe_key: string;
@@ -530,7 +577,7 @@ export type FleetAlertNotificationDispatchRequest = {
 
 export type FleetAlertNotificationProcessRequest = {
   limit?: number;
-  status?: "queued" | "failed" | string | null;
+  status?: FleetAlertNotificationDeliveryProcessStatus | null;
   delivery_kind?: string | null;
   dry_run?: boolean;
   confirmed: boolean;
@@ -568,7 +615,7 @@ export type WebhookRuleDeliveryRecord = {
   rule_name: string;
   event_kind: string;
   event_id: string;
-  status: string;
+  status: WebhookRuleDeliveryStatus;
   target: string;
   dedupe_key: string;
   payload: JsonValue;
@@ -614,7 +661,7 @@ export type WebhookRuleDispatchRequest = {
 
 export type WebhookRuleProcessRequest = {
   limit?: number;
-  status?: "queued" | "failed" | string | null;
+  status?: WebhookRuleDeliveryProcessStatus | null;
   dry_run?: boolean;
   confirmed: boolean;
 };
@@ -622,7 +669,7 @@ export type WebhookRuleProcessRequest = {
 export type WebhookDeliveryRotationRequest = {
   older_than?: string | null;
   older_than_days?: number | null;
-  status?: string | null;
+  status?: WebhookRuleDeliveryHistoryStatus | null;
   rule_id?: string | null;
   confirmed: boolean;
 };
@@ -880,8 +927,8 @@ export type JobHistoryRecord = {
 
 export type ServerJobRecord = {
   id: string;
-  job_type: string;
-  status: string;
+  job_type: ServerJobType;
+  status: ServerJobStatus;
   expression: string | null;
   preview_hash: string | null;
   matched_count: number;
@@ -909,7 +956,8 @@ export type CommandTemplateRecord = {
   name: string;
   scope_kind: "global" | "provider" | "tag" | "client" | string;
   scope_value: string | null;
-  command_type: string;
+  command_type: JobCommandType;
+  display_group: string | null;
   operation: JobOperation;
   defaults: JsonValue;
   actor_id: string | null;
@@ -921,7 +969,7 @@ export type UpsertCommandTemplateRequest = {
   name: string;
   scope_kind: string;
   scope_value?: string | null;
-  command_type: string;
+  display_group?: string | null;
   operation: JobOperation;
   defaults?: JsonValue;
   confirmed: boolean;
@@ -1098,10 +1146,10 @@ export type TunnelPlanRecord = {
   kind: TunnelKind;
   left_client_id: string;
   right_client_id: string;
-  left_status: string;
-  right_status: string;
+  left_status: TunnelEndpointStatus;
+  right_status: TunnelEndpointStatus;
   recommended_ospf_cost: number;
-  status: string;
+  status: TunnelPlanStatus;
   last_apply_job_id: string | null;
   last_rollback_job_id: string | null;
   input: TunnelPlanInput;
@@ -1129,7 +1177,7 @@ export type PromoteTelemetryTunnelRequest = {
 export type TopologyGraphNode = {
   client_id: string;
   display_name: string;
-  status: string;
+  status: TopologyNodeStatus;
   tags: string[];
   tunnel_count: number;
   applied_tunnel_count: number;
@@ -1144,24 +1192,24 @@ export type TopologyGraphEdge = {
   kind: TunnelKind;
   left_client_id: string;
   right_client_id: string;
-  left_status: string;
-  right_status: string;
-  status: string;
-  health: string;
+  left_status: TunnelEndpointStatus;
+  right_status: TunnelEndpointStatus;
+  status: TunnelPlanStatus;
+  health: TopologyEdgeHealthStatus;
   convergence_blocked: boolean;
   offline_client_ids: string[];
   server_drift_reasons: string[];
-  topology_drift_policy: string;
-  topology_drift_action: string;
-  neighbor_state: string;
-  probe_state: string;
-  runtime_state: string;
+  topology_drift_policy: TopologyDriftPolicy;
+  topology_drift_action: TopologyDriftAction;
+  neighbor_state: TopologyNeighborState;
+  probe_state: TopologyObservationState;
+  runtime_state: TopologyRuntimeState;
   runtime_reasons: string[];
-  adapter_state: string;
-  routing_state: string;
-  kernel_link_probe_state: string;
-  kernel_neighbor_probe_state: string;
-  kernel_route_probe_state: string;
+  adapter_state: TopologyRuntimeState;
+  routing_state: TopologyRuntimeState;
+  kernel_link_probe_state: TopologyProbeState;
+  kernel_neighbor_probe_state: TopologyProbeState;
+  kernel_route_probe_state: TopologyProbeState;
   kernel_namespace_covered: boolean;
   desired_missing_count: number;
   stale_present_count: number;
@@ -1253,7 +1301,7 @@ export type AgentUpdateReleaseRecord = {
   name: string;
   version: string;
   channel: string;
-  status: string;
+  status: AgentUpdateReleaseStatus;
   artifact_sha256_hex: string;
   artifact_signature_provided: boolean;
   artifact_signature_sha256_hex: string | null;
@@ -1869,7 +1917,7 @@ export type BackupRequestRecord = {
   client_id: string;
   paths: string[];
   include_config: boolean;
-  status: string;
+  status: BackupRequestStatus;
   payload_hash: string;
   command_scope: string;
   artifact_id: string | null;
@@ -1985,7 +2033,7 @@ export type RestorePlanRecord = {
   paths: string[];
   include_config: boolean;
   destination_root: string | null;
-  status: string;
+  status: RestorePlanStatus;
   payload_hash: string;
   command_scope: string;
   note: string | null;
@@ -2002,7 +2050,7 @@ export type MigrationLinkRecord = {
   paths: string[];
   include_config: boolean;
   destination_root: string | null;
-  status: string;
+  status: MigrationLinkStatus;
   note: string | null;
   created_at: string;
 };
@@ -2178,7 +2226,7 @@ export type DataSourceStatusRecord = {
   preset_name: string;
   preset_scope: string;
   source_kind: string;
-  status: string;
+  status: DataSourceReadinessStatus;
   status_reason: string;
   evidence: JsonValue;
   assigned_at: string;

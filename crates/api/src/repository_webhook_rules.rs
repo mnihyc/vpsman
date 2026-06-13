@@ -4,7 +4,11 @@ use reqwest::Url;
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
-use vpsman_common::validate_template;
+use vpsman_common::{
+    validate_template, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+};
 
 use crate::{
     model::{AgentView, AuditLogView, AuthContext},
@@ -25,10 +29,6 @@ const MAX_EXPRESSION_BYTES: usize = 4096;
 const MAX_TARGET_BYTES: usize = 512;
 const MAX_TEMPLATE_BYTES: usize = 4096;
 const MAX_NOTES_BYTES: usize = 1024;
-const STATUS_DELIVERED: &str = "delivered";
-const STATUS_FAILED: &str = "failed";
-const STATUS_PERMANENTLY_FAILED: &str = "permanently_failed";
-const STATUS_QUEUED: &str = "queued";
 
 impl Repository {
     pub(crate) async fn list_webhook_rules(
@@ -343,7 +343,10 @@ impl Repository {
                     }) {
                         continue;
                     }
-                    let delivery = webhook_delivery_from_candidate(candidate, STATUS_QUEUED);
+                    let delivery = webhook_delivery_from_candidate(
+                        candidate,
+                        WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+                    );
                     deliveries.push(delivery.clone());
                     persisted.push(delivery);
                 }
@@ -370,7 +373,10 @@ impl Repository {
                     if duplicate {
                         continue;
                     }
-                    let delivery = webhook_delivery_from_candidate(candidate, STATUS_QUEUED);
+                    let delivery = webhook_delivery_from_candidate(
+                        candidate,
+                        WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+                    );
                     let row = insert_delivery_query(&delivery).fetch_one(&mut *tx).await?;
                     persisted.push(webhook_delivery_from_row(row)?);
                 }
@@ -588,14 +594,18 @@ impl Repository {
                     .find(|delivery| delivery.id == delivery_id)
                     .context("webhook rule delivery not found")?;
                 anyhow::ensure!(
-                    matches!(delivery.status.as_str(), STATUS_QUEUED | STATUS_FAILED),
+                    matches!(
+                        delivery.status.as_str(),
+                        WEBHOOK_RULE_DELIVERY_STATUS_QUEUED | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
+                    ),
                     "webhook rule delivery is not retryable"
                 );
                 delivery.status = status.to_string();
                 delivery.error = error;
                 delivery.attempt_count = delivery.attempt_count.saturating_add(1);
                 delivery.last_attempt_at = Some(now.clone());
-                delivery.delivered_at = (status == STATUS_DELIVERED).then_some(now);
+                delivery.delivered_at =
+                    (status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).then_some(now);
                 Ok(delivery.clone())
             }
             Self::Postgres(pool) => {
@@ -653,8 +663,8 @@ impl Repository {
         }
         let metadata = json!({
             "delivery_count": deliveries.len(),
-            "delivered_count": deliveries.iter().filter(|delivery| delivery.status == STATUS_DELIVERED).count(),
-            "failed_count": deliveries.iter().filter(|delivery| delivery.status == STATUS_FAILED).count(),
+            "delivered_count": deliveries.iter().filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).count(),
+            "failed_count": deliveries.iter().filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_FAILED).count(),
             "deliveries": deliveries.iter().take(100).map(|delivery| json!({
                 "id": delivery.id,
                 "rule_id": delivery.rule_id,
@@ -757,7 +767,7 @@ pub(crate) fn webhook_rule_from_request(
 pub(crate) fn dry_run_webhook_delivery(
     candidate: &WebhookRuleDeliveryCandidate,
 ) -> WebhookRuleDeliveryView {
-    webhook_delivery_from_candidate(candidate, "matched_dry_run")
+    webhook_delivery_from_candidate(candidate, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN)
 }
 
 pub(crate) fn validate_webhook_rule_target(target: &str) -> Result<()> {
@@ -895,7 +905,8 @@ fn webhook_delivery_from_candidate(
         last_attempt_at: None,
         actor_id: candidate.actor_id,
         created_at: unix_now().to_string(),
-        delivered_at: (status == STATUS_DELIVERED).then(|| unix_now().to_string()),
+        delivered_at: (status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED)
+            .then(|| unix_now().to_string()),
     }
 }
 
@@ -1163,7 +1174,10 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
             anyhow::ensure!(
                 matches!(
                     value,
-                    STATUS_QUEUED | STATUS_FAILED | STATUS_DELIVERED | STATUS_PERMANENTLY_FAILED
+                    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
+                        | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
+                        | WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED
+                        | WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED
                 ),
                 "webhook rule delivery status is invalid"
             );
@@ -1174,9 +1188,11 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
 
 fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {
     match status.trim() {
-        STATUS_DELIVERED => Ok(STATUS_DELIVERED),
-        STATUS_FAILED => Ok(STATUS_FAILED),
-        STATUS_PERMANENTLY_FAILED => Ok(STATUS_PERMANENTLY_FAILED),
+        WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED => Ok(WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED),
+        WEBHOOK_RULE_DELIVERY_STATUS_FAILED => Ok(WEBHOOK_RULE_DELIVERY_STATUS_FAILED),
+        WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED => {
+            Ok(WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED)
+        }
         _ => anyhow::bail!("webhook rule delivery attempt status is invalid"),
     }
 }
