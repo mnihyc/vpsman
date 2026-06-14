@@ -16,17 +16,3 @@ CREATE TABLE system_metric_rollups (
 
 CREATE INDEX system_metric_rollups_latest_idx
     ON system_metric_rollups (bucket_secs, bucket_start DESC, metric);
-
-ALTER TABLE history_retention_policies
-    DROP CONSTRAINT IF EXISTS history_retention_policies_domain_check;
-
-ALTER TABLE history_retention_policies
-    ADD CONSTRAINT history_retention_policies_domain_check CHECK (domain IN (
-        'audit_logs',
-        'system_metric_rollups',
-        'telemetry_rollups',
-        'job_outputs',
-        'backup_artifacts',
-        'network_observations',
-        'topology_history'
-    ));

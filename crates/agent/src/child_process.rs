@@ -32,6 +32,14 @@ pub(crate) struct ChildRunOutput {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     pub(crate) exit_code: Option<i32>,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
+    pub(crate) pty_truncated: bool,
+}
+
+struct BoundedReadOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 #[derive(Clone)]
@@ -155,17 +163,22 @@ async fn run_child(
         }
     };
     child.disarm();
+    let stdout = stdout_task
+        .await
+        .context("stdout reader task failed")?
+        .context("failed to read stdout")?;
+    let stderr = stderr_task
+        .await
+        .context("stderr reader task failed")?
+        .context("failed to read stderr")?;
 
     Ok(ChildRunResult::Completed(ChildRunOutput {
-        stdout: stdout_task
-            .await
-            .context("stdout reader task failed")?
-            .context("failed to read stdout")?,
-        stderr: stderr_task
-            .await
-            .context("stderr reader task failed")?
-            .context("failed to read stderr")?,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
         exit_code: status.code(),
+        stdout_truncated: stdout.truncated,
+        stderr_truncated: stderr.truncated,
+        pty_truncated: false,
     }))
 }
 
@@ -204,14 +217,18 @@ async fn run_pty(
         }
     };
     child.disarm();
+    let output = reader_task
+        .await
+        .context("pty reader task failed")?
+        .context("failed to read pty output")?;
 
     Ok(ChildRunResult::Completed(ChildRunOutput {
-        stdout: reader_task
-            .await
-            .context("pty reader task failed")?
-            .context("failed to read pty output")?,
+        stdout: output.bytes,
         stderr: Vec::new(),
         exit_code: status.code(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        pty_truncated: output.truncated,
     }))
 }
 
@@ -479,11 +496,12 @@ async fn read_bounded_pty_output_with_sink<R>(
     mut reader: R,
     max_output_bytes: usize,
     sink: Option<ChildOutputSink>,
-) -> std::io::Result<Vec<u8>>
+) -> std::io::Result<BoundedReadOutput>
 where
     R: AsyncRead + Unpin,
 {
     let mut captured = Vec::new();
+    let mut truncated = false;
     let mut pending_stream = Vec::new();
     let mut buffer = [0_u8; 8192];
     let mut flush_tick = time::interval(Duration::from_millis(STREAM_OUTPUT_FLUSH_MS));
@@ -496,9 +514,15 @@ where
                 let read = read?;
                 if read == 0 {
                     flush_pending_stream(&sink, OutputStream::Pty, &mut pending_stream).await;
-                    return Ok(captured);
+                    return Ok(BoundedReadOutput {
+                        bytes: captured,
+                        truncated,
+                    });
                 }
                 let remaining = max_output_bytes.saturating_sub(captured.len());
+                if read > remaining {
+                    truncated = true;
+                }
                 if remaining > 0 {
                     let captured_len = read.min(remaining);
                     let chunk = &buffer[..captured_len];
@@ -537,11 +561,12 @@ async fn read_bounded_output_with_sink<R>(
     max_output_bytes: usize,
     sink: Option<ChildOutputSink>,
     stream: OutputStream,
-) -> std::io::Result<Vec<u8>>
+) -> std::io::Result<BoundedReadOutput>
 where
     R: AsyncRead + Unpin,
 {
     let mut captured = Vec::new();
+    let mut truncated = false;
     let mut pending_stream = Vec::new();
     let mut buffer = [0_u8; 8192];
     let mut flush_tick = time::interval(Duration::from_millis(STREAM_OUTPUT_FLUSH_MS));
@@ -554,9 +579,15 @@ where
                 let read = read?;
                 if read == 0 {
                     flush_pending_stream(&sink, stream, &mut pending_stream).await;
-                    return Ok(captured);
+                    return Ok(BoundedReadOutput {
+                        bytes: captured,
+                        truncated,
+                    });
                 }
                 let remaining = max_output_bytes.saturating_sub(captured.len());
+                if read > remaining {
+                    truncated = true;
+                }
                 if remaining > 0 {
                     let captured_len = read.min(remaining);
                     let chunk = &buffer[..captured_len];
@@ -650,6 +681,69 @@ mod tests {
             streamed.extend_from_slice(&output.data);
         }
         assert_eq!(streamed, b"startend");
+    }
+
+    #[tokio::test]
+    async fn bounded_child_output_reports_stdout_truncation() {
+        let mut command = tokio::process::Command::new(TEST_SHELL);
+        command.arg("-lc").arg("printf '%080d' 0");
+
+        let output =
+            match run_child_with_bounded_output(command, 5, 64, ChildCleanupPolicy::ProcessGroup)
+                .await
+                .unwrap()
+            {
+                ChildRunResult::Completed(output) => output,
+                ChildRunResult::TimedOut(_) => panic!("child timed out"),
+            };
+
+        assert_eq!(output.stdout.len(), 64);
+        assert!(output.stdout_truncated);
+        assert!(!output.stderr_truncated);
+        assert!(!output.pty_truncated);
+        assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn bounded_child_output_reports_stderr_truncation() {
+        let mut command = tokio::process::Command::new(TEST_SHELL);
+        command.arg("-lc").arg("printf '%080d' 0 >&2");
+
+        let output =
+            match run_child_with_bounded_output(command, 5, 64, ChildCleanupPolicy::ProcessGroup)
+                .await
+                .unwrap()
+            {
+                ChildRunResult::Completed(output) => output,
+                ChildRunResult::TimedOut(_) => panic!("child timed out"),
+            };
+
+        assert_eq!(output.stderr.len(), 64);
+        assert!(!output.stdout_truncated);
+        assert!(output.stderr_truncated);
+        assert!(!output.pty_truncated);
+        assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn bounded_pty_output_reports_truncation() {
+        let mut command = tokio::process::Command::new(TEST_SHELL);
+        command.arg("-lc").arg("printf '%080d' 0");
+
+        let output =
+            match run_pty_with_bounded_output(command, 5, 64, ChildCleanupPolicy::ProcessGroup)
+                .await
+                .unwrap()
+            {
+                ChildRunResult::Completed(output) => output,
+                ChildRunResult::TimedOut(_) => panic!("pty command timed out"),
+            };
+
+        assert_eq!(output.stdout.len(), 64);
+        assert!(!output.stdout_truncated);
+        assert!(!output.stderr_truncated);
+        assert!(output.pty_truncated);
+        assert_eq!(output.exit_code, Some(0));
     }
 
     #[tokio::test]

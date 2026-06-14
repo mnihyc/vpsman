@@ -203,6 +203,7 @@ CREATE TABLE fleet_alert_notification_deliveries (
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at TIMESTAMPTZ,
+    CHECK (status IN ('queued', 'failed', 'delivered', 'matched_dry_run')),
     CHECK (alert_severity IN ('info', 'warning', 'critical')),
     CHECK (cooldown_until_unix >= 0)
 );
@@ -342,6 +343,7 @@ CREATE TABLE history_retention_policies (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (domain IN (
         'audit_logs',
+        'system_metric_rollups',
         'telemetry_rollups',
         'job_outputs',
         'backup_artifacts',

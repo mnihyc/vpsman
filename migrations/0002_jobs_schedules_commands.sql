@@ -65,26 +65,31 @@ CREATE TABLE jobs (
     request_fingerprint TEXT NOT NULL,
     timeout_secs BIGINT NOT NULL DEFAULT 30,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT jobs_status_common_check CHECK (status IN (
+        'queued',
+        'running',
+        'completed',
+        'partial_success',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    ))
 );
 
 CREATE INDEX jobs_scheduled_source_idx
     ON jobs (status, source_schedule_id)
     WHERE source_schedule_id IS NOT NULL;
 
-ALTER TABLE jobs
-  ADD CONSTRAINT jobs_status_common_check CHECK (status IN (
-    'queued',
-    'running',
-    'completed',
-    'partial_success',
-    'skipped',
-    'rejected',
-    'failed',
-    'agent_timeout',
-    'control_timeout',
-    'canceled'
-  ));
+CREATE INDEX jobs_created_idx
+    ON jobs (created_at DESC, id DESC);
+
+CREATE INDEX jobs_active_status_idx
+    ON jobs (status, id)
+    WHERE completed_at IS NULL;
 
 CREATE TABLE job_targets (
     job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -104,7 +109,19 @@ CREATE TABLE job_targets (
     cancel_acked_at TIMESTAMPTZ,
     result_received_at TIMESTAMPTZ,
     last_dispatch_error TEXT,
-    PRIMARY KEY (job_id, client_id)
+    PRIMARY KEY (job_id, client_id),
+    CONSTRAINT job_targets_status_common_check CHECK (status IN (
+        'queued',
+        'dispatching',
+        'running',
+        'completed',
+        'skipped',
+        'rejected',
+        'failed',
+        'agent_timeout',
+        'control_timeout',
+        'canceled'
+    ))
 );
 
 CREATE INDEX job_targets_dispatch_due_idx
@@ -117,19 +134,13 @@ CREATE INDEX job_targets_deadline_due_idx
     WHERE completed_at IS NULL
       AND status IN ('dispatching', 'running');
 
-ALTER TABLE job_targets
-  ADD CONSTRAINT job_targets_status_common_check CHECK (status IN (
-    'queued',
-    'dispatching',
-    'running',
-    'completed',
-    'skipped',
-    'rejected',
-    'failed',
-    'agent_timeout',
-    'control_timeout',
-    'canceled'
-  ));
+CREATE INDEX job_targets_active_status_idx
+    ON job_targets (status, job_id, client_id)
+    WHERE completed_at IS NULL;
+
+CREATE INDEX job_targets_recent_terminal_idx
+    ON job_targets (status, completed_at DESC, job_id, client_id)
+    WHERE completed_at IS NOT NULL;
 
 CREATE TABLE job_outputs (
     job_id UUID NOT NULL,
@@ -152,6 +163,9 @@ CREATE TABLE job_outputs (
 CREATE UNIQUE INDEX job_outputs_object_key_unique
     ON job_outputs (object_key)
     WHERE object_key IS NOT NULL;
+
+CREATE INDEX job_outputs_created_idx
+    ON job_outputs (created_at, job_id, client_id, seq);
 
 CREATE TABLE server_artifacts (
     id UUID PRIMARY KEY,
@@ -234,7 +248,42 @@ CREATE TABLE terminal_sessions (
     last_seq INTEGER NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_id, session_id),
-    CONSTRAINT terminal_sessions_argv_array CHECK (jsonb_typeof(argv) = 'array')
+    CONSTRAINT terminal_sessions_argv_array CHECK (jsonb_typeof(argv) = 'array'),
+    CONSTRAINT terminal_sessions_state_check
+        CHECK (state IN ('open', 'closed', 'missing', 'rejected', 'exited', 'unknown')),
+    CONSTRAINT terminal_sessions_last_status_check
+        CHECK (last_status IN (
+            'opened',
+            'attached',
+            'rejected',
+            'accepted',
+            'duplicate_ignored',
+            'polled',
+            'resized',
+            'closed',
+            'missing',
+            'streaming',
+            'exited',
+            'idle_timeout',
+            'unknown'
+        )),
+    CONSTRAINT terminal_sessions_last_event_check
+        CHECK (last_event IN (
+            'terminal_open',
+            'terminal_input',
+            'terminal_poll',
+            'terminal_resize',
+            'terminal_close',
+            'terminal_stream'
+        )),
+    CONSTRAINT terminal_sessions_last_command_type_check
+        CHECK (last_command_type IN (
+            'terminal_open',
+            'terminal_input',
+            'terminal_poll',
+            'terminal_resize',
+            'terminal_close'
+        ))
 );
 
 CREATE INDEX terminal_sessions_observed_idx
@@ -269,7 +318,64 @@ CREATE TABLE command_templates (
         (scope_kind = 'global' AND scope_value IS NULL)
         OR (scope_kind <> 'global' AND scope_value IS NOT NULL)
     ),
-    CHECK (display_group IS NULL OR length(display_group) BETWEEN 1 AND 64),
+    CONSTRAINT command_templates_display_group_check
+        CHECK (display_group IS NULL OR length(display_group) BETWEEN 1 AND 64),
+    CONSTRAINT command_templates_command_type_check
+        CHECK (command_type IN (
+            'shell_argv',
+            'shell_pty',
+            'shell_script',
+            'terminal_open',
+            'terminal_input',
+            'terminal_poll',
+            'terminal_resize',
+            'terminal_close',
+            'config_read',
+            'hot_config',
+            'data_source_config_patch',
+            'agent_update',
+            'agent_update_activate',
+            'agent_update_rollback',
+            'agent_update_check',
+            'file_pull',
+            'file_push',
+            'file_push_chunked',
+            'file_transfer_start',
+            'file_transfer_chunk',
+            'file_transfer_commit',
+            'file_transfer_abort',
+            'file_transfer_download_start',
+            'file_transfer_download_chunk',
+            'file_stat',
+            'file_list_dir',
+            'file_read_text',
+            'file_mkdir',
+            'file_write_text',
+            'file_rename',
+            'file_delete',
+            'file_chmod',
+            'file_chown',
+            'file_copy',
+            'file_download',
+            'file_archive_tar',
+            'user_sessions',
+            'process_list',
+            'process_start',
+            'process_stop',
+            'process_restart',
+            'process_status',
+            'process_logs',
+            'backup',
+            'restore',
+            'restore_rollback',
+            'network_apply',
+            'network_ospf_cost_update',
+            'network_rollback',
+            'network_status',
+            'network_interfaces',
+            'network_probe',
+            'network_speed_test'
+        )),
     CHECK (jsonb_typeof(operation) = 'object'),
     CHECK (jsonb_typeof(defaults) = 'object')
 );

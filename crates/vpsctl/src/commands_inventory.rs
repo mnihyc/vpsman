@@ -396,7 +396,7 @@ pub(crate) fn telemetry_network_rates(
     }
     let mut path = format!(
         "/api/v1/telemetry/network-rates?limit={}",
-        limit.clamp(1, 200)
+        limit.clamp(1, 5_000)
     );
     if let Some(client_id) = client_id {
         anyhow::ensure!(

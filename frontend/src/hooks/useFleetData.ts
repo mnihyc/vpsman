@@ -31,6 +31,7 @@ import type {
 } from "../types";
 
 const FLEET_DETAIL_LIMIT = 200;
+const FLEET_NETWORK_RATE_LIMIT = 5_000;
 
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [summary, setSummary] = useState<FleetSummary>(emptySummary);
@@ -102,7 +103,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           apiToken,
         ),
         apiGet<TelemetryNetworkRateRecord[]>(
-          `/api/v1/telemetry/network-rates?limit=${FLEET_DETAIL_LIMIT}`,
+          `/api/v1/telemetry/network-rates?limit=${FLEET_NETWORK_RATE_LIMIT}`,
           apiToken,
         ),
         apiGet<TelemetryTunnelRecord[]>(

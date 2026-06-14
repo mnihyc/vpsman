@@ -67,7 +67,29 @@ CREATE TABLE file_transfer_sessions (
     handoff_available BOOLEAN NOT NULL DEFAULT FALSE,
     handoff_object_key TEXT,
     handoff_download_path TEXT,
-    PRIMARY KEY (client_id, session_id)
+    PRIMARY KEY (client_id, session_id),
+    CONSTRAINT file_transfer_sessions_direction_check
+        CHECK (direction IN ('upload', 'download')),
+    CONSTRAINT file_transfer_sessions_status_check
+        CHECK (status IN ('started', 'transferring', 'completed', 'aborted', 'unknown')),
+    CONSTRAINT file_transfer_sessions_last_event_check
+        CHECK (last_event IN (
+            'file_transfer_start',
+            'file_transfer_chunk_ack',
+            'file_transfer_commit',
+            'file_transfer_abort',
+            'file_transfer_download_start',
+            'file_transfer_download_chunk'
+        )),
+    CONSTRAINT file_transfer_sessions_last_command_type_check
+        CHECK (last_command_type IN (
+            'file_transfer_start',
+            'file_transfer_chunk',
+            'file_transfer_commit',
+            'file_transfer_abort',
+            'file_transfer_download_start',
+            'file_transfer_download_chunk'
+        ))
 );
 
 CREATE INDEX file_transfer_sessions_observed_idx

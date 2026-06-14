@@ -35,6 +35,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_argv_command_reports_truncated_stdout_in_status() {
+        let outputs = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::Shell {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "head -c 70000 /dev/zero | tr '\\0' x".to_string(),
+                ],
+                pty: false,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stdout_bytes(&outputs).len(), 64 * 1024);
+        let status = outputs
+            .iter()
+            .find(|output| output.done && output.stream == OutputStream::Status)
+            .expect("status output");
+        assert_eq!(status.exit_code, Some(0));
+        let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(payload["type"], "shell_argv");
+        assert_eq!(payload["output_truncated"], true);
+        assert_eq!(payload["stdout_truncated"], true);
+        assert_eq!(payload["stderr_truncated"], false);
+        assert_eq!(payload["output_limit_bytes"], 64 * 1024);
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("command output truncated"));
+    }
+
+    #[tokio::test]
+    async fn execute_argv_command_reports_truncated_stderr_in_status() {
+        let outputs = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::Shell {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "head -c 70000 /dev/zero | tr '\\0' x >&2".to_string(),
+                ],
+                pty: false,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stderr_bytes(&outputs).len(), 64 * 1024);
+        let status = outputs
+            .iter()
+            .find(|output| output.done && output.stream == OutputStream::Status)
+            .expect("status output");
+        assert_eq!(status.exit_code, Some(0));
+        let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(payload["type"], "shell_argv");
+        assert_eq!(payload["output_truncated"], true);
+        assert_eq!(payload["stdout_truncated"], false);
+        assert_eq!(payload["stderr_truncated"], true);
+        assert_eq!(payload["output_limit_bytes"], 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn execute_pty_command_reports_truncation_in_status() {
+        let outputs = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::Shell {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "head -c 70000 /dev/zero | tr '\\0' x".to_string(),
+                ],
+                pty: true,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pty_bytes(&outputs).len(), 64 * 1024);
+        let status = outputs
+            .iter()
+            .find(|output| output.done && output.stream == OutputStream::Status)
+            .expect("status output");
+        assert_eq!(status.exit_code, Some(0));
+        let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(payload["type"], "shell_pty");
+        assert_eq!(payload["output_truncated"], true);
+        assert_eq!(payload["pty_truncated"], true);
+        assert_eq!(payload["output_limit_bytes"], 64 * 1024);
+    }
+
+    #[tokio::test]
     async fn execute_pty_argv_command_uses_pty_stream() {
         let outputs = execute_job_command(
             uuid::Uuid::new_v4(),
@@ -1326,6 +1422,22 @@ mod tests {
         outputs
             .iter()
             .filter(|output| output.stream == OutputStream::Stdout)
+            .flat_map(|output| output.data.clone())
+            .collect()
+    }
+
+    fn stderr_bytes(outputs: &[vpsman_common::CommandOutput]) -> Vec<u8> {
+        outputs
+            .iter()
+            .filter(|output| output.stream == OutputStream::Stderr)
+            .flat_map(|output| output.data.clone())
+            .collect()
+    }
+
+    fn pty_bytes(outputs: &[vpsman_common::CommandOutput]) -> Vec<u8> {
+        outputs
+            .iter()
+            .filter(|output| output.stream == OutputStream::Pty)
             .flat_map(|output| output.data.clone())
             .collect()
     }

@@ -543,6 +543,9 @@ fn target_status_needs_reason(status: &str) -> bool {
     !matches!(status, TARGET_STATUS_RUNNING | TARGET_STATUS_COMPLETED)
 }
 
+pub(crate) const COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE: &str =
+    "command completed without numeric exit code";
+
 fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status: &str) -> String {
     if let Some(message) = outputs.iter().rev().find_map(status_output_message) {
         return message;
@@ -553,6 +556,25 @@ fn target_message_from_outputs(outputs: &[CommandOutput], fallback: &str, status
     } else {
         trimmed.to_string()
     }
+}
+
+pub(crate) fn target_message_for_status(
+    outputs: &[CommandOutput],
+    fallback: &str,
+    status: &str,
+    final_output: Option<&CommandOutput>,
+) -> String {
+    if status == TARGET_STATUS_FAILED
+        && final_output.is_some_and(|output| output.done && output.exit_code.is_none())
+        && outputs
+            .iter()
+            .rev()
+            .find_map(status_output_message)
+            .is_none()
+    {
+        return COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE.to_string();
+    }
+    target_message_from_outputs(outputs, fallback, status)
 }
 
 fn status_output_message(output: &CommandOutput) -> Option<String> {
@@ -794,20 +816,9 @@ pub(crate) fn target_outcome_from_gateway(
         };
     }
     let final_output = result.outputs.iter().rev().find(|output| output.done);
-    let exit_code = final_output.and_then(|output| output.exit_code);
-    let status = if final_output.is_some_and(output_indicates_rejected) {
-        TARGET_STATUS_REJECTED
-    } else if final_output.is_some_and(output_indicates_timeout) {
-        TARGET_STATUS_AGENT_TIMEOUT
-    } else {
-        match exit_code {
-            Some(0) => TARGET_STATUS_COMPLETED,
-            Some(_) => TARGET_STATUS_FAILED,
-            None => TARGET_STATUS_RUNNING,
-        }
-    };
+    let (status, exit_code) = target_status_from_final_output(final_output);
     let message = if target_status_needs_reason(status) {
-        target_message_from_outputs(&result.outputs, &result.message, status)
+        target_message_for_status(&result.outputs, &result.message, status, final_output)
     } else {
         result.message
     };
@@ -820,6 +831,25 @@ pub(crate) fn target_outcome_from_gateway(
         message,
         received_at: None,
         outputs: result.outputs,
+    }
+}
+
+pub(crate) fn target_status_from_final_output(
+    final_output: Option<&CommandOutput>,
+) -> (&'static str, Option<i32>) {
+    let Some(final_output) = final_output else {
+        return (TARGET_STATUS_RUNNING, None);
+    };
+    let exit_code = final_output.exit_code;
+    if output_indicates_rejected(final_output) {
+        (TARGET_STATUS_REJECTED, exit_code)
+    } else if output_indicates_timeout(final_output) {
+        (TARGET_STATUS_AGENT_TIMEOUT, exit_code)
+    } else {
+        match exit_code {
+            Some(0) => (TARGET_STATUS_COMPLETED, exit_code),
+            Some(_) | None => (TARGET_STATUS_FAILED, exit_code),
+        }
     }
 }
 

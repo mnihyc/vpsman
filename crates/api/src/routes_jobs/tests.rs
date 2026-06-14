@@ -99,6 +99,52 @@ fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
 }
 
 #[test]
+fn gateway_done_output_without_exit_code_maps_to_failed() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        command_version: 1,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: Vec::new(),
+            exit_code: None,
+            done: true,
+        }],
+    });
+
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.exit_code, None);
+    assert_eq!(outcome.message, COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE);
+}
+
+#[test]
+fn gateway_output_without_done_marker_stays_running() {
+    let job_id = Uuid::new_v4();
+    let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
+        client_id: "client-a".to_string(),
+        job_id,
+        command_version: 1,
+        accepted: true,
+        message: "accepted".to_string(),
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"still running".to_vec(),
+            exit_code: None,
+            done: false,
+        }],
+    });
+
+    assert_eq!(outcome.status, "running");
+    assert_eq!(outcome.exit_code, None);
+    assert_eq!(outcome.message, "accepted");
+}
+
+#[test]
 fn protocol_mismatch_detects_unsupported_command_status_output() {
     let job_id = Uuid::new_v4();
     let outcome = TargetDispatchOutcome {

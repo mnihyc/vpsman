@@ -314,6 +314,18 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
+            "telemetry-network-rates --limit 5000 --client-id edge/a --interface eth0 --bucket-secs 60",
+        )
+        .unwrap(),
+        VtyInventoryCommand::TelemetryNetworkRates {
+            limit: 5000,
+            client_id: Some("edge/a".to_string()),
+            interface: Some("eth0".to_string()),
+            bucket_secs: Some(60),
+        }
+    );
+    assert_eq!(
+        parse_vty_inventory_command(
             "telemetry-tunnels --limit 20 --client-id edge/a --interface tun0"
         )
         .unwrap(),
@@ -339,6 +351,10 @@ fn rejects_invalid_inventory_commands() {
     assert!(parse_vty_inventory_command("unknown").is_err());
     assert!(gateway_sessions_path("gateway-sessions --limit=0").is_err());
     assert!(gateway_sessions_path("gateway-sessions extra").is_err());
+    assert!(
+        parse_vty_inventory_command("telemetry-network-rates --limit 5001 --bucket-secs 60")
+            .is_err()
+    );
     assert_eq!(
         telemetry_rollups_path(10, Some("edge/a"), Some(60)),
         "/api/v1/telemetry/rollups?limit=10&client_id=edge%2Fa&bucket_secs=60"
@@ -346,6 +362,10 @@ fn rejects_invalid_inventory_commands() {
     assert_eq!(
         telemetry_network_rates_path(10, Some("edge/a"), Some("eth/0"), Some(60)),
         "/api/v1/telemetry/network-rates?limit=10&client_id=edge%2Fa&interface=eth%2F0&bucket_secs=60"
+    );
+    assert_eq!(
+        telemetry_network_rates_path(5000, Some("edge/a"), Some("eth/0"), Some(60)),
+        "/api/v1/telemetry/network-rates?limit=5000&client_id=edge%2Fa&interface=eth%2F0&bucket_secs=60"
     );
     assert_eq!(
         telemetry_tunnels_path(10, Some("edge/a"), Some("tun/0")),

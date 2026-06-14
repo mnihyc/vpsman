@@ -22,6 +22,122 @@ fn generated_operator_tokens_are_hashed_for_storage() {
     assert_eq!(token_hash(&token), hash);
 }
 
+#[tokio::test]
+async fn bootstrap_operator_rejects_second_admin_in_repository() {
+    let repo = Repository::Memory(MemoryState::default());
+
+    repo.bootstrap_operator(&BootstrapOperatorRequest {
+        username: "admin".to_string(),
+        password: "admin-password-123".to_string(),
+    })
+    .await
+    .unwrap();
+    let error = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "other-admin".to_string(),
+            password: "other-admin-password-123".to_string(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "operator_already_bootstrapped");
+    assert_eq!(repo.operator_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_bootstrap_operator_creates_exactly_one_admin() {
+    let repo = Repository::Memory(MemoryState::default());
+    let mut tasks = Vec::new();
+
+    for index in 0..16 {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            repo.bootstrap_operator(&BootstrapOperatorRequest {
+                username: format!("admin-{index}"),
+                password: "admin-password-123".to_string(),
+            })
+            .await
+            .map(|auth| auth.operator.username)
+        }));
+    }
+
+    let mut created = Vec::new();
+    let mut rejected = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(username) => created.push(username),
+            Err(error) if error.to_string() == "operator_already_bootstrapped" => rejected += 1,
+            Err(error) => panic!("unexpected bootstrap error: {error}"),
+        }
+    }
+
+    assert_eq!(created.len(), 1);
+    assert_eq!(rejected, 15);
+    assert_eq!(repo.operator_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn refresh_operator_session_rotates_refresh_token_once() {
+    let repo = Repository::Memory(MemoryState::default());
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let replacement = repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap();
+    assert!(replacement.is_some());
+    let replay = repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap();
+
+    assert!(replay.is_none());
+}
+
+#[tokio::test]
+async fn concurrent_refresh_operator_session_mints_one_replacement() {
+    let repo = Repository::Memory(MemoryState::default());
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut tasks = Vec::new();
+
+    for _ in 0..16 {
+        let repo = repo.clone();
+        let refresh_token = auth.refresh_token.clone();
+        tasks.push(tokio::spawn(async move {
+            repo.refresh_operator_session(&refresh_token).await
+        }));
+    }
+
+    let mut replacements = 0;
+    let mut rejected = 0;
+    for task in tasks {
+        match task.await.unwrap().unwrap() {
+            Some(_) => replacements += 1,
+            None => rejected += 1,
+        }
+    }
+
+    assert_eq!(replacements, 1);
+    assert_eq!(rejected, 15);
+    assert!(repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .is_none());
+}
+
 #[test]
 fn operator_roles_are_ranked_for_authorization() {
     assert!(role_allows("admin", "operator"));

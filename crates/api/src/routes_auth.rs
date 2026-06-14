@@ -25,7 +25,13 @@ pub(crate) async fn bootstrap_operator(
     if state.repo.operator_count().await? > 0 {
         return Err(ApiError::conflict("operator_already_bootstrapped"));
     }
-    Ok(Json(state.repo.bootstrap_operator(&request).await?))
+    match state.repo.bootstrap_operator(&request).await {
+        Ok(response) => Ok(Json(response)),
+        Err(error) if error.to_string() == "operator_already_bootstrapped" => {
+            Err(ApiError::conflict("operator_already_bootstrapped"))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn login_operator(

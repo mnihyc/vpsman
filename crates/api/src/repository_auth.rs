@@ -41,10 +41,26 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
-                memory.operators.write().await.push(operator.clone());
+                let mut operators = memory.operators.write().await;
+                if !operators.is_empty() {
+                    anyhow::bail!("operator_already_bootstrapped");
+                }
+                operators.push(operator.clone());
+                drop(operators);
                 self.issue_session(operator.view()).await
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.bootstrap_operator'))")
+                    .execute(&mut *tx)
+                    .await?;
+                let row = sqlx::query("SELECT count(*) AS count FROM operators")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let operator_count: i64 = row.try_get("count")?;
+                if operator_count > 0 {
+                    anyhow::bail!("operator_already_bootstrapped");
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO operators (id, username, password_hash, role, scopes, preferences)
@@ -57,9 +73,12 @@ impl Repository {
                 .bind(&operator.role)
                 .bind(serde_json::json!(operator.scopes))
                 .bind(serde_json::json!(operator.preferences))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
-                self.issue_session(operator.view()).await
+                let session = PreparedOperatorSession::new();
+                insert_operator_session_in_tx(&mut tx, operator.id, &session).await?;
+                tx.commit().await?;
+                Ok(session.auth_response(operator.view()))
             }
         }
     }
@@ -122,12 +141,17 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
+                    WITH revoked AS (
+                        UPDATE operator_sessions
+                        SET revoked_at = now()
+                        WHERE refresh_token_hash = $1
+                          AND refresh_expires_at > now()
+                          AND revoked_at IS NULL
+                        RETURNING operator_id
+                    )
                     SELECT o.id, o.username, o.role, o.scopes, o.preferences, o.totp_enabled
-                    FROM operator_sessions s
-                    JOIN operators o ON o.id = s.operator_id
-                    WHERE s.refresh_token_hash = $1
-                      AND s.refresh_expires_at > now()
-                      AND s.revoked_at IS NULL
+                    FROM revoked
+                    JOIN operators o ON o.id = revoked.operator_id
                     "#,
                 )
                 .bind(&refresh_hash)
@@ -136,16 +160,6 @@ impl Repository {
                 let Some(row) = row else {
                     return Ok(None);
                 };
-                sqlx::query(
-                    r#"
-                    UPDATE operator_sessions
-                    SET revoked_at = now()
-                    WHERE refresh_token_hash = $1
-                    "#,
-                )
-                .bind(&refresh_hash)
-                .execute(&mut *tx)
-                .await?;
                 tx.commit().await?;
                 let operator = OperatorView {
                     id: row.try_get("id")?,
@@ -684,62 +698,122 @@ impl Repository {
     }
 
     pub(crate) async fn issue_session(&self, operator: OperatorView) -> Result<AuthResponse> {
-        let access_token = generate_token();
-        let refresh_token = generate_token();
-        let session_id = Uuid::new_v4();
-        let now = unix_now();
-        let expires_unix = now.saturating_add(ACCESS_TOKEN_TTL_SECS);
-        let refresh_expires_unix = now.saturating_add(REFRESH_TOKEN_TTL_SECS);
-        let access_hash = token_hash(&access_token);
-        let refresh_hash = token_hash(&refresh_token);
+        let session = PreparedOperatorSession::new();
 
         match self {
             Self::Memory(memory) => {
                 memory.sessions.write().await.push(OperatorSessionRecord {
-                    session_id,
-                    access_token_hash: access_hash,
-                    refresh_token_hash: refresh_hash,
+                    session_id: session.session_id,
+                    access_token_hash: session.access_hash.clone(),
+                    refresh_token_hash: session.refresh_hash.clone(),
                     operator_id: operator.id,
-                    expires_unix,
-                    refresh_expires_unix,
-                    created_unix: now,
+                    expires_unix: session.expires_unix,
+                    refresh_expires_unix: session.refresh_expires_unix,
+                    created_unix: session.created_unix,
                     revoked: false,
                 });
             }
             Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO operator_sessions (
-                        id, operator_id, access_token_hash, refresh_token_hash,
-                        expires_at, refresh_expires_at
-                    )
-                    VALUES (
-                        $1, $2, $3, $4,
-                        to_timestamp($5::double precision),
-                        to_timestamp($6::double precision)
-                    )
-                    "#,
-                )
-                .bind(session_id)
-                .bind(operator.id)
-                .bind(&access_hash)
-                .bind(&refresh_hash)
-                .bind(expires_unix as f64)
-                .bind(refresh_expires_unix as f64)
-                .execute(pool)
-                .await?;
+                insert_operator_session(pool, operator.id, &session).await?;
             }
         }
 
-        Ok(AuthResponse {
-            token_type: "Bearer",
+        Ok(session.auth_response(operator))
+    }
+}
+
+struct PreparedOperatorSession {
+    access_token: String,
+    refresh_token: String,
+    session_id: Uuid,
+    created_unix: u64,
+    expires_unix: u64,
+    refresh_expires_unix: u64,
+    access_hash: String,
+    refresh_hash: String,
+}
+
+impl PreparedOperatorSession {
+    fn new() -> Self {
+        let access_token = generate_token();
+        let refresh_token = generate_token();
+        let session_id = Uuid::new_v4();
+        let created_unix = unix_now();
+        let expires_unix = created_unix.saturating_add(ACCESS_TOKEN_TTL_SECS);
+        let refresh_expires_unix = created_unix.saturating_add(REFRESH_TOKEN_TTL_SECS);
+        let access_hash = token_hash(&access_token);
+        let refresh_hash = token_hash(&refresh_token);
+
+        Self {
             access_token,
             refresh_token,
+            session_id,
+            created_unix,
+            expires_unix,
+            refresh_expires_unix,
+            access_hash,
+            refresh_hash,
+        }
+    }
+
+    fn auth_response(self, operator: OperatorView) -> AuthResponse {
+        AuthResponse {
+            token_type: "Bearer",
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
             expires_in_secs: ACCESS_TOKEN_TTL_SECS,
             refresh_expires_in_secs: REFRESH_TOKEN_TTL_SECS,
             operator,
-        })
+        }
     }
+}
+
+async fn insert_operator_session(
+    pool: &sqlx::PgPool,
+    operator_id: Uuid,
+    session: &PreparedOperatorSession,
+) -> Result<()> {
+    sqlx::query(operator_session_insert_sql())
+        .bind(session.session_id)
+        .bind(operator_id)
+        .bind(&session.access_hash)
+        .bind(&session.refresh_hash)
+        .bind(session.expires_unix as f64)
+        .bind(session.refresh_expires_unix as f64)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn insert_operator_session_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operator_id: Uuid,
+    session: &PreparedOperatorSession,
+) -> Result<()> {
+    sqlx::query(operator_session_insert_sql())
+        .bind(session.session_id)
+        .bind(operator_id)
+        .bind(&session.access_hash)
+        .bind(&session.refresh_hash)
+        .bind(session.expires_unix as f64)
+        .bind(session.refresh_expires_unix as f64)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+fn operator_session_insert_sql() -> &'static str {
+    r#"
+    INSERT INTO operator_sessions (
+        id, operator_id, access_token_hash, refresh_token_hash,
+        expires_at, refresh_expires_at
+    )
+    VALUES (
+        $1, $2, $3, $4,
+        to_timestamp($5::double precision),
+        to_timestamp($6::double precision)
+    )
+    "#
 }
 
 pub(crate) fn parse_scopes(value: serde_json::Value) -> Vec<String> {

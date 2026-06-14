@@ -1426,7 +1426,7 @@ async fn process_due_schedule(
             materialize_due_schedule(&mut tx, &schedule, run_index, run_count, dispatch_config)
                 .await?;
         }
-        advance_schedule_after_success(&mut tx, &schedule, run_count).await?;
+        advance_schedule_after_materialization(&mut tx, &schedule, run_count).await?;
         tx.commit().await?;
         Ok(run_count as usize)
     }
@@ -1993,7 +1993,7 @@ fn schedule_job_predicates(
     predicates
 }
 
-async fn advance_schedule_after_success(
+async fn advance_schedule_after_materialization(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
     run_count: i64,
@@ -2005,8 +2005,6 @@ async fn advance_schedule_after_success(
         SET
             last_run_at = now(),
             next_run_at = to_timestamp($2),
-            failure_count = 0,
-            last_error = NULL,
             updated_at = now()
         WHERE id = $1
         "#,

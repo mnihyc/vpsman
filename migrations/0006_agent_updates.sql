@@ -23,7 +23,9 @@ CREATE TABLE agent_update_releases (
     rollback_size_bytes BIGINT,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (name, version, channel)
+    UNIQUE (name, version, channel),
+    CONSTRAINT agent_update_releases_status_check
+        CHECK (status IN ('published_metadata_only', 'artifact_hosted'))
 );
 
 CREATE INDEX agent_update_releases_channel_created_idx

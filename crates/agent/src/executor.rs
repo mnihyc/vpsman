@@ -12,7 +12,7 @@ use crate::{
     child_process::{
         run_child_with_bounded_output, run_child_with_streaming_output,
         run_pty_with_bounded_output, run_pty_with_streaming_output, ChildCleanupPolicy,
-        ChildOutputSink, ChildRunResult,
+        ChildOutputSink, ChildRunOutput, ChildRunResult,
     },
     file_browser::execute_file_browser_command,
     file_download::{
@@ -36,6 +36,8 @@ use crate::{
 };
 
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+const COMMAND_OUTPUT_TRUNCATED_MESSAGE: &str =
+    "command output truncated; only first 65536 bytes per stream were retained";
 const PRESET_USER_SESSIONS_W: &str = "/usr/bin/w";
 const PRESET_USER_SESSIONS_WHO: &str = "/usr/bin/who";
 
@@ -496,6 +498,7 @@ async fn execute_child_with_output(
             }]);
         }
     };
+    let status_data = command_status_data(mode, &output, success_status)?;
     let mut outputs = Vec::new();
     if !streaming && !output.stdout.is_empty() {
         outputs.push(CommandOutput {
@@ -518,10 +521,7 @@ async fn execute_child_with_output(
     outputs.push(CommandOutput {
         job_id,
         stream: OutputStream::Status,
-        data: match success_status {
-            Some(status) => serde_json::to_vec(&status)?,
-            None => Vec::new(),
-        },
+        data: status_data,
         exit_code: output.exit_code,
         done: true,
     });
@@ -576,6 +576,7 @@ async fn execute_pty_child_with_output(
             }]);
         }
     };
+    let status_data = pty_status_data(&output)?;
     let mut outputs = Vec::new();
     if !streaming && !output.stdout.is_empty() {
         outputs.push(CommandOutput {
@@ -589,14 +590,80 @@ async fn execute_pty_child_with_output(
     outputs.push(CommandOutput {
         job_id,
         stream: OutputStream::Status,
-        data: serde_json::to_vec(&serde_json::json!({
-            "type": "shell_pty",
-            "pty": true,
-        }))?,
+        data: status_data,
         exit_code: output.exit_code,
         done: true,
     });
     Ok(outputs)
+}
+
+fn command_status_data(
+    mode: &'static str,
+    output: &ChildRunOutput,
+    success_status: Option<serde_json::Value>,
+) -> Result<Vec<u8>> {
+    let output_truncated = output.stdout_truncated || output.stderr_truncated;
+    if !output_truncated {
+        return match success_status {
+            Some(status) => Ok(serde_json::to_vec(&status)?),
+            None => Ok(Vec::new()),
+        };
+    }
+    let mut status = success_status.unwrap_or_else(|| serde_json::json!({ "type": mode }));
+    if !status.is_object() {
+        status = serde_json::json!({
+            "type": mode,
+            "status": status,
+        });
+    }
+    if let Some(object) = status.as_object_mut() {
+        object.insert(
+            "message".to_string(),
+            serde_json::Value::String(COMMAND_OUTPUT_TRUNCATED_MESSAGE.to_string()),
+        );
+        object.insert(
+            "output_truncated".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        object.insert(
+            "stdout_truncated".to_string(),
+            serde_json::Value::Bool(output.stdout_truncated),
+        );
+        object.insert(
+            "stderr_truncated".to_string(),
+            serde_json::Value::Bool(output.stderr_truncated),
+        );
+        object.insert(
+            "output_limit_bytes".to_string(),
+            serde_json::json!(MAX_COMMAND_OUTPUT_BYTES),
+        );
+    }
+    Ok(serde_json::to_vec(&status)?)
+}
+
+fn pty_status_data(output: &ChildRunOutput) -> Result<Vec<u8>> {
+    let mut status = serde_json::json!({
+        "type": "shell_pty",
+        "pty": true,
+    });
+    if output.pty_truncated {
+        if let Some(object) = status.as_object_mut() {
+            object.insert(
+                "message".to_string(),
+                serde_json::Value::String(COMMAND_OUTPUT_TRUNCATED_MESSAGE.to_string()),
+            );
+            object.insert(
+                "output_truncated".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            object.insert("pty_truncated".to_string(), serde_json::Value::Bool(true));
+            object.insert(
+                "output_limit_bytes".to_string(),
+                serde_json::json!(MAX_COMMAND_OUTPUT_BYTES),
+            );
+        }
+    }
+    Ok(serde_json::to_vec(&status)?)
 }
 
 fn validate_shell_script(script: &str) -> Result<()> {

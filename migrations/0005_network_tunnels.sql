@@ -27,7 +27,13 @@ CREATE TABLE tunnel_plans (
     last_apply_job_id UUID REFERENCES jobs(id),
     last_rollback_job_id UUID REFERENCES jobs(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT tunnel_plans_status_check
+        CHECK (status IN ('planned', 'applied', 'partially_applied', 'rolled_back', 'partially_rolled_back')),
+    CONSTRAINT tunnel_plans_left_status_check
+        CHECK (left_status IN ('planned', 'applied', 'rolled_back')),
+    CONSTRAINT tunnel_plans_right_status_check
+        CHECK (right_status IN ('planned', 'applied', 'rolled_back'))
 );
 
 CREATE INDEX tunnel_plans_clients_idx

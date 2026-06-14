@@ -9,8 +9,7 @@ use vpsman_common::{
     OutputStream,
 };
 use vpsman_server_core::{
-    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_COMPLETED,
-    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
+    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING,
 };
 
 use crate::{
@@ -231,33 +230,26 @@ fn target_outcome_from_done_output(
     output: &CommandOutput,
     received_at: String,
 ) -> TargetDispatchOutcome {
-    let rejected = crate::routes_jobs::output_indicates_rejected(output);
-    let timed_out = crate::routes_jobs::output_indicates_timeout(output);
-    let exit_code = output.exit_code;
-    let status = if rejected {
-        TARGET_STATUS_REJECTED
-    } else if timed_out {
-        TARGET_STATUS_AGENT_TIMEOUT
-    } else if exit_code.unwrap_or(0) == 0 {
-        TARGET_STATUS_COMPLETED
-    } else {
-        TARGET_STATUS_FAILED
-    };
+    let outputs = vec![CommandOutput {
+        job_id,
+        stream: output.stream,
+        data: output.data.clone(),
+        exit_code: output.exit_code,
+        done: output.done,
+    }];
+    let final_output = outputs.last();
+    let (status, exit_code) = crate::routes_jobs::target_status_from_final_output(final_output);
+    let message =
+        crate::routes_jobs::target_message_for_status(&outputs, status, status, final_output);
     TargetDispatchOutcome {
         status: status.to_string(),
         exit_code,
         #[cfg(test)]
         command_version: None,
         accepted: true,
-        message: status_output_message(output).unwrap_or_else(|| status.to_string()),
+        message,
         received_at: Some(received_at),
-        outputs: vec![CommandOutput {
-            job_id,
-            stream: output.stream,
-            data: output.data.clone(),
-            exit_code: output.exit_code,
-            done: output.done,
-        }],
+        outputs,
     }
 }
 
@@ -439,8 +431,30 @@ mod tests {
         let outcome =
             target_outcome_from_done_output(job_id, &output, "2026-06-13T00:00:00Z".to_string());
 
-        assert_eq!(outcome.status, TARGET_STATUS_REJECTED);
+        assert_eq!(outcome.status, vpsman_server_core::TARGET_STATUS_REJECTED);
         assert_eq!(outcome.exit_code, Some(78));
         assert_eq!(outcome.message, "unsupported_command_version: rejected");
+    }
+
+    #[test]
+    fn ingest_done_output_without_exit_code_maps_to_failed() {
+        let job_id = uuid::Uuid::new_v4();
+        let output = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: Vec::new(),
+            exit_code: None,
+            done: true,
+        };
+
+        let outcome =
+            target_outcome_from_done_output(job_id, &output, "2026-06-13T00:00:00Z".to_string());
+
+        assert_eq!(outcome.status, vpsman_server_core::TARGET_STATUS_FAILED);
+        assert_eq!(outcome.exit_code, None);
+        assert_eq!(
+            outcome.message,
+            crate::routes_jobs::COMMAND_COMPLETED_WITHOUT_EXIT_CODE_MESSAGE
+        );
     }
 }

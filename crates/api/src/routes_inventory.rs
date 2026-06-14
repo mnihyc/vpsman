@@ -34,6 +34,7 @@ const MAX_PRESET_DEFINITION_BYTES: usize = 16 * 1024;
 const MAX_PRESET_ARGV_ITEMS: usize = 32;
 const MAX_PRESET_ARG_BYTES: usize = 512;
 const MAX_RULE_TEMPLATE_BODY_BYTES: usize = 16 * 1024;
+const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
 
 pub(crate) async fn fleet_summary(
     State(state): State<AppState>,
@@ -138,7 +139,7 @@ pub(crate) async fn list_telemetry_network_rates(
         state
             .repo
             .list_telemetry_network_rates(
-                limit_or_default(query.limit),
+                telemetry_network_rate_limit_or_default(query.limit),
                 query.client_id.as_deref(),
                 query.interface.as_deref(),
                 query.bucket_secs,
@@ -866,6 +867,12 @@ fn validate_telemetry_network_rate_query(
     Ok(())
 }
 
+fn telemetry_network_rate_limit_or_default(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(100)
+        .clamp(1, TELEMETRY_NETWORK_RATE_LIMIT_MAX)
+}
+
 fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), ApiError> {
     if query
         .client_id
@@ -886,7 +893,7 @@ fn validate_telemetry_tunnel_query(query: &TelemetryTunnelQuery) -> Result<(), A
 
 #[cfg(test)]
 mod tests {
-    use super::validate_persisted_tag_name;
+    use super::{telemetry_network_rate_limit_or_default, validate_persisted_tag_name};
 
     #[test]
     fn persisted_tags_reject_inner_selector_prefixes() {
@@ -896,5 +903,12 @@ mod tests {
 
         assert!(validate_persisted_tag_name("id:edge-a").is_err());
         assert!(validate_persisted_tag_name("name:edge-a").is_err());
+    }
+
+    #[test]
+    fn telemetry_network_rates_allow_fleet_scale_limits() {
+        assert_eq!(telemetry_network_rate_limit_or_default(None), 100);
+        assert_eq!(telemetry_network_rate_limit_or_default(Some(5_000)), 5_000);
+        assert_eq!(telemetry_network_rate_limit_or_default(Some(50_000)), 5_000);
     }
 }

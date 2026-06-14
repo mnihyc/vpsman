@@ -21,7 +21,9 @@ CREATE TABLE backup_requests (
     source_job_id UUID REFERENCES jobs(id),
     source_schedule_id UUID REFERENCES schedules(id),
     note TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT backup_requests_status_check
+        CHECK (status IN ('requested_metadata_only', 'artifact_metadata_recorded'))
 );
 
 CREATE INDEX backup_requests_client_created_idx
@@ -47,7 +49,9 @@ CREATE TABLE restore_plans (
     payload_hash TEXT NOT NULL,
     command_scope TEXT NOT NULL,
     note TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT restore_plans_status_check
+        CHECK (status IN ('planned_metadata_only'))
 );
 
 CREATE INDEX restore_plans_source_created_idx
@@ -71,7 +75,9 @@ CREATE TABLE migration_links (
     destination_root TEXT,
     status TEXT NOT NULL,
     note TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT migration_links_status_check
+        CHECK (status IN ('linked_metadata_only'))
 );
 
 CREATE INDEX migration_links_source_created_idx

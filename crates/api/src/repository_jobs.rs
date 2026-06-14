@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -203,6 +204,11 @@ struct ScheduleJobOutcome {
     job_id: Uuid,
     status: String,
     error: Option<String>,
+    enabled: bool,
+    failure_count: i32,
+    max_failures: i32,
+    retry_delay_secs: i64,
+    next_run_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1982,27 +1988,107 @@ impl Repository {
         };
         let outcome_error = schedule_job_outcome_error(status);
         let schedule_outcome = match self {
-            Self::Memory(_) => None,
+            Self::Memory(memory) => {
+                let mut schedules = memory.schedules.write().await;
+                let schedule = schedules
+                    .iter_mut()
+                    .find(|schedule| schedule.id == schedule_id);
+                let Some(schedule) = schedule else {
+                    return Ok(());
+                };
+                if let Some(error) = outcome_error {
+                    schedule.failure_count += 1;
+                    schedule.last_error = Some(error.to_string());
+                    if schedule.failure_count >= schedule.max_failures {
+                        schedule.enabled = false;
+                    } else {
+                        schedule.next_run_at = (Utc::now()
+                            + Duration::seconds(schedule.retry_delay_secs.max(0)))
+                        .to_rfc3339();
+                    }
+                } else {
+                    schedule.failure_count = 0;
+                    schedule.last_error = None;
+                }
+                schedule.updated_at = unix_now().to_string();
+                Some(ScheduleJobOutcome {
+                    schedule_id,
+                    schedule_name: schedule.name.clone(),
+                    job_id,
+                    status: status.to_string(),
+                    error: outcome_error.map(ToOwned::to_owned),
+                    enabled: schedule.enabled,
+                    failure_count: schedule.failure_count,
+                    max_failures: schedule.max_failures,
+                    retry_delay_secs: schedule.retry_delay_secs,
+                    next_run_at: schedule.next_run_at.clone(),
+                })
+            }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    UPDATE schedules
-                    SET
-                        last_job_id = $2,
-                        last_job_status = $3,
-                        last_job_completed_at = now(),
-                        last_job_error = $4,
-                        updated_at = now()
-                    WHERE id = $1
-                    RETURNING name
-                    "#,
-                )
-                .bind(schedule_id)
-                .bind(job_id)
-                .bind(status)
-                .bind(outcome_error)
-                .fetch_optional(pool)
-                .await?;
+                let row = if let Some(error) = outcome_error {
+                    sqlx::query(
+                        r#"
+                        UPDATE schedules
+                        SET
+                            last_job_id = $2,
+                            last_job_status = $3,
+                            last_job_completed_at = now(),
+                            last_job_error = $4,
+                            failure_count = failure_count + 1,
+                            last_error = $4,
+                            enabled = CASE
+                                WHEN failure_count + 1 >= max_failures THEN FALSE
+                                ELSE enabled
+                            END,
+                            next_run_at = CASE
+                                WHEN failure_count + 1 >= max_failures THEN next_run_at
+                                ELSE now() + (retry_delay_secs * interval '1 second')
+                            END,
+                            updated_at = now()
+                        WHERE id = $1
+                        RETURNING
+                            name,
+                            enabled,
+                            failure_count,
+                            max_failures,
+                            retry_delay_secs,
+                            next_run_at::text AS next_run_at
+                        "#,
+                    )
+                    .bind(schedule_id)
+                    .bind(job_id)
+                    .bind(status)
+                    .bind(error)
+                    .fetch_optional(pool)
+                    .await?
+                } else {
+                    sqlx::query(
+                        r#"
+                        UPDATE schedules
+                        SET
+                            last_job_id = $2,
+                            last_job_status = $3,
+                            last_job_completed_at = now(),
+                            last_job_error = NULL,
+                            failure_count = 0,
+                            last_error = NULL,
+                            updated_at = now()
+                        WHERE id = $1
+                        RETURNING
+                            name,
+                            enabled,
+                            failure_count,
+                            max_failures,
+                            retry_delay_secs,
+                            next_run_at::text AS next_run_at
+                        "#,
+                    )
+                    .bind(schedule_id)
+                    .bind(job_id)
+                    .bind(status)
+                    .fetch_optional(pool)
+                    .await?
+                };
                 row.map(|row| {
                     let schedule_name: String = row.try_get("name")?;
                     Ok::<_, sqlx::Error>(ScheduleJobOutcome {
@@ -2011,6 +2097,11 @@ impl Repository {
                         job_id,
                         status: status.to_string(),
                         error: outcome_error.map(ToOwned::to_owned),
+                        enabled: row.try_get("enabled")?,
+                        failure_count: row.try_get("failure_count")?,
+                        max_failures: row.try_get("max_failures")?,
+                        retry_delay_secs: row.try_get("retry_delay_secs")?,
+                        next_run_at: row.try_get("next_run_at")?,
                     })
                 })
                 .transpose()?
@@ -2056,6 +2147,121 @@ impl Repository {
                     "privileged": summary.privileged,
                     "payload_hash": &summary.payload_hash,
                     "source_schedule_id": schedule_id,
+                    "target_count": summary.target_count,
+                    "target_ids": &summary.targets,
+                },
+            }),
+        })
+        .await?;
+        self.record_schedule_job_failure_visibility(&summary, &schedule_outcome)
+            .await?;
+        Ok(())
+    }
+
+    async fn record_schedule_job_failure_visibility(
+        &self,
+        summary: &WebhookJobSummary,
+        schedule_outcome: &ScheduleJobOutcome,
+    ) -> Result<()> {
+        let Some(error) = schedule_outcome.error.as_ref() else {
+            return Ok(());
+        };
+        match self {
+            Self::Memory(memory) => {
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: summary.actor_id,
+                    action: "schedule.job_failed".to_string(),
+                    target: format!("schedule:{}", schedule_outcome.schedule_id),
+                    command_hash: None,
+                    metadata: json!({
+                        "schedule_id": schedule_outcome.schedule_id,
+                        "schedule_name": &schedule_outcome.schedule_name,
+                        "failure_count": schedule_outcome.failure_count,
+                        "max_failures": schedule_outcome.max_failures,
+                        "retry_delay_secs": schedule_outcome.retry_delay_secs,
+                        "next_run_at": &schedule_outcome.next_run_at,
+                        "disabled": !schedule_outcome.enabled,
+                        "error": error,
+                        "job_id": schedule_outcome.job_id,
+                        "job_status": &schedule_outcome.status,
+                    }),
+                    created_at: unix_now().to_string(),
+                });
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(summary.actor_id)
+                .bind("schedule.job_failed")
+                .bind(format!("schedule:{}", schedule_outcome.schedule_id))
+                .bind(json!({
+                    "schedule_id": schedule_outcome.schedule_id,
+                    "schedule_name": &schedule_outcome.schedule_name,
+                    "failure_count": schedule_outcome.failure_count,
+                    "max_failures": schedule_outcome.max_failures,
+                    "retry_delay_secs": schedule_outcome.retry_delay_secs,
+                    "next_run_at": &schedule_outcome.next_run_at,
+                    "disabled": !schedule_outcome.enabled,
+                    "error": error,
+                    "job_id": schedule_outcome.job_id,
+                    "job_status": &schedule_outcome.status,
+                }))
+                .execute(pool)
+                .await?;
+            }
+        }
+        let event_id = format!(
+            "schedule:{}:job:{}:failed",
+            schedule_outcome.schedule_id, schedule_outcome.job_id
+        );
+        let mut predicates = vec![
+            "schedule.failed".to_string(),
+            format!("schedule.id:{}", schedule_outcome.schedule_id),
+            format!("schedule.name:{}", schedule_outcome.schedule_name),
+            format!("job.status:{}", schedule_outcome.status),
+            format!("job.status.become_{}", schedule_outcome.status),
+            format!("job.type:{}", summary.command_type),
+        ];
+        predicates.sort();
+        predicates.dedup();
+        self.record_webhook_event(WebhookEventCandidate {
+            kind: "schedule.failed".to_string(),
+            event_id: event_id.clone(),
+            event_predicates: predicates.clone(),
+            subject_client_ids: summary.targets.clone(),
+            actor_id: summary.actor_id,
+            payload: json!({
+                "event": {
+                    "kind": "schedule.failed",
+                    "id": event_id,
+                    "predicates": &predicates,
+                },
+                "schedule": {
+                    "id": schedule_outcome.schedule_id,
+                    "name": &schedule_outcome.schedule_name,
+                    "failure_count": schedule_outcome.failure_count,
+                    "max_failures": schedule_outcome.max_failures,
+                    "retry_delay_secs": schedule_outcome.retry_delay_secs,
+                    "next_run_at": &schedule_outcome.next_run_at,
+                    "disabled": !schedule_outcome.enabled,
+                    "error": error,
+                    "last_job_id": schedule_outcome.job_id,
+                    "last_job_status": &schedule_outcome.status,
+                    "last_job_error": error,
+                },
+                "job": {
+                    "id": schedule_outcome.job_id,
+                    "status": &schedule_outcome.status,
+                    "type": &summary.command_type,
+                    "source_schedule_id": schedule_outcome.schedule_id,
                     "target_count": summary.target_count,
                     "target_ids": &summary.targets,
                 },
@@ -2210,6 +2416,12 @@ impl Repository {
                     .filter(|target| target.job_id == job_id)
                     .map(|target| target.client_id.clone())
                     .collect::<Vec<_>>();
+                let source_schedule_id = memory
+                    .job_source_schedule_ids
+                    .read()
+                    .await
+                    .get(&job_id)
+                    .copied();
                 Ok(Some(WebhookJobSummary {
                     actor_id: job.actor_id,
                     command_type: job.command_type,
@@ -2217,7 +2429,7 @@ impl Repository {
                     status: job.status,
                     target_count: job.target_count,
                     payload_hash: job.payload_hash,
-                    source_schedule_id: None,
+                    source_schedule_id,
                     targets,
                 }))
             }

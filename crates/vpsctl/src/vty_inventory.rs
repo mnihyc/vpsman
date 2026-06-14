@@ -2363,8 +2363,8 @@ fn parse_telemetry_network_rates_args(parts: &[&str]) -> Result<TelemetryNetwork
         }
     }
     anyhow::ensure!(
-        (1..=200).contains(&limit),
-        "telemetry-network-rates --limit must be between 1 and 200"
+        (1..=5_000).contains(&limit),
+        "telemetry-network-rates --limit must be between 1 and 5000"
     );
     if let Some(client_id) = client_id.as_deref() {
         anyhow::ensure!(

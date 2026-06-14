@@ -4,7 +4,9 @@ use axum::{
     Json,
 };
 use tokio::sync::broadcast;
-use vpsman_common::{AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand};
+use vpsman_common::{
+    encode_json, payload_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand,
+};
 
 use super::*;
 use crate::{
@@ -88,6 +90,40 @@ async fn seed_unprivileged_agent(repo: &crate::repository::Repository, client_id
         },
     )
     .await;
+}
+
+async fn record_scheduled_memory_job(
+    repo: &Repository,
+    operator: &AuthContext,
+    schedule: &ScheduleView,
+    fingerprint_suffix: &str,
+) -> Uuid {
+    let request = CreateJobRequest {
+        job_id: None,
+        selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
+        destructive: false,
+        confirmed: true,
+        command: "operation".to_string(),
+        argv: Vec::new(),
+        operation: Some(schedule.operation.clone()),
+        timeout_secs: Some(30),
+        force_unprivileged: false,
+        privileged: false,
+        privilege_assertion: None,
+    };
+    let command_hash = payload_hash(&encode_json(&schedule.operation).unwrap());
+    repo.record_dispatching_job_from_schedule(
+        Uuid::new_v4(),
+        &request,
+        &command_hash,
+        &format!("scheduled_finish_{fingerprint_suffix}"),
+        operator,
+        &schedule.target_client_ids,
+        schedule.id,
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -215,6 +251,115 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
     assert!(audit_actions.contains(&"schedule.disabled".to_string()));
     assert!(audit_actions.contains(&"schedule.deferred".to_string()));
     assert!(audit_actions.contains(&"schedule.deleted".to_string()));
+}
+
+#[tokio::test]
+async fn scheduled_failed_job_updates_retry_controls_on_finish() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let mut schedule_request = shell_schedule_request("retrying-schedule", true);
+    schedule_request.max_failures = 2;
+    schedule_request.retry_delay_secs = 120;
+    let schedule = repo
+        .create_schedule(schedule_request, &operator)
+        .await
+        .unwrap();
+
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "first").await;
+    repo.finish_job(job_id, "failed").await.unwrap();
+    let failed_once = repo.schedule_by_id(schedule.id).await.unwrap();
+    assert_eq!(failed_once.failure_count, 1);
+    assert_eq!(failed_once.last_error.as_deref(), Some("failed"));
+    assert!(failed_once.enabled);
+    assert_ne!(failed_once.next_run_at, schedule.next_run_at);
+    let first_job_id = job_id.to_string();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    assert!(memory
+        .webhook_events
+        .read()
+        .await
+        .iter()
+        .any(|event| event.kind == "schedule.failed"
+            && event.payload["schedule"]["last_job_id"].as_str() == Some(first_job_id.as_str())));
+    assert!(memory
+        .audits
+        .read()
+        .await
+        .iter()
+        .any(|audit| audit.action == "schedule.job_failed"
+            && audit.metadata["job_id"].as_str() == Some(first_job_id.as_str())));
+
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "second").await;
+    repo.finish_job(job_id, "failed").await.unwrap();
+    let failed_twice = repo.schedule_by_id(schedule.id).await.unwrap();
+    assert_eq!(failed_twice.failure_count, 2);
+    assert_eq!(failed_twice.last_error.as_deref(), Some("failed"));
+    assert!(!failed_twice.enabled);
+}
+
+#[tokio::test]
+async fn scheduled_successful_job_resets_failure_controls_on_finish() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let schedule = repo
+        .create_schedule(
+            shell_schedule_request("recovering-schedule", true),
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "failed").await;
+    repo.finish_job(job_id, "failed").await.unwrap();
+    assert_eq!(
+        repo.schedule_by_id(schedule.id)
+            .await
+            .unwrap()
+            .failure_count,
+        1
+    );
+
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "completed").await;
+    repo.finish_job(job_id, "completed").await.unwrap();
+    let recovered = repo.schedule_by_id(schedule.id).await.unwrap();
+    assert_eq!(recovered.failure_count, 0);
+    assert_eq!(recovered.last_error, None);
+}
+
+#[tokio::test]
+async fn scheduled_partial_success_and_skipped_reset_failure_controls_on_finish() {
+    for status in ["partial_success", "skipped"] {
+        let repo = Repository::Memory(MemoryState::default());
+        let operator = schedule_test_operator();
+        let schedule = repo
+            .create_schedule(
+                shell_schedule_request(&format!("recovering-schedule-{status}"), true),
+                &operator,
+            )
+            .await
+            .unwrap();
+
+        let job_id =
+            record_scheduled_memory_job(&repo, &operator, &schedule, &format!("{status}-failed"))
+                .await;
+        repo.finish_job(job_id, "failed").await.unwrap();
+        assert_eq!(
+            repo.schedule_by_id(schedule.id)
+                .await
+                .unwrap()
+                .failure_count,
+            1
+        );
+
+        let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, status).await;
+        repo.finish_job(job_id, status).await.unwrap();
+        let recovered = repo.schedule_by_id(schedule.id).await.unwrap();
+        assert_eq!(recovered.failure_count, 0);
+        assert_eq!(recovered.last_error, None);
+        assert!(recovered.enabled);
+    }
 }
 
 #[tokio::test]

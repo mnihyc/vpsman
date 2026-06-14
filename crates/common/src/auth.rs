@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
@@ -33,9 +33,8 @@ pub enum PrivilegeAssertionError {
 
 #[derive(Debug)]
 pub struct PrivilegeAssertionReplayCache {
-    max_entries: usize,
-    seen: HashSet<String>,
-    order: VecDeque<String>,
+    seen: HashMap<String, u64>,
+    order: VecDeque<(String, u64)>,
 }
 
 impl Default for PrivilegeAssertionReplayCache {
@@ -47,25 +46,43 @@ impl Default for PrivilegeAssertionReplayCache {
 impl PrivilegeAssertionReplayCache {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            max_entries: max_entries.max(1),
-            seen: HashSet::new(),
+            seen: HashMap::with_capacity(max_entries.max(1)),
             order: VecDeque::new(),
         }
     }
 
-    pub fn remember(&mut self, nonce_hex: &str) -> Result<(), PrivilegeAssertionError> {
+    pub fn remember(
+        &mut self,
+        nonce_hex: &str,
+        expires_unix: u64,
+        now_unix: u64,
+    ) -> Result<(), PrivilegeAssertionError> {
+        self.purge_expired(now_unix);
         let nonce_hex = nonce_hex.to_string();
-        if self.seen.contains(&nonce_hex) {
+        if self.seen.contains_key(&nonce_hex) {
             return Err(PrivilegeAssertionError::Replay);
         }
-        self.seen.insert(nonce_hex.clone());
-        self.order.push_back(nonce_hex);
-        while self.order.len() > self.max_entries {
-            if let Some(expired) = self.order.pop_front() {
-                self.seen.remove(&expired);
+        self.seen.insert(nonce_hex.clone(), expires_unix);
+        self.order.push_back((nonce_hex, expires_unix));
+        Ok(())
+    }
+
+    fn purge_expired(&mut self, now_unix: u64) {
+        let mut active = VecDeque::with_capacity(self.order.len());
+        while let Some((nonce_hex, expires_unix)) = self.order.pop_front() {
+            if expires_unix < now_unix {
+                if self
+                    .seen
+                    .get(&nonce_hex)
+                    .is_some_and(|current_expires| *current_expires == expires_unix)
+                {
+                    self.seen.remove(&nonce_hex);
+                }
+            } else {
+                active.push_back((nonce_hex, expires_unix));
             }
         }
-        Ok(())
+        self.order = active;
     }
 }
 
@@ -144,7 +161,11 @@ pub fn verify_privilege_assertion(
     ) {
         return Err(PrivilegeAssertionError::InvalidAssertion);
     }
-    replay_cache.remember(&assertion.nonce_hex)?;
+    let replay_expires_unix = assertion
+        .issued_unix
+        .saturating_add(MAX_PRIVILEGE_ASSERTION_AGE_SECS)
+        .min(assertion.expires_unix);
+    replay_cache.remember(&assertion.nonce_hex, replay_expires_unix, now_unix)?;
     Ok(intent_hash_hex)
 }
 
@@ -247,6 +268,46 @@ mod tests {
             verify_privilege_assertion(&verifier_key, intent, &assertion, 120, &mut replay_cache),
             Err(PrivilegeAssertionError::Replay)
         );
+    }
+
+    #[test]
+    fn privilege_assertion_replay_cache_keeps_unexpired_nonces_under_churn() {
+        let verifier_key = [10_u8; 32];
+        let intent = r#"{"action":"job.dispatch","target":"fleet"}"#;
+        let intent_hash = payload_hash(intent.as_bytes());
+        let mut replay_cache = PrivilegeAssertionReplayCache::new(2);
+
+        for nonce in [[1_u8; 16], [2_u8; 16], [3_u8; 16]] {
+            let assertion = sign_privilege_assertion(&verifier_key, &intent_hash, &nonce, 100, 300);
+            assert_eq!(
+                verify_privilege_assertion(
+                    &verifier_key,
+                    intent,
+                    &assertion,
+                    120,
+                    &mut replay_cache
+                ),
+                Ok(intent_hash.clone())
+            );
+        }
+
+        let first = sign_privilege_assertion(&verifier_key, &intent_hash, &[1_u8; 16], 100, 300);
+        assert_eq!(
+            verify_privilege_assertion(&verifier_key, intent, &first, 121, &mut replay_cache),
+            Err(PrivilegeAssertionError::Replay)
+        );
+    }
+
+    #[test]
+    fn privilege_assertion_replay_cache_purges_expired_nonces() {
+        let mut replay_cache = PrivilegeAssertionReplayCache::new(1);
+
+        replay_cache.remember("nonce-a", 10, 1).unwrap();
+        assert_eq!(
+            replay_cache.remember("nonce-a", 10, 10),
+            Err(PrivilegeAssertionError::Replay)
+        );
+        assert_eq!(replay_cache.remember("nonce-a", 10, 11), Ok(()));
     }
 
     #[test]

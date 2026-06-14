@@ -153,3 +153,6 @@ CREATE TABLE audit_logs (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX audit_logs_created_idx
+    ON audit_logs (created_at DESC, id DESC);
