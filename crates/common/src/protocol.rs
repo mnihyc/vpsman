@@ -977,6 +977,15 @@ pub struct GatewayCommandCancel {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommandResume {
+    pub job_id: Uuid,
+    #[serde(default = "default_command_protocol_version")]
+    pub command_version: u16,
+    pub payload_hash: String,
+    pub next_output_seq: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayPrivilegeVerification {
     pub intent: String,
     pub assertion: PrivilegeAssertion,
@@ -2936,6 +2945,12 @@ pub struct CommandOutput {
     pub data: Vec<u8>,
     pub exit_code: Option<i32>,
     pub done: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SequencedCommandOutput {
+    pub seq: i32,
+    pub output: CommandOutput,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

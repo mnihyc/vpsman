@@ -87,7 +87,6 @@ pub(crate) struct PendingCommand {
     pub(crate) command_version: u16,
     pub(crate) ack: Option<JobAck>,
     pub(crate) outputs: Vec<CommandOutput>,
-    pub(crate) next_output_seq: i32,
     pub(crate) response: Option<oneshot::Sender<GatewayCommandDispatchResult>>,
 }
 
@@ -179,7 +178,6 @@ mod tests {
                 message: "accepted".to_string(),
             }),
             outputs: Vec::new(),
-            next_output_seq: 0,
             response: Some(response),
         };
 
@@ -207,7 +205,6 @@ mod tests {
             command_version: 1,
             ack: None,
             outputs: Vec::new(),
-            next_output_seq: 0,
             response: Some(response),
         };
 

@@ -707,6 +707,16 @@ async fn main() -> Result<()> {
                 }
                 Err(error) => warn!(%error, "failed to detect offline agents"),
             }
+            match expire_stale_gateway_sessions(&pool, runtime_config.agent_offline_timeout_secs)
+                .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        info!(count, "expired stale gateway sessions");
+                    }
+                }
+                Err(error) => warn!(%error, "failed to expire stale gateway sessions"),
+            }
         }
     }
 }
@@ -789,6 +799,33 @@ async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> 
         .await?;
     }
     tx.commit().await?;
+    Ok(rows.len() as u64)
+}
+
+async fn expire_stale_gateway_sessions(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE gateway_sessions session
+        SET
+            status = 'expired',
+            last_seen_at = now(),
+            ended_at = COALESCE(session.ended_at, now()),
+            end_reason = COALESCE(session.end_reason, 'agent_offline_timeout')
+        FROM clients client
+        WHERE session.client_id = client.id
+          AND session.status = 'active'
+          AND (
+            client.hidden_at IS NOT NULL
+            OR client.status IN ('offline', 'disconnected')
+            OR client.last_seen_at IS NULL
+            OR client.last_seen_at < now() - make_interval(secs => $1)
+          )
+        RETURNING session.id
+        "#,
+    )
+    .bind(timeout_secs as f64)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.len() as u64)
 }
 
@@ -1717,6 +1754,8 @@ async fn materialize_due_schedule(
                 WHEN $3 IN ('completed', 'partial_success', 'skipped') THEN NULL
                 ELSE $3
             END,
+            failure_count = CASE WHEN $4 THEN 0 ELSE failure_count END,
+            last_error = CASE WHEN $4 THEN NULL ELSE last_error END,
             updated_at = now()
         WHERE id = $1
         "#,

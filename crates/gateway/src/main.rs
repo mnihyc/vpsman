@@ -20,10 +20,11 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 use vpsman_common::{
-    decode_json, decode_noise_key_hex, encode_json, read_secret_file_ref, AgentHello, Frame,
-    GatewayAgentHelloIngest, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
-    GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobAck, JobCancelAck, MessageKind,
-    NoiseFrameStream, ServerHello, SuiteConfig, TelemetryEnvelope,
+    decode_json, decode_noise_key_hex, encode_json, read_secret_file_ref, AgentHello,
+    CommandResume, Frame, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
+    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobAck,
+    JobCancelAck, MessageKind, NoiseFrameStream, SequencedCommandOutput, ServerHello, SuiteConfig,
+    TelemetryEnvelope,
 };
 
 use crate::{
@@ -511,7 +512,6 @@ async fn handle_agent(
                             command_version,
                             ack: None,
                             outputs: Vec::new(),
-                            next_output_seq: 0,
                             response: Some(command.response),
                         });
                     }
@@ -740,18 +740,47 @@ async fn handle_agent_frame(
                 let _ = response.send(cancel_ack_result(client_id, ack));
             }
         }
+        MessageKind::CommandResume => {
+            let resume: CommandResume = decode_json(&frame.decoded_payload()?)?;
+            let Some(active_client_id) = client_id.clone() else {
+                return Ok(());
+            };
+            pending_commands
+                .entry(resume.job_id)
+                .and_modify(|pending| {
+                    pending.command_version = resume.command_version;
+                    pending.client_id = active_client_id.clone();
+                })
+                .or_insert_with(|| PendingCommand {
+                    client_id: active_client_id,
+                    job_id: resume.job_id,
+                    command_version: resume.command_version,
+                    ack: Some(JobAck {
+                        job_id: resume.job_id,
+                        accepted: true,
+                        message: "resumed".to_string(),
+                    }),
+                    outputs: Vec::new(),
+                    response: None,
+                });
+            debug!(
+                job_id = %resume.job_id,
+                payload_hash = %resume.payload_hash,
+                next_output_seq = resume.next_output_seq,
+                "resumed active agent command"
+            );
+        }
         MessageKind::CommandOutput => {
-            let output: vpsman_common::CommandOutput = decode_json(&frame.decoded_payload()?)?;
+            let sequenced: SequencedCommandOutput = decode_json(&frame.decoded_payload()?)?;
+            let output = sequenced.output;
             let mut remove_job_id = None;
             if let Some(pending) = pending_commands.get_mut(&output.job_id) {
                 let done = output.done;
-                let seq = pending.next_output_seq;
-                pending.next_output_seq = pending.next_output_seq.saturating_add(1);
                 let ingest = GatewayCommandOutputIngest {
                     gateway_id: context.args.gateway_id.clone(),
                     client_id: pending.client_id.clone(),
                     job_id: output.job_id,
-                    seq,
+                    seq: sequenced.seq,
                     received_unix: Some(unix_now()),
                     output: output.clone(),
                 };

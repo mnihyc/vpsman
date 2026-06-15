@@ -24,6 +24,8 @@ impl Repository {
                 {
                     return Ok(());
                 }
+                expire_memory_active_other_sessions(memory, &event.client_id, event.session_id)
+                    .await;
                 upsert_memory_gateway_session(memory, event, "active", None).await;
                 if let Some(from_status) = set_memory_agent_status(
                     memory,
@@ -64,6 +66,23 @@ impl Repository {
                     tx.commit().await?;
                     return Ok(());
                 };
+                sqlx::query(
+                    r#"
+                    UPDATE gateway_sessions
+                    SET
+                        status = 'expired',
+                        last_seen_at = now(),
+                        ended_at = COALESCE(ended_at, now()),
+                        end_reason = COALESCE(end_reason, 'replaced_by_new_session')
+                    WHERE client_id = $1
+                      AND id <> $2
+                      AND status = 'active'
+                    "#,
+                )
+                .bind(&event.client_id)
+                .bind(event.session_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
@@ -331,6 +350,26 @@ async fn upsert_memory_gateway_session(
     });
 }
 
+async fn expire_memory_active_other_sessions(
+    memory: &MemoryState,
+    client_id: &str,
+    session_id: uuid::Uuid,
+) {
+    let now = unix_now().to_string();
+    let mut sessions = memory.gateway_sessions.write().await;
+    for session in sessions.iter_mut() {
+        if session.client_id == client_id && session.id != session_id && session.status == "active"
+        {
+            session.status = "expired".to_string();
+            session.last_seen_at = now.clone();
+            session.ended_at.get_or_insert_with(|| now.clone());
+            session
+                .end_reason
+                .get_or_insert_with(|| "replaced_by_new_session".to_string());
+        }
+    }
+}
+
 async fn memory_has_active_other_session(
     memory: &MemoryState,
     client_id: &str,
@@ -427,6 +466,24 @@ mod tests {
         repo.record_gateway_session_started(&session_event("client-a", newer))
             .await
             .unwrap();
+        let sessions = repo.list_gateway_sessions(10).await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.id == older)
+                .unwrap()
+                .status,
+            "expired"
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.id == newer)
+                .unwrap()
+                .status,
+            "active"
+        );
         let mut ended = session_event("client-a", older);
         ended.reason = Some("replaced".to_string());
         repo.record_gateway_session_ended(&ended).await.unwrap();
