@@ -23,6 +23,7 @@ use crate::{
         NetworkObservationTrendView, NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
+    routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     state::AppState,
     util::limit_or_default,
 };
@@ -373,7 +374,9 @@ async fn materialize_output_bytes(
             .artifact_object_key
             .as_deref()
             .ok_or_else(|| ApiError::not_found("job_output_artifact_not_found"))?;
-        let bytes = store.get(object_key).await?;
+        let bytes = store
+            .get_with_limit(object_key, state.artifact_max_bytes())
+            .await?;
         if let Some(expected_hash) = output.artifact_sha256_hex.as_deref() {
             if vpsman_common::payload_hash(&bytes) != expected_hash {
                 return Err(ApiError::conflict("job_output_artifact_integrity_mismatch"));
@@ -450,12 +453,30 @@ pub(crate) async fn download_job_output_artifact(
         .get_job_output_artifact_ref(job_id, &client_id, seq)
         .await?
         .ok_or_else(|| ApiError::not_found("job_output_artifact_not_found"))?;
-    let bytes = store.get(&artifact.object_key).await?;
-    let actual_hash = vpsman_common::payload_hash(&bytes);
-    if actual_hash != artifact.sha256_hex || bytes.len() as i64 != artifact.size_bytes {
-        return Err(ApiError::conflict("job_output_artifact_integrity_mismatch"));
-    }
-    let mut response = Response::new(Body::from(bytes));
+    let expected_size = u64::try_from(artifact.size_bytes)
+        .map_err(|_| ApiError::conflict("job_output_artifact_integrity_mismatch"))?;
+    let object_file = store
+        .verified_object_file(
+            &artifact.object_key,
+            &artifact.sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "job_output_artifact_not_found",
+                "job_output_artifact_integrity_mismatch",
+            )
+        })?;
+    let body = streaming_artifact_file_body(
+        object_file.path,
+        "job_output_artifact_not_found",
+        object_file.cleanup_after_stream,
+    )
+    .await?;
+    let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
@@ -471,6 +492,11 @@ pub(crate) async fn download_job_output_artifact(
         "x-vpsman-artifact-sha256",
         HeaderValue::from_str(&artifact.sha256_hex)
             .map_err(|_| ApiError::conflict("job_output_artifact_hash_invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&expected_size.to_string())
+            .map_err(|_| ApiError::conflict("job_output_artifact_size_invalid"))?,
     );
     Ok(response)
 }

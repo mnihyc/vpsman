@@ -24,7 +24,6 @@ use crate::{
 
 pub(crate) use crate::backup_artifact_crypto::restore_artifact_bytes;
 
-const MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const DEFAULT_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) struct BackupPolicyUpsertOptions {
@@ -348,10 +347,7 @@ pub(crate) fn backup_artifact_upload_chunked_response(
     let metadata = std::fs::metadata(&artifact_file)
         .with_context(|| format!("failed to stat artifact file {}", artifact_file.display()))?;
     anyhow::ensure!(metadata.is_file(), "artifact file must be a regular file");
-    anyhow::ensure!(
-        (1..=MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES).contains(&metadata.len()),
-        "artifact file size must be between 1 and {MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES} bytes"
-    );
+    anyhow::ensure!(metadata.len() > 0, "artifact file must not be empty");
     let sha256_hex = sha256_file_hex(&artifact_file)?;
     let session_json = http_post_json(
         api_url,

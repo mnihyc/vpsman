@@ -24,6 +24,7 @@ pub struct SuiteApiConfig {
     pub update_artifact_public_base_url: Option<String>,
     pub require_registered_agent_updates: Option<bool>,
     pub job_output_artifact_min_bytes: Option<usize>,
+    pub artifact_max_bytes: Option<usize>,
     pub alert_memory_available_warning_ratio: Option<f64>,
     pub alert_memory_available_critical_ratio: Option<f64>,
     pub alert_disk_available_warning_ratio: Option<f64>,
@@ -240,6 +241,12 @@ impl SuiteConfig {
             3600,
             "timeout.event_post_secs",
         )?;
+        validate_optional_usize(
+            self.api.artifact_max_bytes,
+            1024 * 1024,
+            4 * 1024 * 1024 * 1024,
+            "api.artifact_max_bytes",
+        )?;
         Ok(())
     }
 
@@ -286,6 +293,7 @@ impl SuiteConfig {
                 "gateway.reconnect_grace_secs".to_string(),
                 "timeout.gateway_reconnect_grace_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),
+                "api.artifact_max_bytes".to_string(),
                 "api.require_registered_agent_updates".to_string(),
                 "worker.schedule_command_timeout_secs".to_string(),
                 "worker.tick_secs".to_string(),
@@ -355,6 +363,20 @@ fn validate_optional_u64(value: Option<u64>, min: u64, max: u64, name: &str) -> 
 fn validate_optional_i64(value: Option<i64>, min: i64, max: i64, name: &str) -> Result<(), String> {
     if let Some(value) = value {
         validate_i64_range(value, min, max, name)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_usize(
+    value: Option<usize>,
+    min: usize,
+    max: usize,
+    name: &str,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        if !(min..=max).contains(&value) {
+            return Err(format!("{name}_out_of_range"));
+        }
     }
     Ok(())
 }

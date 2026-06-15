@@ -15,11 +15,18 @@ type HmacSha256 = Hmac<Sha256>;
 
 const S3_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_S3_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
+const S3_SPOOL_DIR: &str = "vpsman-object-store-spool";
 
 #[derive(Clone, Debug)]
 pub(crate) enum BackupObjectStore {
     Filesystem(FilesystemBackupObjectStore),
     S3(S3BackupObjectStore),
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifiedObjectFile {
+    pub(crate) path: PathBuf,
+    pub(crate) cleanup_after_stream: bool,
 }
 
 impl BackupObjectStore {
@@ -73,7 +80,13 @@ impl BackupObjectStore {
                 );
                 match store.put_new(object_key, &bytes).await {
                     Ok(()) => Ok(true),
-                    Err(error) => match store.get(object_key).await {
+                    Err(error) => match store
+                        .get_with_limit(
+                            object_key,
+                            usize::try_from(expected_size_bytes).unwrap_or(usize::MAX),
+                        )
+                        .await
+                    {
                         Ok(existing)
                             if existing.len() as u64 == expected_size_bytes
                                 && sha256_hex(&existing) == expected_sha256_hex =>
@@ -94,6 +107,17 @@ impl BackupObjectStore {
         }
     }
 
+    pub(crate) async fn get_with_limit(
+        &self,
+        object_key: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        match self {
+            Self::Filesystem(store) => store.get_with_limit(object_key, max_bytes).await,
+            Self::S3(store) => store.get_with_limit(object_key, max_bytes).await,
+        }
+    }
+
     pub(crate) async fn verified_filesystem_path(
         &self,
         object_key: &str,
@@ -106,6 +130,37 @@ impl BackupObjectStore {
                 .await
                 .map(Some),
             Self::S3(_) => Ok(None),
+        }
+    }
+
+    pub(crate) async fn verified_object_file(
+        &self,
+        object_key: &str,
+        expected_sha256_hex: &str,
+        expected_size_bytes: u64,
+        max_bytes: usize,
+    ) -> Result<VerifiedObjectFile> {
+        ensure!(
+            expected_size_bytes <= max_bytes as u64,
+            "object exceeded {max_bytes} bytes"
+        );
+        match self {
+            Self::Filesystem(store) => Ok(VerifiedObjectFile {
+                path: store
+                    .verified_path(object_key, expected_sha256_hex, expected_size_bytes)
+                    .await?,
+                cleanup_after_stream: false,
+            }),
+            Self::S3(store) => {
+                store
+                    .spool_verified_to_temp_file(
+                        object_key,
+                        expected_sha256_hex,
+                        expected_size_bytes,
+                        max_bytes,
+                    )
+                    .await
+            }
         }
     }
 
@@ -239,7 +294,19 @@ impl FilesystemBackupObjectStore {
     }
 
     async fn get(&self, object_key: &str) -> Result<Vec<u8>> {
+        self.get_with_limit(object_key, usize::MAX).await
+    }
+
+    async fn get_with_limit(&self, object_key: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let path = self.path_for_key(object_key)?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .with_context(|| format!("failed to stat object {}", path.display()))?;
+        ensure!(metadata.is_file(), "object is not a file");
+        ensure!(
+            metadata.len() <= max_bytes as u64,
+            "object exceeded {max_bytes} bytes"
+        );
         tokio::fs::read(&path)
             .await
             .with_context(|| format!("failed to read object {}", path.display()))
@@ -351,9 +418,14 @@ impl S3BackupObjectStore {
     }
 
     async fn get(&self, object_key: &str) -> Result<Vec<u8>> {
+        self.get_with_limit(object_key, MAX_S3_RESPONSE_BODY_BYTES)
+            .await
+    }
+
+    async fn get_with_limit(&self, object_key: &str, max_bytes: usize) -> Result<Vec<u8>> {
         validate_object_key(object_key)?;
         let response = self
-            .send_signed_request("GET", Some(object_key), &[])
+            .send_signed_request_with_limit("GET", Some(object_key), &[], max_bytes)
             .await?;
         ensure!(
             response.status_code == 200,
@@ -362,6 +434,106 @@ impl S3BackupObjectStore {
             response.body_text()
         );
         Ok(response.body)
+    }
+
+    async fn spool_verified_to_temp_file(
+        &self,
+        object_key: &str,
+        expected_sha256_hex: &str,
+        expected_size_bytes: u64,
+        max_bytes: usize,
+    ) -> Result<VerifiedObjectFile> {
+        validate_object_key(object_key)?;
+        ensure!(
+            expected_size_bytes <= max_bytes as u64,
+            "S3 object exceeded {max_bytes} bytes"
+        );
+        let mut response = self
+            .send_signed_reqwest_request("GET", Some(object_key), &[])
+            .await?;
+        let status_code = response.status().as_u16();
+        if status_code != 200 {
+            let body = response
+                .bytes()
+                .await
+                .map(|body| String::from_utf8_lossy(&body).trim().to_string())
+                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
+            bail!("S3 get object failed with HTTP {status_code}: {body}");
+        }
+        if let Some(content_length) = response.content_length() {
+            ensure!(
+                content_length <= max_bytes as u64,
+                "S3 response body exceeded {max_bytes} bytes"
+            );
+            ensure!(
+                content_length == expected_size_bytes,
+                "S3 object size mismatch"
+            );
+        }
+
+        let spool_root = std::env::temp_dir().join(S3_SPOOL_DIR);
+        tokio::fs::create_dir_all(&spool_root)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create S3 spool directory {}",
+                    spool_root.display()
+                )
+            })?;
+        let temp_path = spool_root.join(format!("{}.part", Uuid::new_v4()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await
+            .with_context(|| format!("failed to create S3 spool file {}", temp_path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut written = 0_u64;
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(error).context("failed to read S3 response");
+                }
+            };
+            written = written
+                .checked_add(chunk.len() as u64)
+                .context("S3 response body size overflow")?;
+            if written > max_bytes as u64 {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                bail!("S3 response body exceeded {max_bytes} bytes");
+            }
+            if written > expected_size_bytes {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                bail!("S3 object size mismatch");
+            }
+            hasher.update(&chunk);
+            if let Err(error) = file.write_all(&chunk).await {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(error).with_context(|| {
+                    format!("failed to write S3 spool file {}", temp_path.display())
+                });
+            }
+        }
+        if written != expected_size_bytes {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            bail!("S3 object size mismatch");
+        }
+        if hex::encode(hasher.finalize()) != expected_sha256_hex {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            bail!("S3 object hash mismatch");
+        }
+        if let Err(error) = file.sync_data().await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error)
+                .with_context(|| format!("failed to sync S3 spool file {}", temp_path.display()));
+        }
+        Ok(VerifiedObjectFile {
+            path: temp_path,
+            cleanup_after_stream: true,
+        })
     }
 
     async fn delete_best_effort(&self, object_key: &str) {
@@ -403,6 +575,46 @@ impl S3BackupObjectStore {
         object_key: Option<&str>,
         body: &[u8],
     ) -> Result<S3HttpResponse> {
+        self.send_signed_request_with_limit(method, object_key, body, MAX_S3_RESPONSE_BODY_BYTES)
+            .await
+    }
+
+    async fn send_signed_request_with_limit(
+        &self,
+        method: &str,
+        object_key: Option<&str>,
+        body: &[u8],
+        max_response_body_bytes: usize,
+    ) -> Result<S3HttpResponse> {
+        let response = self
+            .send_signed_reqwest_request(method, object_key, body)
+            .await?;
+        let status_code = response.status().as_u16();
+        let content_length = response.content_length();
+        ensure!(
+            content_length.is_none_or(|length| length <= max_response_body_bytes as u64),
+            "S3 response body exceeded {max_response_body_bytes} bytes"
+        );
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read S3 response")?;
+        ensure!(
+            body.len() <= max_response_body_bytes,
+            "S3 response body exceeded {max_response_body_bytes} bytes"
+        );
+        Ok(S3HttpResponse {
+            status_code,
+            body: body.to_vec(),
+        })
+    }
+
+    async fn send_signed_reqwest_request(
+        &self,
+        method: &str,
+        object_key: Option<&str>,
+        body: &[u8],
+    ) -> Result<reqwest::Response> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -441,31 +653,13 @@ impl S3BackupObjectStore {
             .context("failed to build S3 HTTP client")?;
         let method =
             reqwest::Method::from_bytes(method.as_bytes()).context("invalid S3 HTTP method")?;
-        let response = client
+        client
             .request(method, self.endpoint.url(&self.bucket, object_key))
             .headers(headers)
             .body(body.to_vec())
             .send()
             .await
-            .context("S3 request failed")?;
-        let status_code = response.status().as_u16();
-        let content_length = response.content_length();
-        ensure!(
-            content_length.is_none_or(|length| length <= MAX_S3_RESPONSE_BODY_BYTES as u64),
-            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-        );
-        let body = response
-            .bytes()
-            .await
-            .context("failed to read S3 response")?;
-        ensure!(
-            body.len() <= MAX_S3_RESPONSE_BODY_BYTES,
-            "S3 response body exceeded {MAX_S3_RESPONSE_BODY_BYTES} bytes"
-        );
-        Ok(S3HttpResponse {
-            status_code,
-            body: body.to_vec(),
-        })
+            .context("S3 request failed")
     }
 
     fn authorization_header(

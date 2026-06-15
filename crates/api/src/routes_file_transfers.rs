@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
@@ -18,7 +20,7 @@ use crate::{
         FileTransferHandoffRequest, FileTransferHandoffView, FileTransferSessionView,
         FileTransferSourceArtifactView, UploadFileTransferSourceArtifactRequest,
     },
-    object_store::BackupObjectStore,
+    object_store::{BackupObjectStore, VerifiedObjectFile},
     repository_file_transfer_sources::file_transfer_source_artifact_object_key,
     repository_file_transfers::{
         file_transfer_handoff_download_path, file_transfer_handoff_object_key,
@@ -117,7 +119,7 @@ pub(crate) async fn upload_file_transfer_source_artifact(
     match store.put_new(&object_key, &bytes).await {
         Ok(()) => {}
         Err(error) if error.to_string().contains("object already exists") => {
-            let existing = store.get(&object_key).await?;
+            let existing = store.get_with_limit(&object_key, bytes.len()).await?;
             if existing.len() != bytes.len() || hex::encode(Sha256::digest(&existing)) != sha256_hex
             {
                 return Err(ApiError::conflict(
@@ -163,6 +165,7 @@ pub(crate) async fn download_file_transfer_source_artifact(
         &artifact.name,
         &artifact.sha256_hex,
         artifact.size_bytes,
+        state.artifact_max_bytes(),
         ArtifactResponseCodes {
             not_found: "file_transfer_source_artifact_not_found",
             integrity: "file_transfer_source_artifact_integrity_mismatch",
@@ -280,6 +283,7 @@ pub(crate) async fn download_file_transfer_handoff(
         &session.path,
         sha256_hex,
         size_bytes,
+        state.artifact_max_bytes(),
         ArtifactResponseCodes {
             not_found: "file_transfer_handoff_artifact_not_found",
             integrity: "file_transfer_handoff_integrity_mismatch",
@@ -296,69 +300,104 @@ async fn verified_object_artifact_response(
     filename_source: &str,
     expected_sha256_hex: &str,
     expected_size_bytes: i64,
+    artifact_max_bytes: usize,
     codes: ArtifactResponseCodes,
 ) -> Result<Response<Body>, ApiError> {
     let expected_size_u64 =
         u64::try_from(expected_size_bytes).map_err(|_| ApiError::conflict(codes.integrity))?;
-    match store
-        .verified_filesystem_path(object_key, expected_sha256_hex, expected_size_u64)
+    let object_file = store
+        .verified_object_file(
+            object_key,
+            expected_sha256_hex,
+            expected_size_u64,
+            artifact_max_bytes,
+        )
         .await
-    {
-        Ok(Some(path)) => {
-            let body = streaming_file_body(path, codes.not_found).await?;
-            return artifact_response(
-                body,
-                filename_source,
-                expected_sha256_hex,
-                expected_size_u64,
-                "streamed-filesystem",
-                &codes,
-            );
-        }
-        Ok(None) => {}
-        Err(error) if error.to_string().contains("failed to stat object") => {
-            return Err(ApiError::not_found(codes.not_found));
-        }
-        Err(_) => return Err(ApiError::conflict(codes.integrity)),
-    }
-    let bytes = store
-        .get(object_key)
-        .await
-        .map_err(|_| ApiError::not_found(codes.not_found))?;
-    if bytes.len() as i64 != expected_size_bytes
-        || hex::encode(Sha256::digest(&bytes)) != expected_sha256_hex
-    {
-        return Err(ApiError::conflict(codes.integrity));
-    }
+        .map_err(|error| map_verified_object_error(error, codes.not_found, codes.integrity))?;
+    let delivery = verified_object_delivery(&object_file);
+    let body = streaming_artifact_file_body(
+        object_file.path,
+        codes.not_found,
+        object_file.cleanup_after_stream,
+    )
+    .await?;
     artifact_response(
-        Body::from(bytes),
+        body,
         filename_source,
         expected_sha256_hex,
         expected_size_u64,
-        "buffered-object-store",
+        delivery,
         &codes,
     )
 }
 
-async fn streaming_file_body(
-    path: std::path::PathBuf,
+pub(crate) async fn streaming_artifact_file_body(
+    path: PathBuf,
     not_found_code: &'static str,
+    cleanup_after_stream: bool,
 ) -> Result<Body, ApiError> {
-    let file = tokio::fs::File::open(&path)
-        .await
-        .map_err(|_| ApiError::not_found(not_found_code))?;
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => {
+            if cleanup_after_stream {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            return Err(ApiError::not_found(not_found_code));
+        }
+    };
     let stream = stream::try_unfold(
-        (file, vec![0_u8; ARTIFACT_STREAM_CHUNK_BYTES]),
-        |(mut file, mut buffer)| async move {
-            let read = file.read(&mut buffer).await?;
+        StreamingArtifactFile {
+            file,
+            buffer: vec![0_u8; ARTIFACT_STREAM_CHUNK_BYTES],
+            cleanup_path: cleanup_after_stream.then_some(path),
+        },
+        |mut state| async move {
+            let read = state.file.read(&mut state.buffer).await?;
             if read == 0 {
                 return Ok::<_, std::io::Error>(None);
             }
-            let bytes = Bytes::copy_from_slice(&buffer[..read]);
-            Ok(Some((bytes, (file, buffer))))
+            let bytes = Bytes::copy_from_slice(&state.buffer[..read]);
+            Ok(Some((bytes, state)))
         },
     );
     Ok(Body::from_stream(stream))
+}
+
+pub(crate) fn map_verified_object_error(
+    error: anyhow::Error,
+    not_found_code: &'static str,
+    integrity_code: &'static str,
+) -> ApiError {
+    let message = error.to_string();
+    if message.contains("failed to stat object")
+        || message.contains("S3 get object failed with HTTP 404")
+    {
+        ApiError::not_found(not_found_code)
+    } else {
+        ApiError::conflict(integrity_code)
+    }
+}
+
+fn verified_object_delivery(object_file: &VerifiedObjectFile) -> &'static str {
+    if object_file.cleanup_after_stream {
+        "streamed-s3-spool"
+    } else {
+        "streamed-filesystem"
+    }
+}
+
+struct StreamingArtifactFile {
+    file: tokio::fs::File,
+    buffer: Vec<u8>,
+    cleanup_path: Option<PathBuf>,
+}
+
+impl Drop for StreamingArtifactFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.cleanup_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn artifact_response(
@@ -495,7 +534,9 @@ async fn load_handoff_chunk_bytes(
             let object_key = output.artifact_object_key.as_deref().ok_or_else(|| {
                 ApiError::conflict("file_transfer_handoff_output_artifact_missing")
             })?;
-            let data = store.get(object_key).await?;
+            let data = store
+                .get_with_limit(object_key, state.artifact_max_bytes())
+                .await?;
             if let Some(expected_hash) = output.artifact_sha256_hex.as_deref() {
                 if hex::encode(Sha256::digest(&data)) != expected_hash {
                     return Err(ApiError::conflict(

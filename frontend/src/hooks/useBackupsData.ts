@@ -22,7 +22,6 @@ import type {
 } from "../types";
 
 const BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
-const MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES = 128 * 1024 * 1024;
 
 export function useBackupsData(
   apiToken: string,
@@ -151,8 +150,8 @@ export function useBackupsData(
       if (!confirmed) {
         throw new Error("Chunked artifact upload requires confirmation");
       }
-      if (artifactFile.size <= 0 || artifactFile.size > MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES) {
-        throw new Error(`Artifact file must be between 1 and ${MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES} bytes`);
+      if (artifactFile.size <= 0) {
+        throw new Error("Artifact file must not be empty");
       }
       const expectedSha256Hex = await sha256FileHex(artifactFile);
       const session = await apiPost<BackupArtifactUploadSessionRecord>(

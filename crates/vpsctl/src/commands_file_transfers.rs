@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    http::{http_get, http_get_bytes, http_post_json},
+    http::{http_get, http_get_to_file, http_post_json},
     util::percent_encode_query_value,
 };
 
@@ -117,10 +117,8 @@ pub(crate) fn file_transfer_handoff_output(
         &serde_json::json!({ "confirmed": confirmed }),
     )?;
     if let Some(output_file) = output_file {
-        let bytes = http_get_bytes(api_url, &format!("{path}/artifact"), token)?;
-        std::fs::write(&output_file, &bytes).with_context(|| {
-            format!("failed to write handoff artifact {}", output_file.display())
-        })?;
+        let downloaded_size_bytes =
+            http_get_to_file(api_url, &format!("{path}/artifact"), token, &output_file)?;
         let mut value: serde_json::Value = serde_json::from_str(&response)?;
         if let Some(object) = value.as_object_mut() {
             object.insert(
@@ -129,7 +127,7 @@ pub(crate) fn file_transfer_handoff_output(
             );
             object.insert(
                 "downloaded_size_bytes".to_string(),
-                serde_json::json!(bytes.len()),
+                serde_json::json!(downloaded_size_bytes),
             );
         }
         Ok(value.to_string())
@@ -205,13 +203,11 @@ pub(crate) fn file_transfer_source_download_output(
 ) -> Result<String> {
     let artifact_id = Uuid::parse_str(&artifact_id).context("invalid --artifact-id UUID")?;
     let path = file_transfer_source_download_path(artifact_id);
-    let bytes = http_get_bytes(api_url, &path, token)?;
-    std::fs::write(&output_file, &bytes)
-        .with_context(|| format!("failed to write source artifact {}", output_file.display()))?;
+    let downloaded_size_bytes = http_get_to_file(api_url, &path, token, &output_file)?;
     Ok(serde_json::json!({
         "artifact_id": artifact_id,
         "output": output_file.to_string_lossy().to_string(),
-        "downloaded_size_bytes": bytes.len(),
+        "downloaded_size_bytes": downloaded_size_bytes,
     })
     .to_string())
 }

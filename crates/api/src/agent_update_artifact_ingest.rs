@@ -62,7 +62,9 @@ pub(crate) async fn store_uploaded_artifact(
     match store.put_new(&object_key, &artifact.bytes).await {
         Ok(()) => {}
         Err(error) if error.to_string().contains("object already exists") => {
-            let stored = store.get(&object_key).await?;
+            let stored = store
+                .get_with_limit(&object_key, artifact.bytes.len())
+                .await?;
             let stored_hash = sha256_hex(&stored);
             if stored_hash != artifact.sha256_hex || stored.len() != artifact.bytes.len() {
                 return Err(ApiError::conflict(

@@ -132,7 +132,9 @@ async fn hydrate_terminal_replay_chunk(
         .artifact_object_key
         .as_deref()
         .ok_or_else(|| ApiError::conflict("terminal_replay_artifact_missing"))?;
-    let data = store.get(object_key).await?;
+    let data = store
+        .get_with_limit(object_key, state.artifact_max_bytes())
+        .await?;
     if data.len() as i64 != chunk.size_bytes {
         return Err(ApiError::conflict("terminal_replay_artifact_size_mismatch"));
     }

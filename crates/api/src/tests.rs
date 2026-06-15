@@ -886,6 +886,97 @@ async fn memory_dispatch_claim_preserves_source_schedule_id() {
 }
 
 #[tokio::test]
+async fn memory_dispatch_claim_promotes_parent_job_to_running() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "promote_parent_running",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.get_job(job_id).await.unwrap().unwrap().status,
+        "queued"
+    );
+    let claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    assert_eq!(claim.len(), 1);
+
+    let job = repo.get_job(job_id).await.unwrap().unwrap();
+    let targets = repo.list_job_targets(job_id).await.unwrap();
+    assert_eq!(job.status, "running");
+    assert_eq!(targets[0].status, "dispatching");
+}
+
+#[tokio::test]
+async fn late_final_output_does_not_rewrite_control_timeout_target() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "control_timeout_terminal",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(repo.claim_due_job_targets(10, 30).await.unwrap().len(), 1);
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    {
+        let mut targets = memory.job_targets.write().await;
+        let target = targets
+            .iter_mut()
+            .find(|target| target.job_id == job_id && target.client_id == "client-a")
+            .unwrap();
+        target.started_at = Some("0".to_string());
+    }
+    let expired = repo.expire_control_timeout_targets(10).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(
+        repo.refresh_job_status_from_targets(job_id).await.unwrap(),
+        Some("control_timeout".to_string())
+    );
+
+    repo.update_job_target_result(
+        job_id,
+        "client-a",
+        &TargetDispatchOutcome {
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            command_version: Some(1),
+            accepted: true,
+            message: "late success".to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let targets = repo.list_job_targets(job_id).await.unwrap();
+    let job = repo.get_job(job_id).await.unwrap().unwrap();
+    assert_eq!(targets[0].status, "control_timeout");
+    assert_eq!(targets[0].exit_code, None);
+    assert_eq!(job.status, "control_timeout");
+}
+
+#[tokio::test]
 async fn memory_dispatch_exclusivity_uses_operation_for_scheduled_labels() {
     for (case, operation) in exclusive_dispatch_operation_cases() {
         let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));

@@ -587,6 +587,7 @@ function SystemConfigPanel({
                   <ConfigText path="api.bind" label="Bind address" parsed={parsedDraft} onChange={updateField} />
                   <ConfigText path="api.gateway_control_url" label="Gateway control URL" parsed={parsedDraft} onChange={updateField} />
                   <ConfigNumber path="api.job_output_artifact_min_bytes" label="Output artifact threshold" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="api.artifact_max_bytes" label="Artifact max bytes" parsed={parsedDraft} onChange={updateField} />
                   <ConfigCheckbox path="api.require_registered_agent_updates" label="Require registered agent updates" parsed={parsedDraft} onChange={updateField} />
                 </ConfigGroup>
                 <ConfigGroup title="Gateway" description="Agent listener, control listener, and API forwarding identity.">

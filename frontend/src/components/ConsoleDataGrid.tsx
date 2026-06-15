@@ -191,7 +191,7 @@ export function ConsoleDataGrid<T>({
         ),
         cell: ({ row }) => (
           <input
-            aria-label={`Select ${title} row`}
+            aria-label={`Select ${title} row ${getRowId(row.original)}`}
             checked={row.getIsSelected()}
             onClick={(event) => event.stopPropagation()}
             onChange={row.getToggleSelectedHandler()}
@@ -213,7 +213,9 @@ export function ConsoleDataGrid<T>({
                 return (
                   <button
                     aria-expanded={open}
-                    aria-label={`${open ? "Collapse" : "Expand"} ${title} row`}
+                    aria-label={`${open ? "Collapse" : "Expand"} ${title} row ${getRowId(
+                      row.original,
+                    )}`}
                     className="iconButton gridIconButton"
                     onClick={(event) => {
                       event.stopPropagation();

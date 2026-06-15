@@ -11,7 +11,7 @@ use vpsman_common::{
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED,
-    JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
+    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
     TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
     TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
 };
@@ -1109,6 +1109,21 @@ impl Repository {
                             .clamp(1, 3600),
                     });
                 }
+                let claimed_job_ids = claimed
+                    .iter()
+                    .map(|target| target.job_id)
+                    .collect::<std::collections::HashSet<_>>();
+                drop(targets);
+                if !claimed_job_ids.is_empty() {
+                    let mut jobs = memory.jobs.write().await;
+                    for job in jobs.iter_mut().filter(|job| {
+                        claimed_job_ids.contains(&job.id)
+                            && job.completed_at.is_none()
+                            && job.status == JOB_STATUS_QUEUED
+                    }) {
+                        job.status = JOB_STATUS_RUNNING.to_string();
+                    }
+                }
                 Ok(claimed)
             }
             Self::Postgres(pool) => {
@@ -1199,27 +1214,52 @@ impl Repository {
                         ORDER BY job.created_at ASC, target.client_id ASC
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE job_targets target
-                    SET
-	                        status = 'dispatching',
-	                        started_at = COALESCE(target.started_at, now()),
-	                        dispatch_attempts = target.dispatch_attempts + 1,
-	                        dispatch_lease_until = now() + make_interval(secs => $2::integer),
+                    ),
+                    updated_targets AS (
+                        UPDATE job_targets target
+                        SET
+                            status = 'dispatching',
+                            started_at = COALESCE(target.started_at, now()),
+                            dispatch_attempts = target.dispatch_attempts + 1,
+                            dispatch_lease_until = now() + make_interval(secs => $2::integer),
                             deadline_at = COALESCE(target.deadline_at, now() + make_interval(secs => due.timeout_secs::integer)),
-	                        last_dispatch_error = NULL
-                    FROM due
-                    WHERE target.job_id = due.job_id
-                      AND target.client_id = due.client_id
-                    RETURNING
-                        due.job_id,
-                        due.client_id,
-                        due.actor_id,
-                        due.command_type,
-                        due.payload_hash,
-                        due.operation,
-                        due.source_schedule_id,
-                        due.timeout_secs
+                            last_dispatch_error = NULL
+                        FROM due
+                        WHERE target.job_id = due.job_id
+                          AND target.client_id = due.client_id
+                        RETURNING
+                            due.job_id,
+                            due.client_id,
+                            due.actor_id,
+                            due.command_type,
+                            due.payload_hash,
+                            due.operation,
+                            due.source_schedule_id,
+                            due.timeout_secs
+                    ),
+                    promoted_jobs AS (
+                        UPDATE jobs job
+                        SET status = 'running'
+                        FROM (
+                            SELECT DISTINCT job_id
+                            FROM updated_targets
+                        ) claimed
+                        WHERE job.id = claimed.job_id
+                          AND job.completed_at IS NULL
+                          AND job.status = 'queued'
+                        RETURNING job.id
+                    )
+                    SELECT
+                        updated_targets.job_id,
+                        updated_targets.client_id,
+                        updated_targets.actor_id,
+                        updated_targets.command_type,
+                        updated_targets.payload_hash,
+                        updated_targets.operation,
+                        updated_targets.source_schedule_id,
+                        updated_targets.timeout_secs,
+                        (SELECT count(*) FROM promoted_jobs) AS promoted_jobs
+                    FROM updated_targets
                     "#,
                 )
                 .bind(limit.clamp(1, 500))
@@ -1268,8 +1308,11 @@ impl Repository {
             return Ok(Some(job.status));
         }
         let status = aggregate_job_status_from_targets(&targets);
-        self.finish_job(job_id, status).await?;
-        Ok(Some(status.to_string()))
+        if self.finish_job(job_id, status).await? {
+            Ok(Some(status.to_string()))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(crate) async fn mark_job_target_running(
@@ -1680,20 +1723,26 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
-                if let Some(target) = memory
-                    .job_targets
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|target| target.job_id == job_id && target.client_id == client_id)
+                let mut updated = false;
                 {
-                    target.status = outcome.status.clone();
-                    target.message = Some(outcome.message.clone());
-                    target.exit_code = outcome.exit_code;
-                    target
-                        .started_at
-                        .get_or_insert_with(|| completed_at.clone());
-                    target.completed_at = Some(completed_at.clone());
+                    let mut targets = memory.job_targets.write().await;
+                    if let Some(target) = targets.iter_mut().find(|target| {
+                        target.job_id == job_id
+                            && target.client_id == client_id
+                            && target.completed_at.is_none()
+                    }) {
+                        target.status = outcome.status.clone();
+                        target.message = Some(outcome.message.clone());
+                        target.exit_code = outcome.exit_code;
+                        target
+                            .started_at
+                            .get_or_insert_with(|| completed_at.clone());
+                        target.completed_at = Some(completed_at.clone());
+                        updated = true;
+                    }
+                }
+                if !updated {
+                    return Ok(());
                 }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
@@ -1792,10 +1841,7 @@ impl Repository {
                         cancel_acked_at IS NULL
                         OR COALESCE($6::timestamptz, now()) < cancel_acked_at
                       )
-                      AND (
-                        completed_at IS NULL
-                        OR status = 'control_timeout'
-                      )
+                      AND completed_at IS NULL
                     "#,
                 )
                 .bind(job_id)
@@ -1914,20 +1960,20 @@ impl Repository {
         Ok(())
     }
 
-    pub(crate) async fn finish_job(&self, job_id: Uuid, status: &str) -> Result<()> {
+    pub(crate) async fn finish_job(&self, job_id: Uuid, status: &str) -> Result<bool> {
         let completed_operation = match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
-                if let Some(job) = memory
-                    .jobs
-                    .write()
-                    .await
+                let mut jobs = memory.jobs.write().await;
+                let Some(job) = jobs
                     .iter_mut()
-                    .find(|job| job.id == job_id)
-                {
-                    job.status = status.to_string();
-                    job.completed_at = Some(completed_at);
-                }
+                    .find(|job| job.id == job_id && job.completed_at.is_none())
+                else {
+                    return Ok(false);
+                };
+                job.status = status.to_string();
+                job.completed_at = Some(completed_at);
+                drop(jobs);
                 if status == JOB_STATUS_COMPLETED {
                     memory.job_operations.read().await.get(&job_id).cloned()
                 } else {
@@ -1935,36 +1981,25 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
-                sqlx::query(
+                let row = sqlx::query(
                     r#"
                     UPDATE jobs
                     SET status = $2, completed_at = now()
                     WHERE id = $1
+                      AND completed_at IS NULL
+                    RETURNING operation
                     "#,
                 )
                 .bind(job_id)
                 .bind(status)
-                .execute(pool)
+                .fetch_optional(pool)
                 .await?;
+                let Some(row) = row else {
+                    return Ok(false);
+                };
                 if status == JOB_STATUS_COMPLETED {
-                    let row = sqlx::query(
-                        r#"
-                        SELECT operation
-                        FROM jobs
-                        WHERE id = $1
-                        "#,
-                    )
-                    .bind(job_id)
-                    .fetch_optional(pool)
-                    .await?;
-                    match row {
-                        Some(row) => {
-                            let operation: sqlx::types::Json<JobCommand> =
-                                row.try_get("operation")?;
-                            Some(operation.0)
-                        }
-                        None => None,
-                    }
+                    let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                    Some(operation.0)
                 } else {
                     None
                 }
@@ -1976,7 +2011,7 @@ impl Repository {
         }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn record_schedule_job_outcome(&self, job_id: Uuid, status: &str) -> Result<()> {

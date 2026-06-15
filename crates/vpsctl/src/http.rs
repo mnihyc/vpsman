@@ -12,7 +12,9 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::ServerName;
 
 const API_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const API_BINARY_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_API_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_API_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ApiScheme {
@@ -61,6 +63,48 @@ pub(crate) fn http_get_bytes(
     bearer_token: Option<&str>,
 ) -> Result<Vec<u8>> {
     http_request_bytes(base_url, "GET", path, bearer_token, None)
+}
+
+pub(crate) fn http_get_to_file(
+    base_url: &str,
+    path: &str,
+    bearer_token: Option<&str>,
+    output_file: &Path,
+) -> Result<u64> {
+    let parsed = parse_api_url(base_url)?;
+    let request_path = parsed.request_path(path);
+    let request = build_request(
+        "GET",
+        &request_path,
+        &parsed.host_header(),
+        bearer_token,
+        &[],
+        "application/json",
+        &[],
+    );
+    match parsed.scheme {
+        ApiScheme::Http => {
+            let mut stream = connect_tcp_with_timeout(&parsed, API_BINARY_HTTP_TIMEOUT)?;
+            write_request_and_stream_response_to_file(
+                &mut stream,
+                &request,
+                "GET",
+                &request_path,
+                output_file,
+            )
+        }
+        ApiScheme::Https => {
+            let tcp = connect_tcp_with_timeout(&parsed, API_BINARY_HTTP_TIMEOUT)?;
+            let mut stream = tls_stream(tcp, &parsed)?;
+            write_request_and_stream_response_to_file(
+                &mut stream,
+                &request,
+                "GET",
+                &request_path,
+                output_file,
+            )
+        }
+    }
 }
 
 pub(crate) fn http_delete(
@@ -273,12 +317,16 @@ fn build_request_with_len(
 }
 
 fn connect_tcp(parsed: &ParsedApiUrl) -> Result<TcpStream> {
+    connect_tcp_with_timeout(parsed, API_HTTP_TIMEOUT)
+}
+
+fn connect_tcp_with_timeout(parsed: &ParsedApiUrl, timeout: Duration) -> Result<TcpStream> {
     let mut last_error = None;
     for addr in (parsed.host.as_str(), parsed.port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&addr, API_HTTP_TIMEOUT) {
+        match TcpStream::connect_timeout(&addr, timeout) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(API_HTTP_TIMEOUT))?;
-                stream.set_write_timeout(Some(API_HTTP_TIMEOUT))?;
+                stream.set_read_timeout(Some(timeout))?;
+                stream.set_write_timeout(Some(timeout))?;
                 return Ok(stream);
             }
             Err(error) => last_error = Some(error),
@@ -326,6 +374,183 @@ fn write_request_and_read_response(
         anyhow::bail!("API response exceeded {MAX_API_RESPONSE_BYTES} bytes");
     }
     Ok(response)
+}
+
+fn write_request_and_stream_response_to_file(
+    stream: &mut (impl Read + Write),
+    request: &str,
+    method: &str,
+    request_path: &str,
+    output_file: &Path,
+) -> Result<u64> {
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    let headers = read_response_headers(stream)?;
+    let header_end = find_bytes(&headers, b"\r\n\r\n").context("invalid HTTP response from API")?;
+    let head =
+        std::str::from_utf8(&headers[..header_end]).context("API response header is not UTF-8")?;
+    let status_line = head.lines().next().context("missing HTTP status line")?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .context("missing HTTP status code")?;
+    if !status_code.starts_with('2') {
+        let mut body = Vec::new();
+        stream
+            .take((MAX_API_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut body)?;
+        anyhow::ensure!(
+            body.len() <= MAX_API_RESPONSE_BYTES,
+            "API error response exceeded {MAX_API_RESPONSE_BYTES} bytes"
+        );
+        anyhow::bail!(
+            "API request {method} {request_path} failed: {status_line}: {}",
+            String::from_utf8_lossy(&body).trim()
+        );
+    }
+
+    let temp_path = download_temp_path(output_file);
+    let mut file = File::create(&temp_path)
+        .with_context(|| format!("failed to create {}", temp_path.display()))?;
+    let transfer_encoding = header_value(head, "transfer-encoding").unwrap_or_default();
+    let result = if transfer_encoding
+        .to_ascii_lowercase()
+        .split(',')
+        .any(|value| value.trim() == "chunked")
+    {
+        copy_chunked_body_to_file(stream, &mut file)
+    } else if let Some(content_length) = header_value(head, "content-length") {
+        let content_length = content_length
+            .trim()
+            .parse::<u64>()
+            .context("API response content-length is invalid")?;
+        copy_exact_body_to_file(stream, &mut file, content_length)
+    } else {
+        copy_body_to_file(stream, &mut file)
+    };
+    let written = match result {
+        Ok(written) => written,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
+    file.flush()?;
+    drop(file);
+    if let Err(error) = std::fs::rename(&temp_path, output_file) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to move download into {}", output_file.display()));
+    }
+    Ok(written)
+}
+
+fn download_temp_path(output_file: &Path) -> std::path::PathBuf {
+    let suffix = format!("tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+    match output_file.file_name().and_then(|name| name.to_str()) {
+        Some(name) => output_file.with_file_name(format!("{name}.{suffix}")),
+        None => output_file.with_extension(suffix),
+    }
+}
+
+fn read_response_headers(stream: &mut impl Read) -> Result<Vec<u8>> {
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let read = stream.read(&mut byte)?;
+        anyhow::ensure!(read != 0, "invalid HTTP response from API");
+        headers.push(byte[0]);
+        anyhow::ensure!(
+            headers.len() <= MAX_API_RESPONSE_HEADER_BYTES,
+            "API response headers exceeded {MAX_API_RESPONSE_HEADER_BYTES} bytes"
+        );
+        if headers.ends_with(b"\r\n\r\n") {
+            return Ok(headers);
+        }
+    }
+}
+
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (candidate, value) = line.split_once(':')?;
+        candidate.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+}
+
+fn copy_exact_body_to_file(
+    stream: &mut impl Read,
+    file: &mut File,
+    mut remaining: u64,
+) -> Result<u64> {
+    let mut written = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let max_read = buffer.len().min(remaining as usize);
+        let read = stream.read(&mut buffer[..max_read])?;
+        anyhow::ensure!(read != 0, "API response ended before content-length");
+        file.write_all(&buffer[..read])?;
+        written = written.saturating_add(read as u64);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    Ok(written)
+}
+
+fn copy_body_to_file(stream: &mut impl Read, file: &mut File) -> Result<u64> {
+    let mut written = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(written);
+        }
+        file.write_all(&buffer[..read])?;
+        written = written.saturating_add(read as u64);
+    }
+}
+
+fn copy_chunked_body_to_file(stream: &mut impl Read, file: &mut File) -> Result<u64> {
+    let mut written = 0_u64;
+    loop {
+        let line = read_crlf_line(stream)?;
+        let chunk_size_hex = line
+            .split(';')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("invalid chunked API response")?;
+        let chunk_size =
+            u64::from_str_radix(chunk_size_hex, 16).context("invalid API response chunk size")?;
+        if chunk_size == 0 {
+            loop {
+                if read_crlf_line(stream)?.is_empty() {
+                    return Ok(written);
+                }
+            }
+        }
+        written = written.saturating_add(copy_exact_body_to_file(stream, file, chunk_size)?);
+        let mut crlf = [0_u8; 2];
+        stream.read_exact(&mut crlf)?;
+        anyhow::ensure!(crlf == *b"\r\n", "invalid chunked API response");
+    }
+}
+
+fn read_crlf_line(stream: &mut impl Read) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let read = stream.read(&mut byte)?;
+        anyhow::ensure!(read != 0, "API response ended mid-line");
+        bytes.push(byte[0]);
+        anyhow::ensure!(
+            bytes.len() <= MAX_API_RESPONSE_HEADER_BYTES,
+            "API response line exceeded {MAX_API_RESPONSE_HEADER_BYTES} bytes"
+        );
+        if bytes.ends_with(b"\r\n") {
+            bytes.truncate(bytes.len().saturating_sub(2));
+            return String::from_utf8(bytes).context("API response line is not UTF-8");
+        }
+    }
 }
 
 fn write_request_file_and_read_response(
@@ -532,5 +757,81 @@ mod tests {
             .to_string();
         assert!(message.contains("403 Forbidden"));
         assert!(message.contains("not allowed"));
+    }
+
+    #[test]
+    fn streams_content_length_response_to_file() {
+        let mut stream =
+            FakeHttpStream::new(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world");
+        let path = temp_download_test_path("content-length");
+        let written = write_request_and_stream_response_to_file(
+            &mut stream,
+            "GET /artifact HTTP/1.1\r\n\r\n",
+            "GET",
+            "/artifact",
+            &path,
+        )
+        .unwrap();
+
+        assert_eq!(written, 11);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streams_chunked_response_to_file() {
+        let mut stream =
+            FakeHttpStream::new(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+        let path = temp_download_test_path("chunked");
+        let written = write_request_and_stream_response_to_file(
+            &mut stream,
+            "GET /artifact HTTP/1.1\r\n\r\n",
+            "GET",
+            "/artifact",
+            &path,
+        )
+        .unwrap();
+
+        assert_eq!(written, 11);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        let _ = std::fs::remove_file(path);
+    }
+
+    struct FakeHttpStream {
+        read: std::io::Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl FakeHttpStream {
+        fn new(response: &[u8]) -> Self {
+            Self {
+                read: std::io::Cursor::new(response.to_vec()),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl std::io::Read for FakeHttpStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.read, buffer)
+        }
+    }
+
+    impl std::io::Write for FakeHttpStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn temp_download_test_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "vpsctl-http-download-{label}-{}",
+            uuid::Uuid::new_v4()
+        ))
     }
 }

@@ -414,6 +414,11 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "right_underlay": "203.0.113.78",
   "address_pool_cidr": "10.251.0.0/30",
   "reserved_addresses": [],
+  "ipv4_tunnel": {
+    "left": "10.251.0.0",
+    "right": "10.251.0.1",
+    "prefix_len": 31
+  },
   "bandwidth": "1000m",
   "latency_ms": 17,
   "packet_loss_ratio": 0,

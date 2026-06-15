@@ -164,7 +164,10 @@ pub(crate) async fn put_backup_artifact_object(
 ) -> Result<bool> {
     match store.put_new(object_key, data).await {
         Ok(()) => Ok(true),
-        Err(error) => match store.get(object_key).await {
+        Err(error) => match store
+            .get_with_limit(object_key, backup_artifact_streaming_max_bytes())
+            .await
+        {
             Ok(existing) if existing == data => Ok(false),
             _ => Err(error),
         },

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::http::{http_get, http_get_bytes};
+use crate::http::{http_get, http_get_to_file};
 
 pub(crate) fn is_vty_job_output_command(command: &str) -> bool {
     command.starts_with("job-targets ")
@@ -75,22 +75,21 @@ pub(crate) fn submit_vty_job_output_command(
                 .context("invalid job output sequence")?;
             anyhow::ensure!(seq >= 0, "job output sequence must be non-negative");
             let output = PathBuf::from(parts[5]);
-            let bytes = http_get_bytes(
+            let size_bytes = http_get_to_file(
                 api_url,
                 &format!(
                     "/api/v1/jobs/{job_id}/outputs/{}/{seq}/artifact",
                     percent_encode_path_segment(client_id)
                 ),
                 token,
+                &output,
             )?;
-            std::fs::write(&output, &bytes)
-                .with_context(|| format!("failed to write artifact {}", output.display()))?;
             Ok(serde_json::json!({
                 "job_id": job_id,
                 "client_id": client_id,
                 "seq": seq,
                 "output": output,
-                "size_bytes": bytes.len(),
+                "size_bytes": size_bytes,
             })
             .to_string())
         }

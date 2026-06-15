@@ -7,7 +7,9 @@ use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 use vpsman_server_core::{INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES};
 
-use crate::model::{JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView};
+use crate::model::{
+    AuditLogView, JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView,
+};
 use crate::object_store::BackupObjectStore;
 use crate::repository::Repository;
 use crate::{output_stream_name, unix_now};
@@ -449,6 +451,9 @@ impl Repository {
             .iter()
             .filter_map(|output| output.created_artifact_object_key.clone())
             .collect::<Vec<_>>();
+        let mut orphaned_object_keys = Vec::new();
+        let mut accepted_persisted = Vec::new();
+        let mut conflict_audits = Vec::new();
         let result = match self {
             Self::Memory(memory) => {
                 let mut stored = memory.job_outputs.write().await;
@@ -459,9 +464,19 @@ impl Repository {
                             && existing.client_id == view.client_id
                             && existing.seq == view.seq
                     }) {
-                        *existing = view;
+                        if !job_output_view_matches_stored(existing, output) {
+                            conflict_audits.push(job_output_conflict_audit(
+                                output.job_id,
+                                &output.client_id,
+                                output.seq,
+                            ));
+                        }
+                        if let Some(object_key) = output.created_artifact_object_key.clone() {
+                            orphaned_object_keys.push(object_key);
+                        }
                     } else {
                         stored.push(view);
+                        accepted_persisted.push(output.clone());
                     }
                 }
                 Ok(())
@@ -469,7 +484,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 for output in &persisted {
-                    sqlx::query(
+                    let inserted = sqlx::query(
                         r#"
                         INSERT INTO job_outputs (
                             job_id,
@@ -487,16 +502,7 @@ impl Repository {
                         )
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
                         ON CONFLICT (job_id, client_id, seq)
-                        DO UPDATE SET
-                            stream = EXCLUDED.stream,
-                            data = EXCLUDED.data,
-                            storage = EXCLUDED.storage,
-                            object_key = EXCLUDED.object_key,
-                            data_sha256_hex = EXCLUDED.data_sha256_hex,
-                            data_size_bytes = EXCLUDED.data_size_bytes,
-                            exit_code = EXCLUDED.exit_code,
-                            done = EXCLUDED.done,
-                            received_at = EXCLUDED.received_at
+                        DO NOTHING
                         "#,
                     )
                     .bind(output.job_id)
@@ -513,6 +519,40 @@ impl Repository {
                     .bind(&output.received_at)
                     .execute(&mut *tx)
                     .await?;
+                    if inserted.rows_affected() > 0 {
+                        accepted_persisted.push(output.clone());
+                    }
+                    if inserted.rows_affected() == 0 {
+                        if let Some(object_key) = output.created_artifact_object_key.clone() {
+                            orphaned_object_keys.push(object_key);
+                        }
+                        let existing = sqlx::query(
+                            r#"
+                            SELECT
+                                stream,
+                                data,
+                                storage,
+                                object_key,
+                                data_sha256_hex,
+                                data_size_bytes,
+                                exit_code,
+                                done
+                            FROM job_outputs
+                            WHERE job_id = $1 AND client_id = $2 AND seq = $3
+                            "#,
+                        )
+                        .bind(output.job_id)
+                        .bind(&output.client_id)
+                        .bind(output.seq)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        if existing
+                            .as_ref()
+                            .is_some_and(|row| !job_output_row_matches_stored(row, output))
+                        {
+                            insert_job_output_conflict_audit(&mut tx, output).await?;
+                        }
+                    }
                 }
                 tx.commit().await
             }
@@ -525,9 +565,19 @@ impl Repository {
             }
             return Err(error.into());
         }
+        if !conflict_audits.is_empty() {
+            if let Self::Memory(memory) = self {
+                memory.audits.write().await.extend(conflict_audits);
+            }
+        }
+        if let Some(store) = config.object_store {
+            for object_key in orphaned_object_keys {
+                store.delete_best_effort(&object_key).await;
+            }
+        }
         self.record_network_observations_starting_at(job_id, client_id, start_seq, outputs)
             .await?;
-        self.register_persisted_job_output_artifacts(client_id, &persisted)
+        self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
             .await?;
         self.refresh_file_transfer_sessions_for_client(client_id)
             .await?;
@@ -606,6 +656,94 @@ impl StoredJobOutput {
             created_at: self.created_at,
         }
     }
+}
+
+fn job_output_view_matches_stored(existing: &JobOutputView, output: &StoredJobOutput) -> bool {
+    existing.stream == output.stream
+        && existing.data_base64 == BASE64.encode(&output.data)
+        && existing.storage == output.storage
+        && existing.artifact_object_key == output.artifact_object_key
+        && existing.artifact_sha256_hex == output.artifact_sha256_hex
+        && existing.artifact_size_bytes == output.artifact_size_bytes
+        && existing.exit_code == output.exit_code
+        && existing.done == output.done
+}
+
+fn job_output_row_matches_stored(row: &sqlx::postgres::PgRow, output: &StoredJobOutput) -> bool {
+    let Ok(stream) = row.try_get::<String, _>("stream") else {
+        return false;
+    };
+    let Ok(data) = row.try_get::<Vec<u8>, _>("data") else {
+        return false;
+    };
+    let Ok(storage) = row.try_get::<String, _>("storage") else {
+        return false;
+    };
+    let Ok(object_key) = row.try_get::<Option<String>, _>("object_key") else {
+        return false;
+    };
+    let Ok(data_sha256_hex) = row.try_get::<Option<String>, _>("data_sha256_hex") else {
+        return false;
+    };
+    let Ok(data_size_bytes) = row.try_get::<Option<i64>, _>("data_size_bytes") else {
+        return false;
+    };
+    let Ok(exit_code) = row.try_get::<Option<i32>, _>("exit_code") else {
+        return false;
+    };
+    let Ok(done) = row.try_get::<bool, _>("done") else {
+        return false;
+    };
+    stream == output.stream.as_str()
+        && data.as_slice() == output.data.as_slice()
+        && storage == output.storage.as_str()
+        && object_key.as_ref() == output.artifact_object_key.as_ref()
+        && data_sha256_hex.as_ref() == output.artifact_sha256_hex.as_ref()
+        && data_size_bytes == output.artifact_size_bytes
+        && exit_code == output.exit_code
+        && done == output.done
+}
+
+fn job_output_conflict_audit(job_id: Uuid, client_id: &str, seq: i32) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        action: "job.output_conflict_ignored".to_string(),
+        target: format!("client:{client_id}"),
+        command_hash: None,
+        metadata: serde_json::json!({
+            "job_id": job_id,
+            "client_id": client_id,
+            "seq": seq,
+            "reason": "output sequence already persisted with different content",
+        }),
+        created_at: unix_now().to_string(),
+    }
+}
+
+async fn insert_job_output_conflict_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    output: &StoredJobOutput,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, 'job.output_conflict_ignored', $2, NULL, $3)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("client:{}", output.client_id))
+    .bind(serde_json::json!({
+        "job_id": output.job_id,
+        "client_id": output.client_id,
+        "seq": output.seq,
+        "reason": "output sequence already persisted with different content",
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn materialize_job_outputs(
@@ -692,7 +830,7 @@ async fn put_job_output_object(
 ) -> Result<bool> {
     match store.put_new(object_key, data).await {
         Ok(()) => Ok(true),
-        Err(error) => match store.get(object_key).await {
+        Err(error) => match store.get_with_limit(object_key, data.len()).await {
             Ok(existing) if existing == data => Ok(false),
             _ => Err(error),
         },
@@ -1010,6 +1148,71 @@ mod tests {
         assert_eq!(outputs[0].seq, 0);
         assert_eq!(outputs[1].seq, 1);
         assert!(outputs[1].done);
+    }
+
+    #[tokio::test]
+    async fn conflicting_replay_output_preserves_original_sequence_row() {
+        let repo = Repository::Memory(MemoryState::default());
+        let job_id = Uuid::new_v4();
+        let original = CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"original output".to_vec(),
+            exit_code: None,
+            done: false,
+        };
+        let replay_conflict = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: br#"{"type":"duplicate_job_replayed"}"#.to_vec(),
+            exit_code: Some(75),
+            done: true,
+        };
+
+        repo.record_job_output_chunk_with_config(
+            job_id,
+            "client-a",
+            0,
+            &original,
+            None,
+            JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+        )
+        .await
+        .unwrap();
+        repo.record_job_output_chunk_with_config(
+            job_id,
+            "client-a",
+            0,
+            &replay_conflict,
+            None,
+            JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+        )
+        .await
+        .unwrap();
+
+        let outputs = repo.list_job_outputs(job_id).await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].stream, "stdout");
+        assert_eq!(
+            outputs[0].data_base64,
+            super::BASE64.encode(b"original output")
+        );
+        let Repository::Memory(memory) = &repo else {
+            unreachable!();
+        };
+        assert!(memory
+            .audits
+            .read()
+            .await
+            .iter()
+            .any(|audit| audit.action == "job.output_conflict_ignored"
+                && audit.metadata["seq"].as_i64() == Some(0)));
     }
 
     #[test]

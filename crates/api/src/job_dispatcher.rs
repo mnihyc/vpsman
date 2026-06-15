@@ -1,7 +1,14 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        OnceLock,
+    },
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use futures_util::{stream, StreamExt};
+use tokio::sync::Notify;
 use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
@@ -24,12 +31,77 @@ const DISPATCH_LEASE_SECS: i64 = 30;
 const DISPATCH_INTERVAL_SECS: u64 = 1;
 const DEADLINE_EXPIRE_LIMIT: i64 = 128;
 
+struct DispatcherWakeState {
+    notify: Notify,
+    dispatching: AtomicBool,
+    pending: AtomicBool,
+    loop_started: AtomicBool,
+    sweeps_started: AtomicU64,
+    sweeps_coalesced: AtomicU64,
+    targets_claimed: AtomicU64,
+    dispatch_latency_micros_total: AtomicU64,
+    dispatch_latency_samples: AtomicU64,
+    gateway_dispatch_errors: AtomicU64,
+}
+
+impl Default for DispatcherWakeState {
+    fn default() -> Self {
+        Self {
+            notify: Notify::new(),
+            dispatching: AtomicBool::new(false),
+            pending: AtomicBool::new(false),
+            loop_started: AtomicBool::new(false),
+            sweeps_started: AtomicU64::new(0),
+            sweeps_coalesced: AtomicU64::new(0),
+            targets_claimed: AtomicU64::new(0),
+            dispatch_latency_micros_total: AtomicU64::new(0),
+            dispatch_latency_samples: AtomicU64::new(0),
+            gateway_dispatch_errors: AtomicU64::new(0),
+        }
+    }
+}
+
+static DISPATCHER_WAKE_STATE: OnceLock<DispatcherWakeState> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DispatcherMetricsSnapshot {
+    pub(crate) dispatcher_sweeps_started: u64,
+    pub(crate) dispatcher_sweeps_coalesced: u64,
+    pub(crate) targets_claimed: u64,
+    pub(crate) dispatch_latency_micros_total: u64,
+    pub(crate) dispatch_latency_samples: u64,
+    pub(crate) gateway_dispatch_errors: u64,
+}
+
+fn dispatcher_wake_state() -> &'static DispatcherWakeState {
+    DISPATCHER_WAKE_STATE.get_or_init(DispatcherWakeState::default)
+}
+
+pub(crate) fn dispatcher_metrics_snapshot() -> DispatcherMetricsSnapshot {
+    let wake_state = dispatcher_wake_state();
+    DispatcherMetricsSnapshot {
+        dispatcher_sweeps_started: wake_state.sweeps_started.load(Ordering::Relaxed),
+        dispatcher_sweeps_coalesced: wake_state.sweeps_coalesced.load(Ordering::Relaxed),
+        targets_claimed: wake_state.targets_claimed.load(Ordering::Relaxed),
+        dispatch_latency_micros_total: wake_state
+            .dispatch_latency_micros_total
+            .load(Ordering::Relaxed),
+        dispatch_latency_samples: wake_state.dispatch_latency_samples.load(Ordering::Relaxed),
+        gateway_dispatch_errors: wake_state.gateway_dispatch_errors.load(Ordering::Relaxed),
+    }
+}
+
 pub(crate) fn spawn_job_dispatcher(state: AppState) {
+    let wake_state = dispatcher_wake_state();
+    wake_state.loop_started.store(true, Ordering::Release);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(DISPATCH_INTERVAL_SECS));
         loop {
-            interval.tick().await;
-            if let Err(error) = dispatch_due_job_targets(&state).await {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = wake_state.notify.notified() => {}
+            }
+            if let Err(error) = run_dispatcher_sweep(&state).await {
                 warn!(%error, "durable job dispatcher tick failed");
             }
         }
@@ -37,11 +109,68 @@ pub(crate) fn spawn_job_dispatcher(state: AppState) {
 }
 
 pub(crate) fn wake_job_dispatcher(state: AppState) {
-    tokio::spawn(async move {
-        if let Err(error) = dispatch_due_job_targets(&state).await {
-            warn!(%error, "durable job dispatcher wake failed");
+    let wake_state = dispatcher_wake_state();
+    wake_state.pending.store(true, Ordering::Release);
+    if wake_state.dispatching.load(Ordering::Acquire) {
+        wake_state.sweeps_coalesced.fetch_add(1, Ordering::Relaxed);
+    }
+    wake_state.notify.notify_one();
+    if !wake_state.loop_started.load(Ordering::Acquire) {
+        tokio::spawn(async move {
+            if let Err(error) = run_dispatcher_sweep(&state).await {
+                warn!(%error, "durable job dispatcher wake failed");
+            }
+        });
+    }
+}
+
+async fn run_dispatcher_sweep(state: &AppState) -> Result<usize> {
+    let wake_state = dispatcher_wake_state();
+    if wake_state.dispatching.swap(true, Ordering::AcqRel) {
+        wake_state.pending.store(true, Ordering::Release);
+        wake_state.sweeps_coalesced.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            dispatcher_sweeps_coalesced = dispatcher_metrics_snapshot().dispatcher_sweeps_coalesced,
+            "durable job dispatcher wake coalesced"
+        );
+        return Ok(0);
+    }
+
+    wake_state.sweeps_started.fetch_add(1, Ordering::Relaxed);
+    let started_at = Instant::now();
+    let result = async {
+        let mut total = 0;
+        loop {
+            wake_state.pending.store(false, Ordering::Release);
+            total += dispatch_due_job_targets(state).await?;
+            if !wake_state.pending.swap(false, Ordering::AcqRel) {
+                break;
+            }
+            debug!("durable job dispatcher draining coalesced wake");
         }
-    });
+        Ok(total)
+    }
+    .await;
+
+    let elapsed_micros = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+    wake_state
+        .dispatch_latency_micros_total
+        .fetch_add(elapsed_micros, Ordering::Relaxed);
+    wake_state
+        .dispatch_latency_samples
+        .fetch_add(1, Ordering::Relaxed);
+    wake_state.dispatching.store(false, Ordering::Release);
+    let metrics = dispatcher_metrics_snapshot();
+    debug!(
+        dispatcher_sweeps_started = metrics.dispatcher_sweeps_started,
+        dispatcher_sweeps_coalesced = metrics.dispatcher_sweeps_coalesced,
+        targets_claimed = metrics.targets_claimed,
+        dispatch_latency_micros_total = metrics.dispatch_latency_micros_total,
+        dispatch_latency_samples = metrics.dispatch_latency_samples,
+        gateway_dispatch_errors = metrics.gateway_dispatch_errors,
+        "durable job dispatcher metrics"
+    );
+    result
 }
 
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
@@ -55,6 +184,9 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
     if claimed_count == 0 {
         return Ok(0);
     }
+    dispatcher_wake_state()
+        .targets_claimed
+        .fetch_add(claimed_count as u64, Ordering::Relaxed);
     debug!(claimed_count, "durable job dispatcher claimed targets");
     stream::iter(claimed)
         .for_each_concurrent(dispatcher_config.in_flight, |claimed| {
@@ -71,6 +203,9 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
 
 async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) -> Result<()> {
     if !state.gateway.configured() {
+        dispatcher_wake_state()
+            .gateway_dispatch_errors
+            .fetch_add(1, Ordering::Relaxed);
         let outcome = dispatch_error_outcome(claimed.job_id, "gateway control URL missing");
         return finish_claimed_target(state, &claimed, outcome).await;
     }
@@ -101,6 +236,9 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
     let outcome = match state.gateway.dispatch(&claimed.client_id, request).await {
         Ok(result) => crate::routes_jobs::target_outcome_from_gateway(result),
         Err(error) => {
+            dispatcher_wake_state()
+                .gateway_dispatch_errors
+                .fetch_add(1, Ordering::Relaxed);
             let message = error.to_string();
             warn!(
                 job_id = %claimed.job_id,

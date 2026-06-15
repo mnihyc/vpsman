@@ -11,10 +11,7 @@ use vpsman_common::{encode_json, payload_hash, JobCommand};
 use crate::{
     backup_artifact_crypto::prepare_backup_archive_for_restore,
     backup_auto_artifacts::backup_artifact_object_key,
-    backup_handoff::{
-        backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout,
-        MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
-    },
+    backup_handoff::{backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout},
     backup_upload_sessions::backup_upload_sessions,
     error::ApiError,
     job_request::validate_file_path,
@@ -28,6 +25,7 @@ use crate::{
         RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
+    routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::validate_schedule_request,
     security::operator_has_scope,
     selector_expression::id_selector_expression,
@@ -628,23 +626,31 @@ pub(crate) async fn download_backup_artifact(
     if artifact.client_id != backup_request.client_id {
         return Err(ApiError::conflict("backup_artifact_client_mismatch"));
     }
-    let bytes = store
-        .get(&artifact.object_key)
+    let expected_size = u64::try_from(artifact.size_bytes)
+        .map_err(|_| ApiError::conflict("backup_artifact_object_size_mismatch"))?;
+    let object_file = store
+        .verified_object_file(
+            &artifact.object_key,
+            &artifact.sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
         .await
-        .map_err(|_| ApiError::not_found("backup_artifact_object_not_found"))?;
-    if i64::try_from(bytes.len()).ok() != Some(artifact.size_bytes) {
-        return Err(ApiError::conflict("backup_artifact_object_size_mismatch"));
-    }
-    if payload_hash(&bytes) != artifact.sha256_hex {
-        return Err(ApiError::conflict("backup_artifact_object_hash_mismatch"));
-    }
-    validate_encrypted_backup_artifact_with_limit(
-        &bytes,
-        &backup_request.client_id,
-        MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
-    )?;
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "backup_artifact_object_not_found",
+                "backup_artifact_object_hash_mismatch",
+            )
+        })?;
+    let body = streaming_artifact_file_body(
+        object_file.path,
+        "backup_artifact_object_not_found",
+        object_file.cleanup_after_stream,
+    )
+    .await?;
 
-    let mut response = Response::new(Body::from(bytes));
+    let mut response = Response::new(body);
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
@@ -658,6 +664,11 @@ pub(crate) async fn download_backup_artifact(
         "x-vpsman-backup-artifact-sha256",
         HeaderValue::from_str(&artifact.sha256_hex)
             .map_err(|error| ApiError::from(anyhow!("invalid artifact sha header: {error}")))?,
+    );
+    response.headers_mut().insert(
+        "content-length",
+        HeaderValue::from_str(&expected_size.to_string())
+            .map_err(|error| ApiError::from(anyhow!("invalid artifact size header: {error}")))?,
     );
     Ok(response)
 }
@@ -688,7 +699,7 @@ pub(crate) async fn prepare_backup_artifact_restore(
     validate_encrypted_backup_artifact_with_limit(
         &artifact_bytes,
         &backup_request.client_id,
-        MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
+        backup_artifact_streaming_max_bytes(),
     )?;
     let prepared = prepare_backup_archive_for_restore(
         &artifact_bytes,
@@ -725,8 +736,15 @@ async fn stored_backup_artifact_bytes(
     if artifact.client_id != backup_request.client_id {
         return Err(ApiError::conflict("backup_artifact_client_mismatch"));
     }
+    let expected_size = u64::try_from(artifact.size_bytes)
+        .map_err(|_| ApiError::conflict("backup_artifact_object_size_mismatch"))?;
+    if expected_size > state.artifact_max_bytes() as u64 {
+        return Err(ApiError::conflict(
+            "backup_artifact_object_exceeds_configured_limit",
+        ));
+    }
     let bytes = store
-        .get(&artifact.object_key)
+        .get_with_limit(&artifact.object_key, state.artifact_max_bytes())
         .await
         .map_err(|_| ApiError::not_found("backup_artifact_object_not_found"))?;
     if i64::try_from(bytes.len()).ok() != Some(artifact.size_bytes) {

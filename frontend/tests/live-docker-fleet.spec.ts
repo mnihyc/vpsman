@@ -161,7 +161,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   const firstRow = grid
     .locator(".gridBody [role=row]", { hasText: "df-alpha-US-01" })
     .first();
-  const secondRow = grid.locator(".gridBody [role=row]").nth(1);
+  const secondRow = grid
+    .locator(".gridBody [role=row]", { hasText: "df-alpha-DE-10" })
+    .first();
   await firstRow.getByLabel("Expand VPS instance records row").click();
   const firstDetail = grid
     .locator(".gridExpandedRow", { hasText: "df-alpha-US-01" })
@@ -177,8 +179,12 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-expanded-telemetry-detail",
     "Expanded VPS row showing live telemetry detail for a real agent.",
   );
-  await firstRow.getByLabel("Select VPS instance records row").check();
-  await secondRow.getByLabel("Select VPS instance records row").check();
+  await firstRow
+    .getByLabel("Select VPS instance records row")
+    .check({ force: true });
+  await secondRow
+    .getByLabel("Select VPS instance records row")
+    .check({ force: true });
   await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
   await grid.getByRole("button", { name: "Selection" }).click();
   await expect(

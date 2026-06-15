@@ -12,12 +12,11 @@ test.beforeEach(async ({ page }) => {
 
 async function selectScheduleRow(page: Page, scheduleName: string) {
   const grid = page.getByLabel("Schedule records data grid");
-  await expect(grid.getByText(scheduleName)).toBeVisible();
-  const checkbox = grid
-    .getByRole("checkbox", {
-      exact: true,
-      name: "Select Schedule records row",
-    })
+  const row = grid.locator(".gridBody [role=row]", { hasText: scheduleName })
+    .first();
+  await expect(row).toBeVisible();
+  const checkbox = row
+    .getByRole("checkbox", { name: /Select Schedule records row/ })
     .first();
   if (!(await checkbox.isChecked())) {
     await checkbox.check();
@@ -237,8 +236,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(embeddedDetail.getByLabel("Fleet inline tag")).toBeVisible();
 
   const rowChecks = fleetGrid.getByRole("checkbox", {
-    name: "Select VPS instance records row",
-    exact: true,
+    name: /Select VPS instance records row/,
   });
   await rowChecks.nth(0).check();
   await rowChecks.nth(1).check();

@@ -8,7 +8,7 @@ use vpsman_common::{JobCommand, JobStatus};
 
 use crate::{
     commands_schedules::selector_expression_from_targets,
-    http::{http_get, http_get_bytes, http_post_json},
+    http::{http_get, http_get_to_file, http_post_json},
     jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest},
     privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
 };
@@ -276,16 +276,15 @@ pub(crate) fn job_output_artifact(
 ) -> Result<()> {
     let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
     anyhow::ensure!(seq >= 0, "--seq must be non-negative");
-    let bytes = http_get_bytes(
+    let size_bytes = http_get_to_file(
         api_url,
         &format!(
             "/api/v1/jobs/{job_id}/outputs/{}/{seq}/artifact",
             percent_encode_path_segment(&client_id),
         ),
         token,
+        &output_file,
     )?;
-    std::fs::write(&output_file, &bytes)
-        .with_context(|| format!("failed to write artifact {}", output_file.display()))?;
     println!(
         "{}",
         serde_json::json!({
@@ -293,7 +292,7 @@ pub(crate) fn job_output_artifact(
             "client_id": client_id,
             "seq": seq,
             "output": output_file,
-            "size_bytes": bytes.len(),
+            "size_bytes": size_bytes,
         })
     );
     Ok(())

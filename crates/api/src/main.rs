@@ -110,7 +110,7 @@ use gateway_client::{GatewayClientTimeouts, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
-use state::{AppState, UpdateReleasePolicy};
+use state::{AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
 use tokio::{sync::broadcast, time};
 use tracing::info;
 use vpsman_common::{read_secret_file_ref, SuiteConfig};
@@ -277,6 +277,12 @@ struct Args {
     job_output_artifact_min_bytes: usize,
     #[arg(
         long,
+        env = "VPSMAN_ARTIFACT_MAX_BYTES",
+        default_value_t = DEFAULT_ARTIFACT_MAX_BYTES
+    )]
+    artifact_max_bytes: usize,
+    #[arg(
+        long,
         env = "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
         default_value_t = false
     )]
@@ -439,6 +445,11 @@ impl Args {
         if env_absent("VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES") {
             if let Some(value) = config.api.job_output_artifact_min_bytes {
                 self.job_output_artifact_min_bytes = value;
+            }
+        }
+        if env_absent("VPSMAN_ARTIFACT_MAX_BYTES") {
+            if let Some(value) = config.api.artifact_max_bytes {
+                self.artifact_max_bytes = value;
             }
         }
         if env_absent("VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES") {
@@ -654,6 +665,7 @@ async fn main() -> Result<()> {
         update_release_policy,
         fleet_alert_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
+        artifact_max_bytes: args.artifact_max_bytes,
         require_registered_agent_updates: args.require_registered_agent_updates,
         suite_config_path: args.suite_config.clone(),
         dispatcher_config: state::DispatcherRuntimeConfig {

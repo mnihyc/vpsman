@@ -93,7 +93,20 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         let path = temp_suite_config_path("api-hot-reload");
         std::fs::write(
             &path,
-            suite_runtime_toml(17, 9, 11, 12, 13, 4096, true, 0.30, 0.20, 3.0, 5.0),
+            suite_runtime_toml(
+                17,
+                9,
+                11,
+                12,
+                13,
+                4096,
+                96 * 1024 * 1024,
+                true,
+                0.30,
+                0.20,
+                3.0,
+                5.0,
+            ),
         )
         .unwrap();
         let mut state = test_state(Repository::Memory(MemoryState::default()));
@@ -106,6 +119,7 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(dispatcher.event_post_secs, 12);
         assert_eq!(dispatcher.internal_http_read_secs, 13);
         assert_eq!(state.job_output_artifact_min_bytes(), 4096);
+        assert_eq!(state.artifact_max_bytes(), 96 * 1024 * 1024);
         assert!(state.require_registered_agent_updates());
         let policy = state.fleet_alert_policy();
         assert_eq!(policy.memory_available_warning_ratio, 0.30);
@@ -117,7 +131,20 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
 
         std::fs::write(
             &path,
-            suite_runtime_toml(23, 7, 29, 8, 19, 8192, false, 0.40, 0.15, 4.0, 6.0),
+            suite_runtime_toml(
+                23,
+                7,
+                29,
+                8,
+                19,
+                8192,
+                160 * 1024 * 1024,
+                false,
+                0.40,
+                0.15,
+                4.0,
+                6.0,
+            ),
         )
         .unwrap();
 
@@ -128,6 +155,7 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(dispatcher.event_post_secs, 8);
         assert_eq!(dispatcher.internal_http_read_secs, 19);
         assert_eq!(state.job_output_artifact_min_bytes(), 8192);
+        assert_eq!(state.artifact_max_bytes(), 160 * 1024 * 1024);
         assert!(!state.require_registered_agent_updates());
         let policy = state.fleet_alert_policy();
         assert_eq!(policy.memory_available_warning_ratio, 0.40);
@@ -299,6 +327,7 @@ fn test_state(repo: Repository) -> AppState {
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
+        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
@@ -319,6 +348,7 @@ const API_HOT_RELOAD_ENV: &[&str] = &[
     "VPSMAN_EVENT_POST_SECS",
     "VPSMAN_INTERNAL_HTTP_READ_SECS",
     "VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES",
+    "VPSMAN_ARTIFACT_MAX_BYTES",
     "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
     "VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO",
     "VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO",
@@ -361,6 +391,7 @@ fn suite_runtime_toml(
     event_post_secs: u64,
     internal_http_read_secs: u64,
     artifact_min_bytes: usize,
+    artifact_max_bytes: usize,
     require_registered_agent_updates: bool,
     memory_warning: f64,
     memory_critical: f64,
@@ -381,6 +412,7 @@ internal_http_read_secs = {internal_http_read_secs}
 
 [api]
 job_output_artifact_min_bytes = {artifact_min_bytes}
+artifact_max_bytes = {artifact_max_bytes}
 require_registered_agent_updates = {require_registered_agent_updates}
 alert_memory_available_warning_ratio = {memory_warning}
 alert_memory_available_critical_ratio = {memory_critical}

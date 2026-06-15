@@ -21,6 +21,10 @@ use crate::{
     security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
 };
 
+pub(crate) const DEFAULT_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
+const MIN_ARTIFACT_MAX_BYTES: usize = 1024 * 1024;
+const MAX_ARTIFACT_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) repo: Repository,
@@ -33,6 +37,7 @@ pub(crate) struct AppState {
     pub(crate) update_release_policy: UpdateReleasePolicy,
     pub(crate) fleet_alert_policy: FleetAlertPolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
+    pub(crate) artifact_max_bytes: usize,
     pub(crate) require_registered_agent_updates: bool,
     pub(crate) suite_config_path: PathBuf,
     pub(crate) dispatcher_config: DispatcherRuntimeConfig,
@@ -120,6 +125,18 @@ impl AppState {
             }
         }
         self.job_output_artifact_min_bytes
+    }
+
+    pub(crate) fn artifact_max_bytes(&self) -> usize {
+        let mut value = self.artifact_max_bytes;
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_ARTIFACT_MAX_BYTES") {
+                if let Some(configured) = suite.api.artifact_max_bytes {
+                    value = configured;
+                }
+            }
+        }
+        value.clamp(MIN_ARTIFACT_MAX_BYTES, MAX_ARTIFACT_MAX_BYTES)
     }
 
     pub(crate) fn require_registered_agent_updates(&self) -> bool {

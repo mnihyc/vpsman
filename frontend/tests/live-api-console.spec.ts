@@ -53,7 +53,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await expect(planRow.getByText("live-gre-a-b", { exact: true })).toBeVisible();
   await expect(planRow.getByText("GRE", { exact: true })).toBeVisible();
   await expect(planRow.getByText("Agent iproute2", { exact: true })).toBeVisible();
-  await expect(planRow.getByText("planned", { exact: true })).toBeVisible();
+  await expect(planRow.getByText("Planned", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Audit" }).click();
   await expect(page.locator(".consoleHeader").getByRole("heading", { name: "Audit log" })).toBeVisible();

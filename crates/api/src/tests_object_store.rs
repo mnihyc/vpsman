@@ -31,6 +31,25 @@ async fn filesystem_object_store_writes_under_safe_relative_key() {
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
+#[tokio::test]
+async fn filesystem_verified_object_file_returns_store_path_without_cleanup() {
+    let root = std::env::temp_dir().join(format!("vpsman-object-store-{}", Uuid::new_v4()));
+    let store = BackupObjectStore::filesystem(root.clone()).unwrap();
+    let payload = b"verified filesystem payload";
+    let object_key = "backups/client-a/verified.bin";
+    store.put_new(object_key, payload).await.unwrap();
+
+    let verified = store
+        .verified_object_file(object_key, &sha256_hex(payload), payload.len() as u64, 1024)
+        .await
+        .unwrap();
+
+    assert!(!verified.cleanup_after_stream);
+    assert_eq!(tokio::fs::read(&verified.path).await.unwrap(), payload);
+    assert!(verified.path.starts_with(&root));
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
 #[test]
 fn object_key_rejects_path_traversal() {
     assert!(validate_object_key("../artifact").is_err());
@@ -119,6 +138,36 @@ async fn s3_object_store_decodes_chunked_get_response() {
     let store = s3_store(&endpoint);
 
     assert_eq!(store.get(object_key).await.unwrap(), b"hello world");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn s3_verified_object_file_spools_hash_checked_temp_file() {
+    let object_key = "backups/client-a/spooled.bin";
+    let object_path = "/root/vpsman-artifacts/backups/client-a/spooled.bin";
+    let payload = b"spooled object-store payload".to_vec();
+    let (endpoint, server) = spawn_fake_s3(vec![ExpectedS3Request::new(
+        "GET",
+        object_path,
+        Vec::new(),
+        s3_response(200, &payload),
+    )])
+    .await;
+    let store = s3_store(&endpoint);
+
+    let verified = store
+        .verified_object_file(
+            object_key,
+            &sha256_hex(&payload),
+            payload.len() as u64,
+            payload.len(),
+        )
+        .await
+        .unwrap();
+
+    assert!(verified.cleanup_after_stream);
+    assert_eq!(tokio::fs::read(&verified.path).await.unwrap(), payload);
+    tokio::fs::remove_file(&verified.path).await.unwrap();
     server.await.unwrap();
 }
 

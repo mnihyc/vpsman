@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{
-    backup_handoff::MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
+    backup_handoff::backup_artifact_streaming_max_bytes,
     error::ApiError,
     model::{
         BackupArtifactUploadChunkRequest, BackupArtifactUploadCommitRequest,
@@ -215,7 +215,7 @@ impl BackupArtifactUploadSessions {
         validate_encrypted_backup_artifact_with_limit(
             &artifact,
             expected_client_id,
-            MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES,
+            backup_artifact_streaming_max_bytes(),
         )?;
 
         Ok(PreparedBackupArtifactUpload {
@@ -350,8 +350,8 @@ pub(crate) fn validate_backup_artifact_upload_session_create_request(
             "backup_artifact_upload_expected_sha256_invalid",
         ));
     }
-    if !(1..=MAX_BACKUP_ARTIFACT_CHUNKED_UPLOAD_BYTES as i64).contains(&request.expected_size_bytes)
-    {
+    let max_size_bytes = i64::try_from(backup_artifact_streaming_max_bytes()).unwrap_or(i64::MAX);
+    if !(1..=max_size_bytes).contains(&request.expected_size_bytes) {
         return Err(ApiError::bad_request(
             "backup_artifact_upload_expected_size_invalid",
         ));

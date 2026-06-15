@@ -61,6 +61,7 @@ fn schedule_test_state(repo: Repository) -> AppState {
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
+        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
@@ -297,6 +298,38 @@ async fn scheduled_failed_job_updates_retry_controls_on_finish() {
     assert_eq!(failed_twice.failure_count, 2);
     assert_eq!(failed_twice.last_error.as_deref(), Some("failed"));
     assert!(!failed_twice.enabled);
+}
+
+#[tokio::test]
+async fn scheduled_job_finish_is_idempotent_for_failure_accounting() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let schedule = repo
+        .create_schedule(shell_schedule_request("idempotent-finish", true), &operator)
+        .await
+        .unwrap();
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "failed-once").await;
+
+    assert!(repo.finish_job(job_id, "failed").await.unwrap());
+    assert!(!repo.finish_job(job_id, "failed").await.unwrap());
+
+    let failed_once = repo.schedule_by_id(schedule.id).await.unwrap();
+    assert_eq!(failed_once.failure_count, 1);
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let job_id_string = job_id.to_string();
+    let schedule_failed_events = memory
+        .webhook_events
+        .read()
+        .await
+        .iter()
+        .filter(|event| {
+            event.kind == "schedule.failed"
+                && event.payload["schedule"]["last_job_id"].as_str() == Some(job_id_string.as_str())
+        })
+        .count();
+    assert_eq!(schedule_failed_events, 1);
 }
 
 #[tokio::test]

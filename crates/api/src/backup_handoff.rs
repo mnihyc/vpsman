@@ -73,7 +73,10 @@ pub(crate) async fn stage_retained_backup_artifact_stdout(
                     continue;
                 }
             }
-            let data = store.get(object_key).await.map_err(ApiError::from)?;
+            let data = store
+                .get_with_limit(object_key, backup_artifact_streaming_max_bytes())
+                .await
+                .map_err(ApiError::from)?;
             validate_backup_handoff_output_part(output, &data)?;
             append_backup_handoff_bytes(
                 &data,

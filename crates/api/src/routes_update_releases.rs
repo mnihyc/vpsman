@@ -23,6 +23,7 @@ use crate::{
     repository_agent_update_releases::{
         UploadedAgentUpdateReleaseArtifacts, UploadedAgentUpdateReleaseMetadata,
     },
+    routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     state::AppState,
     util::limit_or_default,
 };
@@ -315,18 +316,35 @@ pub(crate) async fn download_agent_update_artifact(
         .update_object_store
         .as_ref()
         .ok_or_else(|| ApiError::not_found("agent_update_artifact_store_not_configured"))?;
-    let bytes = store.get(&artifact_ref.artifact_object_key).await?;
-    let actual_hash = sha256_hex(&bytes);
-    if actual_hash != artifact_ref.artifact_sha256_hex
-        || artifact_ref
-            .size_bytes
-            .is_some_and(|expected| expected != bytes.len() as i64)
-    {
-        return Err(ApiError::conflict(
-            "agent_update_artifact_integrity_mismatch",
-        ));
-    }
-    let mut response = Response::new(Body::from(bytes));
+    let expected_size = artifact_ref
+        .size_bytes
+        .ok_or_else(|| ApiError::conflict("agent_update_artifact_size_missing"))
+        .and_then(|size| {
+            u64::try_from(size)
+                .map_err(|_| ApiError::conflict("agent_update_artifact_integrity_mismatch"))
+        })?;
+    let object_file = store
+        .verified_object_file(
+            &artifact_ref.artifact_object_key,
+            &artifact_ref.artifact_sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "agent_update_artifact_not_found",
+                "agent_update_artifact_integrity_mismatch",
+            )
+        })?;
+    let body = streaming_artifact_file_body(
+        object_file.path,
+        "agent_update_artifact_not_found",
+        object_file.cleanup_after_stream,
+    )
+    .await?;
+    let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
@@ -343,6 +361,11 @@ pub(crate) async fn download_agent_update_artifact(
         "x-vpsman-artifact-sha256",
         HeaderValue::from_str(&artifact_ref.artifact_sha256_hex)
             .map_err(|_| ApiError::conflict("agent_update_artifact_hash_invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&expected_size.to_string())
+            .map_err(|_| ApiError::conflict("agent_update_artifact_size_invalid"))?,
     );
     Ok(response)
 }

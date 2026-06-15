@@ -12,7 +12,7 @@ export async function openConsoleSubpage(page: Page, view: string, subpage: stri
   }
 
   const nav = page.getByRole("navigation", { name: "Primary console navigation" });
-  await activate(nav.locator("button.navItem").filter({ hasText: view }));
+  await activate(nav.getByRole("button", { name: view, exact: true }).first());
   const subpageGroup = nav.getByLabel(`${view} sections`);
   const subpageButton = subpageGroup.getByRole("button", { name: subpage, exact: true });
   if ((await subpageButton.count()) > 0) {
