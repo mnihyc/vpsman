@@ -547,6 +547,15 @@ export async function installTransferJobApiMock(page: Page) {
       if (targetMatch && method === "GET" && dynamicJobTargets[targetMatch[1]]) {
         return jsonResponse(dynamicJobTargets[targetMatch[1]]);
       }
+      const targetStatusDownloadMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/targets\/download$/);
+      if (targetStatusDownloadMatch && method === "GET" && dynamicJobTargets[targetStatusDownloadMatch[1]]) {
+        return Promise.resolve(
+          new Response(new TextEncoder().encode("target status archive"), {
+            headers: { "Content-Type": "application/x-tar" },
+            status: 200,
+          }),
+        );
+      }
       const bundleMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs\/download-bundle$/);
       if (bundleMatch && method === "GET" && dynamicJobOutputs[bundleMatch[1]]) {
         return Promise.resolve(
@@ -556,7 +565,7 @@ export async function installTransferJobApiMock(page: Page) {
           }),
         );
       }
-      const artifactMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs\/([^/]+)\/(\d+)\/artifact$/);
+      const artifactMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs\/([^/]+)\/(\d+)\/download$/);
       if (artifactMatch && method === "GET") {
         const key = `${artifactMatch[1]}/${decodeURIComponent(artifactMatch[2])}/${artifactMatch[3]}`;
         const bytes = dynamicArtifacts[key];

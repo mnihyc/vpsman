@@ -2136,6 +2136,13 @@ export async function installConsoleApiMock(page: Page) {
             status,
           }),
         );
+      const tarResponse = (label: string) =>
+        Promise.resolve(
+          new Response(new TextEncoder().encode(label), {
+            headers: { "Content-Type": "application/x-tar" },
+            status: 200,
+          }),
+        );
       const emptyArrayResponse = () => jsonResponse([]);
       const buildWebhookDelivery = (
         request: Record<string, unknown>,
@@ -3630,6 +3637,12 @@ export async function installConsoleApiMock(page: Page) {
         }
         if (pathname === "/api/v1/network/topology-graph" && method === "GET") {
           return jsonResponse(topologyGraphFixture);
+        }
+        const targetStatusDownloadMatch = pathname.match(
+          /^\/api\/v1\/jobs\/([^/]+)\/targets\/download$/,
+        );
+        if (targetStatusDownloadMatch && method === "GET") {
+          return tarResponse("target status archive");
         }
         const targetMatch = pathname.match(
           /^\/api\/v1\/jobs\/([^/]+)\/targets$/,

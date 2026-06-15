@@ -159,7 +159,7 @@ export function JobDispatchPanel({
   terminalComposerAction,
   onCreateJob,
   onDownloadFileTransferSource,
-  onDownloadOutputArtifact,
+  onDownloadOutputChunk,
   onLoadJob,
   onLoadOutputs,
   onLoadTargets,
@@ -176,7 +176,7 @@ export function JobDispatchPanel({
   terminalComposerAction?: TerminalComposerAction | null;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
-  onDownloadOutputArtifact: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
+  onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -687,7 +687,7 @@ export function JobDispatchPanel({
           createJob: onCreateJob,
           downloadName: fileTransferDownloadName,
           downloadSink: fileTransferDownloadSink,
-          downloadOutputArtifact: onDownloadOutputArtifact,
+          downloadOutputChunk: onDownloadOutputChunk,
           loadJob: onLoadJob,
           loadOutputs: onLoadOutputs,
           path: filePath,

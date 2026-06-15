@@ -137,14 +137,16 @@ agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
    Job and schedule submissions send the resolved VPS IDs as the fixed target
    set; the selector remains audit context.
 3. Dispatch: privilege-gated command with confirmation for destructive work.
-4. Observe: `jobs`, `job-targets`, `job-outputs`, `job-follow`.
+4. Observe: `jobs`, `job-targets`, `job-target-status-download`,
+   `job-outputs`, `job-follow`.
 5. Recover: inspect job outputs, then run an explicit compensating operation such as
    `restore-rollback`, `agent-update-rollback`, or `tunnel-rollback` as appropriate.
 
 Agent update staging, activation, and rollback use the same direct job model as
 other privileged commands. Activation and rollback need privilege unlock through
 `enable` or explicit CLI unlock environment, and operators observe progress
-through `jobs`, `job-targets`, `job-outputs`, and `job-follow`. Use
+through `jobs`, `job-targets`, `job-target-status-download`, `job-outputs`,
+and `job-follow`. Use
 `--force-unprivileged` only for a known normal-user agent where the operator
 deliberately wants a best-effort activation or rollback attempt.
 

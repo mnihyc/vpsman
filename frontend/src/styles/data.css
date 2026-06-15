@@ -868,8 +868,8 @@
   grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(
       180px,
       1fr
-    ) 70px minmax(160px, 0.8fr);
-  min-width: max(100%, 740px);
+    ) 70px minmax(160px, 0.8fr) minmax(150px, 0.7fr);
+  min-width: max(100%, 900px);
 }
 
 .scheduledRunGrid {
@@ -1365,6 +1365,15 @@
   padding: 0 9px;
 }
 
+.inlineActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
 .compactSelect {
   height: 30px;
   max-width: 160px;
@@ -1749,6 +1758,31 @@
   display: grid;
 }
 
+.outputDownloadRows {
+  display: grid;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #dfe3eb;
+}
+
+.outputDownloadRow {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.35fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (max-width: 700px) {
+  .outputDownloadRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .outputDownloadRow .inlineActions {
+    justify-content: flex-start;
+  }
+}
+
 .outputChunk {
   display: grid;
   grid-template-columns: minmax(170px, 0.35fr) minmax(0, 1fr);
@@ -1809,6 +1843,11 @@
   font-size: 12px;
   line-height: 1.5;
   padding: 12px;
+}
+
+.deletedArtifact pre {
+  border-color: #f6c343;
+  background: #fff8e1;
 }
 
 .bulkTagApplyGrid {

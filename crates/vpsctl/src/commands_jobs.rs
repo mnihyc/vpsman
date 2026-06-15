@@ -176,6 +176,30 @@ pub(crate) fn job_targets(api_url: &str, token: Option<&str>, job_id: String) ->
     Ok(())
 }
 
+pub(crate) fn job_target_status_download(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: String,
+    output_file: PathBuf,
+) -> Result<()> {
+    let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
+    let size_bytes = http_get_to_file(
+        api_url,
+        &format!("/api/v1/jobs/{job_id}/targets/download"),
+        token,
+        &output_file,
+    )?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "job_id": job_id,
+            "output": output_file,
+            "size_bytes": size_bytes,
+        })
+    );
+    Ok(())
+}
+
 pub(crate) fn job_outputs(api_url: &str, token: Option<&str>, job_id: String) -> Result<()> {
     let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
     println!(
@@ -266,7 +290,7 @@ pub(crate) fn job_follow_output(
     );
 }
 
-pub(crate) fn job_output_artifact(
+pub(crate) fn job_output_download(
     api_url: &str,
     token: Option<&str>,
     job_id: String,
@@ -279,7 +303,7 @@ pub(crate) fn job_output_artifact(
     let size_bytes = http_get_to_file(
         api_url,
         &format!(
-            "/api/v1/jobs/{job_id}/outputs/{}/{seq}/artifact",
+            "/api/v1/jobs/{job_id}/outputs/{}/{seq}/download",
             percent_encode_path_segment(&client_id),
         ),
         token,
@@ -378,6 +402,10 @@ struct JobOutputRecord {
     seq: i32,
     stream: String,
     data_base64: String,
+    storage: Option<String>,
+    artifact_object_key: Option<String>,
+    artifact_sha256_hex: Option<String>,
+    artifact_size_bytes: Option<i64>,
     done: bool,
 }
 
@@ -390,12 +418,23 @@ fn render_job_output(output: &JobOutputRecord, json: bool) -> Result<String> {
         .context("job output data is not valid base64")?;
     let text = String::from_utf8_lossy(&bytes);
     let done = if output.done { " done" } else { "" };
+    let artifact_deleted = output.storage.as_deref() == Some("artifact_deleted");
+    let deleted = if artifact_deleted {
+        let size = output
+            .artifact_size_bytes
+            .map(|size| format!(" full_size={size}"))
+            .unwrap_or_default();
+        format!(" artifact_deleted preview_only{size}")
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "[{} {} #{}{}] {}\n",
+        "[{} {} #{}{}{}] {}\n",
         output.client_id,
         output.stream,
         output.seq,
         done,
+        deleted,
         text.trim_end_matches(['\r', '\n'])
     ))
 }
@@ -407,6 +446,10 @@ fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {
         "seq": output.seq,
         "stream": &output.stream,
         "data_base64": &output.data_base64,
+        "storage": &output.storage,
+        "artifact_object_key": &output.artifact_object_key,
+        "artifact_sha256_hex": &output.artifact_sha256_hex,
+        "artifact_size_bytes": output.artifact_size_bytes,
         "done": output.done,
     })
 }
@@ -648,6 +691,10 @@ mod tests {
             client_id: "edge-a".to_string(),
             seq: 7,
             stream: "pty".to_string(),
+            storage: None,
+            artifact_object_key: None,
+            artifact_sha256_hex: None,
+            artifact_size_bytes: None,
             data_base64: BASE64.encode("hello\r\n"),
             done: true,
         };

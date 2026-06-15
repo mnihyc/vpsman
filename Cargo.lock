@@ -3139,6 +3139,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vpsman-common",
+ "vpsman-object-store",
  "vpsman-server-build-info",
  "vpsman-server-core",
  "x25519-dalek",
@@ -3190,6 +3191,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vpsman-object-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "hmac",
+ "reqwest",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "vpsman-server-build-info"
 version = "0.1.0"
 dependencies = [
@@ -3223,6 +3237,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vpsman-common",
+ "vpsman-object-store",
  "vpsman-server-build-info",
  "vpsman-server-core",
 ]

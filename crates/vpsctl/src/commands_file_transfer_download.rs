@@ -428,7 +428,7 @@ fn fetch_download_stdout_chunk(
             let bytes = http_get_bytes(
                 api_url,
                 &format!(
-                    "/api/v1/jobs/{job_id}/outputs/{}/{}/artifact",
+                    "/api/v1/jobs/{job_id}/outputs/{}/{}/download",
                     percent_encode_path_segment(client_id),
                     output.seq
                 ),

@@ -214,6 +214,47 @@ export function useJobsData(
     [apiToken, onUnauthorized],
   );
 
+  const downloadJobOutputArchive = useCallback(
+    async (jobId: string, clientIds: string[]) => {
+      try {
+        const params = new URLSearchParams();
+        if (clientIds.length > 0) {
+          params.set("clients", clientIds.join(","));
+        }
+        const suffix = params.toString();
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/archive${suffix ? `?${suffix}` : ""}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const downloadJobTargetStatuses = useCallback(
+    async (jobId: string) => {
+      try {
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/targets/download`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
   const loadJobOutputComparison = useCallback(
     async (jobId: string, mode: JobOutputCompareMode) => {
       try {
@@ -245,11 +286,47 @@ export function useJobsData(
     [apiToken, onAuditChanged],
   );
 
-  const downloadJobOutputArtifact = useCallback(
+  const downloadJobOutputChunk = useCallback(
     async (jobId: string, clientId: string, seq: number) => {
       try {
         return await apiGetBlob(
-          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(clientId)}/${seq}/artifact`,
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(clientId)}/${seq}/download`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const downloadJobOutputStream = useCallback(
+    async (jobId: string, clientId: string, stream: "stdout" | "stderr" | "combined") => {
+      try {
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(clientId)}/download?stream=${encodeURIComponent(stream)}`,
+          apiToken,
+        );
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const downloadFileDownloadForClient = useCallback(
+    async (jobId: string, clientId: string) => {
+      try {
+        return await apiGetBlob(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(clientId)}/file-download`,
           apiToken,
         );
       } catch (error) {
@@ -534,7 +611,11 @@ export function useJobsData(
     createFileTransferHandoff,
     previewArtifactCleanup,
     uploadFileTransferSource,
-    downloadJobOutputArtifact,
+    downloadJobOutputChunk,
+    downloadJobOutputStream,
+    downloadFileDownloadForClient,
+    downloadJobOutputArchive,
+    downloadJobTargetStatuses,
     downloadFileTransferHandoff,
     downloadFileTransferSource,
     saveFileTransferHandoff,

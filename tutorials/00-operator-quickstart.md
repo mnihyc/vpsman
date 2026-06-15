@@ -97,7 +97,10 @@ cargo run -p vpsctl -- bulk-resolve --tags edge,provider:provider-a,region:sfo
 ```sh
 cargo run -p vpsctl -- job-create --command uptime --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- jobs --limit 10
-cargo run -p vpsctl -- job-follow <job_uuid> --max-polls 60
+cargo run -p vpsctl -- job-follow --job-id <job_uuid> --max-polls 60
+cargo run -p vpsctl -- job-target-status-download \
+  --job-id <job_uuid> \
+  --output-file ./job-status.tar
 ```
 
 For interactive work:
@@ -165,6 +168,7 @@ Use this loop while managing 20+ VPSs:
 1. Inspect `summary`, `agents`, `fleet-alerts`, and `gateway-sessions`.
 2. Resolve exact targets with `bulk-resolve`.
 3. Dispatch through panel, CLI, or VTY with confirmation and local privilege unlock.
-4. Observe `jobs`, `job-targets`, `job-outputs`, and alerts.
+4. Observe `jobs`, `job-targets`, `job-target-status-download`,
+   `job-outputs`, and alerts.
 5. Recover with rollback commands, direct identity key rotation, or data-source preset
    changes instead of manual per-host edits.

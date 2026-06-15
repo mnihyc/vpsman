@@ -12,8 +12,8 @@ Job statuses are:
   gateway/agent ACK, or is actively running, and terminal aggregation has not
   completed.
 - `completed`: every target completed successfully.
-- `partial_success`: at least one target completed successfully and at least one target did not, or every dispatched target was skipped by capability policy.
-- `skipped`: the job had zero durable targets.
+- `partial_success`: at least one target completed successfully and at least one target did not.
+- `skipped`: the job had zero durable targets, or every durable target was skipped by backend capability policy.
 - `rejected`: job creation was rejected before dispatch.
 - `failed`: target results were terminal and failed without any completed target.
 - `agent_timeout`: at least one target timed out inside the agent command runtime and no target completed.
@@ -42,7 +42,7 @@ Target statuses are:
 - Claiming any queued target promotes the parent job from `queued` to `running`
   before agent ACK, so a dispatching target is never represented by a still
   queued parent job.
-- `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets, or all skipped targets, aggregate to `partial_success`.
+- `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets aggregate to `partial_success`; all-skipped jobs aggregate to `skipped`.
 - Availability is contextual display only. Offline fixed targets remain target records until backend deadline, then become `control_timeout`.
 - `control_timeout` is a terminal control-plane decision. Late final agent
   output may be persisted as diagnostic evidence, but it must not rewrite the
@@ -57,6 +57,21 @@ Target statuses are:
   original terminal status/result even when cached replay bytes are no longer
   retained.
 - Frontend TypeScript status unions come from `vpsman_common` via `frontend/src/generated/protocolContracts.ts`; frontend code must not maintain separate status alias lists.
+
+## Download Archives
+
+Job output and status downloads are intentionally separate so operators can
+review payloads without confusing them with execution metadata:
+
+- `Download outputs` archives retained output payload streams by target, such
+  as `stdout.bin` and `stderr.bin`.
+- `Download files` archives completed file-download payloads at
+  `<target>/<filename>` and adds root-level `<target>_status.json`
+  file-download metadata. A real downloaded file named `status.json` remains a
+  normal target file at `<target>/status.json`.
+- `Download status` archives target execution status only. It contains root
+  `targets.json` for all target records plus root-level
+  `<target>_status.json` entries for each target.
 
 ## Shared Workflow Contracts
 

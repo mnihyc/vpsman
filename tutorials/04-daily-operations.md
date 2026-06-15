@@ -49,6 +49,9 @@ current resolution.
 ```sh
 cargo run -p vpsctl -- jobs --limit 20
 cargo run -p vpsctl -- job-targets --job-id <job_uuid>
+cargo run -p vpsctl -- job-target-status-download \
+  --job-id <job_uuid> \
+  --output-file ./job-status.tar
 cargo run -p vpsctl -- job-outputs --job-id <job_uuid>
 cargo run -p vpsctl -- job-follow --job-id <job_uuid> --interval-ms 1000 --max-polls 120
 ```
@@ -56,17 +59,32 @@ cargo run -p vpsctl -- job-follow --job-id <job_uuid> --interval-ms 1000 --max-p
 If a large output chunk was externalized to local object storage:
 
 ```sh
-cargo run -p vpsctl -- job-output-artifact \
+cargo run -p vpsctl -- job-output-download \
   --job-id <job_uuid> \
   --client-id edge-01 \
   --seq <output_seq> \
   --output-file ./stdout.bin
 ```
 
-Explicit artifact downloads use the CLI binary streaming path and write through
-a temporary file before rename. They are not subject to the JSON API response
-cap; the server still enforces the configured `api.artifact_max_bytes` /
-`VPSMAN_ARTIFACT_MAX_BYTES` envelope.
+Explicit output and status downloads use the CLI binary streaming path and
+write through a temporary file before rename. They are not subject to the JSON
+API response cap; the server still enforces the configured
+`api.artifact_max_bytes` / `VPSMAN_ARTIFACT_MAX_BYTES` envelope.
+
+In the browser Job History detail panel, bulk archive buttons are intentionally
+separate:
+
+- `Download outputs` downloads retained command output payloads such as
+  `stdout.bin` and `stderr.bin` by target. It does not add target execution
+  status files.
+- `Download files` appears for completed file-download jobs. The archive keeps
+  each downloaded file at `<target>/<filename>` and adds per-target
+  `<target>_status.json` file-download metadata at the archive root. A real
+  downloaded file named `status.json` remains `<target>/status.json` and does
+  not collide with metadata.
+- `Download status` downloads target execution status only. The archive
+  contains root `targets.json` for all targets plus root-level
+  `<target>_status.json` entries for individual target records.
 
 Durable output history is first-writer-wins by `(job_id, client_id, seq)`.
 Duplicate command replay does not insert marker rows into the normal output
@@ -235,7 +253,7 @@ cargo run -p vpsctl -- file-transfer-upload \
 ```
 
 File-transfer handoffs and source-artifact downloads use the same binary
-streaming path as job-output artifacts, so routine downloads are bounded by the
+streaming path as job-output downloads, so routine downloads are bounded by the
 configured artifact max rather than by the small JSON response limit.
 
 ## User Sessions And Processes
@@ -314,5 +332,8 @@ compensating operation when a completed result needs recovery:
 ```sh
 cargo run -p vpsctl -- job-follow --job-id <job_uuid>
 cargo run -p vpsctl -- job-targets --job-id <job_uuid>
+cargo run -p vpsctl -- job-target-status-download \
+  --job-id <job_uuid> \
+  --output-file ./job-status.tar
 cargo run -p vpsctl -- job-outputs --job-id <job_uuid>
 ```

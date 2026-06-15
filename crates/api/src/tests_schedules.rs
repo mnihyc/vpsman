@@ -362,8 +362,10 @@ async fn scheduled_successful_job_resets_failure_controls_on_finish() {
 }
 
 #[tokio::test]
-async fn scheduled_partial_success_and_skipped_reset_failure_controls_on_finish() {
-    for status in ["partial_success", "skipped"] {
+async fn scheduled_partial_success_resets_but_skipped_preserves_failure_controls_on_finish() {
+    for (status, expected_failure_count, expected_last_error) in
+        [("partial_success", 0, None), ("skipped", 1, Some("failed"))]
+    {
         let repo = Repository::Memory(MemoryState::default());
         let operator = schedule_test_operator();
         let schedule = repo
@@ -389,8 +391,8 @@ async fn scheduled_partial_success_and_skipped_reset_failure_controls_on_finish(
         let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, status).await;
         repo.finish_job(job_id, status).await.unwrap();
         let recovered = repo.schedule_by_id(schedule.id).await.unwrap();
-        assert_eq!(recovered.failure_count, 0);
-        assert_eq!(recovered.last_error, None);
+        assert_eq!(recovered.failure_count, expected_failure_count);
+        assert_eq!(recovered.last_error.as_deref(), expected_last_error);
         assert!(recovered.enabled);
     }
 }
@@ -426,8 +428,8 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
     .unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "partial_success");
-    wait_for_job_status(&repo, response.job_id, "partial_success").await;
+    assert_eq!(response.status, "skipped");
+    wait_for_job_status(&repo, response.job_id, "skipped").await;
     assert_eq!(
         repo.schedule_by_id(schedule.id).await.unwrap().next_run_at,
         next_run_before

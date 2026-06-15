@@ -10,6 +10,7 @@ members = [
     "crates/vpsctl",
     "crates/server-core",
     "crates/server-build-info",
+    "crates/object-store",
 ]
 
 [workspace.package]

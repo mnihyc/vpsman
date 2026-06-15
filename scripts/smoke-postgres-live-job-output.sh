@@ -6,7 +6,7 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 source "$ROOT_DIR/scripts/lib-smoke-process-supervisor.sh"
 
 smoke_enter_root
-smoke_require_tools awk base64 cmp curl docker grep jq ping ps python3 sha256sum shuf stat timeout
+smoke_require_tools awk base64 cmp curl docker grep jq ping ps python3 sha256sum shuf stat tar timeout
 smoke_build_binaries
 smoke_init_tmpdir "vpsman-postgres-live-job-output"
 
@@ -536,7 +536,7 @@ assert_large_output_artifact() {
 
   rm -f "$large_output_file"
   VPSMAN_API_TOKEN="$access_token" \
-    target/debug/vpsctl --api-url "$api_url" job-output-artifact \
+    target/debug/vpsctl --api-url "$api_url" job-output-download \
       --job-id "$large_output_job_id" \
       --client-id "$client_id" \
       --seq "$seq" \
@@ -572,7 +572,7 @@ assert_agent_timeout_shell_job() {
 }
 
 assert_file_pull_output() {
-  local job_json targets_json outputs_json status_json pulled_bytes
+  local job_json targets_json outputs_json status_json pulled_bytes status_archive status_entries target_status_json
   job_json="$(api_get "/api/v1/jobs/$file_pull_job_id")"
   targets_json="$(api_get "/api/v1/jobs/$file_pull_job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$file_pull_job_id/outputs")"
@@ -588,6 +588,23 @@ assert_file_pull_output() {
   jq -e --arg path "$shell_marker" --argjson size "${#file_pull_payload}" '
     .type == "file_pull" and .path == $path and .size_bytes == $size
   ' <<<"$status_json" >/dev/null
+
+  status_archive="$SMOKE_TMPDIR/job-target-status.tar"
+  rm -f "$status_archive"
+  VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" job-target-status-download \
+      --job-id "$file_pull_job_id" \
+      --output-file "$status_archive" >/dev/null
+  status_entries="$(tar -tf "$status_archive")"
+  grep -Fx "targets.json" <<<"$status_entries" >/dev/null
+  grep -Fx "${client_id}_status.json" <<<"$status_entries" >/dev/null
+  tar -xOf "$status_archive" targets.json | jq -e --arg client "$client_id" '
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+  ' >/dev/null
+  target_status_json="$(tar -xOf "$status_archive" "${client_id}_status.json")"
+  jq -e --arg client "$client_id" '
+    .client_id == $client and .status == "completed" and .exit_code == 0
+  ' <<<"$target_status_json" >/dev/null
 }
 
 assert_user_sessions_no_privilege_unlock_rejection() {

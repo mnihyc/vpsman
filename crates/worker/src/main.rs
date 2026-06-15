@@ -1,11 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr, time::Duration};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use croner::Cron;
@@ -21,15 +16,16 @@ use uuid::Uuid;
 #[cfg(test)]
 use vpsman_common::VpsMetadata;
 use vpsman_common::{
-    expression_matches, parse_expression, payload_hash, AgentCapabilitySnapshot, Expression,
-    ExpressionContext, JobCommand, SuiteConfig, SERVER_JOB_STATUS_COMPLETED,
-    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING,
-    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    expression_matches, parse_expression, payload_hash, read_secret_file_ref,
+    AgentCapabilitySnapshot, Expression, ExpressionContext, JobCommand, SuiteConfig,
+    SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
+    SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
+use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
     job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
-    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_PARTIAL_SUCCESS,
-    JOB_STATUS_QUEUED, JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
+    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_QUEUED,
+    JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
 };
 
 mod alert_notifications;
@@ -162,6 +158,38 @@ struct Args {
     backup_policy_prune_delete_objects: bool,
     #[arg(long, env = "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR")]
     backup_policy_prune_object_store_dir: Option<PathBuf>,
+    #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
+    backup_object_store_dir: Option<PathBuf>,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
+    update_object_store_dir: Option<PathBuf>,
+    #[arg(long, env = "VPSMAN_OBJECT_ENDPOINT")]
+    object_endpoint: Option<String>,
+    #[arg(long, env = "VPSMAN_OBJECT_BUCKET")]
+    object_bucket: Option<String>,
+    #[arg(long, env = "VPSMAN_OBJECT_ACCESS_KEY")]
+    object_access_key: Option<String>,
+    #[arg(long, env = "VPSMAN_OBJECT_SECRET_KEY")]
+    object_secret_key: Option<String>,
+    #[arg(long, env = "VPSMAN_OBJECT_REGION", default_value = "us-east-1")]
+    object_region: String,
+    #[arg(long, env = "VPSMAN_OBJECT_CREATE_BUCKET", default_value_t = false)]
+    object_create_bucket: bool,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ENDPOINT")]
+    update_object_endpoint: Option<String>,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_BUCKET")]
+    update_object_bucket: Option<String>,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ACCESS_KEY")]
+    update_object_access_key: Option<String>,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_SECRET_KEY")]
+    update_object_secret_key: Option<String>,
+    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_REGION", default_value = "us-east-1")]
+    update_object_region: String,
+    #[arg(
+        long,
+        env = "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
+        default_value_t = false
+    )]
+    update_object_create_bucket: bool,
     #[arg(
         long,
         env = "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
@@ -185,12 +213,13 @@ struct WorkerRuntimeConfig {
     webhook_rule_config: WebhookRuleWorkerConfig,
     backup_policy_prune_config: BackupPolicyRetentionPruneConfig,
     schedule_dispatch_config: ScheduleDispatchConfig,
-    backup_policy_prune_object_store_dir: Option<PathBuf>,
+    artifact_object_store: Option<BackupObjectStore>,
 }
 
 impl WorkerRuntimeConfig {
-    fn from_args(args: &Args) -> Self {
-        Self {
+    fn from_args(args: &Args) -> Result<Self> {
+        let artifact_object_store = build_artifact_object_store(args)?;
+        Ok(Self {
             tick_secs: args.tick_secs.max(1),
             worker_lease_secs: args.worker_lease_secs,
             agent_offline_timeout_secs: args.agent_offline_timeout_secs,
@@ -213,14 +242,14 @@ impl WorkerRuntimeConfig {
                 args.backup_policy_prune_dry_run,
                 args.backup_policy_prune_include_disabled,
                 args.backup_policy_prune_delete_objects,
-                args.backup_policy_prune_object_store_dir.clone(),
+                artifact_object_store.clone(),
             ),
             schedule_dispatch_config: ScheduleDispatchConfig::new(
                 args.schedule_command_timeout_secs,
                 args.require_registered_agent_updates,
             ),
-            backup_policy_prune_object_store_dir: args.backup_policy_prune_object_store_dir.clone(),
-        }
+            artifact_object_store,
+        })
     }
 }
 
@@ -230,7 +259,7 @@ fn load_worker_runtime_config(base_args: &Args) -> Result<WorkerRuntimeConfig> {
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
     args.apply_suite_config(&suite_config)
         .map_err(anyhow::Error::msg)?;
-    Ok(WorkerRuntimeConfig::from_args(&args))
+    WorkerRuntimeConfig::from_args(&args)
 }
 
 impl Args {
@@ -353,6 +382,82 @@ impl Args {
                 .as_deref()
                 .or(config.storage.object_store_dir.as_deref()),
         );
+        apply_opt_path(
+            &mut self.backup_object_store_dir,
+            "VPSMAN_BACKUP_OBJECT_STORE_DIR",
+            config
+                .storage
+                .backup_object_store_dir
+                .as_deref()
+                .or(config.storage.object_store_dir.as_deref()),
+        );
+        apply_opt_path(
+            &mut self.update_object_store_dir,
+            "VPSMAN_UPDATE_OBJECT_STORE_DIR",
+            config
+                .storage
+                .update_object_store_dir
+                .as_deref()
+                .or(config.storage.object_store_dir.as_deref()),
+        );
+        apply_opt_string(
+            &mut self.object_endpoint,
+            "VPSMAN_OBJECT_ENDPOINT",
+            config.storage.object_endpoint.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.object_bucket,
+            "VPSMAN_OBJECT_BUCKET",
+            config.storage.object_bucket.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.update_object_endpoint,
+            "VPSMAN_UPDATE_OBJECT_ENDPOINT",
+            config.storage.update_object_endpoint.as_deref(),
+        );
+        apply_opt_string(
+            &mut self.update_object_bucket,
+            "VPSMAN_UPDATE_OBJECT_BUCKET",
+            config.storage.update_object_bucket.as_deref(),
+        );
+        apply_string_default(
+            &mut self.object_region,
+            "VPSMAN_OBJECT_REGION",
+            config.storage.object_region.as_deref(),
+        );
+        apply_string_default(
+            &mut self.update_object_region,
+            "VPSMAN_UPDATE_OBJECT_REGION",
+            config.storage.update_object_region.as_deref(),
+        );
+        apply_bool_default(
+            &mut self.object_create_bucket,
+            "VPSMAN_OBJECT_CREATE_BUCKET",
+            config.storage.object_create_bucket,
+        );
+        apply_bool_default(
+            &mut self.update_object_create_bucket,
+            "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
+            config.storage.update_object_create_bucket,
+        );
+        if self.object_access_key.is_none() && env_absent("VPSMAN_OBJECT_ACCESS_KEY") {
+            self.object_access_key =
+                read_secret_file_ref(config.secrets.object_access_key_file.as_deref())?;
+        }
+        if self.object_secret_key.is_none() && env_absent("VPSMAN_OBJECT_SECRET_KEY") {
+            self.object_secret_key =
+                read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
+        }
+        if self.update_object_access_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_ACCESS_KEY")
+        {
+            self.update_object_access_key =
+                read_secret_file_ref(config.secrets.update_object_access_key_file.as_deref())?;
+        }
+        if self.update_object_secret_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_SECRET_KEY")
+        {
+            self.update_object_secret_key =
+                read_secret_file_ref(config.secrets.update_object_secret_key_file.as_deref())?;
+        }
         apply_u64_default(
             &mut self.schedule_command_timeout_secs,
             "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
@@ -368,6 +473,87 @@ impl Args {
         );
         Ok(())
     }
+}
+
+fn build_artifact_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+    Ok(build_backup_object_store(args)?.or(build_update_object_store(args)?))
+}
+
+fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+    if let Some(store) = args
+        .backup_object_store_dir
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(BackupObjectStore::filesystem)
+        .transpose()?
+    {
+        return Ok(Some(store));
+    }
+
+    build_s3_object_store(
+        &args.object_endpoint,
+        &args.object_bucket,
+        &args.object_access_key,
+        &args.object_secret_key,
+        &args.object_region,
+        args.object_create_bucket,
+        "S3 object storage requires VPSMAN_OBJECT_ENDPOINT, VPSMAN_OBJECT_BUCKET, VPSMAN_OBJECT_ACCESS_KEY, and VPSMAN_OBJECT_SECRET_KEY",
+    )
+}
+
+fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+    if let Some(store) = args
+        .update_object_store_dir
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(BackupObjectStore::filesystem)
+        .transpose()?
+    {
+        return Ok(Some(store));
+    }
+
+    build_s3_object_store(
+        &args.update_object_endpoint,
+        &args.update_object_bucket,
+        &args.update_object_access_key,
+        &args.update_object_secret_key,
+        &args.update_object_region,
+        args.update_object_create_bucket,
+        "S3 update object storage requires VPSMAN_UPDATE_OBJECT_ENDPOINT, VPSMAN_UPDATE_OBJECT_BUCKET, VPSMAN_UPDATE_OBJECT_ACCESS_KEY, and VPSMAN_UPDATE_OBJECT_SECRET_KEY",
+    )
+}
+
+fn build_s3_object_store(
+    endpoint: &Option<String>,
+    bucket: &Option<String>,
+    access_key: &Option<String>,
+    secret_key: &Option<String>,
+    region: &str,
+    create_bucket: bool,
+    incomplete_config_message: &'static str,
+) -> Result<Option<BackupObjectStore>> {
+    let s3_fields = [
+        endpoint.as_deref(),
+        bucket.as_deref(),
+        access_key.as_deref(),
+        secret_key.as_deref(),
+    ];
+    let s3_field_count = s3_fields
+        .iter()
+        .filter(|value| value.is_some_and(|value| !value.trim().is_empty()))
+        .count();
+    if s3_field_count == 0 {
+        return Ok(None);
+    }
+    ensure!(s3_field_count == s3_fields.len(), incomplete_config_message);
+    Ok(Some(BackupObjectStore::s3(S3BackupObjectStoreSettings {
+        endpoint: endpoint.clone().unwrap_or_default(),
+        bucket: bucket.clone().unwrap_or_default(),
+        access_key: access_key.clone().unwrap_or_default(),
+        secret_key: secret_key.clone().unwrap_or_default(),
+        region: region.to_string(),
+        create_bucket,
+    })?))
 }
 
 fn env_absent(name: &str) -> bool {
@@ -394,6 +580,14 @@ fn apply_path_default(target: &mut PathBuf, env_name: &str, value: Option<&str>)
     if env_absent(env_name) {
         if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
             *target = PathBuf::from(value);
+        }
+    }
+}
+
+fn apply_string_default(target: &mut String, env_name: &str, value: Option<&str>) {
+    if env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = value.to_string();
         }
     }
 }
@@ -481,7 +675,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| format!("vpsman-worker-{}", std::process::id()));
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
-        let runtime_config = WorkerRuntimeConfig::from_args(&args);
+        let runtime_config = WorkerRuntimeConfig::from_args(&args)?;
         let schedules_processed = process_due_schedules_if_leader(
             &pool,
             25,
@@ -513,7 +707,7 @@ async fn main() -> Result<()> {
         .await?;
         let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
             &pool,
-            runtime_config.backup_policy_prune_object_store_dir.as_ref(),
+            runtime_config.artifact_object_store.as_ref(),
             &worker_id,
             runtime_config.worker_lease_secs,
         )
@@ -587,7 +781,13 @@ async fn main() -> Result<()> {
             Ok(config) => config,
             Err(error) => {
                 warn!(%error, "failed to hot-reload worker suite config; using startup runtime config");
-                WorkerRuntimeConfig::from_args(&args)
+                match WorkerRuntimeConfig::from_args(&args) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!(%error, "failed to build startup worker runtime config");
+                        continue;
+                    }
+                }
             }
         };
         if runtime_config.tick_secs != current_tick_secs {
@@ -679,7 +879,7 @@ async fn main() -> Result<()> {
         }
         match process_artifact_cleanup_jobs_if_leader(
             &pool,
-            runtime_config.backup_policy_prune_object_store_dir.as_ref(),
+            runtime_config.artifact_object_store.as_ref(),
             &worker_id,
             runtime_config.worker_lease_secs,
         )
@@ -947,7 +1147,7 @@ struct ArtifactCleanupCandidate {
 
 async fn process_artifact_cleanup_jobs_if_leader(
     pool: &PgPool,
-    object_store_dir: Option<&PathBuf>,
+    object_store: Option<&BackupObjectStore>,
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<ArtifactCleanupRun> {
@@ -958,17 +1158,17 @@ async fn process_artifact_cleanup_jobs_if_leader(
         );
         return Ok(ArtifactCleanupRun::default());
     }
-    process_artifact_cleanup_jobs(pool, object_store_dir).await
+    process_artifact_cleanup_jobs(pool, object_store).await
 }
 
 async fn process_artifact_cleanup_jobs(
     pool: &PgPool,
-    object_store_dir: Option<&PathBuf>,
+    object_store: Option<&BackupObjectStore>,
 ) -> Result<ArtifactCleanupRun> {
     let Some(job) = claim_artifact_cleanup_job(pool).await? else {
         return Ok(ArtifactCleanupRun::default());
     };
-    let result = run_artifact_cleanup_job(pool, object_store_dir, &job).await;
+    let result = run_artifact_cleanup_job(pool, object_store, &job).await;
     match result {
         Ok(run) => {
             sqlx::query(
@@ -1055,11 +1255,11 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
 
 async fn run_artifact_cleanup_job(
     pool: &PgPool,
-    object_store_dir: Option<&PathBuf>,
+    object_store: Option<&BackupObjectStore>,
     job: &ArtifactCleanupJob,
 ) -> Result<ArtifactCleanupRun> {
-    let object_store_dir = object_store_dir
-        .context("artifact cleanup requires VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR")?;
+    let object_store =
+        object_store.context("artifact cleanup requires configured artifact object store")?;
     let parsed = parse_expression(&job.expression).map_err(|error| anyhow::anyhow!(error))?;
     let candidates = artifact_cleanup_candidates(pool).await?;
     let mut run = ArtifactCleanupRun::default();
@@ -1068,7 +1268,7 @@ async fn run_artifact_cleanup_job(
         .filter(|candidate| artifact_cleanup_candidate_matches(candidate, parsed.as_ref()))
         .take(1000)
     {
-        match apply_artifact_cleanup_candidate(pool, object_store_dir, candidate).await? {
+        match apply_artifact_cleanup_candidate(pool, object_store, candidate).await? {
             ArtifactCleanupDisposition::Deleted => {
                 run.deleted_rows += 1;
                 run.deleted_bytes += candidate.size_bytes;
@@ -1089,22 +1289,22 @@ enum ArtifactCleanupDisposition {
 
 async fn apply_artifact_cleanup_candidate(
     pool: &PgPool,
-    object_store_dir: &Path,
+    object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
     match candidate.domain.as_str() {
-        "job_output" => delete_job_output_artifact(pool, object_store_dir, candidate).await,
+        "job_output" => delete_job_output_artifact(pool, object_store, candidate).await,
         "file_transfer_handoff" => {
-            delete_unreferenced_server_artifact(pool, object_store_dir, candidate).await
+            delete_unreferenced_server_artifact(pool, object_store, candidate).await
         }
         "file_transfer_source" => {
-            delete_file_transfer_source_artifact(pool, object_store_dir, candidate).await
+            delete_file_transfer_source_artifact(pool, object_store, candidate).await
         }
         "agent_update" => {
             if agent_update_artifact_is_referenced(pool, &candidate.object_key).await? {
                 tombstone_server_artifact(pool, candidate.id).await
             } else {
-                delete_unreferenced_server_artifact(pool, object_store_dir, candidate).await
+                delete_unreferenced_server_artifact(pool, object_store, candidate).await
             }
         }
         "backup_artifact" => {
@@ -1117,7 +1317,7 @@ async fn apply_artifact_cleanup_candidate(
             {
                 tombstone_server_artifact(pool, candidate.id).await
             } else {
-                delete_backup_artifact(pool, object_store_dir, candidate).await
+                delete_backup_artifact(pool, object_store, candidate).await
             }
         }
         _ => tombstone_server_artifact(pool, candidate.id).await,
@@ -1126,15 +1326,15 @@ async fn apply_artifact_cleanup_candidate(
 
 async fn delete_job_output_artifact(
     pool: &PgPool,
-    object_store_dir: &Path,
+    object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE job_outputs
-        SET storage = 'inline', object_key = NULL
+        SET storage = 'artifact_deleted', object_key = NULL
         WHERE object_key = $1
         "#,
     )
@@ -1148,10 +1348,10 @@ async fn delete_job_output_artifact(
 
 async fn delete_unreferenced_server_artifact(
     pool: &PgPool,
-    object_store_dir: &Path,
+    object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
     let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
@@ -1160,10 +1360,10 @@ async fn delete_unreferenced_server_artifact(
 
 async fn delete_file_transfer_source_artifact(
     pool: &PgPool,
-    object_store_dir: &Path,
+    object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
@@ -1181,10 +1381,10 @@ async fn delete_file_transfer_source_artifact(
 
 async fn delete_backup_artifact(
     pool: &PgPool,
-    object_store_dir: &Path,
+    object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_best_effort(object_store_dir, &candidate.object_key).await;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
     let mut tx = pool.begin().await?;
     if let Some(backup_artifact_id) = candidate.backup_artifact_id {
         sqlx::query(
@@ -1363,23 +1563,14 @@ fn artifact_cleanup_candidate_matches(
     )
 }
 
-async fn delete_object_key_best_effort(root: &Path, object_key: &str) {
-    if object_key.starts_with('/')
-        || object_key.contains('\\')
-        || object_key.split('/').any(|segment| {
-            segment.is_empty()
-                || segment == "."
-                || segment == ".."
-                || segment.as_bytes().contains(&0)
-        })
-    {
-        return;
-    }
-    let mut path = root.to_path_buf();
-    for segment in object_key.split('/') {
-        path.push(segment);
-    }
-    let _ = tokio::fs::remove_file(path).await;
+async fn delete_object_key_confirmed(
+    object_store: &BackupObjectStore,
+    object_key: &str,
+) -> Result<()> {
+    object_store
+        .delete_confirmed(object_key)
+        .await
+        .with_context(|| format!("failed to delete object {object_key}"))
 }
 
 async fn process_due_schedules_if_leader(
@@ -1615,15 +1806,15 @@ async fn materialize_due_schedule(
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let job_id = Uuid::new_v4();
-    let status = if targets.is_empty() {
+    let no_dispatchable_targets =
+        targets.is_empty() || (dispatch_targets.is_empty() && !capability_skips.is_empty());
+    let status = if no_dispatchable_targets {
         JOB_STATUS_SKIPPED
-    } else if dispatch_targets.is_empty() && !capability_skips.is_empty() {
-        JOB_STATUS_PARTIAL_SUCCESS
     } else {
         JOB_STATUS_QUEUED
     };
-    let job_completed_immediately =
-        matches!(status, JOB_STATUS_SKIPPED | JOB_STATUS_PARTIAL_SUCCESS);
+    let job_completed_immediately = status == JOB_STATUS_SKIPPED;
+    let all_targets_skipped = status == JOB_STATUS_SKIPPED;
     let command_type = format!(
         "scheduled_{}",
         scheduled_command_type_label(&operation, operation_type)
@@ -1736,10 +1927,11 @@ async fn materialize_due_schedule(
         "catch_up_run_count": run_count,
         "retry_delay_secs": schedule.retry_delay_secs,
         "max_failures": schedule.max_failures,
-        "failure_count_before_run": schedule.failure_count,
-        "last_error_before_run": &schedule.last_error,
-        "reason": "saved schedule intent was previously privilege-unlocked; worker materialized a durable job from the fixed target snapshot",
-    }))
+            "failure_count_before_run": schedule.failure_count,
+            "last_error_before_run": &schedule.last_error,
+            "no_work_reason": if all_targets_skipped { Some("all_targets_skipped") } else { None },
+            "reason": "saved schedule intent was previously privilege-unlocked; worker materialized a durable job from the fixed target snapshot",
+        }))
     .execute(&mut **tx)
     .await?;
 
@@ -1754,8 +1946,14 @@ async fn materialize_due_schedule(
                 WHEN $3 IN ('completed', 'partial_success', 'skipped') THEN NULL
                 ELSE $3
             END,
-            failure_count = CASE WHEN $4 THEN 0 ELSE failure_count END,
-            last_error = CASE WHEN $4 THEN NULL ELSE last_error END,
+            failure_count = CASE
+                WHEN $4 AND $3 != 'skipped' THEN 0
+                ELSE failure_count
+            END,
+            last_error = CASE
+                WHEN $4 AND $3 != 'skipped' THEN NULL
+                ELSE last_error
+            END,
             updated_at = now()
         WHERE id = $1
         "#,
@@ -1792,7 +1990,7 @@ async fn materialize_due_schedule(
         .await?;
     }
 
-    Ok(!targets.is_empty())
+    Ok(!dispatch_targets.is_empty())
 }
 
 async fn load_schedule_target_capabilities(
@@ -2447,9 +2645,17 @@ mod schedule_tests {
             assert_eq!(
                 runtime
                     .backup_policy_prune_config
-                    .object_store_dir
-                    .as_deref(),
-                Some(object_dir.as_path())
+                    .object_store
+                    .as_ref()
+                    .map(BackupObjectStore::kind),
+                Some("filesystem")
+            );
+            assert_eq!(
+                runtime
+                    .artifact_object_store
+                    .as_ref()
+                    .map(BackupObjectStore::kind),
+                Some("filesystem")
             );
 
             std::fs::write(
@@ -2525,6 +2731,20 @@ mod schedule_tests {
         "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_INCLUDE_DISABLED",
         "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DELETE_OBJECTS",
         "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR",
+        "VPSMAN_BACKUP_OBJECT_STORE_DIR",
+        "VPSMAN_UPDATE_OBJECT_STORE_DIR",
+        "VPSMAN_OBJECT_ENDPOINT",
+        "VPSMAN_OBJECT_BUCKET",
+        "VPSMAN_OBJECT_ACCESS_KEY",
+        "VPSMAN_OBJECT_SECRET_KEY",
+        "VPSMAN_OBJECT_REGION",
+        "VPSMAN_OBJECT_CREATE_BUCKET",
+        "VPSMAN_UPDATE_OBJECT_ENDPOINT",
+        "VPSMAN_UPDATE_OBJECT_BUCKET",
+        "VPSMAN_UPDATE_OBJECT_ACCESS_KEY",
+        "VPSMAN_UPDATE_OBJECT_SECRET_KEY",
+        "VPSMAN_UPDATE_OBJECT_REGION",
+        "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
         "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
         "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
     ];
@@ -2594,6 +2814,9 @@ webhook_rule_retention_prune_limit = {webhook_rule_retention_prune_limit}
 webhook_rule_timeout_secs = {webhook_rule_timeout_secs}
 backup_policy_prune_enabled = {backup_policy_prune_enabled}
 backup_policy_prune_object_store_dir = "{object_store_dir}"
+
+[storage]
+object_store_dir = "{object_store_dir}"
 "#
         )
     }

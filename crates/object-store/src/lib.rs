@@ -18,34 +18,34 @@ const MAX_S3_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 const S3_SPOOL_DIR: &str = "vpsman-object-store-spool";
 
 #[derive(Clone, Debug)]
-pub(crate) enum BackupObjectStore {
+pub enum BackupObjectStore {
     Filesystem(FilesystemBackupObjectStore),
     S3(S3BackupObjectStore),
 }
 
 #[derive(Debug)]
-pub(crate) struct VerifiedObjectFile {
-    pub(crate) path: PathBuf,
-    pub(crate) cleanup_after_stream: bool,
+pub struct VerifiedObjectFile {
+    pub path: PathBuf,
+    pub cleanup_after_stream: bool,
 }
 
 impl BackupObjectStore {
-    pub(crate) fn filesystem(root: PathBuf) -> Result<Self> {
+    pub fn filesystem(root: PathBuf) -> Result<Self> {
         Ok(Self::Filesystem(FilesystemBackupObjectStore::new(root)?))
     }
 
-    pub(crate) fn s3(settings: S3BackupObjectStoreSettings) -> Result<Self> {
+    pub fn s3(settings: S3BackupObjectStoreSettings) -> Result<Self> {
         Ok(Self::S3(S3BackupObjectStore::new(settings)?))
     }
 
-    pub(crate) async fn put_new(&self, object_key: &str, bytes: &[u8]) -> Result<()> {
+    pub async fn put_new(&self, object_key: &str, bytes: &[u8]) -> Result<()> {
         match self {
             Self::Filesystem(store) => store.put_new(object_key, bytes).await.map(|_| ()),
             Self::S3(store) => store.put_new(object_key, bytes).await,
         }
     }
 
-    pub(crate) async fn put_file_idempotent(
+    pub async fn put_file_idempotent(
         &self,
         object_key: &str,
         source_path: &Path,
@@ -100,25 +100,21 @@ impl BackupObjectStore {
         }
     }
 
-    pub(crate) async fn get(&self, object_key: &str) -> Result<Vec<u8>> {
+    pub async fn get(&self, object_key: &str) -> Result<Vec<u8>> {
         match self {
             Self::Filesystem(store) => store.get(object_key).await,
             Self::S3(store) => store.get(object_key).await,
         }
     }
 
-    pub(crate) async fn get_with_limit(
-        &self,
-        object_key: &str,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>> {
+    pub async fn get_with_limit(&self, object_key: &str, max_bytes: usize) -> Result<Vec<u8>> {
         match self {
             Self::Filesystem(store) => store.get_with_limit(object_key, max_bytes).await,
             Self::S3(store) => store.get_with_limit(object_key, max_bytes).await,
         }
     }
 
-    pub(crate) async fn verified_filesystem_path(
+    pub async fn verified_filesystem_path(
         &self,
         object_key: &str,
         expected_sha256_hex: &str,
@@ -133,7 +129,7 @@ impl BackupObjectStore {
         }
     }
 
-    pub(crate) async fn verified_object_file(
+    pub async fn verified_object_file(
         &self,
         object_key: &str,
         expected_sha256_hex: &str,
@@ -164,14 +160,21 @@ impl BackupObjectStore {
         }
     }
 
-    pub(crate) async fn delete_best_effort(&self, object_key: &str) {
+    pub async fn delete_best_effort(&self, object_key: &str) {
         match self {
             Self::Filesystem(store) => store.delete_best_effort(object_key).await,
             Self::S3(store) => store.delete_best_effort(object_key).await,
         }
     }
 
-    pub(crate) fn kind(&self) -> &'static str {
+    pub async fn delete_confirmed(&self, object_key: &str) -> Result<()> {
+        match self {
+            Self::Filesystem(store) => store.delete_confirmed(object_key).await,
+            Self::S3(store) => store.delete_confirmed(object_key).await,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::Filesystem(_) => "filesystem",
             Self::S3(_) => "s3",
@@ -180,7 +183,7 @@ impl BackupObjectStore {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct FilesystemBackupObjectStore {
+pub struct FilesystemBackupObjectStore {
     root: Arc<PathBuf>,
 }
 
@@ -340,6 +343,17 @@ impl FilesystemBackupObjectStore {
         }
     }
 
+    async fn delete_confirmed(&self, object_key: &str) -> Result<()> {
+        let path = self.path_for_key(object_key)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to delete object {}", path.display()))
+            }
+        }
+    }
+
     fn path_for_key(&self, object_key: &str) -> Result<PathBuf> {
         validate_object_key(object_key)?;
         let mut path = (*self.root).clone();
@@ -355,17 +369,17 @@ impl FilesystemBackupObjectStore {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct S3BackupObjectStoreSettings {
-    pub(crate) endpoint: String,
-    pub(crate) bucket: String,
-    pub(crate) access_key: String,
-    pub(crate) secret_key: String,
-    pub(crate) region: String,
-    pub(crate) create_bucket: bool,
+pub struct S3BackupObjectStoreSettings {
+    pub endpoint: String,
+    pub bucket: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub region: String,
+    pub create_bucket: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct S3BackupObjectStore {
+pub struct S3BackupObjectStore {
     endpoint: S3Endpoint,
     bucket: String,
     access_key: Arc<String>,
@@ -542,6 +556,20 @@ impl S3BackupObjectStore {
                 .send_signed_request("DELETE", Some(object_key), &[])
                 .await;
         }
+    }
+
+    async fn delete_confirmed(&self, object_key: &str) -> Result<()> {
+        validate_object_key(object_key)?;
+        let response = self
+            .send_signed_request("DELETE", Some(object_key), &[])
+            .await?;
+        ensure!(
+            matches!(response.status_code, 200 | 202 | 204 | 404),
+            "S3 delete object failed with HTTP {}: {}",
+            response.status_code,
+            response.body_text()
+        );
+        Ok(())
     }
 
     async fn ensure_bucket(&self) -> Result<()> {
@@ -777,7 +805,7 @@ impl S3HttpResponse {
     }
 }
 
-pub(crate) fn validate_object_key(object_key: &str) -> Result<()> {
+pub fn validate_object_key(object_key: &str) -> Result<()> {
     ensure!(!object_key.trim().is_empty(), "object key is required");
     ensure!(
         object_key.len() <= 1024 && !object_key.as_bytes().contains(&0),

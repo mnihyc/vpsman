@@ -31,6 +31,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn gone(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code,
+            error: anyhow::anyhow!(code),
+        }
+    }
+
     pub(crate) fn forbidden(code: &'static str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,

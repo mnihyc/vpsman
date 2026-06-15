@@ -259,7 +259,7 @@ fn aggregate_job_status_uses_terminal_target_states() {
     );
     assert_eq!(
         aggregate_job_status_from_statuses(&["skipped".to_string()], 1),
-        "partial_success"
+        "skipped"
     );
     assert_eq!(
         aggregate_job_status_from_statuses(&["completed".to_string(), "skipped".to_string()], 2,),

@@ -923,11 +923,11 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
     let (status, response) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "partial_success").await;
+    wait_for_job_status(&repo, response.job_id, "skipped").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "partial_success");
+    assert_eq!(response.status, "skipped");
     assert_eq!(targets[0].status, "skipped");
 }
 

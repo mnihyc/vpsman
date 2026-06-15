@@ -2022,6 +2022,7 @@ impl Repository {
             return Ok(());
         };
         let outcome_error = schedule_job_outcome_error(status);
+        let outcome_skipped = status == JOB_STATUS_SKIPPED;
         let schedule_outcome = match self {
             Self::Memory(memory) => {
                 let mut schedules = memory.schedules.write().await;
@@ -2041,7 +2042,7 @@ impl Repository {
                             + Duration::seconds(schedule.retry_delay_secs.max(0)))
                         .to_rfc3339();
                     }
-                } else {
+                } else if !outcome_skipped {
                     schedule.failure_count = 0;
                     schedule.last_error = None;
                 }
@@ -2060,7 +2061,32 @@ impl Repository {
                 })
             }
             Self::Postgres(pool) => {
-                let row = if let Some(error) = outcome_error {
+                let row = if outcome_skipped {
+                    sqlx::query(
+                        r#"
+                        UPDATE schedules
+                        SET
+                            last_job_id = $2,
+                            last_job_status = $3,
+                            last_job_completed_at = now(),
+                            last_job_error = NULL,
+                            updated_at = now()
+                        WHERE id = $1
+                        RETURNING
+                            name,
+                            enabled,
+                            failure_count,
+                            max_failures,
+                            retry_delay_secs,
+                            next_run_at::text AS next_run_at
+                        "#,
+                    )
+                    .bind(schedule_id)
+                    .bind(job_id)
+                    .bind(status)
+                    .fetch_optional(pool)
+                    .await?
+                } else if let Some(error) = outcome_error {
                     sqlx::query(
                         r#"
                         UPDATE schedules

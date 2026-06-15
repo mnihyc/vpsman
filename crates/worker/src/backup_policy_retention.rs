@@ -1,9 +1,8 @@
-use std::path::{Component, Path, PathBuf};
-
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, PgPool, Row};
 use uuid::Uuid;
+use vpsman_object_store::BackupObjectStore;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BackupPolicyRetentionPruneConfig {
@@ -12,7 +11,7 @@ pub(crate) struct BackupPolicyRetentionPruneConfig {
     pub(crate) dry_run: bool,
     pub(crate) include_disabled: bool,
     pub(crate) delete_objects: bool,
-    pub(crate) object_store_dir: Option<PathBuf>,
+    pub(crate) object_store: Option<BackupObjectStore>,
 }
 
 impl BackupPolicyRetentionPruneConfig {
@@ -22,7 +21,7 @@ impl BackupPolicyRetentionPruneConfig {
         dry_run: bool,
         include_disabled: bool,
         delete_objects: bool,
-        object_store_dir: Option<PathBuf>,
+        object_store: Option<BackupObjectStore>,
     ) -> Self {
         Self {
             enabled,
@@ -30,7 +29,7 @@ impl BackupPolicyRetentionPruneConfig {
             dry_run,
             include_disabled,
             delete_objects,
-            object_store_dir,
+            object_store,
         }
     }
 }
@@ -65,6 +64,13 @@ struct BackupPolicyRetentionPruneOutcome {
     object_delete_errors: usize,
 }
 
+#[derive(Debug)]
+struct BackupPolicyRetentionCandidate {
+    request_id: Uuid,
+    artifact_id: Uuid,
+    object_key: String,
+}
+
 pub(crate) async fn process_backup_policy_retention_prune(
     pool: &PgPool,
     config: BackupPolicyRetentionPruneConfig,
@@ -72,10 +78,8 @@ pub(crate) async fn process_backup_policy_retention_prune(
     if !config.enabled {
         return Ok(BackupPolicyRetentionPruneRun::default());
     }
-    if config.delete_objects && !config.dry_run && config.object_store_dir.is_none() {
-        bail!(
-            "backup policy prune object deletion requires --backup-policy-prune-object-store-dir"
-        );
+    if config.delete_objects && !config.dry_run && config.object_store.is_none() {
+        bail!("backup policy prune object deletion requires configured artifact object store");
     }
     let policies = list_backup_policy_retention_candidates(pool, &config).await?;
     let mut outcomes = Vec::new();
@@ -139,45 +143,55 @@ async fn prune_backup_policy(
     policy: &BackupPolicyRetentionPolicy,
     config: &BackupPolicyRetentionPruneConfig,
 ) -> Result<BackupPolicyRetentionPruneOutcome> {
-    let rows = sqlx::query(prune_backup_policy_query(config.dry_run))
+    let rows = sqlx::query(backup_policy_retention_candidate_query())
         .bind(policy.schedule_id)
         .bind(policy.keep_last)
         .bind(policy.retention_days)
         .fetch_all(pool)
         .await?;
-    let object_keys = rows
-        .iter()
-        .filter_map(|row| {
-            row.try_get::<Option<String>, _>("object_key")
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<String, _>("object_key").ok())
+    let candidates = rows
+        .into_iter()
+        .map(|row| {
+            Ok(BackupPolicyRetentionCandidate {
+                request_id: row.try_get("request_id")?,
+                artifact_id: row.try_get("artifact_id")?,
+                object_key: row.try_get("object_key")?,
+            })
         })
-        .collect::<Vec<_>>();
-    let (object_delete_attempted, object_delete_errors) =
-        if config.delete_objects && !config.dry_run {
-            let errors = delete_object_keys(config.object_store_dir.as_deref(), &object_keys).await;
-            (true, errors)
-        } else {
-            (false, 0)
-        };
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+    let object_delete_attempted = config.delete_objects && !config.dry_run;
+    if object_delete_attempted {
+        let object_store = config
+            .object_store
+            .as_ref()
+            .expect("object store checked before pruning");
+        for candidate in &candidates {
+            object_store.delete_confirmed(&candidate.object_key).await?;
+        }
+    }
+    if !config.dry_run && !candidates.is_empty() {
+        prune_backup_policy_rows(pool, &candidates).await?;
+    }
     Ok(BackupPolicyRetentionPruneOutcome {
         schedule_id: policy.schedule_id,
         name: policy.name.clone(),
         enabled: policy.enabled,
         retention_days: policy.retention_days,
         keep_last: policy.keep_last,
-        matched_rows: rows.len() as i64,
-        pruned_rows: if config.dry_run { 0 } else { rows.len() as i64 },
-        object_key_count: rows.len(),
+        matched_rows: candidates.len() as i64,
+        pruned_rows: if config.dry_run {
+            0
+        } else {
+            candidates.len() as i64
+        },
+        object_key_count: candidates.len(),
         object_delete_attempted,
-        object_delete_errors,
+        object_delete_errors: 0,
     })
 }
 
-fn prune_backup_policy_query(dry_run: bool) -> &'static str {
-    if dry_run {
-        r#"
+fn backup_policy_retention_candidate_query() -> &'static str {
+    r#"
         WITH ranked AS (
             SELECT
                 request.id AS request_id,
@@ -198,28 +212,25 @@ fn prune_backup_policy_query(dry_run: bool) -> &'static str {
           AND created_at < now() - ($3::int * interval '1 day')
         ORDER BY created_at ASC, artifact_id ASC
         "#
-    } else {
+}
+
+async fn prune_backup_policy_rows(
+    pool: &PgPool,
+    candidates: &[BackupPolicyRetentionCandidate],
+) -> Result<()> {
+    let request_ids = candidates
+        .iter()
+        .map(|candidate| candidate.request_id)
+        .collect::<Vec<_>>();
+    let artifact_ids = candidates
+        .iter()
+        .map(|candidate| candidate.artifact_id)
+        .collect::<Vec<_>>();
+    sqlx::query(
         r#"
-        WITH ranked AS (
-            SELECT
-                request.id AS request_id,
-                artifact.id AS artifact_id,
-                artifact.object_key,
-                artifact.created_at,
-                row_number() OVER (
-                    PARTITION BY request.client_id
-                    ORDER BY artifact.created_at DESC, artifact.id DESC
-                ) AS retained_rank
-            FROM backup_requests request
-            JOIN backup_artifacts artifact ON artifact.id = request.artifact_id
-            WHERE request.source_schedule_id = $1
-        ),
-        doomed AS (
-            SELECT request_id, artifact_id, object_key
-            FROM ranked
-            WHERE retained_rank > $2
-              AND created_at < now() - ($3::int * interval '1 day')
-            ORDER BY created_at ASC, artifact_id ASC
+        WITH doomed AS (
+            SELECT *
+            FROM unnest($1::uuid[], $2::uuid[]) AS doomed(request_id, artifact_id)
         ),
         cleared_requests AS (
             UPDATE backup_requests request
@@ -232,9 +243,13 @@ fn prune_backup_policy_query(dry_run: bool) -> &'static str {
         DELETE FROM backup_artifacts artifact
         USING doomed
         WHERE artifact.id = doomed.artifact_id
-        RETURNING artifact.object_key
-        "#
-    }
+        "#,
+    )
+    .bind(request_ids)
+    .bind(artifact_ids)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn insert_prune_audit(
@@ -259,7 +274,7 @@ async fn insert_prune_audit(
         "dry_run": config.dry_run,
         "metadata_only": config.dry_run || !config.delete_objects,
         "object_delete_requested": config.delete_objects,
-        "object_delete_configured": config.object_store_dir.is_some(),
+        "object_delete_configured": config.object_store.is_some(),
         "include_disabled": config.include_disabled,
         "limit": config.limit,
         "policies_scanned": run.policies_scanned,
@@ -283,45 +298,6 @@ async fn insert_prune_audit(
     Ok(())
 }
 
-async fn delete_object_keys(object_store_dir: Option<&Path>, object_keys: &[String]) -> usize {
-    let Some(root) = object_store_dir else {
-        return object_keys.len();
-    };
-    let mut errors = 0_usize;
-    for object_key in object_keys {
-        let path = match object_path(root, object_key) {
-            Ok(path) => path,
-            Err(_) => {
-                errors += 1;
-                continue;
-            }
-        };
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => errors += 1,
-        }
-    }
-    errors
-}
-
-fn object_path(root: &Path, object_key: &str) -> Result<PathBuf> {
-    ensure!(!object_key.is_empty(), "object key is empty");
-    ensure!(
-        !object_key.as_bytes().contains(&0),
-        "object key contains nul byte"
-    );
-    let relative = Path::new(object_key);
-    ensure!(relative.is_relative(), "object key must be relative");
-    for component in relative.components() {
-        match component {
-            Component::Normal(_) => {}
-            _ => bail!("object key contains unsafe path component"),
-        }
-    }
-    Ok(root.join(relative))
-}
-
 #[cfg(test)]
 mod tests {
     use super::BackupPolicyRetentionPruneConfig;
@@ -337,14 +313,5 @@ mod tests {
         assert!(high.dry_run);
         assert!(high.include_disabled);
         assert!(high.delete_objects);
-    }
-
-    #[test]
-    fn object_path_rejects_unsafe_keys() {
-        let root = std::path::Path::new("/tmp/vpsman-objects");
-        assert!(super::object_path(root, "backups/client/artifact.age").is_ok());
-        assert!(super::object_path(root, "../artifact.age").is_err());
-        assert!(super::object_path(root, "/artifact.age").is_err());
-        assert!(super::object_path(root, "backups/../artifact.age").is_err());
     }
 }

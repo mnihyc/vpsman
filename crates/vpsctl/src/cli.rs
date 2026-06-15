@@ -647,6 +647,12 @@ pub(crate) enum Command {
         #[arg(long)]
         job_id: String,
     },
+    JobTargetStatusDownload {
+        #[arg(long)]
+        job_id: String,
+        #[arg(long = "output-file")]
+        output_file: PathBuf,
+    },
     JobOutputs {
         #[arg(long)]
         job_id: String,
@@ -661,7 +667,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    JobOutputArtifact {
+    JobOutputDownload {
         #[arg(long)]
         job_id: String,
         #[arg(long)]

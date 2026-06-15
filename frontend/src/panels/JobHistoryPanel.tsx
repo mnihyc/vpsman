@@ -58,6 +58,7 @@ import {
   JobDispatchPanel,
   type TerminalComposerAction,
 } from "./JobDispatchPanel";
+import { parseLatestFileStatus } from "../fileBrowser";
 import { AgentUpdateReleasesPanel } from "./jobs/AgentUpdateReleasesPanel";
 import { FileBrowserPanel } from "./jobs/FileBrowserPanel";
 import { FileTransferSessionsPanel } from "./jobs/FileTransferSessionsPanel";
@@ -73,6 +74,26 @@ function displayToken(value: string): string {
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name || "download.bin";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+type OutputDownloadStream = "stdout" | "stderr" | "combined";
+
+type OutputStreamDownloadTarget = {
+  clientId: string;
+  combined: boolean;
+  stdout: boolean;
+  stderr: boolean;
+};
 
 export function JobHistoryPanel({
   activeSubpage,
@@ -93,7 +114,11 @@ export function JobHistoryPanel({
   onUploadAgentUpdateArtifact,
   onCreateJob,
   onDownloadFileBundle,
-  onDownloadOutputArtifact,
+  onDownloadOutputArchive,
+  onDownloadTargetStatusArchive,
+  onDownloadOutputChunk,
+  onDownloadOutputStream,
+  onDownloadFileForClient,
   onDownloadFileTransferSource,
   onLoadJob,
   onLoadOutputs,
@@ -143,11 +168,19 @@ export function JobHistoryPanel({
     request: UploadAgentUpdateArtifactRequest,
   ) => Promise<AgentUpdateReleaseRecord>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onDownloadOutputArtifact: (
+  onDownloadOutputChunk: (
     jobId: string,
     clientId: string,
     seq: number,
   ) => Promise<Blob>;
+  onDownloadOutputStream: (
+    jobId: string,
+    clientId: string,
+    stream: OutputDownloadStream,
+  ) => Promise<Blob>;
+  onDownloadFileForClient: (jobId: string, clientId: string) => Promise<Blob>;
+  onDownloadOutputArchive: (jobId: string, clientIds: string[]) => Promise<Blob>;
+  onDownloadTargetStatusArchive: (jobId: string) => Promise<Blob>;
   onDownloadFileBundle: (jobId: string, clientIds: string[]) => Promise<Blob>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
@@ -229,10 +262,13 @@ export function JobHistoryPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "history";
-  const [artifactError, setArtifactError] = useState<string | null>(null);
-  const [artifactPendingKey, setArtifactPendingKey] = useState<string | null>(
-    null,
-  );
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [streamPendingKey, setStreamPendingKey] = useState<string | null>(null);
+  const [fileDownloadPendingClientId, setFileDownloadPendingClientId] =
+    useState<string | null>(null);
+  const [archivePendingKey, setArchivePendingKey] = useState<
+    "files" | "outputs" | "status" | null
+  >(null);
   const scheduleRunJobs = jobs.filter((job) => job.command_type.startsWith("scheduled_"));
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
@@ -240,6 +276,63 @@ export function JobHistoryPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
+  const fileDownloadStatusByClient = useMemo(() => {
+    const byClient = new Map<string, JobOutputRecord[]>();
+    for (const output of outputs) {
+      const clientOutputs = byClient.get(output.client_id);
+      if (clientOutputs) {
+        clientOutputs.push(output);
+      } else {
+        byClient.set(output.client_id, [output]);
+      }
+    }
+    const statusByClient = new Map<string, ReturnType<typeof parseLatestFileStatus>>();
+    for (const [clientId, clientOutputs] of byClient) {
+      const status = parseLatestFileStatus(clientOutputs, "file_download");
+      if (
+        status &&
+        status.type === "file_download" &&
+        (status.status ?? "completed") === "completed" &&
+        hasCompleteRetainedOutputStream(clientOutputs, "stdout")
+      ) {
+        statusByClient.set(clientId, status);
+      }
+    }
+    return statusByClient;
+  }, [outputs]);
+  const fileDownloadStatus = fileDownloadStatusByClient.size > 0;
+  const outputStreamDownloadTargets = useMemo<OutputStreamDownloadTarget[]>(() => {
+    const outputsByClient = new Map<string, JobOutputRecord[]>();
+    for (const output of outputs) {
+      const clientOutputs = outputsByClient.get(output.client_id);
+      if (clientOutputs) {
+        clientOutputs.push(output);
+      } else {
+        outputsByClient.set(output.client_id, [output]);
+      }
+    }
+    const targets: OutputStreamDownloadTarget[] = [];
+    for (const [clientId, clientOutputs] of outputsByClient) {
+      const stdout = hasCompleteRetainedOutputStream(clientOutputs, "stdout");
+      const stderr = hasCompleteRetainedOutputStream(clientOutputs, "stderr");
+      const hasDeletedPayload = clientOutputs.some(
+        (output) =>
+          matchesOutputPayloadStream(output.stream) &&
+          output.storage === "artifact_deleted",
+      );
+      if (stdout || stderr) {
+        targets.push({
+          clientId,
+          combined: !hasDeletedPayload,
+          stdout,
+          stderr,
+        });
+      }
+    }
+    return targets.sort((left, right) =>
+      clientLabel(left.clientId).localeCompare(clientLabel(right.clientId)),
+    );
+  }, [outputs, agentNameById]);
   const displayedComparisonRows = useMemo(() => {
     if (!outputComparison) {
       return [];
@@ -439,32 +532,77 @@ export function JobHistoryPanel({
     }
   }, [lastJobOutputEvent, openTargets, selectedJobId]);
 
-  async function downloadOutputArtifact(output: JobOutputRecord) {
+  async function downloadOutputStreamForClient(
+    clientId: string,
+    stream: OutputDownloadStream,
+  ) {
     if (!selectedJobId) {
       return;
     }
-    const pendingKey = `${output.client_id}:${output.seq}`;
-    setArtifactPendingKey(pendingKey);
+    const pendingKey = `${clientId}:${stream}`;
+    setStreamPendingKey(pendingKey);
     await runPanelAction(
       () => undefined,
-      setArtifactError,
+      setDownloadError,
       async () => {
-        const blob = await onDownloadOutputArtifact(
+        const blob = await onDownloadOutputStream(
           selectedJobId,
-          output.client_id,
-          output.seq,
+          clientId,
+          stream,
         );
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `job-output-${shortId(selectedJobId)}-${output.client_id}-${output.seq}.bin`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
+        saveBlob(blob, `job-output-${shortId(selectedJobId)}-${safeDownloadName(clientId)}-${stream}.bin`);
       },
     );
-    setArtifactPendingKey(null);
+    setStreamPendingKey(null);
+  }
+
+  async function downloadFileForClient(clientId: string) {
+    if (!selectedJobId) {
+      return;
+    }
+    const status = fileDownloadStatusByClient.get(clientId);
+    const filename = safeDownloadName(
+      status?.filename,
+      `file-download-${shortId(selectedJobId)}-${clientId}.bin`,
+    );
+    setFileDownloadPendingClientId(clientId);
+    await runPanelAction(
+      () => undefined,
+      setDownloadError,
+      async () => {
+        const blob = await onDownloadFileForClient(selectedJobId, clientId);
+        saveBlob(blob, filename);
+      },
+    );
+    setFileDownloadPendingClientId(null);
+  }
+
+  async function downloadSelectedJobArchive(kind: "files" | "outputs" | "status") {
+    if (!selectedJobId) {
+      return;
+    }
+    setArchivePendingKey(kind);
+    await runPanelAction(
+      () => undefined,
+      setDownloadError,
+      async () => {
+        const blob =
+          kind === "files"
+            ? await onDownloadFileBundle(selectedJobId, [])
+            : kind === "outputs"
+              ? await onDownloadOutputArchive(selectedJobId, [])
+              : await onDownloadTargetStatusArchive(selectedJobId);
+        saveBlob(
+          blob,
+          kind === "files"
+            ? `file-download-${shortId(selectedJobId)}.tar`
+            : kind === "outputs"
+              ? `job-outputs-${shortId(selectedJobId)}.tar`
+              : `job-status-${shortId(selectedJobId)}.tar`,
+        );
+      },
+    );
+    setArchivePendingKey(null);
   }
 
   function prepareTerminalSessionAction(
@@ -488,7 +626,7 @@ export function JobHistoryPanel({
           terminalComposerAction={terminalComposerAction}
           onCreateJob={onCreateJob}
           onDownloadFileTransferSource={onDownloadFileTransferSource}
-          onDownloadOutputArtifact={onDownloadOutputArtifact}
+          onDownloadOutputChunk={onDownloadOutputChunk}
           onLoadJob={onLoadJob}
           onLoadOutputs={onLoadOutputs}
           onLoadTargets={onLoadTargets}
@@ -591,7 +729,7 @@ export function JobHistoryPanel({
             terminalComposerAction={terminalComposerAction}
             onCreateJob={onCreateJob}
             onDownloadFileTransferSource={onDownloadFileTransferSource}
-            onDownloadOutputArtifact={onDownloadOutputArtifact}
+            onDownloadOutputChunk={onDownloadOutputChunk}
             onLoadJob={onLoadJob}
             onLoadOutputs={onLoadOutputs}
             onLoadTargets={onLoadTargets}
@@ -716,6 +854,7 @@ export function JobHistoryPanel({
                       <span>Reason</span>
                       <span>Exit</span>
                       <span>Completed</span>
+                      <span>Actions</span>
                     </div>
                     {targetRows.map((target) => (
                       <div
@@ -738,6 +877,30 @@ export function JobHistoryPanel({
                             ? formatTime(target.completed_at)
                             : "-"}
                         </span>
+                        <span className="inlineActions">
+                          {fileDownloadStatusByClient.has(target.client_id) ? (
+                            <button
+                              className="secondaryAction compactAction"
+                              disabled={
+                                fileDownloadPendingClientId === target.client_id
+                              }
+                              onClick={() =>
+                                void downloadFileForClient(target.client_id)
+                              }
+                              type="button"
+                            >
+                              <Download size={14} />
+                              <span>
+                                {fileDownloadPendingClientId ===
+                                target.client_id
+                                  ? "Downloading"
+                                  : "Download file"}
+                              </span>
+                            </button>
+                          ) : (
+                            "-"
+                          )}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -745,14 +908,63 @@ export function JobHistoryPanel({
               </CrudPager>
               <div className="outputDetail">
                 <div className="sectionHeader compact">
-                  <h2>Output</h2>
-                  <span>
-                    {outputError ??
-                      artifactError ??
-                      (outputsLoading
-                        ? "Loading output records"
-                        : `${outputs.length} chunks`)}
-                  </span>
+                  <div>
+                    <h2>Output</h2>
+                    <span>
+                      {outputError ??
+                        downloadError ??
+                        (outputsLoading
+                          ? "Loading output records"
+                          : `${outputs.length} chunks`)}
+                    </span>
+                  </div>
+                  <div className="outputActions">
+                    {fileDownloadStatus && (
+                      <button
+                        className="secondaryAction compactAction"
+                        disabled={outputsLoading || archivePendingKey !== null}
+                        onClick={() => void downloadSelectedJobArchive("files")}
+                        type="button"
+                      >
+                        <Download size={14} />
+                        <span>
+                          {archivePendingKey === "files"
+                            ? "Downloading"
+                            : "Download files"}
+                        </span>
+                      </button>
+                    )}
+                    {outputs.length > 0 && (
+                      <button
+                        className="secondaryAction compactAction"
+                        disabled={outputsLoading || archivePendingKey !== null}
+                        onClick={() => void downloadSelectedJobArchive("outputs")}
+                        type="button"
+                      >
+                        <Download size={14} />
+                        <span>
+                          {archivePendingKey === "outputs"
+                            ? "Downloading"
+                            : "Download outputs"}
+                        </span>
+                      </button>
+                    )}
+                    {targets.length > 0 && (
+                      <button
+                        className="secondaryAction compactAction"
+                        disabled={targetsLoading || archivePendingKey !== null}
+                        onClick={() => void downloadSelectedJobArchive("status")}
+                        type="button"
+                      >
+                        <Download size={14} />
+                        <span>
+                          {archivePendingKey === "status"
+                            ? "Downloading"
+                            : "Download status"}
+                        </span>
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="executionSummary">
                   <div className="sectionHeader compact">
@@ -958,6 +1170,89 @@ export function JobHistoryPanel({
                     </CrudPager>
                   )}
                 </div>
+                {outputStreamDownloadTargets.length > 0 && (
+                  <div className="outputDownloadRows">
+                    {outputStreamDownloadTargets.map((target) => (
+                      <div className="outputDownloadRow" key={target.clientId}>
+                        <span className="historyPrimary">
+                          <strong>{clientLabel(target.clientId)}</strong>
+                          <small>retained stdout/stderr payload</small>
+                        </span>
+                        <span className="inlineActions">
+                          {target.stdout && (
+                            <button
+                              className="secondaryAction compactAction"
+                              disabled={
+                                streamPendingKey === `${target.clientId}:stdout`
+                              }
+                              onClick={() =>
+                                void downloadOutputStreamForClient(
+                                  target.clientId,
+                                  "stdout",
+                                )
+                              }
+                              type="button"
+                            >
+                              <Download size={14} />
+                              <span>
+                                {streamPendingKey ===
+                                `${target.clientId}:stdout`
+                                  ? "Downloading"
+                                  : "Download stdout"}
+                              </span>
+                            </button>
+                          )}
+                          {target.stderr && (
+                            <button
+                              className="secondaryAction compactAction"
+                              disabled={
+                                streamPendingKey === `${target.clientId}:stderr`
+                              }
+                              onClick={() =>
+                                void downloadOutputStreamForClient(
+                                  target.clientId,
+                                  "stderr",
+                                )
+                              }
+                              type="button"
+                            >
+                              <Download size={14} />
+                              <span>
+                                {streamPendingKey ===
+                                `${target.clientId}:stderr`
+                                  ? "Downloading"
+                                  : "Download stderr"}
+                              </span>
+                            </button>
+                          )}
+                          {target.combined && (
+                            <button
+                              className="secondaryAction compactAction"
+                              disabled={
+                                streamPendingKey === `${target.clientId}:combined`
+                              }
+                              onClick={() =>
+                                void downloadOutputStreamForClient(
+                                  target.clientId,
+                                  "combined",
+                                )
+                              }
+                              type="button"
+                            >
+                              <Download size={14} />
+                              <span>
+                                {streamPendingKey ===
+                                `${target.clientId}:combined`
+                                  ? "Downloading"
+                                  : "Download combined"}
+                              </span>
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="outputList">
                   {outputs.map((output) => (
                     <article
@@ -976,38 +1271,27 @@ export function JobHistoryPanel({
                           {output.exit_code === null
                             ? ""
                             : `exit ${output.exit_code}`}
-                          {output.storage === "object_store" &&
-                          output.artifact_size_bytes
+                          {(output.storage === "object_store" ||
+                            output.storage === "artifact_deleted") &&
+                          output.artifact_size_bytes != null
                             ? ` · ${formatBytes(output.artifact_size_bytes)}`
                             : ""}
                         </small>
                       </div>
                       {output.storage === "object_store" ? (
                         <div className="outputArtifact">
-                          <div className="outputActions">
-                            <button
-                              aria-label="Download retained job output artifact"
-                              className="secondaryAction compactAction"
-                              disabled={
-                                artifactPendingKey ===
-                                `${output.client_id}:${output.seq}`
-                              }
-                              onClick={() =>
-                                void downloadOutputArtifact(output)
-                              }
-                              type="button"
-                            >
-                              <Download size={14} />
-                              <span>
-                                {artifactPendingKey ===
-                                `${output.client_id}:${output.seq}`
-                                  ? "Downloading"
-                                  : "Download"}
-                              </span>
-                            </button>
-                          </div>
                           <pre>
                             {`artifact ${output.artifact_object_key ?? "retained externally"}\nsha256 ${output.artifact_sha256_hex ?? "-"}`}
+                          </pre>
+                        </div>
+                      ) : output.storage === "artifact_deleted" ? (
+                        <div className="outputArtifact deletedArtifact">
+                          <pre>
+                            {`artifact deleted\nsha256 ${output.artifact_sha256_hex ?? "-"}\nfull size ${
+                              output.artifact_size_bytes != null
+                                ? formatBytes(output.artifact_size_bytes)
+                                : "-"
+                            }\n\npreview only\n${decodeOutputPreview(output.data_base64)}`}
                           </pre>
                         </div>
                       ) : (
@@ -1088,6 +1372,29 @@ async function copyText(value: string) {
     return;
   }
   await navigator.clipboard?.writeText(value);
+}
+
+function matchesOutputPayloadStream(stream: string): boolean {
+  return stream === "stdout" || stream === "stderr";
+}
+
+function hasCompleteRetainedOutputStream(
+  outputs: JobOutputRecord[],
+  stream: "stdout" | "stderr",
+): boolean {
+  const streamOutputs = outputs.filter((output) => output.stream === stream);
+  return (
+    streamOutputs.length > 0 &&
+    streamOutputs.every((output) => output.storage !== "artifact_deleted")
+  );
+}
+
+function safeDownloadName(value: string | null | undefined, fallback = "download.bin"): string {
+  const cleaned = (value ?? "")
+    .trim()
+    .replace(/[\\/\u0000-\u001f\u007f]+/g, "_")
+    .slice(0, 180);
+  return cleaned || fallback;
 }
 
 function outputCompareBasisLabel(value: string): string {

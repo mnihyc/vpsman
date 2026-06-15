@@ -50,6 +50,19 @@ async fn filesystem_verified_object_file_returns_store_path_without_cleanup() {
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
+#[tokio::test]
+async fn filesystem_confirmed_delete_removes_object_and_accepts_missing() {
+    let root = std::env::temp_dir().join(format!("vpsman-object-store-{}", Uuid::new_v4()));
+    let store = BackupObjectStore::filesystem(root.clone()).unwrap();
+    let object_key = "jobs/client-a/output.bin";
+    store.put_new(object_key, b"output").await.unwrap();
+
+    store.delete_confirmed(object_key).await.unwrap();
+    store.delete_confirmed(object_key).await.unwrap();
+    assert!(store.get(object_key).await.is_err());
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
 #[test]
 fn object_key_rejects_path_traversal() {
     assert!(validate_object_key("../artifact").is_err());
@@ -97,6 +110,27 @@ async fn s3_object_store_put_get_delete_uses_signed_path_style_requests() {
     store.put_new(object_key, &payload).await.unwrap();
     assert_eq!(store.get(object_key).await.unwrap(), payload);
     store.delete_best_effort(object_key).await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn s3_confirmed_delete_accepts_not_found_and_rejects_server_error() {
+    let object_key = "backups/client-a/delete.bin";
+    let object_path = "/root/vpsman-artifacts/backups/client-a/delete.bin";
+    let (endpoint, server) = spawn_fake_s3(vec![
+        ExpectedS3Request::new("DELETE", object_path, Vec::new(), s3_response(404, b"")),
+        ExpectedS3Request::new("DELETE", object_path, Vec::new(), s3_response(500, b"boom")),
+    ])
+    .await;
+    let store = s3_store(&endpoint);
+
+    store.delete_confirmed(object_key).await.unwrap();
+    let error = store
+        .delete_confirmed(object_key)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("S3 delete object failed with HTTP 500"));
     server.await.unwrap();
 }
 

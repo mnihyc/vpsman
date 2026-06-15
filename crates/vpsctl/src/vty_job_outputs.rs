@@ -7,9 +7,10 @@ use crate::http::{http_get, http_get_to_file};
 
 pub(crate) fn is_vty_job_output_command(command: &str) -> bool {
     command.starts_with("job-targets ")
+        || command.starts_with("job-target-status-download ")
         || command.starts_with("job-outputs ")
         || command.starts_with("job-follow ")
-        || command.starts_with("job-output-artifact ")
+        || command.starts_with("job-output-download ")
 }
 
 pub(crate) fn submit_vty_job_output_command(
@@ -24,6 +25,22 @@ pub(crate) fn submit_vty_job_output_command(
             &format!("/api/v1/jobs/{}/targets", parts[1]),
             token,
         )?),
+        Some("job-target-status-download") if parts.len() == 3 => {
+            let job_id = Uuid::parse_str(parts[1]).context("invalid job UUID")?;
+            let output = PathBuf::from(parts[2]);
+            let size_bytes = http_get_to_file(
+                api_url,
+                &format!("/api/v1/jobs/{job_id}/targets/download"),
+                token,
+                &output,
+            )?;
+            Ok(serde_json::json!({
+                "job_id": job_id,
+                "output": output,
+                "size_bytes": size_bytes,
+            })
+            .to_string())
+        }
         Some("job-outputs") if parts.len() == 2 => Ok(http_get(
             api_url,
             &format!("/api/v1/jobs/{}/outputs", parts[1]),
@@ -67,7 +84,7 @@ pub(crate) fn submit_vty_job_output_command(
                 json,
             )
         }
-        Some("job-output-artifact") if parts.len() == 6 && parts[3] == "--seq" => {
+        Some("job-output-download") if parts.len() == 6 && parts[3] == "--seq" => {
             let job_id = Uuid::parse_str(parts[1]).context("invalid job UUID")?;
             let client_id = parts[2];
             let seq = parts[4]
@@ -78,7 +95,7 @@ pub(crate) fn submit_vty_job_output_command(
             let size_bytes = http_get_to_file(
                 api_url,
                 &format!(
-                    "/api/v1/jobs/{job_id}/outputs/{}/{seq}/artifact",
+                    "/api/v1/jobs/{job_id}/outputs/{}/{seq}/download",
                     percent_encode_path_segment(client_id)
                 ),
                 token,
@@ -93,10 +110,13 @@ pub(crate) fn submit_vty_job_output_command(
             })
             .to_string())
         }
-        Some("job-output-artifact") => anyhow::bail!(
-            "usage: job-output-artifact <job_uuid> <client_id> --seq <seq> <output_file>"
+        Some("job-output-download") => anyhow::bail!(
+            "usage: job-output-download <job_uuid> <client_id> --seq <seq> <output_file>"
         ),
         Some("job-targets") => anyhow::bail!("usage: job-targets <job_uuid>"),
+        Some("job-target-status-download") => {
+            anyhow::bail!("usage: job-target-status-download <job_uuid> <output_file>")
+        }
         Some("job-outputs") => anyhow::bail!("usage: job-outputs <job_uuid>"),
         Some("job-follow") => anyhow::bail!(
             "usage: job-follow <job_uuid> [--interval-ms <100-10000>] [--max-polls <1-10000>] [--json]"

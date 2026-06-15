@@ -381,7 +381,11 @@ export function App() {
                   dashboard.uploadAgentUpdateArtifact
                 }
                 onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
-                onDownloadOutputArtifact={dashboard.downloadJobOutputArtifact}
+                onDownloadOutputChunk={dashboard.downloadJobOutputChunk}
+                onDownloadOutputStream={dashboard.downloadJobOutputStream}
+                onDownloadFileForClient={dashboard.downloadFileDownloadForClient}
+                onDownloadOutputArchive={dashboard.downloadJobOutputArchive}
+                onDownloadTargetStatusArchive={dashboard.downloadJobTargetStatuses}
                 onDownloadFileTransferSource={
                   dashboard.downloadFileTransferSource
                 }

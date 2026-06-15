@@ -9,7 +9,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crate::{
     gateway_client::GatewayDispatchClient,
     job_request::validate_job_command,
-    model::{CreateJobRequest, HistoryQuery, JobHistoryView},
+    model::{CreateJobRequest, HistoryQuery, JobHistoryView, JobOutputView, JobTargetView},
     model_file_transfer::{FileTransferHandoffRequest, UploadFileTransferSourceArtifactRequest},
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
@@ -19,7 +19,11 @@ use crate::{
         download_file_transfer_source_artifact, list_file_transfer_source_artifacts,
         upload_file_transfer_source_artifact,
     },
-    routes_job_history::download_file_download_bundle,
+    routes_job_history::{
+        download_file_download_bundle, download_file_download_for_client,
+        download_job_output_archive, download_job_output_chunk, download_job_output_stream,
+        download_job_target_statuses,
+    },
     state::AppState,
 };
 use vpsman_common::{
@@ -573,6 +577,88 @@ fn rejects_invalid_resumable_file_transfer_job_documents() {
 }
 
 #[tokio::test]
+async fn deleted_job_output_download_returns_gone() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-job-output-deleted-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo, store);
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+    memory.job_outputs.write().await.push(JobOutputView {
+        job_id,
+        client_id: "edge-a".to_string(),
+        seq: 0,
+        stream: "stdout".to_string(),
+        data_base64: BASE64.encode(b"preview"),
+        storage: "artifact_deleted".to_string(),
+        artifact_object_key: None,
+        artifact_sha256_hex: Some(payload_hash(b"full output")),
+        artifact_size_bytes: Some(11),
+        exit_code: None,
+        done: false,
+        received_at: None,
+        created_at: "0".to_string(),
+    });
+
+    let result = download_job_output_chunk(
+        State(state),
+        headers,
+        Path((job_id, "edge-a".to_string(), 0)),
+    )
+    .await;
+    let error = result.err().unwrap();
+
+    assert_eq!(error.status, StatusCode::GONE);
+    assert_eq!(error.code, "job_output_artifact_deleted");
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn status_job_output_download_is_rejected() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-status-output-download-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo, store);
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+    memory.job_outputs.write().await.push(JobOutputView {
+        job_id,
+        client_id: "edge-a".to_string(),
+        seq: 0,
+        stream: "status".to_string(),
+        data_base64: BASE64.encode(br#"{"type":"shell","status":"completed"}"#),
+        storage: "inline".to_string(),
+        artifact_object_key: None,
+        artifact_sha256_hex: Some(payload_hash(br#"{"type":"shell","status":"completed"}"#)),
+        artifact_size_bytes: Some(37),
+        exit_code: Some(0),
+        done: true,
+        received_at: None,
+        created_at: "0".to_string(),
+    });
+
+    let result = download_job_output_chunk(
+        State(state),
+        headers,
+        Path((job_id, "edge-a".to_string(), 0)),
+    )
+    .await;
+    let error = result.err().unwrap();
+
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "job_output_status_not_downloadable");
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
 async fn file_transfer_handoff_assembles_completed_download_from_retained_outputs() {
     let memory = MemoryState::default();
     let repo = Repository::Memory(memory.clone());
@@ -756,12 +842,189 @@ async fn file_download_bundle_route_returns_tar_archive_from_target_outputs() {
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(
-        entries,
+        entries
+            .iter()
+            .map(|entry| entry.0.as_str())
+            .collect::<Vec<_>>(),
         vec![
-            ("edge-a/app.conf".to_string(), b"listen=443\n".to_vec()),
-            ("edge-b/app.conf".to_string(), b"listen=8443\n".to_vec()),
+            "edge-a/app.conf",
+            "edge-a_status.json",
+            "edge-b/app.conf",
+            "edge-b_status.json",
         ]
     );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry.0 == "edge-a/app.conf")
+            .unwrap()
+            .1,
+        b"listen=443\n"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry.0 == "edge-b/app.conf")
+            .unwrap()
+            .1,
+        b"listen=8443\n"
+    );
+    let edge_a_status: serde_json::Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|entry| entry.0 == "edge-a_status.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        edge_a_status,
+        serde_json::json!({
+            "type": "file_download",
+            "status": "completed",
+            "path": "/etc/app.conf",
+            "source_kind": "file",
+            "filename": "app.conf",
+            "content_type": "application/octet-stream",
+            "size_bytes": 11,
+            "sha256_hex": payload_hash(b"listen=443\n"),
+            "archive": false
+        })
+    );
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_download_target_route_returns_validated_file_payload() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-file-download-target-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+    let data = b"\x00listen=443\n\xff".to_vec();
+
+    repo.record_job_outputs_with_config(
+        job_id,
+        "edge-a",
+        &file_download_outputs(job_id, "/etc/app.conf", "app.conf", &data),
+        JobOutputPersistConfig {
+            object_store: Some(&store),
+            artifact_min_bytes: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = download_file_download_for_client(
+        State(state),
+        headers,
+        Path((job_id, "edge-a".to_string())),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/octet-stream"
+    );
+    assert!(response
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("app.conf"));
+    assert_eq!(
+        response
+            .headers()
+            .get("x-vpsman-artifact-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        payload_hash(&data)
+    );
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(body.as_ref(), data.as_slice());
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_download_bundle_route_keeps_status_json_file_separate_from_metadata() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-file-download-status-json-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+    let data = br#"{"service":"ok"}"#;
+
+    repo.record_job_outputs(
+        job_id,
+        "edge-a",
+        &file_download_outputs(job_id, "/var/lib/app/status.json", "status.json", data),
+    )
+    .await
+    .unwrap();
+
+    let response = download_file_download_bundle(
+        State(state),
+        headers,
+        Path(job_id),
+        Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
+    )
+    .await
+    .unwrap();
+
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut entries = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        entries.push((path, bytes));
+    }
+
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["edge-a/status.json", "edge-a_status.json"]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry.0 == "edge-a/status.json")
+            .unwrap()
+            .1,
+        data
+    );
+    let metadata_json: serde_json::Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|entry| entry.0 == "edge-a_status.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(metadata_json["filename"], "status.json");
     let _ = tokio::fs::remove_dir_all(store_root).await;
 }
 
@@ -811,15 +1074,11 @@ async fn file_download_bundle_route_handles_more_than_twenty_target_outputs() {
         entries.push((path, bytes));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
-    assert_eq!(entries.len(), 24);
-    assert_eq!(
-        entries.first().unwrap(),
-        &("edge-00/app.log".to_string(), b"client=edge-00\n".to_vec())
-    );
-    assert_eq!(
-        entries.last().unwrap(),
-        &("edge-23/app.log".to_string(), b"client=edge-23\n".to_vec())
-    );
+    assert_eq!(entries.len(), 48);
+    assert!(entries.contains(&("edge-00/app.log".to_string(), b"client=edge-00\n".to_vec())));
+    assert!(entries.iter().any(|entry| entry.0 == "edge-00_status.json"));
+    assert!(entries.contains(&("edge-23/app.log".to_string(), b"client=edge-23\n".to_vec())));
+    assert!(entries.iter().any(|entry| entry.0 == "edge-23_status.json"));
     let _ = tokio::fs::remove_dir_all(store_root).await;
 }
 
@@ -862,6 +1121,343 @@ async fn file_download_bundle_route_rejects_output_integrity_mismatch() {
 
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.code, "file_download_output_integrity_mismatch");
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn job_target_status_download_returns_targets_and_per_target_status_archive() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-job-target-status-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo,
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+
+    memory.job_targets.write().await.extend([
+        JobTargetView {
+            job_id,
+            client_id: "edge-a".to_string(),
+            status: "completed".to_string(),
+            message: Some("ok".to_string()),
+            exit_code: Some(0),
+            started_at: Some("1700000000".to_string()),
+            completed_at: Some("1700000001".to_string()),
+        },
+        JobTargetView {
+            job_id,
+            client_id: "edge-b".to_string(),
+            status: "failed".to_string(),
+            message: Some("exit 2".to_string()),
+            exit_code: Some(2),
+            started_at: Some("1700000002".to_string()),
+            completed_at: Some("1700000003".to_string()),
+        },
+    ]);
+
+    let response = download_job_target_statuses(State(state), headers, Path(job_id))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/x-tar"
+    );
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut entries = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        entries.push((path, bytes));
+    }
+
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["edge-a_status.json", "edge-b_status.json", "targets.json"]
+    );
+    let targets_json: serde_json::Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|entry| entry.0 == "targets.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        targets_json,
+        serde_json::json!([
+            {
+                "job_id": job_id,
+                "client_id": "edge-a",
+                "status": "completed",
+                "message": "ok",
+                "exit_code": 0,
+                "started_at": "1700000000",
+                "completed_at": "1700000001"
+            },
+            {
+                "job_id": job_id,
+                "client_id": "edge-b",
+                "status": "failed",
+                "message": "exit 2",
+                "exit_code": 2,
+                "started_at": "1700000002",
+                "completed_at": "1700000003"
+            }
+        ])
+    );
+    let edge_a_json: serde_json::Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|entry| entry.0 == "edge-a_status.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        edge_a_json,
+        serde_json::json!({
+            "job_id": job_id,
+            "client_id": "edge-a",
+            "status": "completed",
+            "message": "ok",
+            "exit_code": 0,
+            "started_at": "1700000000",
+            "completed_at": "1700000001"
+        })
+    );
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn job_output_archive_route_returns_per_target_stream_files() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-job-output-archive-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+
+    repo.record_job_outputs_with_config(
+        job_id,
+        "edge-a",
+        &[
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: b"alpha ".to_vec(),
+                exit_code: None,
+                done: false,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: b"beta".to_vec(),
+                exit_code: None,
+                done: false,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stderr,
+                data: b"warn\n".to_vec(),
+                exit_code: None,
+                done: false,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: br#"{"type":"shell","status":"completed"}"#.to_vec(),
+                exit_code: Some(0),
+                done: true,
+            },
+        ],
+        JobOutputPersistConfig {
+            object_store: Some(&store),
+            artifact_min_bytes: 1,
+        },
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        job_id,
+        "edge-b",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"plain inline\n".to_vec(),
+            exit_code: None,
+            done: false,
+        }],
+    )
+    .await
+    .unwrap();
+
+    let response = download_job_output_archive(
+        State(state),
+        headers,
+        Path(job_id),
+        Query(crate::routes_job_history::FileDownloadBundleQuery { clients: None }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/x-tar"
+    );
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let mut archive = tar::Archive::new(std::io::Cursor::new(body));
+    let mut entries = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        entries.push((path, bytes));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        entries,
+        vec![
+            ("edge-a/stderr.bin".to_string(), b"warn\n".to_vec()),
+            ("edge-a/stdout.bin".to_string(), b"alpha beta".to_vec()),
+            ("edge-b/stdout.bin".to_string(), b"plain inline\n".to_vec()),
+        ]
+    );
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn job_output_stream_routes_return_stdout_stderr_and_combined_without_status() {
+    let repo = Repository::Memory(MemoryState::default());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-job-output-stream-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let job_id = uuid::Uuid::new_v4();
+
+    repo.record_job_outputs_with_config(
+        job_id,
+        "edge-a",
+        &[
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: b"out-1\n".to_vec(),
+                exit_code: None,
+                done: false,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stderr,
+                data: b"err-1\n".to_vec(),
+                exit_code: None,
+                done: false,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: br#"{"type":"shell","status":"completed"}"#.to_vec(),
+                exit_code: Some(0),
+                done: true,
+            },
+            CommandOutput {
+                job_id,
+                stream: OutputStream::Stdout,
+                data: b"out-2\n".to_vec(),
+                exit_code: Some(0),
+                done: true,
+            },
+        ],
+        JobOutputPersistConfig {
+            object_store: Some(&store),
+            artifact_min_bytes: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    let stdout = download_job_output_stream(
+        State(state.clone()),
+        headers.clone(),
+        Path((job_id, "edge-a".to_string())),
+        Query(crate::routes_job_history::JobOutputDownloadQuery {
+            stream: "stdout".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        to_bytes(stdout.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"out-1\nout-2\n"
+    );
+
+    let stderr = download_job_output_stream(
+        State(state.clone()),
+        headers.clone(),
+        Path((job_id, "edge-a".to_string())),
+        Query(crate::routes_job_history::JobOutputDownloadQuery {
+            stream: "stderr".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        to_bytes(stderr.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"err-1\n"
+    );
+
+    let combined = download_job_output_stream(
+        State(state),
+        headers,
+        Path((job_id, "edge-a".to_string())),
+        Query(crate::routes_job_history::JobOutputDownloadQuery {
+            stream: "combined".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        to_bytes(combined.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"out-1\nerr-1\nout-2\n"
+    );
     let _ = tokio::fs::remove_dir_all(store_root).await;
 }
 

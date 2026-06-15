@@ -22,5 +22,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vpsman-common = { path = "../common" }
+vpsman-object-store = { path = "../object-store" }
 vpsman-server-core = { path = "../server-core" }
 vpsman-server-build-info = { path = "../server-build-info" }

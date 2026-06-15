@@ -118,6 +118,9 @@ Use normal job inspection commands to review progress:
 ```sh
 cargo run -p vpsctl -- jobs --limit 20
 cargo run -p vpsctl -- job-targets --job-id <job_uuid>
+cargo run -p vpsctl -- job-target-status-download \
+  --job-id <job_uuid> \
+  --output-file ./agent-update-status.tar
 cargo run -p vpsctl -- job-outputs --job-id <job_uuid>
 cargo run -p vpsctl -- job-follow --job-id <job_uuid>
 ```

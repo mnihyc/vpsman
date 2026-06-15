@@ -57,9 +57,10 @@ use crate::{
         upsert_hot_config_rule_template,
     },
     routes_job_history::{
-        compare_job_outputs, download_file_download_bundle, download_job_output_artifact, get_job,
-        list_audit_logs, list_job_outputs, list_job_targets, list_jobs,
-        list_network_observation_trends, list_network_observations,
+        compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
+        download_job_output_archive, download_job_output_chunk, download_job_output_stream,
+        download_job_target_statuses, get_job, list_audit_logs, list_job_outputs, list_job_targets,
+        list_jobs, list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
     routes_jobs::{cancel_job, create_job},
@@ -313,18 +314,34 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/targets", get(list_job_targets))
+        .route(
+            "/api/v1/jobs/{job_id}/targets/download",
+            get(download_job_target_statuses),
+        )
         .route("/api/v1/jobs/{job_id}/outputs", get(list_job_outputs))
         .route(
             "/api/v1/jobs/{job_id}/outputs/download-bundle",
             get(download_file_download_bundle),
         )
         .route(
+            "/api/v1/jobs/{job_id}/outputs/archive",
+            get(download_job_output_archive),
+        )
+        .route(
+            "/api/v1/jobs/{job_id}/outputs/{client_id}/file-download",
+            get(download_file_download_for_client),
+        )
+        .route(
+            "/api/v1/jobs/{job_id}/outputs/{client_id}/download",
+            get(download_job_output_stream),
+        )
+        .route(
             "/api/v1/jobs/{job_id}/output-comparison",
             get(compare_job_outputs),
         )
         .route(
-            "/api/v1/jobs/{job_id}/outputs/{client_id}/{seq}/artifact",
-            get(download_job_output_artifact),
+            "/api/v1/jobs/{job_id}/outputs/{client_id}/{seq}/download",
+            get(download_job_output_chunk),
         )
         .route(
             "/api/v1/process-supervisor/inventory",

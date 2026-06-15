@@ -71,7 +71,7 @@ export type ResumableDownloadRequest = {
   createJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   downloadName: string;
   downloadSink?: BrowserDownloadSinkMode;
-  downloadOutputArtifact: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
+  downloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
   loadJob: (jobId: string) => Promise<JobHistoryRecord>;
   loadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   path: string;
@@ -690,7 +690,7 @@ async function loadDownloadChunkBytes(
   const chunks: Uint8Array[] = [];
   for (const output of outputs) {
     if (output.storage === "object_store") {
-      const blob = await request.downloadOutputArtifact(jobId, clientId, output.seq);
+      const blob = await request.downloadOutputChunk(jobId, clientId, output.seq);
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (output.artifact_sha256_hex && (await sha256Hex(bytes)) !== output.artifact_sha256_hex) {
         throw new Error(`Resumable download artifact hash mismatch for output ${output.seq}`);
@@ -699,6 +699,8 @@ async function loadDownloadChunkBytes(
         throw new Error(`Resumable download artifact size mismatch for output ${output.seq}`);
       }
       chunks.push(bytes);
+    } else if (output.storage === "artifact_deleted") {
+      throw new Error(`Resumable download artifact was deleted for output ${output.seq}`);
     } else {
       chunks.push(base64ToBytes(output.data_base64));
     }

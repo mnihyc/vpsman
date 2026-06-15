@@ -157,6 +157,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_jobs::job_targets(api_url, token, job_id)?;
             Ok(None)
         }
+        Command::JobTargetStatusDownload {
+            job_id,
+            output_file,
+        } => {
+            commands_jobs::job_target_status_download(api_url, token, job_id, output_file)?;
+            Ok(None)
+        }
         Command::JobOutputs { job_id } => {
             commands_jobs::job_outputs(api_url, token, job_id)?;
             Ok(None)
@@ -170,13 +177,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_jobs::job_follow(api_url, token, job_id, interval_ms, max_polls, json)?;
             Ok(None)
         }
-        Command::JobOutputArtifact {
+        Command::JobOutputDownload {
             job_id,
             client_id,
             seq,
             output_file,
         } => {
-            commands_jobs::job_output_artifact(
+            commands_jobs::job_output_download(
                 api_url,
                 token,
                 job_id,

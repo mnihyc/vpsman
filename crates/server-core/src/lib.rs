@@ -271,7 +271,10 @@ pub fn aggregate_job_status_from_statuses(
     if completed == target_count {
         return JOB_STATUS_COMPLETED;
     }
-    if completed > 0 || skipped == target_count {
+    if skipped == target_count {
+        return JOB_STATUS_SKIPPED;
+    }
+    if completed > 0 {
         return JOB_STATUS_PARTIAL_SUCCESS;
     }
     if parsed_statuses.contains(&JobTargetStatus::ControlTimeout) {
@@ -399,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             aggregate_job_status_from_statuses(&["skipped".to_string(), "skipped".to_string()], 2,),
-            "partial_success"
+            "skipped"
         );
     }
 }

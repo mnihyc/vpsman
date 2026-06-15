@@ -33,7 +33,9 @@ mod model_server_jobs;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
-mod object_store;
+pub(crate) mod object_store {
+    pub(crate) use vpsman_object_store::*;
+}
 mod privilege;
 mod repository;
 mod repository_agent_update_lifecycle;

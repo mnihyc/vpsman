@@ -299,14 +299,14 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
     let (status, Json(response)) = create_job(State(state), headers, Json(request))
         .await
         .unwrap();
-    wait_for_job_status(&repo, response.job_id, "partial_success").await;
+    wait_for_job_status(&repo, response.job_id, "skipped").await;
     let targets = repo.list_job_targets(response.job_id).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
     let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
     let status_output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
 
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    assert_eq!(response.status, "partial_success");
+    assert_eq!(response.status, "skipped");
     assert_eq!(targets[0].status, "skipped");
     assert_eq!(
         status_output["reason"],
