@@ -6,8 +6,11 @@ VPSMan uses one canonical job lifecycle across API, database, CLI, frontend, gat
 
 Job statuses are:
 
-- `queued`: the job has at least one target that has not been claimed.
-- `running`: at least one target is `queued`, `dispatching`, or `running`.
+- `queued`: the job has been accepted and no unfinished target has been
+  claimed by the dispatcher yet.
+- `running`: at least one target has been claimed for dispatch, is waiting for
+  gateway/agent ACK, or is actively running, and terminal aggregation has not
+  completed.
 - `completed`: every target completed successfully.
 - `partial_success`: at least one target completed successfully and at least one target did not, or every dispatched target was skipped by capability policy.
 - `skipped`: the job had zero durable targets.
@@ -36,8 +39,23 @@ Target statuses are:
 
 - The database `jobs.status` and `job_targets.status` CHECK constraints are the durable truth boundary.
 - UIs use `target_count`, `target_counts.total`, and canonical target records for progress; there is no separate dispatch-admission count.
+- Claiming any queued target promotes the parent job from `queued` to `running`
+  before agent ACK, so a dispatching target is never represented by a still
+  queued parent job.
 - `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets, or all skipped targets, aggregate to `partial_success`.
 - Availability is contextual display only. Offline fixed targets remain target records until backend deadline, then become `control_timeout`.
+- `control_timeout` is a terminal control-plane decision. Late final agent
+  output may be persisted as diagnostic evidence, but it must not rewrite the
+  target or parent job terminal state.
+- Job finalization is idempotent. Only the first process that transitions a job
+  from non-terminal to terminal may emit terminal side effects such as schedule
+  outcome accounting, webhook events, tunnel execution recording, and job-finish
+  notifications.
+- Job output rows are first-writer-wins by `(job_id, client_id, seq)`. Same
+  duplicate rows are no-ops; conflicting replay rows are audit evidence and do
+  not overwrite previously durable output. Agent duplicate replay preserves the
+  original terminal status/result even when cached replay bytes are no longer
+  retained.
 - Frontend TypeScript status unions come from `vpsman_common` via `frontend/src/generated/protocolContracts.ts`; frontend code must not maintain separate status alias lists.
 
 ## Shared Workflow Contracts

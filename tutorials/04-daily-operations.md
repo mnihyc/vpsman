@@ -63,6 +63,16 @@ cargo run -p vpsctl -- job-output-artifact \
   --output-file ./stdout.bin
 ```
 
+Explicit artifact downloads use the CLI binary streaming path and write through
+a temporary file before rename. They are not subject to the JSON API response
+cap; the server still enforces the configured `api.artifact_max_bytes` /
+`VPSMAN_ARTIFACT_MAX_BYTES` envelope.
+
+Durable output history is first-writer-wins by `(job_id, client_id, seq)`.
+Duplicate command replay does not insert marker rows into the normal output
+stream, and replay conflicts are retained as audit evidence instead of
+rewriting output already stored for operators.
+
 Timeout, cancel, terminal close, and process-stop status output includes a
 `cleanup` object when the agent had to terminate a process group. Inspect it
 for the signal path, fallback use, and final running state during incident
@@ -224,6 +234,10 @@ cargo run -p vpsctl -- file-transfer-upload \
   --confirmed
 ```
 
+File-transfer handoffs and source-artifact downloads use the same binary
+streaming path as job-output artifacts, so routine downloads are bounded by the
+configured artifact max rather than by the small JSON response limit.
+
 ## User Sessions And Processes
 
 ```sh
@@ -288,10 +302,14 @@ set of VPSs, the schedule shows **Update targets**; use it to deliberately
 replace the saved fixed snapshot. Tag mutation dialogs show this as a target
 update notice, not as an automatic schedule edit.
 
-Submitted and scheduled jobs enter a durable queued/dispatching state before
-they are accepted by gateways or agents. Observe them with job polling commands
-and run an explicit compensating operation when a completed result needs
-recovery:
+Submitted and scheduled jobs enter the durable queue first. As soon as the
+dispatcher claims any target and gives it a control deadline, the parent job is
+promoted from `queued` to `running`; individual targets then move through
+`dispatching` and `running` as gateway and agent ACKs arrive. A
+`control_timeout` target is terminal. Late final output after that timeout is
+kept as diagnostic output evidence, but it does not rewrite the target or job
+terminal state. Observe jobs with polling commands and run an explicit
+compensating operation when a completed result needs recovery:
 
 ```sh
 cargo run -p vpsctl -- job-follow --job-id <job_uuid>

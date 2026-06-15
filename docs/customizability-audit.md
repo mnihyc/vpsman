@@ -144,13 +144,15 @@ binary path, or one accounting source is not enough.
   - Required model: routing-daemon adapter contract for Bird2, FRR, and custom
     commands; topology and OSPF-like cost policy should remain daemon-neutral.
 - Backup, restore, and update:
-  - Current state: local filesystem object store with reserved S3 extension;
-    data-source status reports selected backup/update presets, server
-    object-store kind/configuration, backup artifact counts, backup request
-    counts, restore/migration linkage, update release counts and job execution evidence.
-  - Required model: typed object-store adapters, direct/resumable artifact
-    handoff, artifact hosting adapters, restore path mapping presets, update
-    restart adapters, and heartbeat source selection.
+  - Current state: local filesystem and S3-compatible object stores are
+    implemented for backup/update artifacts; data-source status reports
+    selected backup/update presets, server object-store kind/configuration,
+    configured artifact maximums, backup artifact counts, backup request
+    counts, restore/migration linkage, update release counts, and job execution evidence.
+  - Required model: richer typed object-store preset assignment, direct and
+    resumable artifact handoff ergonomics, artifact hosting adapters, restore
+    path mapping presets, update restart adapters, and heartbeat source
+    selection.
 - Install/runtime defaults:
   - Current state: agent config path and supervisor state path have sensible
     Linux defaults and command-line/config overrides in some paths.
@@ -212,7 +214,7 @@ binary path, or one accounting source is not enough.
 - Curated built-in data-source presets now exist beyond defaults:
   host-mounted proc/sys telemetry, `vnstat` JSON traffic accounting, pinned
   `/usr/bin/ping`, host-mounted process inventory, pinned `w`/`who`, BusyBox
-  `ash`, runtime iproute2/tc reconciliation, reserved S3/MinIO backup object
+  `ash`, runtime iproute2/tc reconciliation, S3/MinIO backup/update object
   storage, and signed HTTPS update artifacts. These are selectable presets, not
   automatic defaults.
 

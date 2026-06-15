@@ -7,7 +7,14 @@ forcing ifupdown, NetworkManager, or netplan ownership.
 
 ## Plan A Built-In Tunnel
 
-Create a non-mutating plan first:
+Generate endpoint suggestions first, then create a non-mutating plan. The pool
+CIDR is allocation context only; saved plans and observed imports require
+explicit IPv4 or IPv6 tunnel endpoint pairs.
+
+```sh
+cargo run -p vpsctl -- tunnel-allocate \
+  --ipv4-pool-cidr 10.255.0.0/30
+```
 
 ```sh
 cargo run -p vpsctl -- tunnel-plan \
@@ -19,6 +26,8 @@ cargo run -p vpsctl -- tunnel-plan \
   --left-underlay 203.0.113.10 \
   --right-underlay 203.0.113.20 \
   --address-pool-cidr 10.255.0.0/30 \
+  --left-tunnel-ipv4 10.255.0.0 \
+  --right-tunnel-ipv4 10.255.0.1 \
   --bandwidth 100m \
   --latency-ms 20 \
   --save
@@ -44,6 +53,8 @@ cargo run -p vpsctl -- tunnel-promote-telemetry \
   --local-underlay 198.51.100.10 \
   --peer-underlay 203.0.113.20 \
   --address-pool-cidr 10.255.0.0/30 \
+  --left-tunnel-ipv4 10.255.0.0 \
+  --right-tunnel-ipv4 10.255.0.1 \
   --side left \
   --bandwidth 1000m \
   --latency-ms 8

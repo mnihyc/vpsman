@@ -37,10 +37,10 @@ The default compose shape uses:
   `/etc/vpsman/vpsman.toml` through compose
 
 For production, replace placeholder secrets in `deploy/.env`, review
-`deploy/config/vpsman.toml`, and serve the panel/API through HTTPS. Leave
-S3/MinIO variables unset unless you are deliberately testing that adapter;
-local disk object storage is the current default deployment shape. To upgrade,
-replace the files under
+`deploy/config/vpsman.toml`, and serve the panel/API through HTTPS. Local disk
+object storage is the default compose shape. Configure the S3/MinIO variables
+only when the deployment should use the implemented S3-compatible adapter for
+backup or update artifacts. To upgrade, replace the files under
 `deploy/runtime/server/current` and
 `deploy/runtime/frontend/current`, then restart the compose stack; no Rust or
 frontend rebuild is required. Runtime state stays in checkout-local paths, not
@@ -59,6 +59,7 @@ export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
 export VPSMAN_INTERNAL_TOKEN=dev-internal-token-change-me-32chars
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
+export VPSMAN_ARTIFACT_MAX_BYTES=134217728
 export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
 export VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO=0.10
 export VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO=0.20

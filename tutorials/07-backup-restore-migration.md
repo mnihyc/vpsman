@@ -2,10 +2,10 @@
 
 Backups and restores are privilege-gated workflows. Backup private key material
 stays local to the operator or browser. The API stores encrypted artifact
-metadata and local-disk object-store bytes by default, with S3/MinIO reserved
-as an adapter path. Use local disk first unless the deployment has an explicit
-object-storage requirement; the S3/MinIO path is optional and covered by
-adapter-specific smokes.
+metadata and local-disk object-store bytes by default. S3/MinIO-compatible
+object storage is implemented as an optional adapter for deployments that need
+remote backup or update artifact storage, and is covered by adapter-specific
+smokes.
 
 ## Schedule Backup Policies
 
@@ -149,10 +149,18 @@ cargo run -p vpsctl -- backup-artifact-upload-chunked \
   --confirmed
 ```
 
+Stored artifact upload, download, and restore-preparation paths share the same
+configured API artifact envelope. The default maximum is 128 MiB; set
+`api.artifact_max_bytes` in the suite config or `VPSMAN_ARTIFACT_MAX_BYTES` in
+the API environment to change it. Values are clamped between 1 MiB and 4 GiB.
+`api.job_output_artifact_min_bytes` remains only the threshold for externalizing
+large job output chunks to object storage.
+
 For an explicit S3/MinIO-backed deployment, configure the full
-`VPSMAN_OBJECT_*` set before starting the API. The reserved adapter uses
-path-style SigV4 over the configured endpoint, rejects duplicate objects with
-`HEAD` before `PUT`, bounds response parsing, and has live MinIO verification:
+`VPSMAN_OBJECT_*` set before starting the API. The adapter uses path-style
+SigV4 over the configured endpoint, rejects duplicate objects with `HEAD`
+before `PUT`, and streams verified downloads through a temporary spool file
+with configured size and hash validation before responding to the client:
 
 ```sh
 bash scripts/smoke-minio-backup-artifact.sh

@@ -16,6 +16,7 @@ export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
 export VPSMAN_INTERNAL_TOKEN=dev-internal-token-change-me-32chars
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_UPDATE_OBJECT_STORE_DIR=.tmp/objects/updates
+export VPSMAN_ARTIFACT_MAX_BYTES=134217728
 
 # Run each service in its own shell with the same environment.
 cargo run -p vpsman-api

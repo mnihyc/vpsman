@@ -37,7 +37,19 @@ cargo run -p vpsctl -- --output json agents
 cargo run -p vpsctl -- --output json jobs --limit 20
 cargo run -p vpsctl -- --output json terminal-sessions --limit 20
 cargo run -p vpsctl -- --output json file-transfers --limit 20
-cargo run -p vpsctl -- --output pretty-json tunnel-plan --name edge-a-b --interface-name gre-ab --kind gre --left-client-id edge-a --right-client-id edge-b --left-underlay 203.0.113.10 --right-underlay 203.0.113.20 --address-pool-cidr 10.255.0.0/30 --bandwidth 100m --latency-ms 20
+cargo run -p vpsctl -- --output pretty-json tunnel-plan \
+  --name edge-a-b \
+  --interface-name gre-ab \
+  --kind gre \
+  --left-client-id edge-a \
+  --right-client-id edge-b \
+  --left-underlay 203.0.113.10 \
+  --right-underlay 203.0.113.20 \
+  --address-pool-cidr 10.255.0.0/30 \
+  --left-tunnel-ipv4 10.255.0.0 \
+  --right-tunnel-ipv4 10.255.0.1 \
+  --bandwidth 100m \
+  --latency-ms 20
 ```
 
 ## VTY Privileged Mode
