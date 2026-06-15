@@ -1343,6 +1343,7 @@ export function BackupsPanel({
                 restoreTimeoutSecs={restoreTimeoutSecs}
               />
               <RestoreRollbackForm
+                agents={agents}
                 confirmationOpen={pendingConfirmation === "restore-rollback"}
                 forceUnprivileged={rollbackForceUnprivileged}
                 onForceUnprivilegedChange={setRollbackForceUnprivileged}

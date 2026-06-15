@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
     AgentCapabilitySnapshot, BandwidthTier, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
-    RuntimeTunnelTopologyIntent, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide,
+    TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;
@@ -175,6 +176,22 @@ pub(crate) struct TelemetryTunnelView {
     pub(crate) traffic_reason: Option<String>,
     pub(crate) traffic_checked_unix: Option<i64>,
     pub(crate) adapter_health: Option<TelemetryTunnelAdapterHealthView>,
+    pub(crate) latency_monitoring_enabled: Option<bool>,
+    pub(crate) latency_status: Option<String>,
+    pub(crate) latency_reason: Option<String>,
+    pub(crate) latency_primary_family: Option<String>,
+    pub(crate) latency_target: Option<String>,
+    pub(crate) latency_checked_unix: Option<i64>,
+    pub(crate) latency_avg_ms: Option<f64>,
+    pub(crate) packet_loss_ratio: Option<f64>,
+    pub(crate) latency_healthy_windows: Option<i32>,
+    pub(crate) latency_missed_windows: Option<i32>,
+    pub(crate) auto_ospf_enabled: Option<bool>,
+    pub(crate) auto_ospf_status: Option<String>,
+    pub(crate) auto_ospf_reason: Option<String>,
+    pub(crate) auto_ospf_current_cost: Option<i32>,
+    pub(crate) auto_ospf_recommended_cost: Option<i32>,
+    pub(crate) auto_ospf_updated_unix: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -366,6 +383,7 @@ pub(crate) struct TunnelPlanView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) kind: TunnelKind,
+    pub(crate) enabled: bool,
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
     pub(crate) left_status: String,
@@ -378,6 +396,9 @@ pub(crate) struct TunnelPlanView {
     pub(crate) plan: TunnelPlan,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+    pub(crate) deleted_at: Option<String>,
+    pub(crate) deleted_by: Option<Uuid>,
+    pub(crate) deleted_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -458,6 +479,28 @@ pub(crate) struct CreateTunnelPlanRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AllocateTunnelEndpointsRequest {
+    #[serde(default)]
+    pub(crate) ipv4_pool_cidr: Option<String>,
+    #[serde(default)]
+    pub(crate) ipv6_pool_cidr: Option<String>,
+    #[serde(default)]
+    pub(crate) reserved_addresses: Vec<String>,
+    #[serde(default = "default_true")]
+    pub(crate) include_ipv4: bool,
+    #[serde(default)]
+    pub(crate) include_ipv6: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AllocateTunnelEndpointsResponse {
+    pub(crate) ipv4_tunnel: Option<TunnelAddressPair>,
+    pub(crate) ipv6_tunnel: Option<TunnelAddressPair>,
+    pub(crate) latency_primary_family: TunnelAddressFamily,
+    pub(crate) conflicts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) client_id: String,
     pub(crate) interface: String,
@@ -465,6 +508,14 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) local_underlay: String,
     pub(crate) peer_underlay: String,
     pub(crate) address_pool_cidr: String,
+    #[serde(default)]
+    pub(crate) ipv4_tunnel: Option<TunnelAddressPair>,
+    #[serde(default)]
+    pub(crate) ipv6_address_pool_cidr: Option<String>,
+    #[serde(default)]
+    pub(crate) ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(default)]
+    pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: Option<TunnelEndpointSide>,
     pub(crate) name: Option<String>,
     pub(crate) topology_version: Option<String>,
@@ -472,6 +523,10 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

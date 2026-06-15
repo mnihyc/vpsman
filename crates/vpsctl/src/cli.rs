@@ -22,8 +22,8 @@ use crate::cli_update::{
     AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
 };
 use crate::commands_network::{
-    TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand, TunnelProbeCommand,
-    TunnelPromoteAdapterCommand, TunnelRollbackCommand, TunnelSpeedTestCommand,
+    TunnelAllocateCommand, TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand,
+    TunnelProbeCommand, TunnelPromoteAdapterCommand, TunnelRollbackCommand, TunnelSpeedTestCommand,
     TunnelStatusCommand,
 };
 use crate::commands_terminal::{
@@ -1005,7 +1005,8 @@ pub(crate) enum Command {
     },
     BulkResolve(BulkResolveCommand),
     TunnelPlans,
-    TunnelPlan(TunnelPlanCommand),
+    TunnelAllocate(TunnelAllocateCommand),
+    TunnelPlan(Box<TunnelPlanCommand>),
     TunnelPromoteTelemetry(crate::commands_network::TunnelPromoteTelemetryCommand),
     TunnelPromoteAdapter(TunnelPromoteAdapterCommand),
     TunnelApply(TunnelApplyCommand),

@@ -335,8 +335,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::tunnel_plans(api_url, token)?;
             Ok(None)
         }
+        Command::TunnelAllocate(request) => {
+            commands_network::tunnel_allocate(api_url, token, request)?;
+            Ok(None)
+        }
         Command::TunnelPlan(request) => {
-            commands_network::tunnel_plan(api_url, token, request)?;
+            commands_network::tunnel_plan(api_url, token, *request)?;
             Ok(None)
         }
         Command::TunnelPromoteTelemetry(request) => {

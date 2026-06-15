@@ -16,6 +16,7 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { VpsCombobox } from "../components/VpsCombobox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
 import { generateNoiseKeypair } from "../noiseKeygen";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -192,6 +193,16 @@ export function AccessPanel({
       : "memory only"
     : "none";
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
+  const lifecycleVpsOptions = useMemo(
+    () =>
+      lifecycleClients.map((client) => ({
+        display_name: client.display_name,
+        id: client.client_id,
+        status: client.status,
+        tags: [],
+      })),
+    [lifecycleClients],
+  );
   const lifecycleNameById = useMemo(
     () => clientLifecycleNameMap(lifecycleClients, vpsNameDisplayMode),
     [lifecycleClients, vpsNameDisplayMode],
@@ -1199,11 +1210,12 @@ export function AccessPanel({
         >
           <label>
             <span>VPS ID</span>
-            <input
-              aria-label="VPS key revoke VPS ID"
+            <VpsCombobox
+              agents={lifecycleVpsOptions}
+              ariaLabel="VPS key revoke VPS ID"
               disabled={!canManageOperators || revokePending}
-              onChange={(event) => setRevokeClientId(event.target.value)}
-              placeholder="VPS ID from details"
+              onChange={setRevokeClientId}
+              placeholder="Search VPS key"
               value={revokeClientId}
             />
           </label>

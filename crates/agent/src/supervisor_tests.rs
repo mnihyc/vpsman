@@ -11,7 +11,7 @@ use vpsman_common::{
     ProcessRunPolicy,
 };
 
-use crate::supervisor::execute_blocking;
+use crate::supervisor::{execute_blocking, reconcile_supervisor_records_at_root};
 
 const TEST_LOG_TAIL_BYTES: u32 = 64 * 1024;
 const TEST_SUPERVISOR_SHELL: &str = "/bin/sh";
@@ -236,6 +236,74 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
         uuid::Uuid::new_v4(),
         &JobCommand::ProcessStop {
             name: "flap".to_string(),
+        },
+        &root,
+    )
+    .unwrap();
+}
+
+#[test]
+fn startup_reconcile_restarts_persisted_process_with_restart_policy() {
+    let root = test_root("startup-reconcile");
+    let records = root.join("records");
+    let logs = root.join("logs");
+    fs::create_dir_all(&records).unwrap();
+    fs::create_dir_all(&logs).unwrap();
+    let marker = root.join("startup-marker");
+    let script = format!("echo restarted > '{}'; sleep 30", marker.display());
+    fs::write(
+        records.join("daemon.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": "daemon",
+            "argv": [TEST_SUPERVISOR_SHELL, "-c", script],
+            "cwd": null,
+            "env": {},
+            "policy": {
+                "restart": "on_failure",
+                "restart_max_retries": 1,
+                "restart_backoff_secs": 0,
+                "graceful_stop_secs": 1
+            },
+            "limits": {},
+            "pid": 4_000_000_u32,
+            "process_group_id": 4_000_000_u32,
+            "started_unix": 1_u64,
+            "stdout_log": logs.join("daemon.stdout.log").to_string_lossy(),
+            "stderr_log": logs.join("daemon.stderr.log").to_string_lossy(),
+            "status": "running",
+            "exit_code": null,
+            "restart_attempts": 0_u16,
+            "last_exit_code": null,
+            "last_exit_unix": null,
+            "last_restart_unix": null,
+            "cgroup_path": null,
+            "limit_evidence": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = reconcile_supervisor_records_at_root(&root).unwrap();
+
+    assert_eq!(report["total"], 1);
+    assert_eq!(report["restarted"], 1);
+    assert_eq!(report["processes"][0]["name"], "daemon");
+    assert_eq!(report["processes"][0]["status"], "running");
+    for _ in 0..20 {
+        if fs::read_to_string(&marker).unwrap_or_default().trim() == "restarted" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "restarted"
+    );
+
+    let _ = execute_blocking(
+        uuid::Uuid::new_v4(),
+        &JobCommand::ProcessStop {
+            name: "daemon".to_string(),
         },
         &root,
     )

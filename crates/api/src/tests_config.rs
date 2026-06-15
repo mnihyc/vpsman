@@ -88,6 +88,60 @@ fn rejects_invalid_data_source_config_patch_job_document() {
 }
 
 #[test]
+fn app_state_reloads_suite_config_hot_fields_from_file() {
+    with_cleared_suite_env(API_HOT_RELOAD_ENV, || {
+        let path = temp_suite_config_path("api-hot-reload");
+        std::fs::write(
+            &path,
+            suite_runtime_toml(17, 9, 11, 12, 13, 4096, true, 0.30, 0.20, 3.0, 5.0),
+        )
+        .unwrap();
+        let mut state = test_state(Repository::Memory(MemoryState::default()));
+        state.suite_config_path = path.clone();
+
+        let dispatcher = state.dispatcher_runtime_config();
+        assert_eq!(dispatcher.batch_limit, 17);
+        assert_eq!(dispatcher.in_flight, 9);
+        assert_eq!(dispatcher.dispatch_ack_secs, 11);
+        assert_eq!(dispatcher.event_post_secs, 12);
+        assert_eq!(dispatcher.internal_http_read_secs, 13);
+        assert_eq!(state.job_output_artifact_min_bytes(), 4096);
+        assert!(state.require_registered_agent_updates());
+        let policy = state.fleet_alert_policy();
+        assert_eq!(policy.memory_available_warning_ratio, 0.30);
+        assert_eq!(policy.memory_available_critical_ratio, 0.20);
+        assert_eq!(policy.cpu_load_warning, 3.0);
+        assert_eq!(policy.cpu_load_critical, 5.0);
+        state.refresh_gateway_dispatch_timeouts();
+        assert_eq!(state.gateway.test_timeouts().read.as_secs(), 13);
+
+        std::fs::write(
+            &path,
+            suite_runtime_toml(23, 7, 29, 8, 19, 8192, false, 0.40, 0.15, 4.0, 6.0),
+        )
+        .unwrap();
+
+        let dispatcher = state.dispatcher_runtime_config();
+        assert_eq!(dispatcher.batch_limit, 23);
+        assert_eq!(dispatcher.in_flight, 7);
+        assert_eq!(dispatcher.dispatch_ack_secs, 29);
+        assert_eq!(dispatcher.event_post_secs, 8);
+        assert_eq!(dispatcher.internal_http_read_secs, 19);
+        assert_eq!(state.job_output_artifact_min_bytes(), 8192);
+        assert!(!state.require_registered_agent_updates());
+        let policy = state.fleet_alert_policy();
+        assert_eq!(policy.memory_available_warning_ratio, 0.40);
+        assert_eq!(policy.memory_available_critical_ratio, 0.15);
+        assert_eq!(policy.cpu_load_warning, 4.0);
+        assert_eq!(policy.cpu_load_critical, 6.0);
+        state.refresh_gateway_dispatch_timeouts();
+        assert_eq!(state.gateway.test_timeouts().read.as_secs(), 29);
+
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+#[test]
 fn validates_agent_update_job_document() {
     let command = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
@@ -256,4 +310,84 @@ fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         ..test_state(repo)
     }
+}
+
+const API_HOT_RELOAD_ENV: &[&str] = &[
+    "VPSMAN_DISPATCHER_BATCH",
+    "VPSMAN_DISPATCHER_IN_FLIGHT",
+    "VPSMAN_DISPATCH_ACK_SECS",
+    "VPSMAN_EVENT_POST_SECS",
+    "VPSMAN_INTERNAL_HTTP_READ_SECS",
+    "VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES",
+    "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
+    "VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO",
+    "VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO",
+    "VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO",
+    "VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO",
+    "VPSMAN_ALERT_CPU_LOAD_WARNING",
+    "VPSMAN_ALERT_CPU_LOAD_CRITICAL",
+];
+
+static SUITE_CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_cleared_suite_env<R>(names: &[&str], run: impl FnOnce() -> R) -> R {
+    let _guard = SUITE_CONFIG_ENV_LOCK.lock().unwrap();
+    let saved = names
+        .iter()
+        .map(|name| (*name, std::env::var_os(name)))
+        .collect::<Vec<_>>();
+    for name in names {
+        std::env::remove_var(name);
+    }
+    let result = run();
+    for (name, value) in saved {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+    result
+}
+
+fn temp_suite_config_path(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("vpsman-{label}-{}.toml", uuid::Uuid::new_v4()))
+}
+
+fn suite_runtime_toml(
+    batch: i64,
+    in_flight: usize,
+    dispatch_ack_secs: u64,
+    event_post_secs: u64,
+    internal_http_read_secs: u64,
+    artifact_min_bytes: usize,
+    require_registered_agent_updates: bool,
+    memory_warning: f64,
+    memory_critical: f64,
+    cpu_warning: f64,
+    cpu_critical: f64,
+) -> String {
+    format!(
+        r#"version = 1
+
+[capacity]
+dispatcher_batch = {batch}
+dispatcher_in_flight = {in_flight}
+
+[timeout]
+dispatch_ack_secs = {dispatch_ack_secs}
+event_post_secs = {event_post_secs}
+internal_http_read_secs = {internal_http_read_secs}
+
+[api]
+job_output_artifact_min_bytes = {artifact_min_bytes}
+require_registered_agent_updates = {require_registered_agent_updates}
+alert_memory_available_warning_ratio = {memory_warning}
+alert_memory_available_critical_ratio = {memory_critical}
+alert_disk_available_warning_ratio = {memory_warning}
+alert_disk_available_critical_ratio = {memory_critical}
+alert_cpu_load_warning = {cpu_warning}
+alert_cpu_load_critical = {cpu_critical}
+"#
+    )
 }

@@ -139,23 +139,25 @@ export function tokenizeSearchExpression(input: string): { error: string | null;
       continue;
     }
     const start = index;
-    while (index < input.length && !/[\s()[\],=!<>|&~]/.test(input[index])) {
-      index += 1;
+    const term = readTerm(input, index);
+    if (term.error) {
+      return { error: term.error, tokens };
     }
-    const raw = input.slice(start, index);
-    const lower = raw.toLocaleLowerCase();
+    index = term.end;
+    const raw = term.raw;
+    const lower = term.value.toLocaleLowerCase();
     if (lower === "and" || lower === "or" || lower === "not" || lower === "in") {
       tokens.push(token(lower as "and" | "or" | "not" | "in", raw, start, index));
       continue;
     }
-    const separator = raw.indexOf(":");
+    const separator = term.value.indexOf(":");
     if (separator === 0) {
       return { error: "Selector namespace is empty", tokens };
     }
-    if (separator === raw.length - 1) {
+    if (separator === term.value.length - 1) {
       return { error: "Selector value is empty", tokens };
     }
-    tokens.push(token("term", raw, start, index));
+    tokens.push(token("term", raw, start, index, term.value));
   }
   return { error: null, tokens };
 }
@@ -263,6 +265,13 @@ export function selectorExpressionForClientIds(clientIds: string[]): string {
   return Array.from(new Set(clientIds.map((clientId) => clientId.trim()).filter(Boolean)))
     .map((clientId) => `id:${clientId}`)
     .join(" || ");
+}
+
+export function quoteSelectorValue(value: string): string {
+  if (/^[^\s()[\],=!<>|&~"']+$/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 export function removeTokenFromExpression(expression: string, tokenToRemove: SearchToken): string {
@@ -554,6 +563,46 @@ function readQuoted(input: string, start: number, quote: string): { end: number;
     }
   }
   return { end: input.length, error: "Unterminated quoted value", value };
+}
+
+function readTerm(input: string, start: number): { end: number; error: string | null; raw: string; value: string } {
+  let escaped = false;
+  let quote: string | null = null;
+  let raw = "";
+  let value = "";
+  for (let index = start; index < input.length; index += 1) {
+    const char = input[index];
+    if (!quote && isTermDelimiter(char)) {
+      return { end: index, error: null, raw, value };
+    }
+    raw += char;
+    if (quote) {
+      if (escaped) {
+        value += char;
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      } else {
+        value += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    value += char;
+  }
+  if (quote) {
+    return { end: input.length, error: "Unterminated quoted value", raw, value };
+  }
+  return { end: input.length, error: null, raw, value };
+}
+
+function isTermDelimiter(char: string): boolean {
+  return /[\s()[\],=!<>|&~]/.test(char);
 }
 
 function readRegex(input: string, start: number): { end: number; error: string | null; value: string } {

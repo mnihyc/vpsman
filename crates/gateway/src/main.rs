@@ -16,6 +16,7 @@ use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, OwnedSemaphorePermit, Semaphore},
+    time,
 };
 use tracing::{debug, info, warn};
 use vpsman_common::{
@@ -83,6 +84,23 @@ pub(crate) struct Args {
     dispatch_ack_secs: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GatewayRuntimeConfig {
+    reconnect_grace_secs: u64,
+    dispatch_ack_secs: u64,
+    http_timeouts: GatewayHttpTimeouts,
+}
+
+impl GatewayRuntimeConfig {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            reconnect_grace_secs: args.reconnect_grace_secs.clamp(1, 3600),
+            dispatch_ack_secs: args.dispatch_ack_secs.clamp(1, 3600),
+            http_timeouts: args.gateway_http_timeouts(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -93,6 +111,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = Args::parse();
+    let base_args = args.clone();
     let suite_config =
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
     args.apply_suite_config(&suite_config)
@@ -104,17 +123,26 @@ async fn main() -> Result<()> {
     );
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     validate_gateway_runtime_mode(&args)?;
+    let runtime_config = GatewayRuntimeConfig::from_args(&args);
     let api_client = GatewayControlClient::new(
         args.api_url.clone(),
         args.internal_token.clone(),
-        args.gateway_http_timeouts(),
+        runtime_config.http_timeouts,
     );
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
-        reconnect_grace_secs: args.reconnect_grace_secs,
-        dispatch_ack_secs: args.dispatch_ack_secs,
         ..GatewayState::default()
     };
+    state.set_runtime_timing(
+        runtime_config.reconnect_grace_secs,
+        runtime_config.dispatch_ack_secs,
+    );
+    spawn_gateway_runtime_config_reloader(
+        base_args,
+        runtime_config,
+        state.clone(),
+        api_client.clone(),
+    );
     let critical_failure_state = state.clone();
     api_client.set_critical_failure_handler(move |client_id, reason| {
         let state = critical_failure_state.clone();
@@ -162,6 +190,25 @@ impl Args {
             "VPSMAN_GATEWAY_ID",
             config.gateway.gateway_id.as_deref(),
         );
+        self.apply_runtime_suite_config(config);
+        if self.internal_token.is_none() && env_absent("VPSMAN_INTERNAL_TOKEN") {
+            self.internal_token =
+                read_secret_file_ref(config.secrets.internal_token_file.as_deref())?;
+        }
+        if self.private_key_hex.is_none() && env_absent("VPSMAN_GATEWAY_PRIVATE_KEY_HEX") {
+            self.private_key_hex =
+                read_secret_file_ref(config.secrets.gateway_private_key_file.as_deref())?;
+        }
+        if self.privilege_verifier_key_hex.is_none()
+            && env_absent("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX")
+        {
+            self.privilege_verifier_key_hex =
+                read_secret_file_ref(config.secrets.privilege_verifier_key_file.as_deref())?;
+        }
+        Ok(())
+    }
+
+    fn apply_runtime_suite_config(&mut self, config: &SuiteConfig) {
         if env_absent("VPSMAN_GATEWAY_RECONNECT_GRACE_SECS") {
             if let Some(value) = config
                 .gateway
@@ -196,21 +243,6 @@ impl Args {
             "VPSMAN_DISPATCH_ACK_SECS",
             config.timeout.dispatch_ack_secs,
         );
-        if self.internal_token.is_none() && env_absent("VPSMAN_INTERNAL_TOKEN") {
-            self.internal_token =
-                read_secret_file_ref(config.secrets.internal_token_file.as_deref())?;
-        }
-        if self.private_key_hex.is_none() && env_absent("VPSMAN_GATEWAY_PRIVATE_KEY_HEX") {
-            self.private_key_hex =
-                read_secret_file_ref(config.secrets.gateway_private_key_file.as_deref())?;
-        }
-        if self.privilege_verifier_key_hex.is_none()
-            && env_absent("VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX")
-        {
-            self.privilege_verifier_key_hex =
-                read_secret_file_ref(config.secrets.privilege_verifier_key_file.as_deref())?;
-        }
-        Ok(())
     }
 
     fn gateway_http_timeouts(&self) -> GatewayHttpTimeouts {
@@ -221,6 +253,49 @@ impl Args {
             event_post: Duration::from_secs(self.event_post_secs.clamp(1, 3600)),
         }
     }
+}
+
+fn load_gateway_runtime_config(base_args: &Args) -> Result<GatewayRuntimeConfig> {
+    let mut args = base_args.clone();
+    let suite_config =
+        SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    args.apply_runtime_suite_config(&suite_config);
+    Ok(GatewayRuntimeConfig::from_args(&args))
+}
+
+fn spawn_gateway_runtime_config_reloader(
+    base_args: Args,
+    mut current: GatewayRuntimeConfig,
+    state: GatewayState,
+    api_client: GatewayControlClient,
+) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            match load_gateway_runtime_config(&base_args) {
+                Ok(next) if next != current => {
+                    state.set_runtime_timing(next.reconnect_grace_secs, next.dispatch_ack_secs);
+                    api_client.set_timeouts(next.http_timeouts);
+                    current = next;
+                    info!(
+                        reconnect_grace_secs = next.reconnect_grace_secs,
+                        dispatch_ack_secs = next.dispatch_ack_secs,
+                        internal_http_connect_secs = next.http_timeouts.connect.as_secs(),
+                        internal_http_write_secs = next.http_timeouts.write.as_secs(),
+                        internal_http_read_secs = next.http_timeouts.read.as_secs(),
+                        event_post_secs = next.http_timeouts.event_post.as_secs(),
+                        "gateway runtime suite config hot-reloaded"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => warn!(
+                    %error,
+                    "failed to hot-reload gateway runtime suite config; keeping current runtime config"
+                ),
+            }
+        }
+    });
 }
 
 fn env_absent(name: &str) -> bool {
@@ -927,6 +1002,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gateway_runtime_config_reloads_suite_file_from_base_args() {
+        with_cleared_gateway_env(GATEWAY_HOT_RELOAD_ENV, || {
+            let path = temp_suite_config_path("gateway-hot-reload");
+            std::fs::write(&path, gateway_runtime_toml(45, 31, 4, 5, 6, 7)).unwrap();
+            let mut args = test_args();
+            args.suite_config = path.clone();
+
+            let runtime = load_gateway_runtime_config(&args).unwrap();
+
+            assert_eq!(runtime.reconnect_grace_secs, 45);
+            assert_eq!(runtime.dispatch_ack_secs, 31);
+            assert_eq!(runtime.http_timeouts.connect.as_secs(), 4);
+            assert_eq!(runtime.http_timeouts.write.as_secs(), 5);
+            assert_eq!(runtime.http_timeouts.read.as_secs(), 6);
+            assert_eq!(runtime.http_timeouts.event_post.as_secs(), 7);
+
+            std::fs::write(&path, gateway_runtime_toml(75, 41, 8, 9, 10, 11)).unwrap();
+
+            let runtime = load_gateway_runtime_config(&args).unwrap();
+            assert_eq!(runtime.reconnect_grace_secs, 75);
+            assert_eq!(runtime.dispatch_ack_secs, 41);
+            assert_eq!(runtime.http_timeouts.connect.as_secs(), 8);
+            assert_eq!(runtime.http_timeouts.write.as_secs(), 9);
+            assert_eq!(runtime.http_timeouts.read.as_secs(), 10);
+            assert_eq!(runtime.http_timeouts.event_post.as_secs(), 11);
+
+            let _ = std::fs::remove_file(path);
+        });
+    }
+
     fn test_args() -> Args {
         Args {
             bind: "127.0.0.1:0".to_string(),
@@ -945,5 +1051,64 @@ mod tests {
             event_post_secs: 15,
             dispatch_ack_secs: 30,
         }
+    }
+
+    const GATEWAY_HOT_RELOAD_ENV: &[&str] = &[
+        "VPSMAN_GATEWAY_RECONNECT_GRACE_SECS",
+        "VPSMAN_INTERNAL_HTTP_CONNECT_SECS",
+        "VPSMAN_INTERNAL_HTTP_WRITE_SECS",
+        "VPSMAN_INTERNAL_HTTP_READ_SECS",
+        "VPSMAN_EVENT_POST_SECS",
+        "VPSMAN_DISPATCH_ACK_SECS",
+    ];
+
+    static GATEWAY_SUITE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_cleared_gateway_env<R>(names: &[&str], run: impl FnOnce() -> R) -> R {
+        let _guard = GATEWAY_SUITE_ENV_LOCK.lock().unwrap();
+        let saved = names
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        for name in names {
+            std::env::remove_var(name);
+        }
+        let result = run();
+        for (name, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        result
+    }
+
+    fn temp_suite_config_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vpsman-{label}-{}.toml", uuid::Uuid::new_v4()))
+    }
+
+    fn gateway_runtime_toml(
+        reconnect_grace_secs: u64,
+        dispatch_ack_secs: u64,
+        connect_secs: u64,
+        write_secs: u64,
+        read_secs: u64,
+        event_post_secs: u64,
+    ) -> String {
+        format!(
+            r#"version = 1
+
+[gateway]
+reconnect_grace_secs = {reconnect_grace_secs}
+
+[timeout]
+dispatch_ack_secs = {dispatch_ack_secs}
+internal_http_connect_secs = {connect_secs}
+internal_http_write_secs = {write_secs}
+internal_http_read_secs = {read_secs}
+event_post_secs = {event_post_secs}
+"#
+        )
     }
 }

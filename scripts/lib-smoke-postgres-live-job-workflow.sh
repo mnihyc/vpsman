@@ -68,6 +68,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --right-underlay 127.0.0.1 \
   --address-pool-cidr 127.0.0.0/29 \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
+  --left-tunnel-ipv4 127.0.0.2 \
+  --right-tunnel-ipv4 127.0.0.3 \
   --bandwidth 100m \
   --latency-ms 5 >"$network_plan_file"
 VPSMAN_API_TOKEN="$access_token" \
@@ -81,6 +83,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --right-underlay 127.0.0.1 \
   --address-pool-cidr 127.0.0.0/29 \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
+  --left-tunnel-ipv4 127.0.0.2 \
+  --right-tunnel-ipv4 127.0.0.3 \
   --bandwidth 100m \
   --latency-ms 5 \
   --save >/dev/null

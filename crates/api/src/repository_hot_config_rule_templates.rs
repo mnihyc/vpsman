@@ -413,6 +413,25 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[network]\napply_enabled = {{apply_enabled}}\nruntime_reconcile_enabled = {{runtime_reconcile_enabled}}\nruntime_command_timeout_secs = {{runtime_command_timeout_secs}}\n",
         ),
+        builtin_template(
+            "44444444-4444-4444-8444-444444444444",
+            "Routing daemon adapter",
+            "network",
+            "routing",
+            "Configure interval latency monitoring and the agent-level fallback external OSPF cost updater. Tunnel-local updaters remain higher priority.",
+            serde_json::json!({
+                "fields": {
+                    "latency_monitoring_enabled": {"type": "boolean", "default": true},
+                    "latency_monitoring_interval_secs": {"type": "number", "minimum": 15, "maximum": 3600, "default": 60},
+                    "latency_down_windows": {"type": "number", "minimum": 1, "maximum": 60, "default": 3},
+                    "auto_ospf_enabled": {"type": "boolean", "default": false},
+                    "auto_ospf_min_cost_delta": {"type": "number", "minimum": 1, "maximum": 65535, "default": 5},
+                    "auto_ospf_healthy_windows": {"type": "number", "minimum": 1, "maximum": 10, "default": 2},
+                    "updater_argv": {"type": "array", "default": ["/usr/local/libexec/vpsman-ospf-cost"]}
+                }
+            }),
+            "[network]\nlatency_monitoring_enabled = {{latency_monitoring_enabled}}\nlatency_monitoring_interval_secs = {{latency_monitoring_interval_secs}}\nlatency_down_windows = {{latency_down_windows}}\nauto_ospf_enabled = {{auto_ospf_enabled}}\nauto_ospf_min_cost_delta = {{auto_ospf_min_cost_delta}}\nauto_ospf_healthy_windows = {{auto_ospf_healthy_windows}}\nauto_ospf_updater = { argv = {{updater_argv}}, timeout_secs = 10, max_output_bytes = 16384 }\n",
+        ),
     ]
 }
 

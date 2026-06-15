@@ -43,6 +43,10 @@ import {
 } from "lucide-react";
 import { SearchExpressionInput } from "./SearchExpressionInput";
 import {
+  buildParseableSearchValueSuggestions,
+  searchFieldsForSearchValues,
+} from "./searchSuggestions";
+import {
   filterBySearchExpression,
   type SearchFields,
 } from "../searchExpression";
@@ -142,17 +146,28 @@ export function ConsoleDataGrid<T>({
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
+  const searchValuesForRow = (row: T) =>
+    columns.map((column) =>
+      column.searchValue?.(row) ?? column.sortValue?.(row),
+    );
+  const searchFieldsForRow = (row: T): SearchFields =>
+    searchFieldsForSearchValues(searchValuesForRow(row));
   const filteredRows = useMemo(() => {
     return filterBySearchExpression(
       rows,
       globalFilter,
-      (row): SearchFields => ({
-        all: columns.map((column) =>
-          String(column.searchValue?.(row) ?? column.sortValue?.(row) ?? ""),
-        ),
-      }),
+      searchFieldsForRow,
     ).items;
   }, [columns, globalFilter, rows]);
+  const gridSearchSuggestions = useMemo(
+    () =>
+      buildParseableSearchValueSuggestions(
+        rows,
+        searchValuesForRow,
+        searchFieldsForRow,
+      ),
+    [columns, rows],
+  );
   const tableColumns = useMemo<ColumnDef<T>[]>(
     () => [
       {
@@ -430,6 +445,7 @@ export function ConsoleDataGrid<T>({
           className="gridSearch compact"
           onChange={setGlobalFilter}
           placeholder={searchPlaceholder}
+          suggestions={gridSearchSuggestions}
           value={globalFilter}
         />
         <div className="gridToolbarActions">

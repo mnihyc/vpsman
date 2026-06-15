@@ -23,6 +23,15 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await openConsoleSubpage(page, "Jobs", "Files");
   await expect(page.getByRole("heading", { name: "File browser", exact: true })).toBeVisible();
   await unlockPrivilege(page, "Files");
+  const targetPicker = page.getByRole("combobox", { name: "File browser target VPS" });
+  await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
+  await targetPicker.fill("sfo");
+  await expect(page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })).toBeVisible();
+  await page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }).click();
+  await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
+  await targetPicker.fill("not-a-real-vps");
+  await targetPicker.blur();
+  await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
 
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
@@ -75,6 +84,13 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileBrowserJobs);
   expect(requests.some((request: any) => request.operation?.type === "file_list_dir")).toBe(true);
+  const list = requests.find((request: any) => request.operation?.type === "file_list_dir");
+  expect(list.selector_expression).toBe("id:agent-sfo-01");
+  const listJob = await page.evaluate(() => {
+    const requests = (window as any).__vpsmanTestRequests.jobs;
+    return requests.find((request: any) => request.operation?.type === "file_list_dir");
+  });
+  expect(listJob.target_client_ids).toEqual(["agent-sfo-01"]);
   const save = requests.find((request: any) => request.operation?.type === "file_write_text");
   expect(save.operation.path).toBe("/etc/app.conf");
   expect(save.operation.expected_sha256_hex).toMatch(/^[a-f0-9]{64}$/);

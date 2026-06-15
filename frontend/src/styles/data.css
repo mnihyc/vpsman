@@ -1523,6 +1523,15 @@
   min-width: 0;
 }
 
+.fleetDetailPane .telemetryTimeline {
+  grid-column: 1 / -1;
+}
+
+.telemetryTimeline > div {
+  width: 100%;
+  min-width: 0;
+}
+
 .networkInterfaceRow {
   display: grid;
   grid-template-columns: minmax(72px, 0.8fr) minmax(140px, 1.2fr) minmax(
@@ -1542,6 +1551,56 @@
 .networkInterfaceRow span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.networkInterfaceRow small,
+.telemetryStack small {
+  min-width: 0;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.telemetryStack {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.telemetryStatus {
+  min-width: 0;
+  color: #202124;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.telemetryStatus.ok {
+  color: #137333;
+}
+
+.telemetryStatus.warn {
+  color: #b06000;
+}
+
+.telemetryStatus.critical {
+  color: #a50e0e;
+}
+
+.telemetryRowWarn {
+  border-left: 3px solid #f9ab00;
+}
+
+.telemetryRowCritical {
+  border-left: 3px solid #d93025;
+}
+
+@media (max-width: 700px) {
+  .networkInterfaceRow {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
 }
 
 .sideForm {
@@ -2021,6 +2080,29 @@
 .thresholdMatrixRow strong {
   color: #3c4043;
   font-size: 12px;
+}
+
+.thresholdMatrixRow input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #202124;
+  font-size: 13px;
+  padding: 0 8px;
+}
+
+.thresholdMatrixRow input:focus {
+  outline: 0;
+  border-color: #1a73e8;
+  box-shadow: inset 0 -2px 0 rgba(26, 115, 232, 0.2);
+}
+
+.thresholdMatrixRow input::placeholder {
+  color: #80868b;
 }
 
 .tokenPreview {

@@ -12,13 +12,17 @@ import {
   type Ref,
 } from "react";
 import type { AgentView } from "../types";
+import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  quoteSelectorValue,
   removeTokenFromExpression,
   type SearchToken,
   termMatchTitle,
+  tokenizeSearchExpression,
 } from "../searchExpression";
+import { clientIdSuffix, formatVpsName, type VpsNameDisplayMode } from "../utils";
 
 type SearchExpressionInputProps = {
   agents?: AgentView[];
@@ -51,7 +55,9 @@ export function SearchExpressionInput({
   verification = "neutral",
   verificationMessage,
 }: SearchExpressionInputProps) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const wheelHandlerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -61,8 +67,8 @@ export function SearchExpressionInput({
   const hasTokens = displayTokens.some((token) => token.kind === "term");
   const matchedAgents = agents && !parsed.error ? agentsMatchingExpression(agents, value) : [];
   const completion = useMemo(
-    () => buildCompletion(value, value.length, suggestions ?? buildAgentSuggestions(agents ?? [])),
-    [agents, suggestions, value],
+    () => buildCompletion(value, caretIndex, agents ?? [], suggestions ?? [], vpsNameDisplayMode, Boolean(agents?.length)),
+    [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
   );
   const matchTitle = agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
 
@@ -70,11 +76,16 @@ export function SearchExpressionInput({
     if (!focused || !editorRef.current) {
       return;
     }
+    if (cleanEditorText(editorRef.current.textContent ?? "") !== value) {
+      editorRef.current.textContent = value;
+    }
     if (document.activeElement !== editorRef.current) {
       editorRef.current.focus({ preventScroll: true });
     }
-    setCaretOffset(editorRef.current, Math.min(caretIndex, editorTextLength(editorRef.current)));
-  }, [caretIndex, displayTokens, focused, value]);
+    const nextCaretIndex = Math.min(caretIndex, editorTextLength(editorRef.current));
+    setCaretOffset(editorRef.current, nextCaretIndex);
+    scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
+  }, [caretIndex, focused, value]);
 
   useEffect(() => {
     if (!focused && !autocompleteOpen) {
@@ -93,8 +104,21 @@ export function SearchExpressionInput({
   }, [autocompleteOpen, focused]);
 
   function bindEditor(element: HTMLDivElement | null) {
+    if (editorRef.current && wheelHandlerRef.current) {
+      editorRef.current.removeEventListener("wheel", wheelHandlerRef.current, true);
+      wheelHandlerRef.current = null;
+    }
     editorRef.current = element;
     assignRef(inputRef, element);
+    if (element) {
+      const wheelHandler = (event: globalThis.WheelEvent) => {
+        if (scrollEditorByWheelDelta(element, event.deltaX, event.deltaY)) {
+          event.preventDefault();
+        }
+      };
+      element.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
+      wheelHandlerRef.current = wheelHandler;
+    }
   }
 
   function prepareEditorForTyping() {
@@ -111,6 +135,7 @@ export function SearchExpressionInput({
     const nextValue = cleanEditorText(editorRef.current.textContent ?? "");
     const offset = Math.min(getCaretOffset(editorRef.current), nextValue.length);
     setCaretIndex(nextValue !== value && nextValue.startsWith(value) ? nextValue.length : offset);
+    scrollCaretIndexIntoView(editorRef.current, offset);
     setAutocompleteOpen(true);
     setFocused(true);
     if (nextValue !== value) {
@@ -145,15 +170,17 @@ export function SearchExpressionInput({
   function handlePointerUpdate(_: MouseEvent<HTMLDivElement>) {
     window.setTimeout(() => {
       if (editorRef.current) {
-        setCaretIndex(Math.min(getCaretOffset(editorRef.current), value.length));
+        const nextCaretIndex = Math.min(getCaretOffset(editorRef.current), editorTextLength(editorRef.current));
+        setCaretIndex(nextCaretIndex);
+        scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
       }
     }, 0);
   }
 
-  function applySuggestion(suggestion: string) {
+  function applySuggestion(suggestion: CompletionOption) {
     const nextValue = applyCompletion(value, completion, suggestion);
     onChange(nextValue);
-    setCaretIndex(completion.start + suggestion.length + 1);
+    setCaretIndex(completion.start + suggestion.value.length + 1);
     window.setTimeout(() => editorRef.current?.focus(), 0);
   }
 
@@ -178,7 +205,6 @@ export function SearchExpressionInput({
           contentEditable
           data-placeholder={placeholder}
           id={inputId}
-          key={value}
           onBlur={() =>
             window.setTimeout(() => {
               if (document.activeElement !== editorRef.current) {
@@ -200,7 +226,9 @@ export function SearchExpressionInput({
           onKeyDown={handleKeyDown}
           onKeyUp={() => {
             if (editorRef.current) {
-              setCaretIndex(Math.min(getCaretOffset(editorRef.current), value.length));
+              const nextCaretIndex = Math.min(getCaretOffset(editorRef.current), editorTextLength(editorRef.current));
+              setCaretIndex(nextCaretIndex);
+              scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
             }
           }}
           onMouseUp={handlePointerUpdate}
@@ -212,7 +240,7 @@ export function SearchExpressionInput({
           tabIndex={0}
         >
           {focused
-            ? value
+            ? null
             : displayTokens.map((token, index) => (
                 <TokenFragment
                   agents={agents}
@@ -229,7 +257,7 @@ export function SearchExpressionInput({
         <div className="searchExpressionAutocomplete" role="listbox">
           {completion.filtered.slice(0, 8).map((suggestion) => (
             <button
-              key={suggestion}
+              key={`${suggestion.value}:${suggestion.label}`}
               onMouseDown={(event) => {
                 event.preventDefault();
                 applySuggestion(suggestion);
@@ -237,7 +265,8 @@ export function SearchExpressionInput({
               role="option"
               type="button"
             >
-              {suggestion}
+              <span>{suggestion.label}</span>
+              {suggestion.detail ? <small>{suggestion.detail}</small> : null}
             </button>
           ))}
         </div>
@@ -308,67 +337,269 @@ function SearchExpressionTokenView({
 
 type CompletionState = {
   end: number;
-  filtered: string[];
+  filtered: CompletionOption[];
   fragment: string;
   start: number;
 };
 
-function buildAgentSuggestions(agents: AgentView[]): string[] {
-  const values = new Set<string>();
+type CompletionOption = {
+  detail?: string;
+  label: string;
+  matchText: string;
+  namespace: string | null;
+  selectorValue: string;
+  value: string;
+};
+
+const ALWAYS_VISIBLE_VPS_SELECTOR_SUGGESTIONS = ["*", "id:*"];
+const COMMON_VPS_STATUSES = [
+  "online",
+  "stale",
+  "offline",
+  "disconnected",
+  "never",
+  "revoked",
+];
+const COMMON_VPS_SELECTOR_SUGGESTIONS = [
+  "untagged",
+  ...COMMON_VPS_STATUSES.flatMap((status) => [
+    `status:${status}`,
+    `vps.status:${status}`,
+  ]),
+];
+
+export function buildAgentSelectorSuggestionValues(agents: AgentView[]): string[] {
+  const observedValues = new Set<string>();
+  for (const value of ALWAYS_VISIBLE_VPS_SELECTOR_SUGGESTIONS) {
+    observedValues.add(value);
+  }
+  if (agents.some((agent) => agent.tags.length === 0)) {
+    observedValues.add("untagged");
+  }
   for (const agent of agents) {
-    values.add(`id:${agent.id}`);
-    if (agent.display_name) {
-      values.add(`name:${agent.display_name}`);
+    if (agent.status) {
+      observedValues.add(`status:${agent.status}`);
+      observedValues.add(`vps.status:${agent.status}`);
     }
     for (const tag of agent.tags) {
-      values.add(`tag:${tag}`);
-      if (tag.startsWith("provider:")) {
-        values.add(tag);
+      const lowerTag = tag.toLocaleLowerCase();
+      observedValues.add(`tag:${quoteSelectorValue(tag)}`);
+      observedValues.add(`vps.tag:${quoteSelectorValue(tag)}`);
+      observedValues.add(`vps.tags:${quoteSelectorValue(tag)}`);
+      if (isSimpleNamespacedTag(tag)) {
+        observedValues.add(tag);
       }
-      if (tag.startsWith("country:")) {
-        values.add(tag);
+      if (lowerTag.startsWith("provider:")) {
+        const value = tag.slice("provider:".length);
+        observedValues.add(`provider:${quoteSelectorValue(value)}`);
+        observedValues.add(`vps.provider:${quoteSelectorValue(value)}`);
+      }
+      if (lowerTag.startsWith("country:")) {
+        const value = tag.slice("country:".length);
+        observedValues.add(`country:${quoteSelectorValue(value)}`);
+        observedValues.add(`region:${quoteSelectorValue(value)}`);
+        observedValues.add(`vps.country:${quoteSelectorValue(value)}`);
+        observedValues.add(`vps.region:${quoteSelectorValue(value)}`);
       }
     }
   }
-  values.add("id:*");
-  return Array.from(values).sort((left, right) => left.localeCompare(right));
+  return uniqueParseableSuggestions([
+    ...Array.from(observedValues).sort((left, right) => left.localeCompare(right)),
+    ...[...COMMON_VPS_SELECTOR_SUGGESTIONS].sort((left, right) => left.localeCompare(right)),
+  ]);
 }
 
-function buildCompletion(value: string, caretIndex: number, suggestions: string[]): CompletionState {
+function buildAgentSelectorSuggestions(agents: AgentView[]): CompletionOption[] {
+  return buildAgentSelectorSuggestionValues(agents).map((value) => staticCompletionOption(value));
+}
+
+function buildCompletion(
+  value: string,
+  caretIndex: number,
+  agents: AgentView[],
+  suggestions: string[],
+  mode: VpsNameDisplayMode,
+  agentSuggestionsEnabled: boolean,
+): CompletionState {
   const boundedCaret = Math.max(0, Math.min(caretIndex, value.length));
-  const beforeCaret = value.slice(0, boundedCaret);
-  const match = beforeCaret.match(/(?:^|[\s(])([^\s()&|]*)$/);
-  const fragment = match?.[1] ?? "";
-  const start = match ? boundedCaret - fragment.length : boundedCaret;
+  const { fragment, start } = completionFragment(value, boundedCaret);
   const normalized = fragment.toLocaleLowerCase();
   const namespaceSeparator = normalized.indexOf(":");
+  const allSuggestions = uniqueCompletionOptions([
+    ...(agentSuggestionsEnabled ? buildAgentCompletionOptions(agents, fragment, mode) : []),
+    ...(agentSuggestionsEnabled ? buildAgentSelectorSuggestions(agents) : []),
+    ...suggestions.map((suggestion) => staticCompletionOption(suggestion)),
+  ]);
   return {
     end: boundedCaret,
     filtered: normalized
-      ? suggestions.filter((suggestion) => suggestionMatchesFragment(suggestion, normalized, namespaceSeparator))
-      : suggestions.slice(0, 8),
+      ? allSuggestions.filter((suggestion) => suggestionMatchesFragment(suggestion, normalized, namespaceSeparator))
+      : allSuggestions.slice(0, 8),
     fragment,
     start,
   };
 }
 
-function applyCompletion(value: string, completion: CompletionState, suggestion: string): string {
-  return cleanEditorText(`${value.slice(0, completion.start)}${suggestion} ${value.slice(completion.end)}`);
+function applyCompletion(value: string, completion: CompletionState, suggestion: CompletionOption): string {
+  return cleanEditorText(`${value.slice(0, completion.start)}${suggestion.value} ${value.slice(completion.end)}`);
 }
 
-function suggestionMatchesFragment(suggestion: string, normalizedFragment: string, namespaceSeparator: number): boolean {
-  const normalizedSuggestion = suggestion.toLocaleLowerCase();
+function suggestionMatchesFragment(
+  suggestion: CompletionOption,
+  normalizedFragment: string,
+  namespaceSeparator: number,
+): boolean {
   if (namespaceSeparator < 0) {
-    return normalizedSuggestion.includes(normalizedFragment);
+    return suggestion.matchText.includes(normalizedFragment);
   }
   const namespace = normalizedFragment.slice(0, namespaceSeparator);
-  const valueFragment = normalizedFragment.slice(namespaceSeparator + 1);
-  const suggestionSeparator = normalizedSuggestion.indexOf(":");
-  if (suggestionSeparator < 0 || normalizedSuggestion.slice(0, suggestionSeparator) !== namespace) {
+  const valueFragment = unquoteLeadingFragment(normalizedFragment.slice(namespaceSeparator + 1));
+  if (!suggestion.namespace || suggestion.namespace !== namespace) {
     return false;
   }
-  const suggestionValue = normalizedSuggestion.slice(suggestionSeparator + 1);
-  return valueFragment ? suggestionValue.includes(valueFragment) : true;
+  return valueFragment ? suggestion.selectorValue.includes(valueFragment) || suggestion.matchText.includes(valueFragment) : true;
+}
+
+function buildAgentCompletionOptions(
+  agents: AgentView[],
+  fragment: string,
+  mode: VpsNameDisplayMode,
+): CompletionOption[] {
+  const normalized = fragment.trim().toLocaleLowerCase();
+  const separator = normalized.indexOf(":");
+  const namespace = separator >= 0 ? normalized.slice(0, separator) : null;
+  const valueFragment = separator >= 0 ? unquoteLeadingFragment(normalized.slice(separator + 1)) : normalized;
+  return agents
+    .map((agent) => agentCompletionOption(agent, namespace, valueFragment, mode))
+    .filter((option): option is CompletionOption => Boolean(option))
+    .sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
+}
+
+function agentCompletionOption(
+  agent: AgentView,
+  namespace: string | null,
+  normalizedFragment: string,
+  mode: VpsNameDisplayMode,
+): CompletionOption | null {
+  const displayName = agent.display_name.trim();
+  const suffix = clientIdSuffix(agent.id) ?? "";
+  const label = formatVpsName(agent, mode);
+  const idMatchText = `${agent.id} ${suffix}`.toLocaleLowerCase();
+  const nameMatchText = `${displayName} ${label}`.toLocaleLowerCase();
+  if (namespace === "id") {
+    if (normalizedFragment && !idMatchText.includes(normalizedFragment)) {
+      return null;
+    }
+    return completionOption(`id:${agent.id}`, label, agentDetail(agent, "ID"), `${idMatchText} ${nameMatchText}`);
+  }
+  if (namespace === "name") {
+    if (!displayName || (normalizedFragment && !nameMatchText.includes(normalizedFragment))) {
+      return null;
+    }
+    return completionOption(`name:${quoteSelectorValue(displayName)}`, label, agentDetail(agent, "Name"), `${nameMatchText} ${idMatchText}`);
+  }
+  if (namespace) {
+    return null;
+  }
+  const nameMatched = Boolean(displayName) && (!normalizedFragment || nameMatchText.includes(normalizedFragment));
+  const idMatched = !normalizedFragment || idMatchText.includes(normalizedFragment);
+  if (!nameMatched && !idMatched) {
+    return null;
+  }
+  const useId = idMatched && (!nameMatched || agent.id.toLocaleLowerCase().startsWith(normalizedFragment) || suffix.toLocaleLowerCase() === normalizedFragment);
+  const selector = useId ? `id:${agent.id}` : `name:${quoteSelectorValue(displayName)}`;
+  return completionOption(selector, label, agentDetail(agent, useId ? "ID" : "Name"), `${nameMatchText} ${idMatchText}`);
+}
+
+function staticCompletionOption(value: string): CompletionOption {
+  return completionOption(value, value, undefined, value);
+}
+
+function completionOption(value: string, label: string, detail: string | undefined, matchText: string): CompletionOption {
+  const separator = value.indexOf(":");
+  const selectorValue = separator >= 0 ? unquoteSelectorValue(value.slice(separator + 1)) : value;
+  return {
+    detail: detail ?? (label === value ? undefined : value),
+    label,
+    matchText: `${matchText} ${value}`.toLocaleLowerCase(),
+    namespace: separator > 0 ? value.slice(0, separator).toLocaleLowerCase() : null,
+    selectorValue: selectorValue.toLocaleLowerCase(),
+    value,
+  };
+}
+
+function uniqueCompletionOptions(options: CompletionOption[]): CompletionOption[] {
+  const seen = new Set<string>();
+  return options.filter((option) => {
+    const key = option.value.toLocaleLowerCase();
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function uniqueParseableSuggestions(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = value.toLocaleLowerCase();
+    if (seen.has(key)) {
+      return false;
+    }
+    if (parseSearchExpression(value).error) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function isSimpleNamespacedTag(tag: string): boolean {
+  return /^[^\s()[\],=!<>|&~"']+:[^\s()[\],=!<>|&~"']+$/.test(tag);
+}
+
+function agentDetail(agent: AgentView, source: "ID" | "Name"): string {
+  return `${source} · ${agent.id}${agent.status ? ` · ${agent.status}` : ""}`;
+}
+
+function unquoteSelectorValue(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).replace(/\\(["'\\])/g, "$1");
+  }
+  return trimmed;
+}
+
+function unquoteLeadingFragment(value: string): string {
+  return value.replace(/^["']/, "");
+}
+
+function completionFragment(value: string, caretIndex: number): { fragment: string; start: number } {
+  let start = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < caretIndex; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/[\s()&|]/.test(char)) {
+      start = index + 1;
+    }
+  }
+  return { fragment: value.slice(start, caretIndex), start };
 }
 
 function agentListTitle(agents: AgentView[]): string {
@@ -379,6 +610,10 @@ function agentListTitle(agents: AgentView[]): string {
 }
 
 function tokenizeForDisplay(input: string): DisplayToken[] {
+  const parsed = tokenizeSearchExpression(input);
+  if (!parsed.error) {
+    return parsed.tokens;
+  }
   const tokens: DisplayToken[] = [];
   let index = 0;
   while (index < input.length) {
@@ -485,6 +720,64 @@ function setCaretOffset(editor: HTMLElement, offset: number) {
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
+}
+
+function scrollCaretIndexIntoView(editor: HTMLElement, caretIndex: number) {
+  const maxScrollLeft = editor.scrollWidth - editor.clientWidth;
+  if (maxScrollLeft <= 1) {
+    editor.scrollLeft = 0;
+    return;
+  }
+  const caretX = caretInlineOffset(editor, caretIndex);
+  const leftGuard = editor.scrollLeft + 8;
+  const rightGuard = editor.scrollLeft + editor.clientWidth - 12;
+  if (caretX > rightGuard) {
+    editor.scrollLeft = Math.min(maxScrollLeft, caretX - editor.clientWidth + 18);
+  } else if (caretX < leftGuard) {
+    editor.scrollLeft = Math.max(0, caretX - 18);
+  }
+}
+
+function scrollEditorByWheelDelta(editor: HTMLElement, deltaX: number, deltaY: number): boolean {
+  const maxScrollLeft = editor.scrollWidth - editor.clientWidth;
+  if (maxScrollLeft <= 1) {
+    return false;
+  }
+  const delta = Math.abs(deltaX) > Math.abs(deltaY) ? deltaX : deltaY;
+  if (!delta) {
+    return false;
+  }
+  const previousScrollLeft = editor.scrollLeft;
+  editor.scrollLeft = Math.max(0, Math.min(maxScrollLeft, previousScrollLeft + delta));
+  return editor.scrollLeft !== previousScrollLeft;
+}
+
+function caretInlineOffset(editor: HTMLElement, caretIndex: number): number {
+  const text = cleanEditorText(editor.textContent ?? "");
+  if (!text) {
+    return 0;
+  }
+  const targetOffset = Math.max(0, Math.min(caretIndex, text.length));
+  const textNode = firstTextNode(editor);
+  if (!textNode) {
+    return Math.round((targetOffset / text.length) * editor.scrollWidth);
+  }
+  const range = document.createRange();
+  range.setStart(textNode, 0);
+  range.setEnd(textNode, Math.min(targetOffset, textNode.textContent?.length ?? 0));
+  const rect = range.getBoundingClientRect();
+  const editorRect = editor.getBoundingClientRect();
+  range.detach();
+  if (rect.width > 0 || targetOffset > 0) {
+    return Math.round(rect.right - editorRect.left + editor.scrollLeft);
+  }
+  return Math.round((targetOffset / text.length) * editor.scrollWidth);
+}
+
+function firstTextNode(root: HTMLElement): Text | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const node = walker.nextNode();
+  return node instanceof Text ? node : null;
 }
 
 function insertPlainText(text: string) {

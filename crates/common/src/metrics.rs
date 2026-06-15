@@ -98,6 +98,38 @@ pub struct RuntimeTunnelStat {
     pub peer_client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_health: Option<RuntimeTunnelAdapterHealthStat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_monitoring_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_primary_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_checked_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_avg_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_loss_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_healthy_windows: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_missed_windows: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_current_cost: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_recommended_cost: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_updated_unix: Option<u64>,
 }
 
 fn default_runtime_tunnel_mutation_policy() -> String {

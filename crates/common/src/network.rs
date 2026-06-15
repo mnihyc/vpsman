@@ -15,14 +15,16 @@ pub use models::{
     BandwidthTier, IfupdownConfig, IfupdownInterface, LegacyBirdConfig, LegacyBirdPeer,
     OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions,
     RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
-    RuntimeTunnelTrafficLimit, TunnelBackendConfig, TunnelBackendFile, TunnelConfigBackend,
-    TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelPlan,
-    TunnelPlanInput, MANAGED_BIRD2_FILE, MANAGED_IFUPDOWN_FILE, MANAGED_NETPLAN_FILE,
-    MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE, MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
+    RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair, TunnelBackendConfig,
+    TunnelBackendFile, TunnelConfigBackend, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind,
+    TunnelObservation, TunnelPlan, TunnelPlanInput, MANAGED_BIRD2_FILE, MANAGED_IFUPDOWN_FILE,
+    MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
+    MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
 };
 pub use planner::{
-    plan_tunnel, render_tunnel_endpoint_config, validate_runtime_topology_intent,
-    validate_runtime_tunnel_control, NetworkPlanError,
+    allocate_tunnel_endpoints, plan_tunnel, render_tunnel_endpoint_config,
+    validate_runtime_topology_intent, validate_runtime_tunnel_control, NetworkPlanError,
+    TunnelEndpointAllocation,
 };
 
 #[cfg(test)]

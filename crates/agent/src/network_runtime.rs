@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{net::IpAddr, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::time;
@@ -94,6 +94,16 @@ async fn reconcile_runtime_tunnel(
 
     let root = Path::new(&input.config.network.root_dir);
     let link_exists = runtime_link_exists(root, &input.plan.interface_name).await;
+    let mut preflight_reports = Vec::new();
+    let mut existing_link_validation = serde_json::Value::Null;
+    if link_exists
+        && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
+    {
+        let (reports, validation) =
+            validate_existing_iproute2_tunnel(input.config, input.plan, &endpoint).await?;
+        preflight_reports.extend(reports);
+        existing_link_validation = validation;
+    }
     let cleanup_specs = build_runtime_topology_cleanup_steps(input.config, input.plan)?;
     let specs = match input.plan.runtime_control.manager {
         RuntimeTunnelManager::AgentIproute2Managed => {
@@ -108,7 +118,7 @@ async fn reconcile_runtime_tunnel(
     let specs = cleanup_specs.into_iter().chain(specs).collect::<Vec<_>>();
     let effective_uid = effective_uid(input.effective_uid_override());
     let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
-    let mut reports = Vec::new();
+    let mut reports = preflight_reports;
     let mut degraded = false;
     let mut failed = false;
     let mut failed_required_label = None;
@@ -189,6 +199,7 @@ async fn reconcile_runtime_tunnel(
         "desired_interfaces": &input.plan.runtime_topology.desired_interfaces,
         "stale_interfaces": &input.plan.runtime_topology.stale_interfaces,
         "link_existed_before": link_exists,
+        "existing_link_validation": existing_link_validation,
         "effective_uid": effective_uid,
         "unprivileged_mutation_policy": unprivileged_mutation_policy,
         "commands": reports,
@@ -360,23 +371,14 @@ fn build_iproute2_reconcile_steps(
         });
     }
 
-    let tunnel_action = if link_exists { "change" } else { "add" };
-    let tunnel_label = if link_exists {
-        "runtime_tunnel_change"
-    } else {
-        "runtime_tunnel_add"
-    };
-    steps.push(RuntimeCommandSpec {
-        label: tunnel_label,
-        argv: build_ip_tunnel_argv(
-            &config.network.runtime_ip_argv,
-            tunnel_action,
-            plan,
-            endpoint,
-        )?,
-        mutates: true,
-        required: true,
-    });
+    if !link_exists {
+        steps.push(RuntimeCommandSpec {
+            label: "runtime_tunnel_add",
+            argv: build_ip_tunnel_argv(&config.network.runtime_ip_argv, "add", plan, endpoint)?,
+            mutates: true,
+            required: true,
+        });
+    }
     steps.push(RuntimeCommandSpec {
         label: "runtime_addr_replace",
         argv: extend_argv(
@@ -533,6 +535,371 @@ fn build_ip_tunnel_argv(
         ]);
     }
     Ok(argv)
+}
+
+async fn validate_existing_iproute2_tunnel(
+    config: &AgentConfig,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
+    ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
+    let link_argv = extend_argv(
+        &config.network.runtime_ip_argv,
+        [
+            "-details",
+            "-json",
+            "link",
+            "show",
+            "dev",
+            &plan.interface_name,
+        ],
+    );
+    let link_report = run_runtime_command(
+        "runtime_tunnel_inspect",
+        &link_argv,
+        false,
+        true,
+        config.network.runtime_command_timeout_secs,
+        config.network.runtime_command_max_output_bytes as usize,
+    )
+    .await?;
+    if link_report["success"].as_bool() != Some(true) {
+        anyhow::bail!(
+            "existing runtime tunnel {} could not be inspected: {}",
+            plan.interface_name,
+            runtime_report_failure_summary(&link_report)
+        );
+    }
+    let link_stdout = link_report["stdout"]["text"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("existing runtime tunnel inspect output was not UTF-8"))?;
+    let link = parse_iproute2_link_json(link_stdout, &plan.interface_name)?;
+
+    let addr_argv = extend_argv(
+        &config.network.runtime_ip_argv,
+        [
+            "-details",
+            "-json",
+            "addr",
+            "show",
+            "dev",
+            &plan.interface_name,
+        ],
+    );
+    let addr_report = run_runtime_command(
+        "runtime_addr_inspect",
+        &addr_argv,
+        false,
+        true,
+        config.network.runtime_command_timeout_secs,
+        config.network.runtime_command_max_output_bytes as usize,
+    )
+    .await?;
+    if addr_report["success"].as_bool() != Some(true) {
+        anyhow::bail!(
+            "existing runtime tunnel {} address assignment could not be inspected: {}",
+            plan.interface_name,
+            runtime_report_failure_summary(&addr_report)
+        );
+    }
+    let addr_stdout = addr_report["stdout"]["text"].as_str().ok_or_else(|| {
+        anyhow::anyhow!("existing runtime tunnel address inspect output was not UTF-8")
+    })?;
+    let addresses = parse_iproute2_addr_json(addr_stdout, &plan.interface_name)?;
+
+    let mut mismatches = existing_iproute2_tunnel_mismatches(&link, plan, endpoint)?;
+    let matched_address = matching_existing_iproute2_address(&addresses, plan, endpoint);
+    if matched_address.is_none() {
+        mismatches.push(address_mismatch_message(&addresses, plan, endpoint));
+    }
+    if !mismatches.is_empty() {
+        anyhow::bail!(
+            "existing runtime tunnel {} does not match saved plan: {}",
+            plan.interface_name,
+            mismatches.join("; ")
+        );
+    }
+    Ok((
+        vec![link_report, addr_report],
+        serde_json::json!({
+            "status": "matched",
+            "interface": plan.interface_name,
+            "mode": link.kind,
+            "local_underlay": link.local,
+            "remote_underlay": link.remote,
+            "ttl": link.ttl,
+            "encap": link.encap,
+            "encap_dport": link.encap_dport,
+            "address": matched_address,
+        }),
+    ))
+}
+
+#[derive(Debug)]
+struct ExistingIproute2Tunnel {
+    kind: Option<String>,
+    local: Option<String>,
+    remote: Option<String>,
+    ttl: Option<String>,
+    encap: Option<String>,
+    encap_dport: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ExistingIproute2Address {
+    family: Option<String>,
+    local: Option<String>,
+    prefix_len: Option<u8>,
+    peer: Option<String>,
+}
+
+fn parse_iproute2_link_json(stdout: &str, interface_name: &str) -> Result<ExistingIproute2Tunnel> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .context("failed to parse existing runtime tunnel inspect JSON")?;
+    let candidates = value
+        .as_array()
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![&value]);
+    let link = candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate
+                .get("ifname")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|ifname| ifname == interface_name)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing runtime tunnel inspect JSON did not include interface {interface_name}"
+            )
+        })?;
+    let linkinfo = link.get("linkinfo").unwrap_or(link);
+    let data = linkinfo.get("info_data").unwrap_or(linkinfo);
+    Ok(ExistingIproute2Tunnel {
+        kind: string_field(linkinfo, &["info_kind", "kind"])
+            .or_else(|| string_field(data, &["info_kind", "kind", "mode"])),
+        local: string_field(data, &["local", "local_address", "local-address"]),
+        remote: string_field(data, &["remote", "remote_address", "remote-address"]),
+        ttl: string_field(data, &["ttl", "hoplimit", "hop_limit", "hop-limit"]),
+        encap: string_field(data, &["encap", "encap_type", "encap-type"]),
+        encap_dport: string_field(
+            data,
+            &[
+                "encap_dport",
+                "encap-dport",
+                "encap_dport_be16",
+                "encap-dport-be16",
+            ],
+        ),
+    })
+}
+
+fn parse_iproute2_addr_json(
+    stdout: &str,
+    interface_name: &str,
+) -> Result<Vec<ExistingIproute2Address>> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .context("failed to parse existing runtime tunnel address inspect JSON")?;
+    let candidates = value
+        .as_array()
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![&value]);
+    let link = candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate
+                .get("ifname")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|ifname| ifname == interface_name)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing runtime tunnel address inspect JSON did not include interface {interface_name}"
+            )
+        })?;
+    let Some(addr_info) = link.get("addr_info").and_then(serde_json::Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    Ok(addr_info
+        .iter()
+        .map(|address| ExistingIproute2Address {
+            family: string_field(address, &["family"]),
+            local: string_field(address, &["local"]),
+            prefix_len: address
+                .get("prefixlen")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok()),
+            peer: string_field(address, &["peer", "local_peer", "local-peer"]),
+        })
+        .collect())
+}
+
+fn existing_iproute2_tunnel_mismatches(
+    link: &ExistingIproute2Tunnel,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Result<Vec<String>> {
+    let expected_mode = linux_tunnel_mode(plan.kind)?;
+    let expected_local = local_underlay(plan, endpoint);
+    let expected_remote = remote_underlay(plan, endpoint);
+    let mut mismatches = Vec::new();
+    push_string_mismatch(&mut mismatches, "mode", link.kind.as_deref(), expected_mode);
+    push_ip_mismatch(
+        &mut mismatches,
+        "local_underlay",
+        link.local.as_deref(),
+        expected_local,
+    );
+    push_ip_mismatch(
+        &mut mismatches,
+        "remote_underlay",
+        link.remote.as_deref(),
+        expected_remote,
+    );
+    push_string_mismatch(&mut mismatches, "ttl", link.ttl.as_deref(), "255");
+    if plan.kind == TunnelKind::Fou {
+        push_string_mismatch(&mut mismatches, "encap", link.encap.as_deref(), "fou");
+        let expected_dport = plan.runtime_control.fou.peer_port.to_string();
+        push_string_mismatch(
+            &mut mismatches,
+            "encap_dport",
+            link.encap_dport.as_deref(),
+            &expected_dport,
+        );
+    }
+    Ok(mismatches)
+}
+
+fn matching_existing_iproute2_address(
+    addresses: &[ExistingIproute2Address],
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Option<ExistingIproute2Address> {
+    let expected_local = local_address(plan, endpoint);
+    let expected_remote = remote_address(plan, endpoint);
+    addresses
+        .iter()
+        .find(|address| {
+            address
+                .local
+                .as_deref()
+                .is_some_and(|actual| ip_values_match(actual, expected_local))
+                && address.prefix_len == Some(plan.tunnel_prefix_len)
+                && address
+                    .peer
+                    .as_deref()
+                    .is_some_and(|actual| ip_values_match(actual, expected_remote))
+        })
+        .cloned()
+}
+
+fn address_mismatch_message(
+    addresses: &[ExistingIproute2Address],
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> String {
+    let expected = format!(
+        "{}/{} peer {}",
+        local_address(plan, endpoint),
+        plan.tunnel_prefix_len,
+        remote_address(plan, endpoint)
+    );
+    let actual = if addresses.is_empty() {
+        "<missing>".to_string()
+    } else {
+        addresses
+            .iter()
+            .map(|address| {
+                format!(
+                    "{}/{} peer {}",
+                    address.local.as_deref().unwrap_or("<missing>"),
+                    address
+                        .prefix_len
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "<missing>".to_string()),
+                    address.peer.as_deref().unwrap_or("<missing>")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("tunnel_address expected {expected} got {actual}")
+}
+
+fn push_string_mismatch(
+    mismatches: &mut Vec<String>,
+    field: &str,
+    actual: Option<&str>,
+    expected: &str,
+) {
+    let actual = actual.map(str::trim).filter(|value| !value.is_empty());
+    if actual.is_none_or(|actual| !actual.eq_ignore_ascii_case(expected)) {
+        mismatches.push(format!(
+            "{field} expected {expected} got {}",
+            actual.unwrap_or("<missing>")
+        ));
+    }
+}
+
+fn push_ip_mismatch(
+    mismatches: &mut Vec<String>,
+    field: &str,
+    actual: Option<&str>,
+    expected: &str,
+) {
+    let actual = actual.map(str::trim).filter(|value| !value.is_empty());
+    if actual.is_none_or(|actual| !ip_values_match(actual, expected)) {
+        mismatches.push(format!(
+            "{field} expected {expected} got {}",
+            actual.unwrap_or("<missing>")
+        ));
+    }
+}
+
+fn ip_values_match(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (actual.parse::<IpAddr>(), expected.parse::<IpAddr>()) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
+fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(value) = value.get(*key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str() {
+            return Some(text.to_string());
+        }
+        if let Some(number) = value.as_u64() {
+            return Some(number.to_string());
+        }
+        if let Some(number) = value.as_i64() {
+            return Some(number.to_string());
+        }
+    }
+    None
+}
+
+fn runtime_report_failure_summary(report: &serde_json::Value) -> String {
+    let exit_code = report
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let stderr = report["stderr"]["text"].as_str().unwrap_or_default().trim();
+    let stdout = report["stdout"]["text"].as_str().unwrap_or_default().trim();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "no command output"
+    };
+    format!("exit_code={exit_code}, {detail}")
 }
 
 fn build_route_replace_steps(
@@ -838,7 +1205,19 @@ pub(crate) fn render_runtime_adapter_command(
                 .replace("{remote_underlay}", remote_underlay(plan, endpoint))
                 .replace("{local_address}", local_address(plan, endpoint))
                 .replace("{remote_address}", remote_address(plan, endpoint))
-                .replace("{prefix_len}", &plan.tunnel_prefix_len.to_string())
+                .replace("{prefix_len}", &endpoint.tunnel_prefix_len.to_string())
+                .replace("{local_ipv4}", &family_address(plan, endpoint, true, true))
+                .replace(
+                    "{remote_ipv4}",
+                    &family_address(plan, endpoint, true, false),
+                )
+                .replace("{prefix_len_ipv4}", &family_prefix_len(plan, true))
+                .replace("{local_ipv6}", &family_address(plan, endpoint, false, true))
+                .replace(
+                    "{remote_ipv6}",
+                    &family_address(plan, endpoint, false, false),
+                )
+                .replace("{prefix_len_ipv6}", &family_prefix_len(plan, false))
                 .replace("{fou_port}", &plan.runtime_control.fou.port.to_string())
                 .replace(
                     "{fou_peer_port}",
@@ -909,19 +1288,45 @@ fn remote_underlay<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) ->
     }
 }
 
-fn local_address<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint.side == TunnelEndpointSide::Left {
-        &plan.left_tunnel_address
+fn local_address<'a>(_plan: &TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
+    &endpoint.local_tunnel_address
+}
+
+fn remote_address<'a>(_plan: &TunnelPlan, endpoint: &'a TunnelEndpointConfig) -> &'a str {
+    &endpoint.remote_tunnel_address
+}
+
+fn family_address(
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+    ipv4: bool,
+    local: bool,
+) -> String {
+    let pair = if ipv4 {
+        plan.ipv4_tunnel.as_ref()
     } else {
-        &plan.right_tunnel_address
+        plan.ipv6_tunnel.as_ref()
+    };
+    let Some(pair) = pair else {
+        return String::new();
+    };
+    match (endpoint.side, local) {
+        (TunnelEndpointSide::Left, true) | (TunnelEndpointSide::Right, false) => pair.left.clone(),
+        (TunnelEndpointSide::Left, false) | (TunnelEndpointSide::Right, true) => pair.right.clone(),
     }
 }
 
-fn remote_address<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint.side == TunnelEndpointSide::Left {
-        &plan.right_tunnel_address
+fn family_prefix_len(plan: &TunnelPlan, ipv4: bool) -> String {
+    if ipv4 {
+        plan.ipv4_tunnel
+            .as_ref()
+            .map(|pair| pair.prefix_len.to_string())
+            .unwrap_or_default()
     } else {
-        &plan.left_tunnel_address
+        plan.ipv6_tunnel
+            .as_ref()
+            .map(|pair| pair.prefix_len.to_string())
+            .unwrap_or_default()
     }
 }
 

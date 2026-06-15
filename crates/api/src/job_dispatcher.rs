@@ -46,9 +46,10 @@ pub(crate) fn wake_job_dispatcher(state: AppState) {
 
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
     expire_control_timeout_targets(state).await?;
+    let dispatcher_config = state.dispatcher_runtime_config();
     let claimed = state
         .repo
-        .claim_due_job_targets(state.dispatcher_config.batch_limit, DISPATCH_LEASE_SECS)
+        .claim_due_job_targets(dispatcher_config.batch_limit, DISPATCH_LEASE_SECS)
         .await?;
     let claimed_count = claimed.len();
     if claimed_count == 0 {
@@ -56,7 +57,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
     }
     debug!(claimed_count, "durable job dispatcher claimed targets");
     stream::iter(claimed)
-        .for_each_concurrent(state.dispatcher_config.in_flight, |claimed| {
+        .for_each_concurrent(dispatcher_config.in_flight, |claimed| {
             let state = state.clone();
             async move {
                 if let Err(error) = dispatch_claimed_target(&state, claimed).await {
@@ -96,6 +97,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         command: claimed.operation.clone(),
         timeout_secs: claimed.timeout_secs.clamp(1, 3600),
     };
+    state.refresh_gateway_dispatch_timeouts();
     let outcome = match state.gateway.dispatch(&claimed.client_id, request).await {
         Ok(result) => crate::routes_jobs::target_outcome_from_gateway(result),
         Err(error) => {
@@ -212,7 +214,7 @@ async fn finish_claimed_target(
             &outcome.outputs,
             JobOutputPersistConfig {
                 object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes,
+                artifact_min_bytes: state.job_output_artifact_min_bytes(),
             },
         )
         .await?;

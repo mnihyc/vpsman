@@ -232,6 +232,17 @@
     width: 100%;
   }
 
+  .dashboardToolbarActions .timeRangeTabs {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .dashboardToolbarActions .timeRangeTabs button {
+    flex: 1 0 25%;
+  }
+
   .dashboardControlBar {
     gap: 8px;
   }
@@ -282,6 +293,10 @@
   .sectionHeader {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .sectionContext {
+    text-align: left;
   }
 
   .gridToolbar {
@@ -421,7 +436,13 @@
   }
 
   .thresholdMatrixRow {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(86px, 1fr) minmax(72px, 88px) minmax(72px, 88px);
+    gap: 6px;
+  }
+
+  .thresholdMatrixRow strong {
+    font-size: 11px;
+    line-height: 1.25;
   }
 
   .consoleDetailPanelHeader,

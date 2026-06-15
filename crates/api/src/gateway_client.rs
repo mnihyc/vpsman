@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::{Arc, RwLock as StdRwLock},
+    time::Duration,
+};
 
 use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
@@ -19,7 +22,7 @@ const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) struct GatewayDispatchClient {
     control_url: Option<String>,
     internal_token: Option<String>,
-    timeouts: GatewayClientTimeouts,
+    timeouts: Arc<StdRwLock<GatewayClientTimeouts>>,
     #[cfg(test)]
     test_privilege_auto_approve: bool,
 }
@@ -63,7 +66,7 @@ impl GatewayDispatchClient {
             internal_token: internal_token
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
-            timeouts,
+            timeouts: Arc::new(StdRwLock::new(timeouts)),
             #[cfg(test)]
             test_privilege_auto_approve: false,
         }
@@ -91,7 +94,7 @@ impl GatewayDispatchClient {
         Self {
             control_url: None,
             internal_token: None,
-            timeouts: GatewayClientTimeouts::default(),
+            timeouts: Arc::new(StdRwLock::new(GatewayClientTimeouts::default())),
             test_privilege_auto_approve: true,
         }
     }
@@ -105,6 +108,24 @@ impl GatewayDispatchClient {
     #[cfg(test)]
     pub(crate) fn test_privilege_auto_approves(&self) -> bool {
         self.test_privilege_auto_approve
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_timeouts(&self) -> GatewayClientTimeouts {
+        self.timeouts()
+    }
+
+    pub(crate) fn set_read_timeout(&self, read: Duration) {
+        if let Ok(mut timeouts) = self.timeouts.write() {
+            timeouts.read = read;
+        }
+    }
+
+    fn timeouts(&self) -> GatewayClientTimeouts {
+        self.timeouts
+            .read()
+            .map(|timeouts| *timeouts)
+            .unwrap_or_default()
     }
 
     pub(crate) async fn dispatch(
@@ -123,7 +144,7 @@ impl GatewayDispatchClient {
                 request,
             },
             self.internal_token.as_deref(),
-            self.timeouts,
+            self.timeouts(),
         )
         .await
     }
@@ -145,7 +166,7 @@ impl GatewayDispatchClient {
                 request,
             },
             self.internal_token.as_deref(),
-            self.timeouts,
+            self.timeouts(),
         )
         .await
     }
@@ -173,7 +194,7 @@ impl GatewayDispatchClient {
             "/internal/v1/gateway/privilege/verify",
             &GatewayPrivilegeVerification { intent, assertion },
             self.internal_token.as_deref(),
-            self.timeouts,
+            self.timeouts(),
         )
         .await
     }
@@ -188,7 +209,7 @@ impl GatewayDispatchClient {
             "/internal/v1/gateway/metrics",
             &serde_json::json!({}),
             self.internal_token.as_deref(),
-            self.timeouts,
+            self.timeouts(),
         )
         .await
     }

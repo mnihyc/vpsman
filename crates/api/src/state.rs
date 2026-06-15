@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{ensure, Result};
 use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
+use vpsman_common::SuiteConfig;
 
 use crate::{
     error::ApiError,
@@ -56,6 +57,130 @@ impl Default for DispatcherRuntimeConfig {
             internal_http_read_secs: 15,
         }
     }
+}
+
+impl AppState {
+    fn current_suite_config(&self) -> Option<SuiteConfig> {
+        SuiteConfig::load_optional(&self.suite_config_path).ok()
+    }
+
+    pub(crate) fn dispatcher_runtime_config(&self) -> DispatcherRuntimeConfig {
+        let mut config = self.dispatcher_config.clone();
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_DISPATCHER_BATCH") {
+                if let Some(value) = suite.capacity.dispatcher_batch {
+                    config.batch_limit = value;
+                }
+            }
+            if env_absent("VPSMAN_DISPATCHER_IN_FLIGHT") {
+                if let Some(value) = suite.capacity.dispatcher_in_flight {
+                    config.in_flight = value;
+                }
+            }
+            if env_absent("VPSMAN_DISPATCH_ACK_SECS") {
+                if let Some(value) = suite.timeout.dispatch_ack_secs {
+                    config.dispatch_ack_secs = value;
+                }
+            }
+            if env_absent("VPSMAN_EVENT_POST_SECS") {
+                if let Some(value) = suite.timeout.event_post_secs {
+                    config.event_post_secs = value;
+                }
+            }
+            if env_absent("VPSMAN_INTERNAL_HTTP_READ_SECS") {
+                if let Some(value) = suite.timeout.internal_http_read_secs {
+                    config.internal_http_read_secs = value;
+                }
+            }
+        }
+        config.batch_limit = config.batch_limit.clamp(1, 500);
+        config.in_flight = config.in_flight.clamp(1, 512);
+        config.dispatch_ack_secs = config.dispatch_ack_secs.clamp(1, 3600);
+        config.event_post_secs = config.event_post_secs.clamp(1, 3600);
+        config.internal_http_read_secs = config.internal_http_read_secs.clamp(1, 3600);
+        config
+    }
+
+    pub(crate) fn refresh_gateway_dispatch_timeouts(&self) {
+        let config = self.dispatcher_runtime_config();
+        self.gateway.set_read_timeout(Duration::from_secs(
+            config
+                .internal_http_read_secs
+                .max(config.dispatch_ack_secs)
+                .clamp(1, 3600),
+        ));
+    }
+
+    pub(crate) fn job_output_artifact_min_bytes(&self) -> usize {
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES") {
+                if let Some(value) = suite.api.job_output_artifact_min_bytes {
+                    return value;
+                }
+            }
+        }
+        self.job_output_artifact_min_bytes
+    }
+
+    pub(crate) fn require_registered_agent_updates(&self) -> bool {
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES") {
+                if let Some(value) = suite.api.require_registered_agent_updates {
+                    return value;
+                }
+            }
+        }
+        self.require_registered_agent_updates
+    }
+
+    pub(crate) fn fleet_alert_policy(&self) -> FleetAlertPolicy {
+        let mut policy = self.fleet_alert_policy.clone();
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO") {
+                if let Some(value) = suite.api.alert_memory_available_warning_ratio {
+                    policy.memory_available_warning_ratio = value;
+                }
+            }
+            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO") {
+                if let Some(value) = suite.api.alert_memory_available_critical_ratio {
+                    policy.memory_available_critical_ratio = value;
+                }
+            }
+            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO") {
+                if let Some(value) = suite.api.alert_disk_available_warning_ratio {
+                    policy.disk_available_warning_ratio = value;
+                }
+            }
+            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO") {
+                if let Some(value) = suite.api.alert_disk_available_critical_ratio {
+                    policy.disk_available_critical_ratio = value;
+                }
+            }
+            if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING") {
+                if let Some(value) = suite.api.alert_cpu_load_warning {
+                    policy.cpu_load_warning = value;
+                }
+            }
+            if env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL") {
+                if let Some(value) = suite.api.alert_cpu_load_critical {
+                    policy.cpu_load_critical = value;
+                }
+            }
+        }
+        FleetAlertPolicy::new(
+            policy.memory_available_warning_ratio,
+            policy.memory_available_critical_ratio,
+            policy.disk_available_warning_ratio,
+            policy.disk_available_critical_ratio,
+            policy.cpu_load_warning,
+            policy.cpu_load_critical,
+        )
+        .unwrap_or_else(|_| self.fleet_alert_policy.clone())
+    }
+}
+
+fn env_absent(name: &str) -> bool {
+    std::env::var_os(name).is_none()
 }
 
 #[derive(Clone, Debug, Default)]

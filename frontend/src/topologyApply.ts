@@ -22,12 +22,23 @@ export type TunnelEndpointConfig = {
   remoteUnderlay: string;
   localAddress: string;
   remoteAddress: string;
+  prefixLen: number;
+  ipv4Address: EndpointAddressPair | null;
+  ipv6Address: EndpointAddressPair | null;
+};
+
+type EndpointAddressPair = {
+  local: string;
+  remote: string;
+  prefixLen: number;
 };
 
 export function renderTunnelEndpointConfig(plan: TunnelPlan, side: TunnelEndpointSide): TunnelEndpointConfig {
   const left = side === "left";
   const localClientId = left ? plan.left_client_id : plan.right_client_id;
   const peerClientId = left ? plan.right_client_id : plan.left_client_id;
+  const ipv4Address = plan.ipv4_tunnel ? endpointAddressPair(plan.ipv4_tunnel, side) : null;
+  const ipv6Address = plan.ipv6_tunnel ? endpointAddressPair(plan.ipv6_tunnel, side) : null;
   return {
     localClientId,
     peerClientId,
@@ -35,15 +46,18 @@ export function renderTunnelEndpointConfig(plan: TunnelPlan, side: TunnelEndpoin
     remoteUnderlay: left ? plan.right_underlay : plan.left_underlay,
     localAddress: left ? plan.left_tunnel_address : plan.right_tunnel_address,
     remoteAddress: left ? plan.right_tunnel_address : plan.left_tunnel_address,
+    prefixLen: plan.tunnel_prefix_len,
+    ipv4Address,
+    ipv6Address,
     ifupdownSnippet: renderRuntimeSnippet(
       {
         kind: plan.kind,
-        localAddress: left ? plan.left_tunnel_address : plan.right_tunnel_address,
         localUnderlay: left ? plan.left_underlay : plan.right_underlay,
         name: plan.name,
-        remoteAddress: left ? plan.right_tunnel_address : plan.left_tunnel_address,
         remoteUnderlay: left ? plan.right_underlay : plan.left_underlay,
         interfaceName: plan.interface_name,
+        ipv4: ipv4Address,
+        ipv6: ipv6Address,
         fou: runtimeFouOptions(plan.kind, plan.runtime_control?.fou),
       },
       plan.runtime_control?.manager ?? "agent_iproute2_managed",
@@ -57,6 +71,15 @@ export function renderTunnelEndpointConfig(plan: TunnelPlan, side: TunnelEndpoin
       plan.recommended_ospf_cost,
     ),
   };
+}
+
+function endpointAddressPair(
+  pair: { left: string; right: string; prefix_len: number },
+  side: TunnelEndpointSide,
+): EndpointAddressPair {
+  return side === "left"
+    ? { local: pair.left, remote: pair.right, prefixLen: pair.prefix_len }
+    : { local: pair.right, remote: pair.left, prefixLen: pair.prefix_len };
 }
 
 export async function buildNetworkApplyOperation(
@@ -232,21 +255,60 @@ function renderIfupdownSnippet(input: {
   kind: TunnelKind;
   localUnderlay: string;
   remoteUnderlay: string;
-  localAddress: string;
-  remoteAddress: string;
+  ipv4: EndpointAddressPair | null;
+  ipv6: EndpointAddressPair | null;
   fou: RuntimeTunnelFouOptions;
 }): string {
   if (!isLinuxTunnelKind(input.kind)) {
     throw new Error("iproute2-managed rendering requires GRE, IPIP, SIT, or FOU");
   }
+  const lines = [`# vpsman tunnel ${input.name}: generated plan only`];
+  if (input.ipv4) {
+    lines.push(...renderIfupdownIpv4Stanza(input, input.ipv4, true));
+  }
+  if (input.ipv6) {
+    lines.push(...renderIfupdownIpv6Stanza(input, input.ipv6, !input.ipv4));
+  }
+  return lines.join("\n");
+}
+
+function renderIfupdownIpv4Stanza(
+  input: Parameters<typeof renderIfupdownSnippet>[0],
+  address: EndpointAddressPair,
+  includeLifecycle: boolean,
+): string[] {
   const lines = [
-    `# vpsman tunnel ${input.name}: generated plan only`,
     `auto ${input.interfaceName}`,
     `iface ${input.interfaceName} inet static`,
-    `    address ${input.localAddress}`,
-    "    netmask 255.255.255.254",
-    `    pointopoint ${input.remoteAddress}`,
+    `    address ${address.local}`,
+    `    netmask ${ipv4Netmask(address.prefixLen)}`,
+    `    pointopoint ${address.remote}`,
   ];
+  if (includeLifecycle) {
+    appendTunnelLifecycle(lines, input);
+  }
+  return lines;
+}
+
+function renderIfupdownIpv6Stanza(
+  input: Parameters<typeof renderIfupdownSnippet>[0],
+  address: EndpointAddressPair,
+  includeLifecycle: boolean,
+): string[] {
+  const lines = [
+    `auto ${input.interfaceName}`,
+    `iface ${input.interfaceName} inet6 static`,
+    `    address ${address.local}`,
+    `    netmask ${address.prefixLen}`,
+    `    pointopoint ${address.remote}`,
+  ];
+  if (includeLifecycle) {
+    appendTunnelLifecycle(lines, input);
+  }
+  return lines;
+}
+
+function appendTunnelLifecycle(lines: string[], input: Parameters<typeof renderIfupdownSnippet>[0]) {
   if (input.kind === "fou") {
     lines.push(`    pre-up ip fou add port ${input.fou.port} ipproto ${input.fou.ipproto} || true`);
   }
@@ -258,7 +320,6 @@ function renderIfupdownSnippet(input: {
   if (input.kind === "fou") {
     lines.push(`    post-down ip fou del port ${input.fou.port} || true`);
   }
-  return lines.join("\n");
 }
 
 function renderRuntimeSnippet(
@@ -268,8 +329,8 @@ function renderRuntimeSnippet(
     kind: TunnelKind;
     localUnderlay: string;
     remoteUnderlay: string;
-    localAddress: string;
-    remoteAddress: string;
+    ipv4: EndpointAddressPair | null;
+    ipv6: EndpointAddressPair | null;
     fou: RuntimeTunnelFouOptions;
   },
   manager: RuntimeTunnelManager,
@@ -304,7 +365,7 @@ function renderNetplanSnippet(plan: TunnelPlan, endpoint: TunnelEndpointConfig):
     `      remote: ${endpoint.remoteUnderlay}`,
     "      ttl: 255",
     "      addresses:",
-    `        - ${endpoint.localAddress}/${plan.tunnel_prefix_len}`,
+    ...endpointAddresses(endpoint).map((address) => `        - ${address.local}/${address.prefixLen}`),
     "",
   ].join("\n");
 }
@@ -346,10 +407,20 @@ function renderSystemdNetworkSnippet(plan: TunnelPlan, endpoint: TunnelEndpointC
     `Name=${plan.interface_name}`,
     "",
     "[Network]",
-    `Address=${endpoint.localAddress}/${plan.tunnel_prefix_len}`,
-    `Peer=${endpoint.remoteAddress}`,
+    ...endpointAddresses(endpoint).flatMap((address) => [
+      `Address=${address.local}/${address.prefixLen}`,
+      `Peer=${address.remote}`,
+    ]),
     "",
   ].join("\n");
+}
+
+function endpointAddresses(endpoint: TunnelEndpointConfig): EndpointAddressPair[] {
+  const addresses = [endpoint.ipv4Address, endpoint.ipv6Address].filter(Boolean) as EndpointAddressPair[];
+  if (addresses.length > 0) {
+    return addresses;
+  }
+  return [{ local: endpoint.localAddress, remote: endpoint.remoteAddress, prefixLen: endpoint.prefixLen }];
 }
 
 function renderBird2InterfaceSnippet(
@@ -377,6 +448,12 @@ function linuxTunnelMode(kind: TunnelKind): string {
     return "gre";
   }
   return "ipip";
+}
+
+function ipv4Netmask(prefixLen: number): string {
+  const clamped = Math.max(0, Math.min(32, Math.trunc(prefixLen)));
+  const mask = clamped === 0 ? 0 : (0xffffffff << (32 - clamped)) >>> 0;
+  return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 255).join(".");
 }
 
 function bird2Label(kind: TunnelKind): string {

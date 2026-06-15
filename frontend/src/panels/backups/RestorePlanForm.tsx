@@ -1,13 +1,13 @@
 import type { FormEvent } from "react";
 import { RotateCcw } from "lucide-react";
-import { usePanelDisplaySettings } from "../../panelDisplay";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   RESTORE_PATH_PLACEHOLDER,
   RESTORE_PATH_PRESETS,
 } from "../../presets/backupPathPresets";
 import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView, BackupRequestRecord } from "../../types";
-import { formatVpsName, shortId } from "../../utils";
+import { shortId } from "../../utils";
 
 type RestorePlanFormProps = {
   agents: AgentView[];
@@ -56,7 +56,6 @@ export function RestorePlanForm({
   restoreTargetId,
   restoreTargetName,
 }: RestorePlanFormProps) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <>
       <div className="sectionHeader compact restoreFormHeader">
@@ -81,18 +80,13 @@ export function RestorePlanForm({
         </label>
         <label>
           <span>Target VPS</span>
-          <select
-            aria-label="Restore target client"
-            onChange={(event) => onTargetIdChange(event.target.value)}
+          <VpsCombobox
+            agents={agents}
+            ariaLabel="Restore target client"
+            onChange={onTargetIdChange}
+            placeholder="Search target VPS"
             value={restoreTargetId}
-          >
-            <option value="">Select VPS</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {formatVpsName(agent, vpsNameDisplayMode)}
-              </option>
-            ))}
-          </select>
+          />
         </label>
         <label>
           <span>Selected paths</span>

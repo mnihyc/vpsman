@@ -711,6 +711,8 @@ plan_json="$(vpsctl_auth tunnel-plan \
   --left-underlay 203.0.113.201 \
   --right-underlay 203.0.113.202 \
   --address-pool-cidr 10.252.0.0/30 \
+  --left-tunnel-ipv4 10.252.0.0 \
+  --right-tunnel-ipv4 10.252.0.1 \
   --bandwidth 100m \
   --latency-ms 25 \
   --save)"

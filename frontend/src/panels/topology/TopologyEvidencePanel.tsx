@@ -17,6 +17,7 @@ import type {
   TopologyRuntimeState,
 } from "../../types";
 import { decodeOutputPreview, formatTime, shortId } from "../../utils";
+import { readableTelemetryToken } from "../../topologyRuntime";
 
 const networkCommands = new Set([
   "network_apply",
@@ -180,7 +181,9 @@ export function TopologyEvidencePanel({
                 <strong>{row.planName}</strong>
                 <small>{row.interfaceName}</small>
               </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
+                {humanStatus(row.signalStatus)}
+              </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -209,7 +212,9 @@ export function TopologyEvidencePanel({
                 <strong>{row.planName}</strong>
                 <small>{row.interfaceName}</small>
               </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
+                {humanStatus(row.signalStatus)}
+              </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -235,10 +240,12 @@ export function TopologyEvidencePanel({
           {trendRows.map((row) => (
             <div className="historyRow topologyEvidenceGrid" key={row.id}>
               <span className="historyPrimary">
-                <strong>{row.kind}</strong>
+                <strong>{humanStatus(row.kind)}</strong>
                 <small>{row.sampleCount} samples</small>
               </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
+                {humanStatus(row.signalStatus)}
+              </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -264,10 +271,12 @@ export function TopologyEvidencePanel({
           {observationRows.map((row) => (
             <div className="historyRow topologyEvidenceGrid" key={row.id}>
               <span className="historyPrimary">
-                <strong>{row.kind}</strong>
+                <strong>{humanStatus(row.kind)}</strong>
                 <small>{shortId(row.jobId)}</small>
               </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>{row.signalStatus}</span>
+              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
+                {humanStatus(row.signalStatus)}
+              </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
                 <small>{row.metricDetail}</small>
@@ -292,10 +301,10 @@ export function TopologyEvidencePanel({
         {rows.map((row) => (
           <div className="historyRow topologyEvidenceGrid" key={row.job.id}>
             <span className="historyPrimary">
-              <strong>{row.job.command_type}</strong>
-              <small>{shortId(row.job.id)}</small>
-            </span>
-            <span className={`status ${evidenceStatusBadgeClass(row)}`}>{row.signalStatus}</span>
+                <strong>{humanStatus(row.job.command_type)}</strong>
+                <small>{shortId(row.job.id)}</small>
+              </span>
+            <span className={`status ${evidenceStatusBadgeClass(row)}`}>{humanStatus(row.signalStatus)}</span>
             <span className="topologyMetric">
               <strong>{row.metric}</strong>
               <small>{row.metricDetail}</small>
@@ -529,7 +538,7 @@ function buildObservationRow(observation: NetworkObservationRecord, clientLabel:
       observation.healthy === true && applied
         ? "Managed blocks match"
         : runtimeStatus
-          ? `Runtime ${humanStatus(runtimeStatus)}`
+          ? `Runtime ${humanStatus(runtimeStatus).toLowerCase()}`
           : observation.healthy === true
             ? "Runtime healthy"
             : "Recorded status",
@@ -627,10 +636,10 @@ function buildEvidenceRow(
       signalStatus: statusHealthy ? "healthy" : "drift",
       metric:
         applied && statusHealthy
-          ? "Managed blocks match"
-          : runtimeStatus
-            ? `Runtime ${humanStatus(runtimeStatus)}`
-            : "Needs review",
+        ? "Managed blocks match"
+        : runtimeStatus
+          ? `Runtime ${humanStatus(runtimeStatus).toLowerCase()}`
+          : "Needs review",
       metricDetail: runtimeDetail,
       target: asString(parsedStatus.interface) ?? "interface",
       targetDetail: endpointLabel(asString(parsedStatus.client_id), asString(parsedStatus.peer_client_id), clientLabel),
@@ -771,7 +780,7 @@ function healthLabel(value: unknown): string {
 }
 
 function humanStatus(value: string): string {
-  return value.replace(/_/g, " ");
+  return readableTelemetryToken(value);
 }
 
 function runtimeSummaryDetail(reasons: string[], importCandidateCount: number | null, fallback: string): string {

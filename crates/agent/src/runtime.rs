@@ -32,10 +32,12 @@ use crate::{
         NetworkRollbackInput,
     },
     network_probe::{execute_network_probe_command, NetworkProbeInput},
+    network_runtime::{execute_runtime_tunnel_reconcile_report, NetworkRuntimeReconcileInput},
     network_speed::{execute_network_speed_test_command, NetworkSpeedTestInput},
     network_status::{execute_network_status_command, NetworkStatusInput},
     restore::{execute_restore_command, RestoreCommandInput},
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
+    supervisor::reconcile_supervised_processes_on_start,
     telemetry::{collect_metrics_for_config, read_optional, TelemetryRuntimeState},
     terminal::execute_terminal_command_with_stream_sink,
     update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
@@ -53,6 +55,12 @@ pub(crate) async fn run_agent(
         priority: 0,
     });
     let mut recent_commands = RecentCommandCache::default();
+    match reconcile_supervised_processes_on_start().await {
+        Ok(report) => log_supervisor_startup_reconcile(&report),
+        Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
+    }
+    let startup_reconcile = reconcile_configured_runtime_tunnels(&config, "agent_start").await;
+    log_configured_runtime_tunnel_reconcile(&startup_reconcile);
 
     loop {
         let endpoints = override_endpoint
@@ -310,6 +318,204 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
             }
         }
         Err(error) => warn!(%job_id, %error, "unmanaged agent update check failed"),
+    }
+}
+
+async fn reconcile_configured_runtime_tunnels(
+    config: &AgentConfig,
+    trigger: &'static str,
+) -> serde_json::Value {
+    let total = config.network.runtime_status_telemetry_plans.len();
+    let mut summaries = Vec::with_capacity(total);
+    let mut converged = 0_u64;
+    let mut observed = 0_u64;
+    let mut skipped = 0_u64;
+    let mut degraded = 0_u64;
+    let mut failed = 0_u64;
+
+    for telemetry_plan in &config.network.runtime_status_telemetry_plans {
+        let plan = &telemetry_plan.plan;
+        match execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+            config,
+            plan,
+            side: telemetry_plan.endpoint_side,
+            timeout_secs: config.network.runtime_command_timeout_secs.max(1),
+            #[cfg(test)]
+            effective_uid_override: None,
+        })
+        .await
+        {
+            Ok(report) => {
+                match report["status"].as_str().unwrap_or("unknown") {
+                    "converged" => converged += 1,
+                    "observed_only" => observed += 1,
+                    "skipped" => skipped += 1,
+                    "degraded_unprivileged" => degraded += 1,
+                    "failed" => failed += 1,
+                    _ => degraded += 1,
+                }
+                summaries.push(runtime_reconcile_summary(
+                    trigger,
+                    telemetry_plan.plan_id.as_deref(),
+                    report,
+                    None,
+                ));
+            }
+            Err(error) => {
+                failed += 1;
+                warn!(
+                    %trigger,
+                    plan = %plan.name,
+                    interface = %plan.interface_name,
+                    side = endpoint_side_name(telemetry_plan.endpoint_side),
+                    %error,
+                    "configured runtime tunnel reconcile failed"
+                );
+                summaries.push(runtime_reconcile_summary(
+                    trigger,
+                    telemetry_plan.plan_id.as_deref(),
+                    serde_json::json!({
+                        "type": "runtime_tunnel_reconcile",
+                        "status": "failed",
+                        "plan": plan.name,
+                        "interface": plan.interface_name,
+                        "side": endpoint_side_name(telemetry_plan.endpoint_side),
+                        "manager": plan.runtime_control.manager,
+                    }),
+                    Some(error.to_string()),
+                ));
+            }
+        }
+    }
+
+    let status = if total == 0 {
+        "skipped"
+    } else if failed > 0 {
+        "failed"
+    } else if degraded > 0 {
+        "degraded"
+    } else {
+        "completed"
+    };
+    serde_json::json!({
+        "type": "configured_runtime_tunnel_reconcile",
+        "trigger": trigger,
+        "status": status,
+        "total": total,
+        "converged": converged,
+        "observed": observed,
+        "skipped": skipped,
+        "degraded": degraded,
+        "failed": failed,
+        "tunnels": summaries,
+    })
+}
+
+fn runtime_reconcile_summary(
+    trigger: &'static str,
+    plan_id: Option<&str>,
+    report: serde_json::Value,
+    error: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trigger": trigger,
+        "plan_id": plan_id,
+        "plan": report.get("plan").cloned().unwrap_or(serde_json::Value::Null),
+        "interface": report.get("interface").cloned().unwrap_or(serde_json::Value::Null),
+        "side": report.get("side").cloned().unwrap_or(serde_json::Value::Null),
+        "manager": report.get("manager").cloned().unwrap_or(serde_json::Value::Null),
+        "status": report.get("status").cloned().unwrap_or(serde_json::Value::Null),
+        "reason": report.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+        "link_existed_before": report
+            .get("link_existed_before")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "existing_link_validation": report
+            .get("existing_link_validation")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "error": error,
+    })
+}
+
+fn log_configured_runtime_tunnel_reconcile(report: &serde_json::Value) {
+    let trigger = report["trigger"].as_str().unwrap_or("unknown");
+    let status = report["status"].as_str().unwrap_or("unknown");
+    let total = report["total"].as_u64().unwrap_or_default();
+    let converged = report["converged"].as_u64().unwrap_or_default();
+    let observed = report["observed"].as_u64().unwrap_or_default();
+    let skipped = report["skipped"].as_u64().unwrap_or_default();
+    let degraded = report["degraded"].as_u64().unwrap_or_default();
+    let failed = report["failed"].as_u64().unwrap_or_default();
+    if failed > 0 || degraded > 0 {
+        warn!(
+            %trigger,
+            %status,
+            total,
+            converged,
+            observed,
+            skipped,
+            degraded,
+            failed,
+            "configured runtime tunnel reconcile completed with issues"
+        );
+    } else if total > 0 {
+        info!(
+            %trigger,
+            %status,
+            total,
+            converged,
+            observed,
+            skipped,
+            "configured runtime tunnel reconcile completed"
+        );
+    } else {
+        debug!(%trigger, %status, "no configured runtime tunnels to reconcile");
+    }
+}
+
+fn log_supervisor_startup_reconcile(report: &serde_json::Value) {
+    let total = report["total"].as_u64().unwrap_or_default();
+    if total == 0 {
+        debug!("no supervised processes to reconcile at startup");
+        return;
+    }
+    info!(
+        total,
+        running = report["running"].as_u64().unwrap_or_default(),
+        restarted = report["restarted"].as_u64().unwrap_or_default(),
+        restart_pending = report["restart_pending"].as_u64().unwrap_or_default(),
+        stopped = report["stopped"].as_u64().unwrap_or_default(),
+        failed = report["failed"].as_u64().unwrap_or_default(),
+        no_retries_remaining = report["no_retries_remaining"].as_u64().unwrap_or_default(),
+        "process supervisor startup reconcile completed"
+    );
+}
+
+fn attach_runtime_reconcile_report(
+    outputs: &mut [CommandOutput],
+    report: serde_json::Value,
+) -> Result<()> {
+    let Some(output) = outputs
+        .iter_mut()
+        .rev()
+        .find(|output| output.stream == OutputStream::Status && output.done)
+    else {
+        return Ok(());
+    };
+    let mut status: serde_json::Value =
+        serde_json::from_slice(&output.data).context("config update status output was not JSON")?;
+    if let Some(object) = status.as_object_mut() {
+        object.insert("runtime_reconcile".to_string(), report);
+        output.data = serde_json::to_vec(&status)?;
+    }
+    Ok(())
+}
+
+fn endpoint_side_name(side: vpsman_common::TunnelEndpointSide) -> &'static str {
+    match side {
+        vpsman_common::TunnelEndpointSide::Left => "left",
+        vpsman_common::TunnelEndpointSide::Right => "right",
     }
 }
 
@@ -749,22 +955,47 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         base_config_sha256_hex,
     } = &request.command
     {
-        let result = apply_hot_config_update(
+        let outputs = match apply_hot_config_update(
             request.job_id,
             config,
             config_path,
             toml,
             preserve_redacted.unwrap_or(false),
             base_config_sha256_hex.as_deref(),
-        );
-        let outputs = command_result_outputs(request.job_id, result);
+        ) {
+            Ok(mut outputs) => {
+                let reconcile =
+                    reconcile_configured_runtime_tunnels(config, "hot_config_update").await;
+                log_configured_runtime_tunnel_reconcile(&reconcile);
+                if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
+                    warn!(%error, "failed to attach runtime tunnel reconcile report to hot config output");
+                }
+                outputs
+            }
+            Err(error) => command_result_outputs(request.job_id, Err(error)),
+        };
         recent_commands.remember(request.job_id, request_payload_hash, outputs.clone(), false);
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
     if let JobCommand::DataSourceConfigPatch { toml } = &request.command {
-        let result = apply_data_source_config_patch(request.job_id, config, config_path, toml);
-        let outputs = command_result_outputs(request.job_id, result);
+        let outputs = match apply_data_source_config_patch(
+            request.job_id,
+            config,
+            config_path,
+            toml,
+        ) {
+            Ok(mut outputs) => {
+                let reconcile =
+                    reconcile_configured_runtime_tunnels(config, "data_source_config_patch").await;
+                log_configured_runtime_tunnel_reconcile(&reconcile);
+                if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
+                    warn!(%error, "failed to attach runtime tunnel reconcile report to data source config patch output");
+                }
+                outputs
+            }
+            Err(error) => command_result_outputs(request.job_id, Err(error)),
+        };
         recent_commands.remember(request.job_id, request_payload_hash, outputs.clone(), false);
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
@@ -1374,6 +1605,76 @@ mod tests {
             CURRENT_COMMAND_PROTOCOL_VERSION
         ));
         assert!(!command_supports_requested_protocol(&command, 0));
+    }
+
+    #[tokio::test]
+    async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-configured-runtime-reconcile-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let plan = vpsman_common::plan_tunnel(&vpsman_common::TunnelPlanInput {
+            name: "left-right".to_string(),
+            interface_name: "tunlr".to_string(),
+            kind: vpsman_common::TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "left-a".to_string(),
+            right_client_id: "right-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: "203.0.113.20".to_string(),
+            address_pool_cidr: "10.255.0.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+                left: "10.255.0.0".to_string(),
+                right: "10.255.0.1".to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: vpsman_common::BandwidthTier::M100,
+            latency_ms: 15.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+        })
+        .unwrap();
+        let config = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: true,
+                runtime_reconcile_enabled: true,
+                root_dir: root.to_string_lossy().to_string(),
+                runtime_ip_argv: vec!["/bin/echo".to_string()],
+                runtime_tc_argv: vec!["/bin/echo".to_string()],
+                runtime_unprivileged_mutation_policy:
+                    vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+                runtime_status_telemetry_plans: vec![
+                    vpsman_common::AgentRuntimeStatusTelemetryPlan {
+                        plan_id: Some("plan-a".to_string()),
+                        endpoint_side: vpsman_common::TunnelEndpointSide::Left,
+                        plan,
+                        traffic_source: Default::default(),
+                        traffic_command: None,
+                        latency_monitoring_enabled: true,
+                        auto_ospf_enabled: false,
+                        auto_ospf_updater: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+
+        let report = reconcile_configured_runtime_tunnels(&config, "test").await;
+
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["total"], 1);
+        assert_eq!(report["converged"], 1);
+        assert_eq!(report["tunnels"][0]["plan_id"], "plan-a");
+        assert_eq!(report["tunnels"][0]["interface"], "tunlr");
     }
 
     #[test]

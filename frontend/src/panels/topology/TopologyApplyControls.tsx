@@ -91,6 +91,8 @@ export function TopologyApplyControls({
       ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
         ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
+      : selectedPlan && !selectedPlan.enabled
+        ? "Plan disabled; inspect and rollback only"
       : privilegeMaterial
         ? "Ready"
         : "Locked");
@@ -145,6 +147,10 @@ export function TopologyApplyControls({
       setActionError("Privilege unlock is locked");
       return;
     }
+    if (!selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
+      setActionError("Tunnel plan is disabled");
+      return;
+    }
     setPendingAction(mode);
   }
 
@@ -163,6 +169,9 @@ export function TopologyApplyControls({
       }
       if (!privilegeMaterial) {
         throw new Error("Privilege unlock is locked");
+      }
+      if (!selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
+        throw new Error("Tunnel plan is disabled");
       }
       const boundedProbeCount = clampInteger(probeCount, 1, 20);
       const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
@@ -267,7 +276,7 @@ export function TopologyApplyControls({
             >
               {tunnelPlans.map((plan) => (
                 <option key={plan.id} value={plan.id}>
-                  {plan.name}
+                  {plan.name}{plan.enabled ? "" : " (disabled)"}
                 </option>
               ))}
             </select>
@@ -443,7 +452,7 @@ export function TopologyApplyControls({
         <div className="dispatchActions">
           <button
             className="primaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             type="submit"
           >
             <Play size={17} />
@@ -469,7 +478,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             onClick={submitProbe}
             type="button"
           >
@@ -478,7 +487,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
+            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             onClick={submitSpeedTest}
             type="button"
           >
@@ -498,6 +507,10 @@ export function TopologyApplyControls({
 }
 
 type NetworkAction = "apply" | "rollback" | "status" | "probe" | "speed_test";
+
+function disabledPlanAllowsAction(mode: NetworkAction): boolean {
+  return mode === "rollback" || mode === "status";
+}
 
 function commandName(mode: NetworkAction) {
   if (mode === "apply") {

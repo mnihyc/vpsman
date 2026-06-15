@@ -5,7 +5,8 @@ use uuid::Uuid;
 use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
-    JobCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
+    JobCommand, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide,
+    TunnelPlan,
 };
 
 use crate::{
@@ -37,6 +38,10 @@ pub(crate) struct VtyTunnelPromoteTelemetryRequest {
     pub(crate) local_underlay: String,
     pub(crate) peer_underlay: String,
     pub(crate) address_pool_cidr: String,
+    pub(crate) ipv4_tunnel: Option<TunnelAddressPair>,
+    pub(crate) ipv6_address_pool_cidr: Option<String>,
+    pub(crate) ipv6_tunnel: Option<TunnelAddressPair>,
+    pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) name: Option<String>,
     pub(crate) topology_version: Option<String>,
@@ -44,6 +49,15 @@ pub(crate) struct VtyTunnelPromoteTelemetryRequest {
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct VtyTunnelAllocateRequest {
+    pub(crate) ipv4_pool_cidr: Option<String>,
+    pub(crate) ipv6_pool_cidr: Option<String>,
+    pub(crate) reserved_addresses: Vec<String>,
+    pub(crate) include_ipv4: bool,
+    pub(crate) include_ipv6: bool,
 }
 
 pub(crate) fn submit_or_render_vty_tunnel_plan(
@@ -64,6 +78,25 @@ pub(crate) fn submit_or_render_vty_tunnel_plan(
     }
 }
 
+pub(crate) fn submit_vty_tunnel_allocate(
+    api_url: &str,
+    token: Option<&str>,
+    request: VtyTunnelAllocateRequest,
+) -> Result<String> {
+    http_post_json(
+        api_url,
+        "/api/v1/tunnel-plans/allocate",
+        token,
+        &serde_json::json!({
+            "ipv4_pool_cidr": request.ipv4_pool_cidr,
+            "ipv6_pool_cidr": request.ipv6_pool_cidr,
+            "reserved_addresses": request.reserved_addresses,
+            "include_ipv4": request.include_ipv4,
+            "include_ipv6": request.include_ipv6,
+        }),
+    )
+}
+
 pub(crate) fn submit_vty_tunnel_promote_telemetry(
     api_url: &str,
     token: Option<&str>,
@@ -80,6 +113,10 @@ pub(crate) fn submit_vty_tunnel_promote_telemetry(
             "local_underlay": request.local_underlay,
             "peer_underlay": request.peer_underlay,
             "address_pool_cidr": request.address_pool_cidr,
+            "ipv4_tunnel": request.ipv4_tunnel,
+            "ipv6_address_pool_cidr": request.ipv6_address_pool_cidr,
+            "ipv6_tunnel": request.ipv6_tunnel,
+            "latency_primary_family": request.latency_primary_family,
             "side": request.side,
             "name": request.name,
             "topology_version": request.topology_version,
@@ -91,6 +128,91 @@ pub(crate) fn submit_vty_tunnel_promote_telemetry(
     )
 }
 
+pub(crate) fn parse_vty_tunnel_allocate(tokens: &[&str]) -> Result<VtyTunnelAllocateRequest> {
+    let mut ipv4_pool_cidr = None::<String>;
+    let mut ipv6_pool_cidr = None::<String>;
+    let mut reserved_addresses = Vec::<String>::new();
+    let mut include_ipv4 = true;
+    let mut include_ipv6 = false;
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--ipv4-pool-cidr" | "--address-pool-cidr" | "--pool-cidr" => {
+                ipv4_pool_cidr = Some(next_value(tokens, index, tokens[index])?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--ipv4-pool-cidr=") => {
+                ipv4_pool_cidr = Some(flag_value(value, "--ipv4-pool-cidr=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--address-pool-cidr=") => {
+                ipv4_pool_cidr = Some(flag_value(value, "--address-pool-cidr=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--pool-cidr=") => {
+                ipv4_pool_cidr = Some(flag_value(value, "--pool-cidr=").to_string());
+                index += 1;
+            }
+            "--ipv6-pool-cidr" | "--ipv6-address-pool-cidr" => {
+                ipv6_pool_cidr = Some(next_value(tokens, index, tokens[index])?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--ipv6-pool-cidr=") => {
+                ipv6_pool_cidr = Some(flag_value(value, "--ipv6-pool-cidr=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--ipv6-address-pool-cidr=") => {
+                ipv6_pool_cidr = Some(flag_value(value, "--ipv6-address-pool-cidr=").to_string());
+                index += 1;
+            }
+            "--reserved-address" | "--reserved" => {
+                reserved_addresses.push(next_value(tokens, index, tokens[index])?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--reserved-address=") => {
+                reserved_addresses.push(flag_value(value, "--reserved-address=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--reserved=") => {
+                reserved_addresses.push(flag_value(value, "--reserved=").to_string());
+                index += 1;
+            }
+            "--include-ipv4" => {
+                include_ipv4 = true;
+                index += 1;
+            }
+            "--no-ipv4" | "--disable-ipv4" => {
+                include_ipv4 = false;
+                index += 1;
+            }
+            value if value.starts_with("--include-ipv4=") => {
+                include_ipv4 = parse_bool(flag_value(value, "--include-ipv4="), "--include-ipv4")?;
+                index += 1;
+            }
+            "--include-ipv6" => {
+                include_ipv6 = true;
+                index += 1;
+            }
+            "--no-ipv6" | "--disable-ipv6" => {
+                include_ipv6 = false;
+                index += 1;
+            }
+            value if value.starts_with("--include-ipv6=") => {
+                include_ipv6 = parse_bool(flag_value(value, "--include-ipv6="), "--include-ipv6")?;
+                index += 1;
+            }
+            other => anyhow::bail!("unknown tunnel-allocate flag {other}"),
+        }
+    }
+    Ok(VtyTunnelAllocateRequest {
+        ipv4_pool_cidr,
+        ipv6_pool_cidr,
+        reserved_addresses,
+        include_ipv4,
+        include_ipv6,
+    })
+}
+
 pub(crate) fn parse_vty_tunnel_promote_telemetry(
     tokens: &[&str],
 ) -> Result<VtyTunnelPromoteTelemetryRequest> {
@@ -100,6 +222,14 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
     let mut local_underlay = None::<String>;
     let mut peer_underlay = None::<String>;
     let mut address_pool_cidr = None::<String>;
+    let mut left_tunnel_ipv4 = None::<String>;
+    let mut right_tunnel_ipv4 = None::<String>;
+    let mut tunnel_ipv4_prefix_len = 31_u8;
+    let mut ipv6_address_pool_cidr = None::<String>;
+    let mut left_tunnel_ipv6 = None::<String>;
+    let mut right_tunnel_ipv6 = None::<String>;
+    let mut tunnel_ipv6_prefix_len = 127_u8;
+    let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut side = TunnelEndpointSide::Left;
     let mut name = None::<String>;
     let mut topology_version = None::<String>;
@@ -157,6 +287,97 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
             }
             value if value.starts_with("--address-pool-cidr=") => {
                 address_pool_cidr = Some(flag_value(value, "--address-pool-cidr=").to_string());
+                index += 1;
+            }
+            "--left-tunnel-ipv4" => {
+                left_tunnel_ipv4 =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv4")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--left-tunnel-ipv4=") => {
+                left_tunnel_ipv4 = Some(flag_value(value, "--left-tunnel-ipv4=").to_string());
+                index += 1;
+            }
+            "--right-tunnel-ipv4" => {
+                right_tunnel_ipv4 =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv4")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--right-tunnel-ipv4=") => {
+                right_tunnel_ipv4 = Some(flag_value(value, "--right-tunnel-ipv4=").to_string());
+                index += 1;
+            }
+            "--tunnel-ipv4-prefix-len" => {
+                tunnel_ipv4_prefix_len = parse_u8(
+                    next_value(tokens, index, "--tunnel-ipv4-prefix-len")?,
+                    "--tunnel-ipv4-prefix-len",
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--tunnel-ipv4-prefix-len=") => {
+                tunnel_ipv4_prefix_len = parse_u8(
+                    flag_value(value, "--tunnel-ipv4-prefix-len="),
+                    "--tunnel-ipv4-prefix-len",
+                )?;
+                index += 1;
+            }
+            "--ipv6-address-pool-cidr" | "--ipv6-pool-cidr" => {
+                ipv6_address_pool_cidr =
+                    Some(next_value(tokens, index, tokens[index])?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--ipv6-address-pool-cidr=") => {
+                ipv6_address_pool_cidr =
+                    Some(flag_value(value, "--ipv6-address-pool-cidr=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--ipv6-pool-cidr=") => {
+                ipv6_address_pool_cidr = Some(flag_value(value, "--ipv6-pool-cidr=").to_string());
+                index += 1;
+            }
+            "--left-tunnel-ipv6" => {
+                left_tunnel_ipv6 =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv6")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--left-tunnel-ipv6=") => {
+                left_tunnel_ipv6 = Some(flag_value(value, "--left-tunnel-ipv6=").to_string());
+                index += 1;
+            }
+            "--right-tunnel-ipv6" => {
+                right_tunnel_ipv6 =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv6")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--right-tunnel-ipv6=") => {
+                right_tunnel_ipv6 = Some(flag_value(value, "--right-tunnel-ipv6=").to_string());
+                index += 1;
+            }
+            "--tunnel-ipv6-prefix-len" => {
+                tunnel_ipv6_prefix_len = parse_u8(
+                    next_value(tokens, index, "--tunnel-ipv6-prefix-len")?,
+                    "--tunnel-ipv6-prefix-len",
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--tunnel-ipv6-prefix-len=") => {
+                tunnel_ipv6_prefix_len = parse_u8(
+                    flag_value(value, "--tunnel-ipv6-prefix-len="),
+                    "--tunnel-ipv6-prefix-len",
+                )?;
+                index += 1;
+            }
+            "--latency-primary-family" => {
+                latency_primary_family = parse_tunnel_address_family(next_value(
+                    tokens,
+                    index,
+                    "--latency-primary-family",
+                )?)?;
+                index += 2;
+            }
+            value if value.starts_with("--latency-primary-family=") => {
+                latency_primary_family =
+                    parse_tunnel_address_family(flag_value(value, "--latency-primary-family="))?;
                 index += 1;
             }
             "--side" => {
@@ -224,6 +445,19 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
             other => anyhow::bail!("unknown tunnel-promote-telemetry flag {other}"),
         }
     }
+    let ipv4_tunnel = build_address_pair(
+        left_tunnel_ipv4,
+        right_tunnel_ipv4,
+        tunnel_ipv4_prefix_len,
+        "IPv4",
+    )?;
+    let ipv6_tunnel = build_address_pair(
+        left_tunnel_ipv6,
+        right_tunnel_ipv6,
+        tunnel_ipv6_prefix_len,
+        "IPv6",
+    )?;
+    ensure_explicit_tunnel_endpoints(&ipv4_tunnel, &ipv6_tunnel, "tunnel-promote-telemetry")?;
     Ok(VtyTunnelPromoteTelemetryRequest {
         client_id: client_id.context("tunnel-promote-telemetry requires --client-id")?,
         interface: interface.context("tunnel-promote-telemetry requires --interface")?,
@@ -233,8 +467,11 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
             .context("tunnel-promote-telemetry requires --local-underlay")?,
         peer_underlay: peer_underlay
             .context("tunnel-promote-telemetry requires --peer-underlay")?,
-        address_pool_cidr: address_pool_cidr
-            .context("tunnel-promote-telemetry requires --address-pool-cidr")?,
+        address_pool_cidr: address_pool_cidr.unwrap_or_default(),
+        ipv4_tunnel,
+        ipv6_address_pool_cidr,
+        ipv6_tunnel,
+        latency_primary_family,
         side,
         name,
         topology_version,
@@ -535,6 +772,35 @@ fn required<T>(value: Option<T>, flag: &str) -> Result<T> {
     value.with_context(|| format!("missing required {flag}"))
 }
 
+fn build_address_pair(
+    left: Option<String>,
+    right: Option<String>,
+    prefix_len: u8,
+    label: &str,
+) -> Result<Option<TunnelAddressPair>> {
+    match (left, right) {
+        (Some(left), Some(right)) => Ok(Some(TunnelAddressPair {
+            left,
+            right,
+            prefix_len,
+        })),
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("{label} tunnel endpoints require both left and right addresses"),
+    }
+}
+
+fn ensure_explicit_tunnel_endpoints(
+    ipv4_tunnel: &Option<TunnelAddressPair>,
+    ipv6_tunnel: &Option<TunnelAddressPair>,
+    command: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        ipv4_tunnel.is_some() || ipv6_tunnel.is_some(),
+        "{command} requires explicit IPv4 or IPv6 tunnel endpoints; run tunnel-allocate for non-overlapping suggestions first"
+    );
+    Ok(())
+}
+
 fn parse_tunnel_apply_side(value: &str) -> Result<TunnelEndpointSide> {
     match value {
         "left" => Ok(TunnelEndpointSide::Left),
@@ -552,12 +818,34 @@ fn parse_promote_bandwidth(value: &str) -> Result<BandwidthTier> {
     }
 }
 
+fn parse_tunnel_address_family(value: &str) -> Result<TunnelAddressFamily> {
+    match value {
+        "ipv4" | "IPv4" => Ok(TunnelAddressFamily::Ipv4),
+        "ipv6" | "IPv6" => Ok(TunnelAddressFamily::Ipv6),
+        _ => anyhow::bail!("--latency-primary-family must be one of ipv4, ipv6"),
+    }
+}
+
 fn parse_tunnel_backend(value: &str) -> Result<TunnelConfigBackend> {
     match value {
         "ifupdown" => Ok(TunnelConfigBackend::Ifupdown),
         "netplan" => Ok(TunnelConfigBackend::Netplan),
         "systemd-networkd" | "systemd_networkd" => Ok(TunnelConfigBackend::SystemdNetworkd),
         _ => anyhow::bail!("--backend must be one of ifupdown, netplan, systemd-networkd"),
+    }
+}
+
+fn parse_u8(value: &str, flag: &str) -> Result<u8> {
+    value
+        .parse::<u8>()
+        .with_context(|| format!("{flag} must be an integer from 0 to 255"))
+}
+
+fn parse_bool(value: &str, flag: &str) -> Result<bool> {
+    match value {
+        "true" | "yes" | "1" | "on" => Ok(true),
+        "false" | "no" | "0" | "off" => Ok(false),
+        _ => anyhow::bail!("{flag} must be true or false"),
     }
 }
 
@@ -575,10 +863,12 @@ fn parse_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64>
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_vty_tunnel_apply, parse_vty_tunnel_promote_telemetry, parse_vty_tunnel_rollback,
-        parse_vty_tunnel_status,
+        parse_vty_tunnel_allocate, parse_vty_tunnel_apply, parse_vty_tunnel_promote_telemetry,
+        parse_vty_tunnel_rollback, parse_vty_tunnel_status,
     };
-    use vpsman_common::{BandwidthTier, TunnelConfigBackend, TunnelEndpointSide};
+    use vpsman_common::{
+        BandwidthTier, TunnelAddressFamily, TunnelConfigBackend, TunnelEndpointSide,
+    };
 
     #[test]
     fn parses_vty_tunnel_apply() {
@@ -618,6 +908,8 @@ mod tests {
             "--peer-underlay",
             "198.51.100.11",
             "--address-pool-cidr=10.44.0.0/30",
+            "--left-tunnel-ipv4=10.44.0.0",
+            "--right-tunnel-ipv4=10.44.0.1",
             "--side=right",
             "--name",
             "imported-tun42",
@@ -637,6 +929,7 @@ mod tests {
         assert_eq!(request.local_underlay, "198.51.100.10");
         assert_eq!(request.peer_underlay, "198.51.100.11");
         assert_eq!(request.address_pool_cidr, "10.44.0.0/30");
+        assert_eq!(request.ipv4_tunnel.as_ref().unwrap().left, "10.44.0.0");
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.name.as_deref(), Some("imported-tun42"));
         assert_eq!(request.topology_version.as_deref(), Some("observed-v1"));
@@ -644,6 +937,52 @@ mod tests {
         assert_eq!(request.latency_ms, Some(21.5));
         assert_eq!(request.packet_loss_ratio, Some(0.02));
         assert_eq!(request.preference, Some(1.5));
+    }
+
+    #[test]
+    fn parses_vty_tunnel_promote_telemetry_explicit_endpoints() {
+        let request = parse_vty_tunnel_promote_telemetry(&[
+            "--client-id=edge-a",
+            "--interface=tun42",
+            "--peer-client-id=edge-b",
+            "--local-underlay=198.51.100.10",
+            "--peer-underlay=198.51.100.11",
+            "--left-tunnel-ipv4=10.44.0.0",
+            "--right-tunnel-ipv4=10.44.0.1",
+            "--ipv6-pool-cidr=fd7a:115c:a1e0:44::/126",
+            "--latency-primary-family=ipv6",
+        ])
+        .unwrap();
+
+        assert_eq!(request.address_pool_cidr, "");
+        assert_eq!(request.ipv4_tunnel.as_ref().unwrap().right, "10.44.0.1");
+        assert_eq!(
+            request.ipv6_address_pool_cidr.as_deref(),
+            Some("fd7a:115c:a1e0:44::/126")
+        );
+        assert_eq!(request.latency_primary_family, TunnelAddressFamily::Ipv6);
+    }
+
+    #[test]
+    fn parses_vty_tunnel_allocate() {
+        let request = parse_vty_tunnel_allocate(&[
+            "--ipv4-pool-cidr=10.255.40.0/24",
+            "--ipv6-pool-cidr",
+            "fd7a:115c:a1e0:40::/120",
+            "--reserved=10.255.40.0",
+            "--include-ipv6",
+            "--include-ipv4=false",
+        ])
+        .unwrap();
+
+        assert_eq!(request.ipv4_pool_cidr.as_deref(), Some("10.255.40.0/24"));
+        assert_eq!(
+            request.ipv6_pool_cidr.as_deref(),
+            Some("fd7a:115c:a1e0:40::/120")
+        );
+        assert_eq!(request.reserved_addresses, vec!["10.255.40.0"]);
+        assert!(!request.include_ipv4);
+        assert!(request.include_ipv6);
     }
 
     #[test]
@@ -664,6 +1003,23 @@ mod tests {
             "--peer-client-id=edge-b",
             "--local-underlay=198.51.100.10",
             "--peer-underlay=198.51.100.11",
+            "--left-tunnel-ipv4=10.44.0.0",
+        ])
+        .is_err());
+        assert!(parse_vty_tunnel_promote_telemetry(&[
+            "--client-id=edge-a",
+            "--interface=tun42",
+            "--peer-client-id=edge-b",
+            "--local-underlay=198.51.100.10",
+            "--peer-underlay=198.51.100.11",
+            "--address-pool-cidr=10.44.0.0/30",
+        ])
+        .is_err());
+        assert!(parse_vty_tunnel_promote_telemetry(&[
+            "--client-id=edge-a",
+            "--interface=tun42",
+            "--peer-client-id=edge-b",
+            "--local-underlay=198.51.100.10",
         ])
         .is_err());
     }

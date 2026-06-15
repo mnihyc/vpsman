@@ -453,6 +453,7 @@ async fn build_dashboard_overview(
         effective_range,
     );
     let resources = build_resources(latest_rollups.values());
+    let base_alert_policy = state.fleet_alert_policy();
     let resource_curve = build_resource_curve(ResourceCurveInput {
         metric: resource_metric,
         rollups: &rollups,
@@ -460,7 +461,7 @@ async fn build_dashboard_overview(
         range: &effective_range,
         chart_step_secs,
         preferences,
-        base_policy: &state.fleet_alert_policy,
+        base_policy: &base_alert_policy,
         alert_policies: &alert_policies,
     })?;
     let network = build_network(

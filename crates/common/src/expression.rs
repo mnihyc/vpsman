@@ -325,25 +325,10 @@ fn tokenize(input: &str) -> Result<Vec<TokenKind>, String> {
             _ => {}
         }
 
-        let start = chars[index].0;
-        let mut cursor = index;
-        let mut end = input.len();
-        while cursor < chars.len() {
-            let (byte_index, current) = chars[cursor];
-            if current.is_whitespace()
-                || matches!(
-                    current,
-                    '(' | ')' | '[' | ']' | ',' | '=' | '!' | '<' | '>' | '&' | '|' | '~'
-                )
-            {
-                end = byte_index;
-                break;
-            }
-            cursor += 1;
-        }
-        let raw = input[start..end].trim();
+        let (word, next_index) = read_word(input, &chars, index)?;
+        let raw = word.trim();
         if raw.is_empty() {
-            index = cursor;
+            index = next_index;
             continue;
         }
         tokens.push(match raw.to_ascii_lowercase().as_str() {
@@ -353,9 +338,62 @@ fn tokenize(input: &str) -> Result<Vec<TokenKind>, String> {
             "in" => TokenKind::In,
             _ => TokenKind::Word(raw.to_string()),
         });
-        index = cursor;
+        index = next_index;
     }
     Ok(tokens)
+}
+
+fn read_word(
+    input: &str,
+    chars: &[(usize, char)],
+    start_index: usize,
+) -> Result<(String, usize), String> {
+    let mut value = String::new();
+    let mut quote = None;
+    let mut quote_start = None;
+    let mut escaped = false;
+    let mut cursor = start_index;
+    while cursor < chars.len() {
+        let (byte_index, current) = chars[cursor];
+        if let Some(active_quote) = quote {
+            if escaped {
+                value.push(current);
+                escaped = false;
+            } else if current == '\\' {
+                escaped = true;
+            } else if current == active_quote {
+                quote = None;
+                quote_start = None;
+            } else {
+                value.push(current);
+            }
+            cursor += 1;
+            continue;
+        }
+        if current.is_whitespace()
+            || matches!(
+                current,
+                '(' | ')' | '[' | ']' | ',' | '=' | '!' | '<' | '>' | '&' | '|' | '~'
+            )
+        {
+            break;
+        }
+        if current == '"' || current == '\'' {
+            quote = Some(current);
+            quote_start = Some(byte_index);
+            cursor += 1;
+            continue;
+        }
+        value.push(current);
+        cursor += 1;
+    }
+    if quote.is_some() {
+        return Err(format!(
+            "unterminated quoted value starting at byte {}",
+            quote_start.unwrap_or(input.len())
+        ));
+    }
+    Ok((value, cursor))
 }
 
 fn read_quoted(
@@ -1272,6 +1310,15 @@ mod tests {
                 })
                 .collect::<BTreeSet<_>>();
             assert_eq!(actual, expected, "fixture case {name}");
+        }
+        let suggestions = fixture
+            .get("parseable_suggestions")
+            .and_then(Value::as_array)
+            .expect("fixture parseable suggestions");
+        for suggestion in suggestions.iter().filter_map(Value::as_str) {
+            parse_expression(suggestion)
+                .unwrap_or_else(|error| panic!("suggestion {suggestion}: parse failed: {error}"))
+                .expect("fixture suggestion expression");
         }
     }
 

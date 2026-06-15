@@ -1,5 +1,13 @@
 use super::*;
 
+fn ipv4_pair(left: &str, right: &str) -> TunnelAddressPair {
+    TunnelAddressPair {
+        left: left.to_string(),
+        right: right.to_string(),
+        prefix_len: 31,
+    }
+}
+
 #[test]
 fn higher_bandwidth_is_preferred_when_latency_close() {
     let policy = OspfCostPolicy::default();
@@ -129,6 +137,10 @@ fn renders_safe_tunnel_plan_without_mutation() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M1000,
         latency_ms: 138.0,
         packet_loss_ratio: 0.002,
@@ -159,6 +171,130 @@ fn renders_safe_tunnel_plan_without_mutation() {
 }
 
 #[test]
+fn plans_explicit_dual_stack_tunnel_addresses() {
+    let plan = plan_tunnel(&TunnelPlanInput {
+        name: "dual-stack".to_string(),
+        interface_name: "tun6".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "edge-a".to_string(),
+        right_client_id: "edge-b".to_string(),
+        left_underlay: "198.51.100.10".to_string(),
+        right_underlay: "203.0.113.20".to_string(),
+        address_pool_cidr: String::new(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.255.10.0".to_string(),
+            right: "10.255.10.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: Some(TunnelAddressPair {
+            left: "fd00:10::0".to_string(),
+            right: "fd00:10::1".to_string(),
+            prefix_len: 127,
+        }),
+        latency_primary_family: TunnelAddressFamily::Ipv6,
+        bandwidth: BandwidthTier::M1000,
+        latency_ms: 20.0,
+        packet_loss_ratio: 0.0,
+        preference: 1.0,
+        ospf_policy: OspfCostPolicy::default(),
+    })
+    .expect("plan");
+
+    assert_eq!(plan.latency_primary_family, TunnelAddressFamily::Ipv6);
+    assert_eq!(plan.left_tunnel_address, "fd00:10::0");
+    assert_eq!(plan.right_tunnel_address, "fd00:10::1");
+    assert_eq!(plan.tunnel_prefix_len, 127);
+    assert!(plan.ifupdown_snippet.contains("iface tun6 inet static"));
+    assert!(plan.ifupdown_snippet.contains("iface tun6 inet6 static"));
+    assert!(plan.ifupdown_snippet.contains("address 10.255.10.0"));
+    assert!(plan.ifupdown_snippet.contains("address fd00:10::0"));
+}
+
+#[test]
+fn allocates_endpoint_suggestions_without_planning_side_effects() {
+    let allocation = allocate_tunnel_endpoints(
+        Some("10.255.30.0/29"),
+        Some("fd00:30::/126"),
+        &["10.255.30.0".to_string(), "10.255.30.1".to_string()],
+        true,
+        true,
+    )
+    .expect("allocation");
+
+    assert_eq!(
+        allocation.ipv4_tunnel,
+        Some(ipv4_pair("10.255.30.2", "10.255.30.3"))
+    );
+    assert_eq!(
+        allocation.ipv6_tunnel,
+        Some(TunnelAddressPair {
+            left: "fd00:30::".to_string(),
+            right: "fd00:30::1".to_string(),
+            prefix_len: 127,
+        })
+    );
+    assert_eq!(allocation.latency_primary_family, TunnelAddressFamily::Ipv4);
+}
+
+#[test]
+fn rejects_tunnel_plan_without_any_endpoint_addresses() {
+    assert_eq!(
+        plan_tunnel(&TunnelPlanInput {
+            name: "empty".to_string(),
+            interface_name: "tunempty".to_string(),
+            kind: TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "edge-a".to_string(),
+            right_client_id: "edge-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: "203.0.113.20".to_string(),
+            address_pool_cidr: String::new(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: None,
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: BandwidthTier::M100,
+            latency_ms: 20.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: OspfCostPolicy::default(),
+        }),
+        Err(NetworkPlanError::TunnelAddressRequired)
+    );
+    assert_eq!(
+        plan_tunnel(&TunnelPlanInput {
+            name: "pool-only".to_string(),
+            interface_name: "tunpool".to_string(),
+            kind: TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "edge-a".to_string(),
+            right_client_id: "edge-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: "203.0.113.20".to_string(),
+            address_pool_cidr: "10.255.99.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: None,
+            ipv6_address_pool_cidr: Some("fd00:99::/127".to_string()),
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: BandwidthTier::M100,
+            latency_ms: 20.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: OspfCostPolicy::default(),
+        }),
+        Err(NetworkPlanError::TunnelAddressRequired)
+    );
+}
+
+#[test]
 fn plans_external_observed_tunnel_without_ifupdown_mutation() {
     let plan = plan_tunnel(&TunnelPlanInput {
         name: "wg-import".to_string(),
@@ -179,6 +315,10 @@ fn plans_external_observed_tunnel_without_ifupdown_mutation() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 80.0,
         packet_loss_ratio: 0.0,
@@ -244,6 +384,10 @@ fn plans_external_managed_adapter_tunnel_with_commands() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M1000,
         latency_ms: 80.0,
         packet_loss_ratio: 0.0,
@@ -279,6 +423,10 @@ fn rejects_custom_kind_without_external_runtime_manager() {
             right_underlay: "203.0.113.20".to_string(),
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
+            ipv4_tunnel: None,
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
             bandwidth: BandwidthTier::M100,
             latency_ms: 80.0,
             packet_loss_ratio: 0.0,
@@ -455,6 +603,10 @@ fn renders_side_specific_tunnel_apply_snippets() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 50.0,
         packet_loss_ratio: 0.0,
@@ -502,6 +654,10 @@ fn renders_all_initial_tunnel_kinds() {
             right_underlay: "203.0.113.20".to_string(),
             address_pool_cidr: "10.255.10.0/29".to_string(),
             reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(ipv4_pair("10.255.10.0", "10.255.10.1")),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
             bandwidth: BandwidthTier::M100,
             latency_ms: 20.0,
             packet_loss_ratio: 0.0,
@@ -536,6 +692,10 @@ fn renders_custom_fou_runtime_options_without_hardcoded_ports() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.20.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.20.0", "10.255.20.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 20.0,
         packet_loss_ratio: 0.0,
@@ -581,6 +741,10 @@ fn renders_backend_specific_tunnel_files_and_signature_payload() {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(ipv4_pair("10.255.0.0", "10.255.0.1")),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 50.0,
         packet_loss_ratio: 0.0,
@@ -636,6 +800,10 @@ fn rejects_conflicting_or_invalid_tunnel_plans() {
             right_underlay: "203.0.113.20".to_string(),
             address_pool_cidr: "10.255.0.0/30".to_string(),
             reserved_addresses: Vec::new(),
+            ipv4_tunnel: None,
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
             bandwidth: BandwidthTier::M10,
             latency_ms: 10.0,
             packet_loss_ratio: 0.0,
@@ -646,24 +814,13 @@ fn rejects_conflicting_or_invalid_tunnel_plans() {
     );
 
     assert_eq!(
-        plan_tunnel(&TunnelPlanInput {
-            name: "full".to_string(),
-            interface_name: "vpsfull".to_string(),
-            kind: TunnelKind::Ipip,
-            runtime_control: Default::default(),
-            runtime_topology: Default::default(),
-            left_client_id: "left".to_string(),
-            right_client_id: "right".to_string(),
-            left_underlay: "198.51.100.10".to_string(),
-            right_underlay: "203.0.113.20".to_string(),
-            address_pool_cidr: "10.255.0.0/31".to_string(),
-            reserved_addresses: vec!["10.255.0.0".to_string(), "10.255.0.1".to_string()],
-            bandwidth: BandwidthTier::M10,
-            latency_ms: 10.0,
-            packet_loss_ratio: 0.0,
-            preference: 1.0,
-            ospf_policy: OspfCostPolicy::default(),
-        }),
+        allocate_tunnel_endpoints(
+            Some("10.255.0.0/31"),
+            None,
+            &["10.255.0.0".to_string(), "10.255.0.1".to_string()],
+            true,
+            false
+        ),
         Err(NetworkPlanError::AddressPoolExhausted)
     );
 }

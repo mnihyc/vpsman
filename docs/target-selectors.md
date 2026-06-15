@@ -59,6 +59,7 @@ Precedence is:
 Examples:
 
 ```text
+*
 status = "stale"
 status in [stale]
 vps.status = stale && tag:edge
@@ -92,6 +93,8 @@ Regex flags are not supported.
 
 Literal matching is case-insensitive. Bare text still searches VPS id and
 display name by contains for operator convenience.
+The bare wildcard `*` is supported as the concise all-VPS selector, equivalent
+in practice to `id:*` for target selection.
 
 Datetime ordering accepts RFC3339 timestamps and Unix seconds.
 
@@ -107,6 +110,7 @@ Canonical VPS fields use `vps.<path>`.
   `role:edge`; use `vps.role = edge` for future serialized VPS JSON fields.
 - `untagged` is true only when VPS metadata exists and the tag list is empty.
 - `last_seen` aliases `vps.last_seen_at`.
+- `*` selects all VPSs; `id:*` remains the explicit ID-field spelling.
 
 `client:<id>` is not an operator selector. Internal audit and command
 records may still render concrete resolved targets as `client:<id>`.

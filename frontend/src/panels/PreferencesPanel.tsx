@@ -359,15 +359,15 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
           </PreferenceGroup>
 
           <PreferenceGroup
-            description="Controls server-side dashboard curve limits and exclusions. Selectors support provider:*, country:*, tag:*, name:*, id:*, or a raw tag."
+            description="Controls server-side dashboard curve limits and exclusions. Selectors support *, provider:*, country:*, tag:*, name:*, id:*, or a raw tag."
             icon={<Activity size={18} />}
             title="Dashboard curves"
           >
             <div className="preferenceInlineControls">
               <label>
-                <span>Resource top VPS</span>
+                <span>Resource top count</span>
                 <select
-                  aria-label="Resource curve top VPS"
+                  aria-label="Resource curve top count"
                   value={draft.dashboard_resource_top_limit}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -384,9 +384,9 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
                 </select>
               </label>
               <label>
-                <span>Network top VPS</span>
+                <span>Network top count</span>
                 <select
-                  aria-label="Network top VPS"
+                  aria-label="Network top count"
                   value={draft.dashboard_network_top_limit}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -524,14 +524,14 @@ function validateDashboardLimits(
     resourceTopLimit < 3 ||
     resourceTopLimit > 16
   ) {
-    return "Resource curve top VPS must be between 3 and 16";
+    return "Resource curve top count must be between 3 and 16";
   }
   if (
     !Number.isInteger(networkTopLimit) ||
     networkTopLimit < 3 ||
     networkTopLimit > 16
   ) {
-    return "Network top VPS must be between 3 and 16";
+    return "Network top count must be between 3 and 16";
   }
   return null;
 }

@@ -47,6 +47,14 @@ async fn tunnel_plan_records_non_mutating_plan_and_audit() {
         right_underlay: "203.0.113.2".to_string(),
         address_pool_cidr: "10.10.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.10.0.0".to_string(),
+            right: "10.10.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
@@ -67,6 +75,260 @@ async fn tunnel_plan_records_non_mutating_plan_and_audit() {
     assert_eq!(plans.len(), 1);
     assert_eq!(audits[0].action, "network.tunnel_plan_created");
     assert_eq!(audits[0].metadata["mutates_host"], false);
+}
+
+#[tokio::test]
+async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "test-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    let mut input = test_plan_input();
+    input.address_pool_cidr = "10.10.0.0/29".to_string();
+    input.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+        left: "10.10.0.0".to_string(),
+        right: "10.10.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let plan = plan_tunnel(&input).unwrap();
+    repo.record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
+        State(state),
+        headers,
+        Json(AllocateTunnelEndpointsRequest {
+            ipv4_pool_cidr: Some("10.10.0.0/29".to_string()),
+            ipv6_pool_cidr: Some("fd00:10::/126".to_string()),
+            reserved_addresses: Vec::new(),
+            include_ipv4: true,
+            include_ipv6: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let ipv4 = allocation.ipv4_tunnel.expect("ipv4");
+    let ipv6 = allocation.ipv6_tunnel.expect("ipv6");
+    assert_eq!(ipv4.left, "10.10.0.2");
+    assert_eq!(ipv4.right, "10.10.0.3");
+    assert_eq!(ipv4.prefix_len, 31);
+    assert_eq!(ipv6.left, "fd00:10::");
+    assert_eq!(ipv6.right, "fd00:10::1");
+    assert_eq!(ipv6.prefix_len, 127);
+}
+
+#[tokio::test]
+async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "right-b".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+
+    let endpoint_as_right = test_plan_input();
+    let endpoint_as_right_plan = plan_tunnel(&endpoint_as_right).unwrap();
+    repo.record_tunnel_plan(&endpoint_as_right, &endpoint_as_right_plan, &operator)
+        .await
+        .unwrap();
+
+    let mut endpoint_as_left = test_plan_input();
+    endpoint_as_left.name = "edge-b-edge-c".to_string();
+    endpoint_as_left.interface_name = "tunbc".to_string();
+    endpoint_as_left.left_client_id = "right-b".to_string();
+    endpoint_as_left.right_client_id = "edge-c".to_string();
+    endpoint_as_left.left_underlay = "203.0.113.20".to_string();
+    endpoint_as_left.right_underlay = "192.0.2.30".to_string();
+    endpoint_as_left.address_pool_cidr = "10.255.0.4/31".to_string();
+    endpoint_as_left.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+        left: "10.255.0.4".to_string(),
+        right: "10.255.0.5".to_string(),
+        prefix_len: 31,
+    });
+    let endpoint_as_left_plan = plan_tunnel(&endpoint_as_left).unwrap();
+    repo.record_tunnel_plan(&endpoint_as_left, &endpoint_as_left_plan, &operator)
+        .await
+        .unwrap();
+
+    let mut survivor = test_plan_input();
+    survivor.name = "edge-c-edge-d".to_string();
+    survivor.interface_name = "tuncd".to_string();
+    survivor.left_client_id = "edge-c".to_string();
+    survivor.right_client_id = "edge-d".to_string();
+    survivor.left_underlay = "192.0.2.30".to_string();
+    survivor.right_underlay = "192.0.2.40".to_string();
+    survivor.address_pool_cidr = "10.255.0.8/31".to_string();
+    survivor.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+        left: "10.255.0.8".to_string(),
+        right: "10.255.0.9".to_string(),
+        prefix_len: 31,
+    });
+    let survivor_plan = plan_tunnel(&survivor).unwrap();
+    repo.record_tunnel_plan(&survivor, &survivor_plan, &operator)
+        .await
+        .unwrap();
+
+    repo.delete_agent(
+        "right-b",
+        &DeleteAgentRequest {
+            confirmed: true,
+            reason: Some("decommissioned peer".to_string()),
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let active_names = repo
+        .list_tunnel_plans()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|plan| plan.name)
+        .collect::<Vec<_>>();
+    assert_eq!(active_names, vec!["edge-c-edge-d".to_string()]);
+
+    if let Repository::Memory(memory) = &repo {
+        let plans = memory.tunnel_plans.read().await;
+        let deleted = plans
+            .iter()
+            .filter(|plan| plan.deleted_at.is_some())
+            .map(|plan| plan.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(deleted, vec!["edge-a-edge-b", "edge-b-edge-c"]);
+        for plan in plans.iter().filter(|plan| plan.deleted_at.is_some()) {
+            assert_eq!(plan.deleted_by, Some(operator.operator.id));
+            assert!(!plan.enabled);
+            assert!(plan
+                .deleted_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("endpoint_vps_deleted:right-b"));
+        }
+        let survivor = plans
+            .iter()
+            .find(|plan| plan.name == "edge-c-edge-d")
+            .unwrap();
+        assert!(survivor.deleted_at.is_none());
+        let audits = memory.audits.read().await;
+        let deleted_audit = audits
+            .iter()
+            .find(|audit| audit.action == "agent.deleted")
+            .unwrap();
+        assert_eq!(
+            deleted_audit.metadata["soft_deleted_tunnel_plan_count"].as_u64(),
+            Some(2)
+        );
+    }
+}
+
+#[tokio::test]
+async fn tunnel_plan_enabled_state_is_explicit_and_controls_ospf_recommendations() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    let created = repo
+        .record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+    assert!(created.enabled);
+    assert_eq!(
+        repo.list_network_ospf_recommendations(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let disabled = repo
+        .set_tunnel_plan_enabled(created.id, false, &operator)
+        .await
+        .unwrap();
+    assert!(!disabled.enabled);
+    let visible = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(visible.len(), 1);
+    assert!(!visible[0].enabled);
+    assert!(repo
+        .list_network_ospf_recommendations(10)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let edited_plan = plan_tunnel(&input).unwrap();
+    let edited = repo
+        .record_tunnel_plan(&input, &edited_plan, &operator)
+        .await
+        .unwrap();
+    assert!(!edited.enabled);
+
+    let enabled = repo
+        .set_tunnel_plan_enabled(created.id, true, &operator)
+        .await
+        .unwrap();
+    assert!(enabled.enabled);
+    assert_eq!(
+        repo.list_network_ospf_recommendations(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    if let Repository::Memory(memory) = &repo {
+        let actions = memory
+            .audits
+            .read()
+            .await
+            .iter()
+            .map(|audit| audit.action.clone())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&"network.tunnel_plan_disabled".to_string()));
+        assert!(actions.contains(&"network.tunnel_plan_enabled".to_string()));
+    }
 }
 
 #[tokio::test]
@@ -877,6 +1139,14 @@ fn test_plan_input() -> TunnelPlanInput {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,

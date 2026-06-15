@@ -69,9 +69,9 @@ use crate::{
     },
     routes_migrations::{create_migration_link, list_migration_links},
     routes_network::{
-        create_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
-        list_network_ospf_update_plans, list_tunnel_plans, promote_telemetry_tunnel_plan,
-        promote_tunnel_plan_to_adapter,
+        allocate_tunnel_endpoints, create_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
+        get_topology_graph, list_network_ospf_recommendations, list_network_ospf_update_plans,
+        list_tunnel_plans, promote_telemetry_tunnel_plan, promote_tunnel_plan_to_adapter,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
@@ -404,6 +404,18 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/tunnel-plans",
             get(list_tunnel_plans).post(create_tunnel_plan),
+        )
+        .route(
+            "/api/v1/tunnel-plans/allocate",
+            post(allocate_tunnel_endpoints),
+        )
+        .route(
+            "/api/v1/tunnel-plans/{plan_id}/enable",
+            post(enable_tunnel_plan),
+        )
+        .route(
+            "/api/v1/tunnel-plans/{plan_id}/disable",
+            post(disable_tunnel_plan),
         )
         .route(
             "/api/v1/tunnel-plans/promote-telemetry",

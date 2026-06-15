@@ -221,6 +221,7 @@ export function App() {
           <>
             {activeView === "Dashboard" && (
               <DashboardPanel
+                agents={dashboard.agents}
                 error={dashboard.dashboardOverviewError}
                 loading={dashboard.dashboardOverviewLoading}
                 onNavigate={navigateDashboardTarget}
@@ -292,6 +293,7 @@ export function App() {
                 selectedAgent={selectedAgent}
                 summary={dashboard.summary}
                 tags={dashboard.tags}
+                targetAgents={dashboard.agents}
                 telemetryNetworkRates={dashboard.telemetryNetworkRates}
                 telemetryRollups={dashboard.telemetryRollups}
                 telemetryTunnels={dashboard.telemetryTunnels}
@@ -301,7 +303,7 @@ export function App() {
             {activeView === "Config" && (
               <ConfigPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 dataSourceAssignments={dashboard.dataSourceAssignments}
                 dataSourcePresets={dashboard.dataSourcePresets}
                 dataSourceStatus={dashboard.dataSourceStatus}
@@ -341,7 +343,7 @@ export function App() {
             {activeView === "Tags" && (
               <TagsPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 error={dashboard.tagsError}
                 loading={dashboard.tagsLoading}
                 onAssignTag={dashboard.assignTag}
@@ -359,7 +361,7 @@ export function App() {
             {activeView === "Jobs" && (
               <JobHistoryPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 error={dashboard.jobsError}
                 agentUpdateReleases={dashboard.agentUpdateReleases}
                 jobs={dashboard.jobs}
@@ -411,7 +413,7 @@ export function App() {
             {activeView === "Schedules" && (
               <SchedulesPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 commandTemplates={dashboard.commandTemplates}
                 error={dashboard.schedulesError}
                 loading={dashboard.schedulesLoading}
@@ -433,7 +435,7 @@ export function App() {
             {activeView === "Topology" && (
               <TopologyPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 error={dashboard.topologyError}
                 jobs={dashboard.jobs}
                 loading={dashboard.topologyLoading}
@@ -441,6 +443,7 @@ export function App() {
                 networkTrends={dashboard.networkTrends}
                 ospfRecommendations={dashboard.ospfRecommendations}
                 ospfUpdatePlans={dashboard.ospfUpdatePlans}
+                onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
                 onCreateJob={dashboard.createJob}
                 onCreateTunnelPlan={dashboard.createTunnelPlan}
                 onLoadNetworkObservations={dashboard.loadNetworkObservations}
@@ -457,6 +460,7 @@ export function App() {
                   dashboard.promoteTunnelPlanToAdapter
                 }
                 onRefresh={dashboard.loadTunnelPlans}
+                onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
                 privilegeMaterial={privilegeMaterial}
                 setPrivilegeMaterial={setPrivilegeMaterial}
                 topologyGraph={dashboard.topologyGraph}
@@ -484,7 +488,7 @@ export function App() {
             {activeView === "Backups" && (
               <BackupsPanel
                 activeSubpage={activeSubpage}
-                agents={visibleAgents}
+                agents={dashboard.agents}
                 artifacts={dashboard.backupArtifacts}
                 backupPolicies={dashboard.backupPolicies}
                 backups={dashboard.backups}

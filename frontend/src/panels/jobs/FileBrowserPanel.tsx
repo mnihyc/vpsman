@@ -25,7 +25,7 @@ import { html } from "@codemirror/lang-html";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
-import { SearchExpressionInput } from "../../components/SearchExpressionInput";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
   FILE_BROWSER_LIST_LIMIT,
@@ -47,7 +47,7 @@ import {
 } from "../../fileBrowser";
 import { base64ToBytes, parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
-import { agentsMatchingExpression } from "../../searchExpression";
+import { selectorExpressionForClientIds } from "../../searchExpression";
 import type {
   AgentView,
   CreateJobRequest,
@@ -66,7 +66,8 @@ const DEFAULT_DIR_MODE = "0755";
 type BrowserState = {
   path: string;
   showHidden: boolean;
-  targetExpression: string;
+  targetClientId: string;
+  targetExpression?: string;
 };
 
 type PendingConfirmation = {
@@ -101,7 +102,7 @@ export function FileBrowserPanel({
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
 }) {
   const saved = readBrowserState();
-  const [targetExpression, setTargetExpression] = useState(saved.targetExpression || (agents[0]?.id ? `id:${agents[0].id}` : ""));
+  const [targetClientId, setTargetClientId] = useState(saved.targetClientId || agents[0]?.id || "");
   const [pathInput, setPathInput] = useState(saved.path || "/");
   const [currentPath, setCurrentPath] = useState(safeNormalizeAbsolutePath(saved.path || "/"));
   const [showHidden, setShowHidden] = useState(saved.showHidden);
@@ -138,33 +139,48 @@ export function FileBrowserPanel({
   const [uploadGroup, setUploadGroup] = useState("");
   const [uploadDestination, setUploadDestination] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const targetMatches = useMemo(() => agentsMatchingExpression(agents, targetExpression), [agents, targetExpression]);
-  const selectedAgent = targetMatches.length === 1 ? targetMatches[0] : null;
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === targetClientId) ?? null,
+    [agents, targetClientId],
+  );
   const selectedEntry = metadataByPath[selectedPath];
   const locationCommandDisabled = !selectedEntry || pending || !privilegeMaterial;
   const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
   const editorDirty = editorContent !== editorSavedContent;
   const currentEntries = entriesByPath[currentPath] ?? [];
   const staleMessage = staleDirectoryPath ? `Directory ${staleDirectoryPath} changed; refresh to update listing` : null;
-  const targetSummary = targetExpression.trim() ? `${targetMatches.length}/${agents.length} targets` : "No target selector";
+  const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
   const summary = actionError ?? actionMessage ?? staleMessage ?? (privilegeMaterial ? `${targetSummary} · ${currentEntries.length} entries loaded` : "Locked");
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
   const editorStatusText = actionError ?? (actionMessage ? `${actionMessage}${staleDirectoryPath ? " · refresh available" : ""}` : staleMessage) ?? editorStateText;
 
   useEffect(() => {
-    if (!targetExpression && agents[0]?.id) {
-      setTargetExpression(`id:${agents[0].id}`);
+    if (!targetClientId && agents[0]?.id) {
+      setTargetClientId(agents[0].id);
     }
-  }, [agents, targetExpression]);
+  }, [agents, targetClientId]);
 
   useEffect(() => {
-    writeBrowserState({ path: currentPath, targetExpression, showHidden });
-  }, [currentPath, targetExpression, showHidden]);
+    writeBrowserState({ path: currentPath, targetClientId, showHidden });
+  }, [currentPath, targetClientId, showHidden]);
+
+  function selectTargetClientId(value: string) {
+    setTargetClientId(value);
+    setEntriesByPath({});
+    setMetadataByPath({});
+    setExpandedPaths({ "/": true });
+    setSelectedPath(currentPath);
+    setEditorPath(null);
+    setEditorContent("");
+    setEditorSavedContent("");
+    setEditorSha256Hex(null);
+    setPendingConfirmation(null);
+    setActionError(null);
+    setActionMessage(null);
+    setStaleDirectoryPath(null);
+  }
 
   async function runFileJob(operation: JobOperation, options: { expectedType?: string } = {}) {
-    if (targetMatches.length !== 1) {
-      throw new Error(`File browser target selector must resolve exactly one VPS; got ${targetMatches.length}`);
-    }
     if (!selectedAgent) {
       throw new Error("Choose a VPS first");
     }
@@ -172,18 +188,19 @@ export function FileBrowserPanel({
       throw new Error("Privilege unlock is locked");
     }
     const timeoutSecs = operation.type === "file_download" ? 90 : 30;
+    const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
     const built = await buildPrivilegeForJobOperation({
       clientIds: [selectedAgent.id],
       commandType: operation.type,
       operation,
       privilegeMaterial,
-      selectorExpression: targetExpression.trim(),
+      selectorExpression,
       timeoutSecs,
     });
     setLastPayloadHash(built.payloadHashHex);
     const destructive = mutatesFileSystem(operation);
     const job = await onCreateJob({
-      selector_expression: targetExpression.trim(),
+      selector_expression: selectorExpression,
       target_client_ids: [selectedAgent.id],
       destructive,
       confirmed: true,
@@ -302,7 +319,14 @@ export function FileBrowserPanel({
   }
 
   function confirmOperation(operation: JobOperation, title: string, detail: string, refreshPath?: string) {
-    setPendingConfirmation({ operation, title, detail, refreshPath, selectorExpression: targetExpression.trim(), target: selectedAgent });
+    setPendingConfirmation({
+      operation,
+      title,
+      detail,
+      refreshPath,
+      selectorExpression: selectedAgent ? selectorExpressionForClientIds([selectedAgent.id]) : "",
+      target: selectedAgent,
+    });
   }
 
   function reportActionError(error: unknown) {
@@ -546,15 +570,12 @@ export function FileBrowserPanel({
           <span>{summary}</span>
         </div>
         <div className="fileBrowserHeaderActions">
-          <SearchExpressionInput
+          <VpsCombobox
             agents={agents}
-            ariaLabel="File browser target selector"
-            onChange={setTargetExpression}
-            placeholder="id:edge-sfo-01"
-            showMatchCount
-            value={targetExpression}
-            verification={targetMatches.length === 1 ? "valid" : "neutral"}
-            verificationMessage={`${targetMatches.length}/${agents.length}`}
+            ariaLabel="File browser target VPS"
+            onChange={selectTargetClientId}
+            placeholder="Search file browser VPS"
+            value={targetClientId}
           />
         </div>
       </div>
@@ -1326,17 +1347,35 @@ function saveBlob(blob: Blob, name: string) {
 function readBrowserState(): BrowserState {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Partial<BrowserState> & { selectedClientId?: string };
-    const legacyClientId = typeof parsed.selectedClientId === "string" && parsed.selectedClientId ? `id:${parsed.selectedClientId}` : "";
+    const targetClientId =
+      typeof parsed.targetClientId === "string" && parsed.targetClientId.trim()
+        ? parsed.targetClientId.trim()
+        : typeof parsed.selectedClientId === "string" && parsed.selectedClientId.trim()
+          ? parsed.selectedClientId.trim()
+          : typeof parsed.targetExpression === "string"
+            ? clientIdFromLegacyFileSelector(parsed.targetExpression)
+            : "";
     return {
       path: typeof parsed.path === "string" ? parsed.path : "/",
       showHidden: Boolean(parsed.showHidden),
-      targetExpression: typeof parsed.targetExpression === "string" ? parsed.targetExpression : legacyClientId,
+      targetClientId,
+      targetExpression: typeof parsed.targetExpression === "string" ? parsed.targetExpression : undefined,
     };
   } catch {
-    return { path: "/", showHidden: false, targetExpression: "" };
+    return { path: "/", showHidden: false, targetClientId: "" };
   }
 }
 
 function writeBrowserState(state: BrowserState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function clientIdFromLegacyFileSelector(value: string): string {
+  const match = value
+    .trim()
+    .match(/^id:(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s()&|]+))$/i);
+  if (!match) {
+    return "";
+  }
+  return (match[1] ?? match[2] ?? match[3] ?? "").replace(/\\(["'\\])/g, "$1");
 }

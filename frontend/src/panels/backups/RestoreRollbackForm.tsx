@@ -1,8 +1,10 @@
 import { RotateCcw } from "lucide-react";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
 
 type RestoreRollbackFormProps = {
+  agents: AgentView[];
   confirmationOpen: boolean;
   forceUnprivileged: boolean;
   onForceUnprivilegedChange: (value: boolean) => void;
@@ -19,6 +21,7 @@ type RestoreRollbackFormProps = {
 };
 
 export function RestoreRollbackForm({
+  agents,
   confirmationOpen,
   forceUnprivileged,
   onForceUnprivilegedChange,
@@ -51,10 +54,11 @@ export function RestoreRollbackForm({
         </label>
         <label>
           <span>Target VPS</span>
-          <input
-            aria-label="Restore rollback target VPS ID"
-            onChange={(event) => onTargetClientIdChange(event.target.value)}
-            placeholder="VPS ID from details"
+          <VpsCombobox
+            agents={agents}
+            ariaLabel="Restore rollback target VPS ID"
+            onChange={onTargetClientIdChange}
+            placeholder="Search rollback VPS"
             value={targetClientId}
           />
         </label>

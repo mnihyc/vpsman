@@ -55,14 +55,16 @@ async fn iproute2_reconciler_builds_create_addr_up_and_tc_steps() {
 }
 
 #[tokio::test]
-async fn iproute2_reconciler_changes_existing_link_instead_of_adding() {
+async fn iproute2_reconciler_keeps_matching_existing_link_instead_of_changing_identity() {
     let job_id = uuid::Uuid::new_v4();
     let root = test_root("existing", job_id);
     tokio::fs::create_dir_all(root.join("sys/class/net/tunlr"))
         .await
         .unwrap();
     let plan = test_plan();
-    let config = test_config(&root);
+    let mut config = test_config(&root);
+    configure_inspected_existing_link(&mut config, &root, &plan, TunnelEndpointSide::Left, None)
+        .await;
 
     let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
         config: &config,
@@ -75,14 +77,84 @@ async fn iproute2_reconciler_changes_existing_link_instead_of_adding() {
     .unwrap();
 
     assert_eq!(report["link_existed_before"], true);
+    assert_eq!(report["existing_link_validation"]["status"], "matched");
     let labels = report["commands"]
         .as_array()
         .unwrap()
         .iter()
         .map(|command| command["label"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(labels.contains(&"runtime_tunnel_change"));
+    assert!(labels.contains(&"runtime_tunnel_inspect"));
+    assert!(labels.contains(&"runtime_addr_replace"));
+    assert!(labels.contains(&"runtime_link_up"));
+    assert!(!labels.contains(&"runtime_tunnel_change"));
     assert!(!labels.contains(&"runtime_tunnel_add"));
+}
+
+#[tokio::test]
+async fn iproute2_reconciler_rejects_conflicting_existing_link() {
+    let job_id = uuid::Uuid::new_v4();
+    let root = test_root("existing-conflict", job_id);
+    tokio::fs::create_dir_all(root.join("sys/class/net/tunlr"))
+        .await
+        .unwrap();
+    let plan = test_plan();
+    let mut config = test_config(&root);
+    configure_inspected_existing_link(
+        &mut config,
+        &root,
+        &plan,
+        TunnelEndpointSide::Left,
+        Some(("remote", "203.0.113.99")),
+    )
+    .await;
+
+    let error = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+        config: &config,
+        plan: &plan,
+        side: TunnelEndpointSide::Left,
+        timeout_secs: 5,
+        effective_uid_override: Some(0),
+    })
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("existing runtime tunnel tunlr does not match saved plan"));
+    assert!(message.contains("remote_underlay expected 203.0.113.20 got 203.0.113.99"));
+}
+
+#[tokio::test]
+async fn iproute2_reconciler_rejects_conflicting_existing_tunnel_address() {
+    let job_id = uuid::Uuid::new_v4();
+    let root = test_root("existing-address-conflict", job_id);
+    tokio::fs::create_dir_all(root.join("sys/class/net/tunlr"))
+        .await
+        .unwrap();
+    let plan = test_plan();
+    let mut config = test_config(&root);
+    configure_inspected_existing_link(
+        &mut config,
+        &root,
+        &plan,
+        TunnelEndpointSide::Left,
+        Some(("address_peer", "10.255.0.2")),
+    )
+    .await;
+
+    let error = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
+        config: &config,
+        plan: &plan,
+        side: TunnelEndpointSide::Left,
+        timeout_secs: 5,
+        effective_uid_override: Some(0),
+    })
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("existing runtime tunnel tunlr does not match saved plan"));
+    assert!(message.contains("tunnel_address expected 10.255.0.0/31 peer 10.255.0.1"));
 }
 
 #[tokio::test]
@@ -339,7 +411,9 @@ async fn reconciler_only_deletes_interfaces_explicitly_declared_stale() {
         .await
         .unwrap();
     let plan = test_plan();
-    let config = test_config(&root);
+    let mut config = test_config(&root);
+    configure_inspected_existing_link(&mut config, &root, &plan, TunnelEndpointSide::Left, None)
+        .await;
 
     let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
         config: &config,
@@ -673,6 +747,14 @@ fn test_plan() -> TunnelPlan {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 15.0,
         packet_loss_ratio: 0.0,
@@ -703,6 +785,14 @@ fn test_fou_plan() -> TunnelPlan {
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.1.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.1.0".to_string(),
+            right: "10.255.1.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 15.0,
         packet_loss_ratio: 0.0,
@@ -722,6 +812,78 @@ fn command_argv<'a>(commands: &'a [serde_json::Value], label: &str) -> Vec<&'a s
         .iter()
         .map(|arg| arg.as_str().unwrap())
         .collect()
+}
+
+async fn configure_inspected_existing_link(
+    config: &mut AgentConfig,
+    root: &Path,
+    plan: &TunnelPlan,
+    side: TunnelEndpointSide,
+    override_field: Option<(&str, &str)>,
+) {
+    let endpoint = render_tunnel_endpoint_config(plan, side).unwrap();
+    let mut local = local_underlay(plan, &endpoint).to_string();
+    let mut remote = remote_underlay(plan, &endpoint).to_string();
+    let mut mode = linux_tunnel_mode(plan.kind).unwrap().to_string();
+    let mut ttl = "255".to_string();
+    let mut encap = (plan.kind == TunnelKind::Fou).then(|| "fou".to_string());
+    let mut encap_dport =
+        (plan.kind == TunnelKind::Fou).then(|| plan.runtime_control.fou.peer_port.to_string());
+    let mut address_local = local_address(plan, &endpoint).to_string();
+    let mut address_peer = remote_address(plan, &endpoint).to_string();
+    let mut address_prefix_len = plan.tunnel_prefix_len;
+    if let Some((field, value)) = override_field {
+        match field {
+            "local" => local = value.to_string(),
+            "remote" => remote = value.to_string(),
+            "mode" => mode = value.to_string(),
+            "ttl" => ttl = value.to_string(),
+            "encap" => encap = Some(value.to_string()),
+            "encap_dport" => encap_dport = Some(value.to_string()),
+            "address_local" => address_local = value.to_string(),
+            "address_peer" => address_peer = value.to_string(),
+            "address_prefix_len" => address_prefix_len = value.parse().unwrap(),
+            other => panic!("unsupported inspect override {other}"),
+        }
+    }
+    let mut info_data = serde_json::json!({
+        "local": local,
+        "remote": remote,
+        "ttl": ttl,
+    });
+    if let Some(encap) = encap {
+        info_data["encap"] = serde_json::Value::String(encap);
+    }
+    if let Some(encap_dport) = encap_dport {
+        info_data["encap_dport"] = serde_json::Value::String(encap_dport);
+    }
+    let inspect_json = serde_json::json!([{
+        "ifname": plan.interface_name,
+        "linkinfo": {
+            "info_kind": mode,
+            "info_data": info_data,
+        },
+    }])
+    .to_string();
+    let address_json = serde_json::json!([{
+        "ifname": plan.interface_name,
+        "addr_info": [{
+            "family": if address_local.contains(':') { "inet6" } else { "inet" },
+            "local": address_local,
+            "prefixlen": address_prefix_len,
+            "peer": address_peer,
+        }],
+    }])
+    .to_string();
+    let ip = root.join("ip-inspect.sh");
+    write_executable(
+        &ip,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-details\" ] && [ \"$2\" = \"-json\" ] && [ \"$3\" = \"link\" ]; then\ncat <<'JSON'\n{inspect_json}\nJSON\nexit 0\nfi\nif [ \"$1\" = \"-details\" ] && [ \"$2\" = \"-json\" ] && [ \"$3\" = \"addr\" ]; then\ncat <<'JSON'\n{address_json}\nJSON\nexit 0\nfi\nexit 0\n"
+        ),
+    )
+    .await;
+    config.network.runtime_ip_argv = vec![ip.to_string_lossy().to_string()];
 }
 
 fn test_config(root: &Path) -> AgentConfig {

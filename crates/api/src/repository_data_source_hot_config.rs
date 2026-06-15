@@ -95,10 +95,10 @@ impl HotConfigRenderer {
             "latency_probe_source" => self.apply_latency_probe_source(preset),
             "runtime_traffic_accounting_source" => self.apply_runtime_traffic_source(preset),
             "runtime_tunnel_adapter" => self.apply_runtime_tunnel_adapter(preset),
+            "routing_daemon_adapter" => self.apply_routing_daemon_adapter(preset),
             "speed_test_provider"
             | "process_supervisor_policy"
             | "traffic_limit_status_source"
-            | "routing_daemon_adapter"
             | "backup_object_store"
             | "restore_path_mapping"
             | "update_artifact_source"
@@ -332,11 +332,43 @@ impl HotConfigRenderer {
             }
             "external_managed_adapter" | "custom_adapter" => {
                 self.unsupported_domains.push(format!(
-                    "runtime_tunnel_adapter:{} adapter commands are rendered from tunnel plans, not global agent config",
+                    "runtime_tunnel_adapter:{} adapter commands are rendered from tunnel plans, not agent-level fallback config",
                     preset.name
                 ));
             }
             _ => bail!("unsupported_runtime_tunnel_adapter:{manager}"),
+        }
+        Ok(())
+    }
+
+    fn apply_routing_daemon_adapter(&mut self, preset: &DataSourcePresetView) -> Result<()> {
+        let section = self.section_mut("network")?;
+        if let Some(enabled) = bool_field(&preset.definition, "latency_monitoring_enabled") {
+            section.insert(
+                "latency_monitoring_enabled".to_string(),
+                Value::Bool(enabled),
+            );
+        }
+        if let Some(value) = u64_field(&preset.definition, "latency_monitoring_interval_secs") {
+            section.insert("latency_monitoring_interval_secs".to_string(), value.into());
+        }
+        if let Some(value) = u64_field(&preset.definition, "latency_down_windows") {
+            section.insert("latency_down_windows".to_string(), value.into());
+        }
+        if let Some(enabled) = bool_field(&preset.definition, "auto_ospf_enabled") {
+            section.insert("auto_ospf_enabled".to_string(), Value::Bool(enabled));
+        }
+        if let Some(value) = u64_field(&preset.definition, "auto_ospf_min_cost_delta") {
+            section.insert("auto_ospf_min_cost_delta".to_string(), value.into());
+        }
+        if let Some(value) = u64_field(&preset.definition, "auto_ospf_healthy_windows") {
+            section.insert("auto_ospf_healthy_windows".to_string(), value.into());
+        }
+        if let Some(command) = command_field(
+            &preset.definition,
+            &["auto_ospf_updater", "ospf_updater", "command"],
+        )? {
+            section.insert("auto_ospf_updater".to_string(), command);
         }
         Ok(())
     }
@@ -362,6 +394,10 @@ fn string_field<'a>(definition: &'a Value, key: &str) -> Option<&'a str> {
 
 fn bool_field(definition: &Value, key: &str) -> Option<bool> {
     definition.get(key).and_then(Value::as_bool)
+}
+
+fn u64_field(definition: &Value, key: &str) -> Option<u64> {
+    definition.get(key).and_then(Value::as_u64)
 }
 
 fn validate_one_of(value: &str, allowed: &[&str], field: &str) -> Result<()> {

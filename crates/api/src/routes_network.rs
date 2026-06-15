@@ -1,21 +1,23 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     http::StatusCode,
     Json,
 };
+use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, BandwidthTier, NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelEndpointSide, TunnelKind,
-    TunnelPlanInput,
+    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, BandwidthTier,
+    NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager,
+    RuntimeTunnelTopologyIntent, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
 };
 
 use crate::{
     error::ApiError,
     model::{
-        CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
-        NetworkOspfUpdatePlanView, PromoteTelemetryTunnelRequest,
-        PromoteTunnelPlanToAdapterRequest, TelemetryTunnelView, TunnelPlanView,
+        AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateTunnelPlanRequest,
+        HistoryQuery, NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
+        PromoteTelemetryTunnelRequest, PromoteTunnelPlanToAdapterRequest, TelemetryTunnelView,
+        TunnelPlanView,
     },
     model_topology::TopologyGraphView,
     state::AppState,
@@ -48,6 +50,77 @@ pub(crate) async fn create_tunnel_plan(
                 .record_tunnel_plan(&request.input, &plan, &operator)
                 .await?,
         ),
+    ))
+}
+
+pub(crate) async fn allocate_tunnel_endpoints(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AllocateTunnelEndpointsRequest>,
+) -> Result<Json<AllocateTunnelEndpointsResponse>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    let mut reserved_addresses = request.reserved_addresses.clone();
+    for plan in state.repo.list_tunnel_plans().await? {
+        if let Some(pair) = plan.plan.ipv4_tunnel {
+            reserved_addresses.push(pair.left);
+            reserved_addresses.push(pair.right);
+        }
+        if let Some(pair) = plan.plan.ipv6_tunnel {
+            reserved_addresses.push(pair.left);
+            reserved_addresses.push(pair.right);
+        }
+    }
+    let allocation = allocate_tunnel_endpoint_pairs(
+        request.ipv4_pool_cidr.as_deref(),
+        request.ipv6_pool_cidr.as_deref(),
+        &reserved_addresses,
+        request.include_ipv4,
+        request.include_ipv6,
+    )
+    .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
+    Ok(Json(AllocateTunnelEndpointsResponse {
+        ipv4_tunnel: allocation.ipv4_tunnel,
+        ipv6_tunnel: allocation.ipv6_tunnel,
+        latency_primary_family: allocation.latency_primary_family,
+        conflicts: Vec::new(),
+    }))
+}
+
+pub(crate) async fn enable_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    mutate_tunnel_plan_enabled(state, headers, plan_id, true).await
+}
+
+pub(crate) async fn disable_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    mutate_tunnel_plan_enabled(state, headers, plan_id, false).await
+}
+
+async fn mutate_tunnel_plan_enabled(
+    state: AppState,
+    headers: HeaderMap,
+    plan_id: Uuid,
+    enabled: bool,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    if state.repo.get_tunnel_plan(plan_id).await?.is_none() {
+        return Err(ApiError::bad_request("tunnel_plan_not_found"));
+    }
+    Ok(Json(
+        state
+            .repo
+            .set_tunnel_plan_enabled(plan_id, enabled, &operator)
+            .await?,
     ))
 }
 
@@ -141,7 +214,9 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         NetworkPlanError::InvalidInterfaceName
         | NetworkPlanError::InvalidCidr
         | NetworkPlanError::AddressPoolTooSmall
-        | NetworkPlanError::AddressPoolExhausted => "invalid_tunnel_plan_input",
+        | NetworkPlanError::AddressPoolExhausted
+        | NetworkPlanError::AddressPoolRequired
+        | NetworkPlanError::TunnelAddressRequired => "invalid_tunnel_plan_input",
     }
 }
 
@@ -251,6 +326,10 @@ fn telemetry_promotion_input(
         right_underlay,
         address_pool_cidr: request.address_pool_cidr.clone(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: request.ipv4_tunnel.clone(),
+        ipv6_address_pool_cidr: request.ipv6_address_pool_cidr.clone(),
+        ipv6_tunnel: request.ipv6_tunnel.clone(),
+        latency_primary_family: request.latency_primary_family,
         bandwidth: request.bandwidth.unwrap_or(BandwidthTier::M100),
         latency_ms: request.latency_ms.unwrap_or(10.0),
         packet_loss_ratio: request.packet_loss_ratio.unwrap_or(0.0),

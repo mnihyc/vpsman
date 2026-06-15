@@ -247,7 +247,7 @@ async fn dispatch_gateway_command(
         .read()
         .await
         .get(&dispatch.client_id)
-        .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs));
+        .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs()));
 
     loop {
         if let Some(sender) = state
@@ -271,7 +271,7 @@ async fn dispatch_gateway_command(
                         anyhow!("agent_session_closed:{}", dispatch.client_id)
                     }
                 })?;
-            return time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
+            return time::timeout(Duration::from_secs(state.dispatch_ack_secs()), response_rx)
                 .await
                 .context("gateway command ack timed out")?
                 .context("gateway command response dropped");
@@ -322,7 +322,7 @@ async fn cancel_gateway_command(
                 anyhow!("agent_session_closed:{}", cancel.client_id)
             }
         })?;
-    time::timeout(Duration::from_secs(state.dispatch_ack_secs), response_rx)
+    time::timeout(Duration::from_secs(state.dispatch_ack_secs()), response_rx)
         .await
         .context("gateway command cancel timed out")?
         .context("gateway command cancel response dropped")

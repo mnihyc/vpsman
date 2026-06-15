@@ -1,5 +1,6 @@
 use serde::Serialize;
 use uuid::Uuid;
+use vpsman_common::TunnelAddressPair;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TopologyGraphView {
@@ -31,6 +32,7 @@ pub(crate) struct TopologyGraphEdgeView {
     pub(crate) left_status: String,
     pub(crate) right_status: String,
     pub(crate) status: String,
+    pub(crate) enabled: bool,
     pub(crate) health: String,
     pub(crate) convergence_blocked: bool,
     pub(crate) offline_client_ids: Vec<String>,
@@ -65,4 +67,7 @@ pub(crate) struct TopologyGraphEdgeView {
     pub(crate) last_rollback_job_id: Option<Uuid>,
     pub(crate) left_tunnel_address: String,
     pub(crate) right_tunnel_address: String,
+    pub(crate) ipv4_tunnel: Option<TunnelAddressPair>,
+    pub(crate) ipv6_tunnel: Option<TunnelAddressPair>,
+    pub(crate) latency_primary_family: String,
 }

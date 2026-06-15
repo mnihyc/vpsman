@@ -713,6 +713,25 @@ impl Repository {
                 drop(agents);
                 anyhow::ensure!(found || already_hidden, "agent_not_found");
                 memory.client_public_keys.write().await.remove(client_id);
+                let tunnel_delete_reason =
+                    deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
+                let soft_deleted_tunnel_plan_count = {
+                    let mut plans = memory.tunnel_plans.write().await;
+                    let mut count = 0usize;
+                    for plan in plans.iter_mut().filter(|plan| {
+                        plan.deleted_at.is_none()
+                            && (plan.left_client_id == client_id
+                                || plan.right_client_id == client_id)
+                    }) {
+                        plan.deleted_at = Some(deleted_at.clone());
+                        plan.deleted_by = Some(operator.operator.id);
+                        plan.deleted_reason = Some(tunnel_delete_reason.clone());
+                        plan.enabled = false;
+                        plan.updated_at = deleted_at.clone();
+                        count += 1;
+                    }
+                    count
+                };
                 for session in memory.gateway_sessions.write().await.iter_mut() {
                     if session.client_id == client_id && session.status == "active" {
                         session.status = "ended".to_string();
@@ -732,6 +751,7 @@ impl Repository {
                         "already_hidden": already_hidden,
                         "frontend_visible": false,
                         "access_deactivated": true,
+                        "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
                     }),
                     created_at: deleted_at.clone(),
                 });
@@ -779,6 +799,27 @@ impl Repository {
                 .bind(client_id)
                 .execute(&mut *tx)
                 .await?;
+                let tunnel_delete_reason =
+                    deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
+                let soft_deleted_tunnel_plan_count = sqlx::query(
+                    r#"
+                    UPDATE tunnel_plans
+                    SET
+                        deleted_at = now(),
+                        deleted_by = $2,
+                        deleted_reason = $3,
+                        enabled = FALSE,
+                        updated_at = now()
+                    WHERE deleted_at IS NULL
+                      AND (left_client_id = $1 OR right_client_id = $1)
+                    "#,
+                )
+                .bind(client_id)
+                .bind(operator.operator.id)
+                .bind(&tunnel_delete_reason)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -791,7 +832,8 @@ impl Repository {
                 .bind(sqlx::types::Json(json!({
                     "reason": reason,
                     "frontend_visible": false,
-                    "access_deactivated": true
+                    "access_deactivated": true,
+                    "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count
                 })))
                 .execute(&mut *tx)
                 .await?;
@@ -1146,6 +1188,13 @@ fn simulate_remove_tag(
         }
     }
     (after_agents, changed)
+}
+
+fn deleted_endpoint_tunnel_plan_reason(client_id: &str, operator_reason: Option<&str>) -> String {
+    match operator_reason {
+        Some(reason) => format!("endpoint_vps_deleted:{client_id}; operator_reason:{reason}"),
+        None => format!("endpoint_vps_deleted:{client_id}"),
+    }
 }
 
 fn resolve_agents_from_set(

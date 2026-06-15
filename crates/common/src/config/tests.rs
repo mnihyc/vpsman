@@ -17,6 +17,37 @@ fn validates_default_agent_config_shape() {
 }
 
 #[test]
+fn network_telemetry_defaults_stay_enabled_when_network_table_is_present() {
+    let config: AgentConfig = toml::from_str(
+        r#"
+client_id = "edge-a"
+display_name = "Edge A"
+telemetry_light_secs = 15
+telemetry_full_secs = 60
+tags = []
+
+[[tcp_endpoints]]
+label = "primary"
+tcp_addr = "127.0.0.1:9443"
+priority = 10
+
+[network]
+root_dir = "/tmp/vpsman-network-root"
+"#,
+    )
+    .unwrap();
+
+    assert!(config.network.runtime_status_telemetry_enabled);
+    assert_eq!(config.network.runtime_status_telemetry_interval_secs, 60);
+    assert!(config.network.latency_monitoring_enabled);
+    assert_eq!(config.network.latency_monitoring_interval_secs, 60);
+    assert_eq!(config.network.latency_down_windows, 3);
+    assert!(!config.network.auto_ospf_enabled);
+    assert_eq!(config.network.auto_ospf_min_cost_delta, 5);
+    assert_eq!(config.network.auto_ospf_healthy_windows, 2);
+}
+
+#[test]
 fn validates_backup_recipient_and_limits() {
     let config = AgentConfig {
         backup: AgentBackupConfig {
@@ -515,6 +546,14 @@ fn validates_network_apply_root() {
         right_underlay: "198.51.100.11".to_string(),
         address_pool_cidr: "10.42.0.0/30".to_string(),
         reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(crate::TunnelAddressPair {
+            left: "10.42.0.0".to_string(),
+            right: "10.42.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
         bandwidth: BandwidthTier::M100,
         latency_ms: 12.0,
         packet_loss_ratio: 0.0,
@@ -531,6 +570,9 @@ fn validates_network_apply_root() {
                 plan: telemetry_plan.clone(),
                 traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
                 traffic_command: None,
+                latency_monitoring_enabled: true,
+                auto_ospf_enabled: false,
+                auto_ospf_updater: None,
             }],
             ..AgentNetworkConfig::default()
         },
@@ -554,6 +596,9 @@ fn validates_network_apply_root() {
                     timeout_secs: 2,
                     max_output_bytes: 1024,
                 }),
+                latency_monitoring_enabled: true,
+                auto_ospf_enabled: false,
+                auto_ospf_updater: None,
             }],
             ..AgentNetworkConfig::default()
         },
@@ -570,6 +615,9 @@ fn validates_network_apply_root() {
                 plan: telemetry_plan.clone(),
                 traffic_source: AgentRuntimeTrafficSource::CustomCommand,
                 traffic_command: None,
+                latency_monitoring_enabled: true,
+                auto_ospf_enabled: false,
+                auto_ospf_updater: None,
             }],
             ..AgentNetworkConfig::default()
         },
@@ -591,6 +639,9 @@ fn validates_network_apply_root() {
                 plan: invalid_plan,
                 traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
                 traffic_command: None,
+                latency_monitoring_enabled: true,
+                auto_ospf_enabled: false,
+                auto_ospf_updater: None,
             }],
             ..AgentNetworkConfig::default()
         },

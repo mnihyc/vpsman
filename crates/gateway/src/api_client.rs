@@ -28,7 +28,7 @@ pub(crate) struct GatewayControlClient {
     api_url: Option<String>,
     internal_token: Option<String>,
     forwarder: Arc<GatewayEventForwarder>,
-    timeouts: GatewayHttpTimeouts,
+    timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
 }
 
 impl GatewayControlClient {
@@ -43,7 +43,7 @@ impl GatewayControlClient {
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
             forwarder: Arc::default(),
-            timeouts,
+            timeouts: Arc::new(StdRwLock::new(timeouts)),
         }
     }
 
@@ -58,6 +58,16 @@ impl GatewayControlClient {
         if let Ok(mut slot) = self.forwarder.critical_failure_handler.write() {
             *slot = Some(Arc::new(handler));
         }
+    }
+
+    pub(crate) fn set_timeouts(&self, timeouts: GatewayHttpTimeouts) {
+        if let Ok(mut current) = self.timeouts.write() {
+            *current = timeouts;
+        }
+    }
+
+    pub(crate) fn timeouts(&self) -> GatewayHttpTimeouts {
+        current_gateway_http_timeouts(&self.timeouts)
     }
 
     pub(crate) async fn post<T: serde::Serialize>(
@@ -85,7 +95,7 @@ impl GatewayControlClient {
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
                 },
-                self.timeouts,
+                self.timeouts.clone(),
             )
             .await
     }
@@ -106,7 +116,7 @@ impl GatewayControlClient {
                 noise_public_key_hex: noise_public_key_hex.to_string(),
             },
             self.internal_token.as_deref(),
-            self.timeouts,
+            self.timeouts(),
         )
         .await?;
         serde_json::from_str(&body).context("failed to parse gateway identity validation response")
@@ -204,7 +214,7 @@ enum GatewayForwardDropReason {
     Coalesced,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GatewayHttpTimeouts {
     pub(crate) connect: Duration,
     pub(crate) write: Duration,
@@ -223,6 +233,13 @@ impl Default for GatewayHttpTimeouts {
     }
 }
 
+fn current_gateway_http_timeouts(timeouts: &StdRwLock<GatewayHttpTimeouts>) -> GatewayHttpTimeouts {
+    timeouts
+        .read()
+        .map(|timeouts| *timeouts)
+        .unwrap_or_default()
+}
+
 const PER_TARGET_QUEUE_CAPACITY: usize = 512;
 const GLOBAL_QUEUE_CAPACITY: u64 = 10_000;
 const QUEUE_IDLE_REAP_SECS: u64 = 600;
@@ -235,7 +252,7 @@ impl GatewayEventForwarder {
         &self,
         target_key: String,
         event: GatewayForwardEvent,
-        timeouts: GatewayHttpTimeouts,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
         if event.kind == GatewayForwardEventKind::Telemetry {
             return self.enqueue_telemetry(target_key, event, timeouts).await;
@@ -247,7 +264,7 @@ impl GatewayEventForwarder {
         &self,
         target_key: String,
         event: GatewayForwardEvent,
-        timeouts: GatewayHttpTimeouts,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
         if self.metrics.current_queue_depth.load(Ordering::Relaxed) >= GLOBAL_QUEUE_CAPACITY {
             return self
@@ -301,7 +318,7 @@ impl GatewayEventForwarder {
         &self,
         target_key: String,
         event: GatewayForwardEvent,
-        timeouts: GatewayHttpTimeouts,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
         if self.metrics.current_queue_depth.load(Ordering::Relaxed) >= GLOBAL_QUEUE_CAPACITY {
             return self
@@ -320,7 +337,7 @@ impl GatewayEventForwarder {
         &self,
         target_key: String,
         item: GatewayForwardQueueItem,
-        timeouts: GatewayHttpTimeouts,
+        timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
         let event_unix = item.created_unix();
         let sender = {
@@ -575,7 +592,7 @@ async fn run_forward_queue(
     telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
     metrics: Arc<GatewayForwardMetrics>,
     critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
-    timeouts: GatewayHttpTimeouts,
+    timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
 ) {
     while let Some(item) = receiver.recv().await {
         let Some(event) = queue_item_event(item, &target_key, &telemetry_pending).await else {
@@ -618,7 +635,7 @@ async fn run_forward_queue(
             &metrics,
             &critical_failure_handler,
             &telemetry_pending,
-            timeouts,
+            &timeouts,
         )
         .await
         {
@@ -664,7 +681,7 @@ async fn post_json_retry_until_expired(
     metrics: &GatewayForwardMetrics,
     critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
     telemetry_pending: &Mutex<HashMap<String, GatewayForwardEvent>>,
-    timeouts: GatewayHttpTimeouts,
+    timeouts: &StdRwLock<GatewayHttpTimeouts>,
 ) -> bool {
     let mut attempt = 1_u64;
     loop {
@@ -684,7 +701,7 @@ async fn post_json_retry_until_expired(
             &event.path,
             &event.body,
             event.internal_token.as_deref(),
-            timeouts,
+            current_gateway_http_timeouts(timeouts),
         )
         .await
         {
@@ -943,7 +960,7 @@ mod tests {
             .enqueue(
                 "client-a".to_string(),
                 test_event("/internal/v1/gateway/telemetry", br#"{"seq":1}"#),
-                GatewayHttpTimeouts::default(),
+                test_timeouts(),
             )
             .await
             .unwrap();
@@ -951,7 +968,7 @@ mod tests {
             .enqueue(
                 "client-a".to_string(),
                 test_event("/internal/v1/gateway/telemetry", br#"{"seq":2}"#),
-                GatewayHttpTimeouts::default(),
+                test_timeouts(),
             )
             .await
             .unwrap();
@@ -986,7 +1003,7 @@ mod tests {
             .enqueue(
                 "active-client".to_string(),
                 test_event("/internal/v1/gateway/session-started", br#"{}"#),
-                GatewayHttpTimeouts::default(),
+                test_timeouts(),
             )
             .await
             .unwrap();
@@ -1016,7 +1033,7 @@ mod tests {
             .enqueue(
                 "client-a".to_string(),
                 test_event("/internal/v1/gateway/command-output", br#"{}"#),
-                GatewayHttpTimeouts::default(),
+                test_timeouts(),
             )
             .await;
 
@@ -1029,5 +1046,9 @@ mod tests {
         assert_eq!(snapshot.critical_failures, 1);
         assert_eq!(snapshot.critical_failures_by_reason.global_queue_full, 1);
         assert_eq!(snapshot.dropped_by_kind.command_output, 1);
+    }
+
+    fn test_timeouts() -> Arc<StdRwLock<GatewayHttpTimeouts>> {
+        Arc::new(StdRwLock::new(GatewayHttpTimeouts::default()))
     }
 }

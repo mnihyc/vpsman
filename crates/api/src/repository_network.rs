@@ -13,7 +13,14 @@ impl Repository {
     pub(crate) async fn list_tunnel_plans(&self) -> Result<Vec<TunnelPlanView>> {
         match self {
             Self::Memory(memory) => {
-                let mut plans = memory.tunnel_plans.read().await.clone();
+                let mut plans: Vec<_> = memory
+                    .tunnel_plans
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|plan| plan.deleted_at.is_none())
+                    .cloned()
+                    .collect();
                 plans.sort_by(|left, right| right.created_at.cmp(&left.created_at));
                 Ok(plans)
             }
@@ -24,6 +31,7 @@ impl Repository {
                         id,
                         name,
                         kind,
+                        enabled,
                         left_client_id,
                         right_client_id,
                         input,
@@ -35,8 +43,12 @@ impl Repository {
                         last_apply_job_id,
                         last_rollback_job_id,
                         created_at::text AS created_at,
-                        updated_at::text AS updated_at
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by,
+                        deleted_reason
                     FROM tunnel_plans
+                    WHERE deleted_at IS NULL
                     ORDER BY updated_at DESC, created_at DESC, id DESC
                     "#,
                 )
@@ -50,6 +62,7 @@ impl Repository {
                             id: row.try_get("id")?,
                             name: row.try_get("name")?,
                             kind: parse_tunnel_kind(row.try_get::<String, _>("kind")?.as_str()),
+                            enabled: row.try_get("enabled")?,
                             left_client_id: row.try_get("left_client_id")?,
                             right_client_id: row.try_get("right_client_id")?,
                             left_status: row.try_get("left_status")?,
@@ -62,6 +75,9 @@ impl Repository {
                             plan: plan.0,
                             created_at: row.try_get("created_at")?,
                             updated_at: row.try_get("updated_at")?,
+                            deleted_at: row.try_get("deleted_at")?,
+                            deleted_by: row.try_get("deleted_by")?,
+                            deleted_reason: row.try_get("deleted_reason")?,
                         })
                     })
                     .collect()
@@ -79,6 +95,7 @@ impl Repository {
             id: Uuid::new_v4(),
             name: plan.name.clone(),
             kind: plan.kind,
+            enabled: true,
             left_client_id: plan.left_client_id.clone(),
             right_client_id: plan.right_client_id.clone(),
             left_status: "planned".to_string(),
@@ -91,71 +108,120 @@ impl Repository {
             plan: plan.clone(),
             created_at: unix_now().to_string(),
             updated_at: unix_now().to_string(),
+            deleted_at: None,
+            deleted_by: None,
+            deleted_reason: None,
         };
         match self {
             Self::Memory(memory) => {
                 let mut plans = memory.tunnel_plans.write().await;
-                if let Some(existing) = plans.iter_mut().find(|existing| existing.name == view.name)
+                let persisted = if let Some(existing) = plans
+                    .iter_mut()
+                    .find(|existing| existing.name == view.name && existing.deleted_at.is_none())
                 {
-                    *existing = view.clone();
+                    let updated = TunnelPlanView {
+                        id: existing.id,
+                        enabled: existing.enabled,
+                        created_at: existing.created_at.clone(),
+                        ..view.clone()
+                    };
+                    *existing = updated.clone();
+                    updated
                 } else {
                     plans.push(view.clone());
-                }
+                    view.clone()
+                };
+                drop(plans);
                 memory.audits.write().await.push(tunnel_plan_audit(
-                    &view,
+                    &persisted,
                     operator,
                     unix_now().to_string(),
                 ));
+                Ok(persisted)
             }
             Self::Postgres(pool) => {
-                let row = sqlx::query(
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                    .bind(&view.name)
+                    .execute(&mut *tx)
+                    .await?;
+                let row = if let Some(row) = sqlx::query(
                     r#"
-                    INSERT INTO tunnel_plans (
-                        id,
-                        actor_id,
-                        name,
-                        kind,
-                        left_client_id,
-                        right_client_id,
-                        input,
-                        plan,
-                        recommended_ospf_cost,
-                        status
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'planned')
-                    ON CONFLICT (name) DO UPDATE SET
-                        actor_id = EXCLUDED.actor_id,
-                        kind = EXCLUDED.kind,
-                        left_client_id = EXCLUDED.left_client_id,
-                        right_client_id = EXCLUDED.right_client_id,
-                        input = EXCLUDED.input,
-                        plan = EXCLUDED.plan,
-                        recommended_ospf_cost = EXCLUDED.recommended_ospf_cost,
+                    UPDATE tunnel_plans
+                    SET
+                        actor_id = $1,
+                        kind = $2,
+                        left_client_id = $3,
+                        right_client_id = $4,
+                        input = $5,
+                        plan = $6,
+                        recommended_ospf_cost = $7,
                         status = 'planned',
                         left_status = 'planned',
                         right_status = 'planned',
                         last_apply_job_id = NULL,
                         last_rollback_job_id = NULL,
                         updated_at = now()
+                    WHERE name = $8 AND deleted_at IS NULL
                     RETURNING
                         id,
+                        enabled,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
                     "#,
                 )
-                .bind(view.id)
                 .bind(operator.operator.id)
-                .bind(&view.name)
                 .bind(tunnel_kind_name(view.kind))
                 .bind(&view.left_client_id)
                 .bind(&view.right_client_id)
                 .bind(SqlJson(input))
                 .bind(SqlJson(plan))
                 .bind(view.recommended_ospf_cost)
-                .fetch_one(pool)
-                .await?;
+                .bind(&view.name)
+                .fetch_optional(&mut *tx)
+                .await?
+                {
+                    row
+                } else {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO tunnel_plans (
+                            id,
+                            actor_id,
+                            name,
+                            kind,
+                            enabled,
+                            left_client_id,
+                            right_client_id,
+                            input,
+                            plan,
+                            recommended_ospf_cost,
+                            status
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'planned')
+                        RETURNING
+                            id,
+                            enabled,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        "#,
+                    )
+                    .bind(view.id)
+                    .bind(operator.operator.id)
+                    .bind(&view.name)
+                    .bind(tunnel_kind_name(view.kind))
+                    .bind(view.enabled)
+                    .bind(&view.left_client_id)
+                    .bind(&view.right_client_id)
+                    .bind(SqlJson(input))
+                    .bind(SqlJson(plan))
+                    .bind(view.recommended_ospf_cost)
+                    .fetch_one(&mut *tx)
+                    .await?
+                };
                 let persisted = TunnelPlanView {
                     id: row.try_get("id")?,
+                    enabled: row.try_get("enabled")?,
                     created_at: row.try_get("created_at")?,
                     updated_at: row.try_get("updated_at")?,
                     ..view
@@ -173,12 +239,12 @@ impl Repository {
                 .bind("network.tunnel_plan_created")
                 .bind(format!("tunnel_plan:{}", persisted.id))
                 .bind(tunnel_plan_metadata(&persisted, operator))
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
-                return Ok(persisted);
+                tx.commit().await?;
+                Ok(persisted)
             }
         }
-        Ok(view)
     }
 
     pub(crate) async fn get_tunnel_plan(&self, id: Uuid) -> Result<Option<TunnelPlanView>> {
@@ -187,6 +253,77 @@ impl Repository {
             .await?
             .into_iter()
             .find(|plan| plan.id == id))
+    }
+
+    pub(crate) async fn set_tunnel_plan_enabled(
+        &self,
+        plan_id: Uuid,
+        enabled: bool,
+        operator: &AuthContext,
+    ) -> Result<TunnelPlanView> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let updated = {
+                    let mut plans = memory.tunnel_plans.write().await;
+                    let Some(plan) = plans
+                        .iter_mut()
+                        .find(|plan| plan.id == plan_id && plan.deleted_at.is_none())
+                    else {
+                        anyhow::bail!("tunnel_plan_not_found");
+                    };
+                    plan.enabled = enabled;
+                    plan.updated_at = now.clone();
+                    plan.clone()
+                };
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(tunnel_plan_enabled_audit(&updated, enabled, operator, now));
+                Ok(updated)
+            }
+            Self::Postgres(pool) => {
+                let result = sqlx::query(
+                    r#"
+                    UPDATE tunnel_plans
+                    SET enabled = $2, actor_id = $3, updated_at = now()
+                    WHERE id = $1 AND deleted_at IS NULL
+                    "#,
+                )
+                .bind(plan_id)
+                .bind(enabled)
+                .bind(operator.operator.id)
+                .execute(pool)
+                .await?;
+                if result.rows_affected() == 0 {
+                    anyhow::bail!("tunnel_plan_not_found");
+                }
+                let Some(updated) = self.get_tunnel_plan(plan_id).await? else {
+                    anyhow::bail!("tunnel_plan_not_found");
+                };
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind(if enabled {
+                    "network.tunnel_plan_enabled"
+                } else {
+                    "network.tunnel_plan_disabled"
+                })
+                .bind(format!("tunnel_plan:{plan_id}"))
+                .bind(tunnel_plan_enabled_metadata(&updated, enabled, operator))
+                .execute(pool)
+                .await?;
+                Ok(updated)
+            }
+        }
     }
 
     pub(crate) async fn promote_tunnel_plan_to_adapter(
@@ -200,6 +337,7 @@ impl Repository {
             id: existing.id,
             name: plan.name.clone(),
             kind: plan.kind,
+            enabled: existing.enabled,
             left_client_id: plan.left_client_id.clone(),
             right_client_id: plan.right_client_id.clone(),
             left_status: "planned".to_string(),
@@ -212,12 +350,18 @@ impl Repository {
             plan: plan.clone(),
             created_at: existing.created_at.clone(),
             updated_at: unix_now().to_string(),
+            deleted_at: None,
+            deleted_by: None,
+            deleted_reason: None,
         };
         match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let mut plans = memory.tunnel_plans.write().await;
-                if let Some(slot) = plans.iter_mut().find(|plan| plan.id == existing.id) {
+                if let Some(slot) = plans
+                    .iter_mut()
+                    .find(|plan| plan.id == existing.id && plan.deleted_at.is_none())
+                {
                     *slot = TunnelPlanView {
                         updated_at: now.clone(),
                         ..view.clone()
@@ -248,8 +392,8 @@ impl Repository {
                         last_apply_job_id = NULL,
                         last_rollback_job_id = NULL,
                         updated_at = now()
-                    WHERE id = $1
-                    RETURNING created_at::text AS created_at, updated_at::text AS updated_at
+                    WHERE id = $1 AND deleted_at IS NULL
+                    RETURNING enabled, created_at::text AS created_at, updated_at::text AS updated_at
                     "#,
                 )
                 .bind(existing.id)
@@ -264,6 +408,7 @@ impl Repository {
                 .fetch_one(pool)
                 .await?;
                 let persisted = TunnelPlanView {
+                    enabled: row.try_get("enabled")?,
                     created_at: row.try_get("created_at")?,
                     updated_at: row.try_get("updated_at")?,
                     ..view
@@ -306,7 +451,9 @@ impl Repository {
                 let now = unix_now().to_string();
                 let aggregate_status = {
                     let mut plans = memory.tunnel_plans.write().await;
-                    let Some(plan) = plans.iter_mut().find(|plan| plan.name == update.plan_name)
+                    let Some(plan) = plans
+                        .iter_mut()
+                        .find(|plan| plan.name == update.plan_name && plan.deleted_at.is_none())
                     else {
                         return Ok(());
                     };
@@ -359,7 +506,7 @@ impl Repository {
                         last_apply_job_id = COALESCE($6, last_apply_job_id),
                         last_rollback_job_id = COALESCE($7, last_rollback_job_id),
                         updated_at = now()
-                    WHERE name = $1
+                    WHERE name = $1 AND deleted_at IS NULL
                     RETURNING id, status
                     "#,
                 )
@@ -475,6 +622,7 @@ fn tunnel_plan_metadata(view: &TunnelPlanView, operator: &AuthContext) -> serde_
     serde_json::json!({
         "name": &view.name,
         "kind": tunnel_kind_name(view.kind),
+        "enabled": view.enabled,
         "left_client_id": &view.left_client_id,
         "right_client_id": &view.right_client_id,
         "recommended_ospf_cost": view.recommended_ospf_cost,
@@ -482,6 +630,42 @@ fn tunnel_plan_metadata(view: &TunnelPlanView, operator: &AuthContext) -> serde_
         "runtime_topology_version": &view.plan.runtime_topology.version,
         "mutates_host": view.plan.mutates_host,
         "touched_files": &view.plan.touched_files,
+        "operator_username": &operator.operator.username,
+        "session_id": operator.session_id,
+    })
+}
+
+fn tunnel_plan_enabled_audit(
+    view: &TunnelPlanView,
+    enabled: bool,
+    operator: &AuthContext,
+    created_at: String,
+) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        action: if enabled {
+            "network.tunnel_plan_enabled".to_string()
+        } else {
+            "network.tunnel_plan_disabled".to_string()
+        },
+        target: format!("tunnel_plan:{}", view.id),
+        command_hash: None,
+        metadata: tunnel_plan_enabled_metadata(view, enabled, operator),
+        created_at,
+    }
+}
+
+fn tunnel_plan_enabled_metadata(
+    view: &TunnelPlanView,
+    enabled: bool,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": &view.name,
+        "enabled": enabled,
+        "left_client_id": &view.left_client_id,
+        "right_client_id": &view.right_client_id,
         "operator_username": &operator.operator.username,
         "session_id": operator.session_id,
     })

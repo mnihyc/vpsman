@@ -554,6 +554,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --left-underlay 192.0.2.10 \
   --right-underlay 192.0.2.20 \
   --address-pool-cidr 10.255.9.0/30 \
+  --left-tunnel-ipv4 10.255.9.0 \
+  --right-tunnel-ipv4 10.255.9.1 \
   --bandwidth 100m \
   --latency-ms 5 >"$network_plan_file"
 
@@ -567,6 +569,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --left-underlay 192.0.2.10 \
     --right-underlay 192.0.2.20 \
     --address-pool-cidr 10.255.9.0/30 \
+    --left-tunnel-ipv4 10.255.9.0 \
+    --right-tunnel-ipv4 10.255.9.1 \
     --bandwidth 100m \
     --latency-ms 5 \
     --save \
@@ -685,6 +689,8 @@ observed_json="$(VPSMAN_API_TOKEN="$access_token" \
     --left-underlay 192.0.2.10 \
     --right-underlay 192.0.2.20 \
     --address-pool-cidr 10.255.10.0/30 \
+    --left-tunnel-ipv4 10.255.10.0 \
+    --right-tunnel-ipv4 10.255.10.1 \
     --bandwidth 100m \
     --latency-ms 5 \
     --save)"

@@ -53,11 +53,23 @@ import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import { VpsCombobox } from "../components/VpsCombobox";
 import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import {
+  addressFamilyLabel,
+  latencyStatusLabel,
+  mutationPolicyLabel,
+  ospfStatusLabel,
+  planCorrelationLabel,
+  runtimeManagerLabel,
+  telemetryReasonLabel,
+  telemetrySourceLabel,
+  trafficStatusLabel,
+} from "../topologyRuntime";
 import {
   buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
@@ -65,6 +77,7 @@ import {
   type PrivilegeMaterial,
 } from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
+import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../webhookExpressionSuggestions";
 import {
   decodeOutputPreview,
   formatCompactTime,
@@ -192,6 +205,7 @@ export function FleetWorkspace({
   selectedAgent,
   summary,
   tags,
+  targetAgents,
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
@@ -269,6 +283,7 @@ export function FleetWorkspace({
   selectedAgent: AgentView | null;
   summary: FleetSummary;
   tags: TagView[];
+  targetAgents: AgentView[];
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
@@ -754,6 +769,7 @@ export function FleetWorkspace({
           </div>
           <ConsoleFreshnessBanner error={apiError} />
           <FleetAlertPolicyManager
+            agents={targetAgents}
             onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
             policies={fleetAlertPolicies}
@@ -775,7 +791,7 @@ export function FleetWorkspace({
           </div>
           <ConsoleFreshnessBanner error={apiError} />
           <FleetNotificationsHub
-            agents={agents}
+            agents={targetAgents}
             alertChannels={fleetAlertNotificationChannels}
             alertDeliveries={fleetAlertNotifications}
             webhookDeliveries={webhookRuleDeliveries}
@@ -2518,10 +2534,12 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
 }
 
 function FleetAlertPolicyManager({
+  agents,
   policies,
   onDelete,
   onUpsert,
 }: {
+  agents: AgentView[];
   policies: FleetAlertPolicyRecord[];
   onDelete: (policyId: string) => Promise<void>;
   onUpsert: (
@@ -2956,15 +2974,27 @@ function FleetAlertPolicyManager({
                 hint={
                   scopeKind === "global"
                     ? "Global policies do not need a value."
-                    : "Tag, provider, or client id."
+                    : scopeKind === "client"
+                      ? "Exact VPS ID is saved; type to search names or IDs."
+                      : "Tag or provider value."
                 }
               >
-                <input
-                  aria-label="Policy scope value"
-                  disabled={scopeKind === "global"}
-                  value={scopeValue}
-                  onChange={(event) => setScopeValue(event.target.value)}
-                />
+                {scopeKind === "client" ? (
+                  <VpsCombobox
+                    agents={agents}
+                    ariaLabel="Policy scope value"
+                    onChange={setScopeValue}
+                    placeholder="Search policy VPS"
+                    value={scopeValue}
+                  />
+                ) : (
+                  <input
+                    aria-label="Policy scope value"
+                    disabled={scopeKind === "global"}
+                    value={scopeValue}
+                    onChange={(event) => setScopeValue(event.target.value)}
+                  />
+                )}
               </ConsoleField>
               <ConsoleField label="Priority">
                 <input
@@ -3182,6 +3212,7 @@ function FleetNotificationsHub({
       </div>
       {tab === "channels" && (
         <FleetAlertNotificationManager
+          agents={agents}
           channels={alertChannels}
           onDelete={onDeleteAlertChannel}
           onDispatch={onDispatchAlertNotifications}
@@ -3289,6 +3320,7 @@ function DeliveryPreviewSection({
 }
 
 function FleetAlertNotificationManager({
+  agents,
   channels,
   onDelete,
   onDispatch,
@@ -3297,6 +3329,7 @@ function FleetAlertNotificationManager({
   onProcess,
   onUpsert,
 }: {
+  agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
   onDelete: (channelId: string) => Promise<void>;
   onDispatch: (
@@ -3843,15 +3876,27 @@ function FleetAlertNotificationManager({
                 hint={
                   scopeKind === "global"
                     ? "Global channels do not need a value."
-                    : "Tag, provider, or client id."
+                    : scopeKind === "client"
+                      ? "Exact VPS ID is saved; type to search names or IDs."
+                      : "Tag or provider value."
                 }
               >
-                <input
-                  aria-label="Notification scope value"
-                  disabled={scopeKind === "global"}
-                  value={scopeValue}
-                  onChange={(event) => setScopeValue(event.target.value)}
-                />
+                {scopeKind === "client" ? (
+                  <VpsCombobox
+                    agents={agents}
+                    ariaLabel="Notification scope value"
+                    onChange={setScopeValue}
+                    placeholder="Search notification VPS"
+                    value={scopeValue}
+                  />
+                ) : (
+                  <input
+                    aria-label="Notification scope value"
+                    disabled={scopeKind === "global"}
+                    value={scopeValue}
+                    onChange={(event) => setScopeValue(event.target.value)}
+                  />
+                )}
               </ConsoleField>
               <ConsoleField label="Minimum severity">
                 <select
@@ -4755,10 +4800,14 @@ function WebhookRuleManager({
                 className="fieldFull"
                 hint="Example: interval.30sec && tag:edge"
               >
-                <input
-                  aria-label="Webhook expression"
+                <SearchExpressionInput
+                  agents={agents}
+                  ariaLabel="Webhook expression"
+                  className="targetExpressionBar"
+                  onChange={setExpression}
+                  placeholder="interval.30sec && tag:edge"
+                  suggestions={WEBHOOK_EXPRESSION_SUGGESTIONS}
                   value={expression}
-                  onChange={(event) => setExpression(event.target.value)}
                 />
               </ConsoleField>
               <ConsoleField label="Target URL" className="fieldFull">
@@ -6088,22 +6137,38 @@ function NetworkRateList({
     );
   }
   return (
-    <div className="timeline">
+    <div className="timeline telemetryTimeline">
       <Network size={18} />
       <div>
         <strong>Interfaces</strong>
-        <span>
+        <span>{rates.length} latest interface rate bucket{rates.length === 1 ? "" : "s"}</span>
+        <div className="networkInterfaceList">
           {rates
             .slice()
             .sort((left, right) =>
               left.interface.localeCompare(right.interface),
             )
-            .map(
-              (rate) =>
-                `${rate.interface} RX ${formatBitsPerSecond(rate.rx_bps_avg)} / TX ${formatBitsPerSecond(rate.tx_bps_avg)}`,
-            )
-            .join("; ")}
-        </span>
+            .map((rate) => (
+              <div className="networkInterfaceRow telemetryInterfaceRow" key={rate.interface}>
+                <TelemetryStack
+                  detail={rateBucketDetail(rate)}
+                  main={rate.interface}
+                />
+                <TelemetryStack
+                  detail={rateByteDetail(rate)}
+                  main={`RX ${formatBitsPerSecond(rate.rx_bps_avg)} / TX ${formatBitsPerSecond(rate.tx_bps_avg)}`}
+                />
+                <TelemetryStack
+                  detail={`updated ${formatCompactTime(rate.updated_at)}`}
+                  main={`${rate.sample_count} sample${rate.sample_count === 1 ? "" : "s"} / ${formatDuration(rate.bucket_secs)}`}
+                />
+                <TelemetryStack
+                  detail={`${formatDuration(rate.bucket_secs)} interval`}
+                  main={rateDeltaDetail(rate)}
+                />
+              </div>
+            ))}
+        </div>
       </div>
     </div>
   );
@@ -6120,32 +6185,151 @@ function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
     );
   }
   return (
-    <div className="timeline">
+    <div className="timeline telemetryTimeline">
       <Network size={18} />
       <div>
         <strong>Runtime tunnels</strong>
-        <span>
+        <span>{tunnels.length} latest tunnel report{tunnels.length === 1 ? "" : "s"}</span>
+        <div className="networkInterfaceList">
           {tunnels
             .slice()
             .sort((left, right) =>
               left.interface.localeCompare(right.interface),
             )
-            .map(
-              (tunnel) =>
-                `${tunnel.interface} ${tunnel.kind} ${tunnel.operstate ?? "unknown"} ${formatTunnelPolicy(tunnel)}`,
-            )
-            .join("; ")}
-        </span>
+            .map((tunnel) => (
+              <div className={`networkInterfaceRow telemetryTunnelRow ${tunnelRowClass(tunnel)}`} key={tunnel.interface}>
+                <TelemetryStack
+                  detail={`${tunnel.kind}; observed ${formatCompactTime(tunnel.observed_at)}`}
+                  main={tunnel.interface}
+                />
+                <TelemetryStack
+                  detail={formatTunnelPolicy(tunnel)}
+                  main={formatTunnelRuntime(tunnel)}
+                />
+                <TelemetryStack
+                  detail={formatTunnelLatencyDetail(tunnel)}
+                  main={formatTunnelLatencyMain(tunnel)}
+                  tone={latencyTone(tunnel.latency_status)}
+                />
+                <TelemetryStack
+                  detail={formatTunnelOspfDetail(tunnel)}
+                  main={formatTunnelOspfMain(tunnel)}
+                  tone={ospfTone(tunnel.auto_ospf_status)}
+                />
+              </div>
+            ))}
+        </div>
       </div>
     </div>
   );
+}
+
+function TelemetryStack({
+  detail,
+  main,
+  title,
+  tone = "neutral",
+}: {
+  detail: string;
+  main: string;
+  title?: string;
+  tone?: "critical" | "neutral" | "ok" | "warn";
+}) {
+  return (
+    <span className="telemetryStack" title={title ?? detail}>
+      <strong className={`telemetryStatus ${tone}`}>{main}</strong>
+      <small>{detail}</small>
+    </span>
+  );
+}
+
+function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
+  if (tunnel.latency_status === "down" || tunnel.auto_ospf_status === "failed") {
+    return "telemetryRowCritical";
+  }
+  if (tunnel.latency_status === "missed" || tunnel.auto_ospf_status === "report_only") {
+    return "telemetryRowWarn";
+  }
+  return "";
+}
+
+function formatTunnelRuntime(tunnel: TelemetryTunnelRecord): string {
+  const state = tunnel.operstate ?? "state unknown";
+  const mtu = typeof tunnel.mtu === "number" ? `mtu ${tunnel.mtu}` : "mtu n/a";
+  return `${state}; ${mtu}`;
+}
+
+function formatTunnelLatencyMain(tunnel: TelemetryTunnelRecord): string {
+  const status = latencyStatusLabel(tunnel.latency_status);
+  const metric = typeof tunnel.latency_avg_ms === "number" ? ` / ${tunnel.latency_avg_ms.toFixed(1)} ms` : "";
+  const loss = typeof tunnel.packet_loss_ratio === "number" ? ` / ${(tunnel.packet_loss_ratio * 100).toFixed(1)}% loss` : "";
+  return `Latency ${status}${metric}${loss}`;
+}
+
+function formatTunnelLatencyDetail(tunnel: TelemetryTunnelRecord): string {
+  const checked = typeof tunnel.latency_checked_unix === "number"
+    ? formatCompactTime(new Date(tunnel.latency_checked_unix * 1000).toISOString())
+    : "not checked";
+  const windows = [
+    typeof tunnel.latency_healthy_windows === "number" ? `ok ${tunnel.latency_healthy_windows}` : "",
+    typeof tunnel.latency_missed_windows === "number" ? `miss ${tunnel.latency_missed_windows}` : "",
+  ].filter(Boolean).join(", ");
+  return [
+    addressFamilyLabel(tunnel.latency_primary_family),
+    tunnel.latency_target ?? "target n/a",
+    `checked ${checked}`,
+    windows || "windows n/a",
+    telemetryReasonLabel(tunnel.latency_reason),
+  ].filter(Boolean).join("; ");
+}
+
+function formatTunnelOspfMain(tunnel: TelemetryTunnelRecord): string {
+  const status = ospfStatusLabel(tunnel.auto_ospf_status, tunnel.auto_ospf_enabled);
+  const cost = tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
+    ? ` ${tunnel.auto_ospf_current_cost ?? "?"}->${tunnel.auto_ospf_recommended_cost ?? "?"}`
+    : "";
+  return `OSPF ${status}${cost}`;
+}
+
+function formatTunnelOspfDetail(tunnel: TelemetryTunnelRecord): string {
+  const enabled = tunnel.auto_ospf_enabled ? "enabled" : "disabled";
+  const updated = typeof tunnel.auto_ospf_updated_unix === "number"
+    ? `updated ${formatCompactTime(new Date(tunnel.auto_ospf_updated_unix * 1000).toISOString())}`
+    : "no update";
+  return [enabled, updated, telemetryReasonLabel(tunnel.auto_ospf_reason)].filter(Boolean).join("; ");
+}
+
+function latencyTone(status: string | null | undefined): "critical" | "neutral" | "ok" | "warn" {
+  if (status === "down") {
+    return "critical";
+  }
+  if (status === "missed" || status === "unconfigured" || status === "disabled") {
+    return "warn";
+  }
+  if (status === "healthy") {
+    return "ok";
+  }
+  return "neutral";
+}
+
+function ospfTone(status: string | null | undefined): "critical" | "neutral" | "ok" | "warn" {
+  if (status === "failed") {
+    return "critical";
+  }
+  if (status === "report_only" || status === "stabilizing" || status === "monitoring_only") {
+    return "warn";
+  }
+  if (status === "stable" || status === "updated" || status === "disabled") {
+    return "ok";
+  }
+  return "neutral";
 }
 
 function formatTunnelPolicy(tunnel: TelemetryTunnelRecord) {
   const adapterHealth = formatAdapterHealth(tunnel);
   const traffic = formatTunnelTraffic(tunnel);
   if (tunnel.plan_correlation === "matched_saved_plan") {
-    const manager = tunnel.plan_runtime_manager ?? tunnel.ownership_mode;
+    const manager = runtimeManagerLabel(tunnel.plan_runtime_manager ?? tunnel.ownership_mode);
     if (tunnel.mutation_policy === "observe_only_saved_plan") {
       return tunnel.plan_name
         ? `saved observed plan ${tunnel.plan_name} (${manager})${adapterHealth}${traffic}`
@@ -6161,7 +6345,7 @@ function formatTunnelPolicy(tunnel: TelemetryTunnelRecord) {
   if (tunnel.mutation_policy === "managed_desired") {
     return `managed${adapterHealth}${traffic}`;
   }
-  return `${tunnel.ownership_mode}${adapterHealth}${traffic}`;
+  return `${planCorrelationLabel(tunnel.plan_correlation)} ${mutationPolicyLabel(tunnel.mutation_policy)}${adapterHealth}${traffic}`;
 }
 
 function formatAdapterHealth(tunnel: TelemetryTunnelRecord) {
@@ -6172,7 +6356,7 @@ function formatAdapterHealth(tunnel: TelemetryTunnelRecord) {
   if (health.success) {
     return " adapter healthy";
   }
-  const reason = health.reason ?? health.status;
+  const reason = telemetryReasonLabel(health.reason) || readableAdapterStatus(health.status);
   return ` adapter ${reason}`;
 }
 
@@ -6183,9 +6367,38 @@ function formatTunnelTraffic(tunnel: TelemetryTunnelRecord) {
   }
   const status =
     tunnel.traffic_status && tunnel.traffic_status !== "ok"
-      ? ` ${tunnel.traffic_status}`
+      ? ` ${trafficStatusLabel(tunnel.traffic_status)}`
       : "";
-  return ` traffic ${source}${status}`;
+  return ` traffic ${telemetrySourceLabel(source)}${status}`;
+}
+
+function readableAdapterStatus(status: string | null | undefined): string {
+  return status ? status.replace(/[_-]+/g, " ") : "unknown";
+}
+
+function rateBucketDetail(rate: TelemetryNetworkRateRecord): string {
+  return `bucket ${formatCompactTime(rate.bucket_start)}`;
+}
+
+function rateByteDetail(rate: TelemetryNetworkRateRecord): string {
+  return `avg bytes RX ${formatBytes(rate.rx_bytes_avg)} / TX ${formatBytes(rate.tx_bytes_avg)}`;
+}
+
+function rateDeltaDetail(rate: TelemetryNetworkRateRecord): string {
+  if (rate.rx_bytes_delta === 0 && rate.tx_bytes_delta === 0) {
+    return "delta pending";
+  }
+  return `delta RX ${formatBytes(rate.rx_bytes_delta)} / TX ${formatBytes(rate.tx_bytes_delta)}`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  return `${Math.round(seconds / 3600)}h`;
 }
 
 function formatRollupSamples(rollup: TelemetryRollupRecord | null) {

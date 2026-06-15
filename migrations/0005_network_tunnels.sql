@@ -14,8 +14,9 @@ CREATE TABLE tunnels (
 CREATE TABLE tunnel_plans (
     id UUID PRIMARY KEY,
     actor_id UUID REFERENCES operators(id),
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     kind TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
     left_client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     right_client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     input JSONB NOT NULL,
@@ -26,6 +27,9 @@ CREATE TABLE tunnel_plans (
     right_status TEXT NOT NULL DEFAULT 'planned',
     last_apply_job_id UUID REFERENCES jobs(id),
     last_rollback_job_id UUID REFERENCES jobs(id),
+    deleted_at TIMESTAMPTZ,
+    deleted_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    deleted_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT tunnel_plans_status_check
@@ -36,11 +40,19 @@ CREATE TABLE tunnel_plans (
         CHECK (right_status IN ('planned', 'applied', 'rolled_back'))
 );
 
+CREATE UNIQUE INDEX tunnel_plans_active_name_idx
+    ON tunnel_plans (name)
+    WHERE deleted_at IS NULL;
+
 CREATE INDEX tunnel_plans_clients_idx
     ON tunnel_plans (left_client_id, right_client_id);
 
 CREATE INDEX tunnel_plans_status_idx
     ON tunnel_plans (status, updated_at DESC);
+
+CREATE INDEX tunnel_plans_active_clients_idx
+    ON tunnel_plans (left_client_id, right_client_id, updated_at DESC)
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE network_observations (
     id UUID PRIMARY KEY,

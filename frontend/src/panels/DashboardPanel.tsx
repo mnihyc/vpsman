@@ -11,7 +11,9 @@ import {
 } from "lucide-react";
 import { ConsoleActionDrawer, ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
+import { VpsCombobox } from "../components/VpsCombobox";
 import type {
+  AgentView,
   DashboardDrilldownRecord,
   DashboardLabelClusterRecord,
   DashboardOverviewRecord,
@@ -29,6 +31,7 @@ import type {
 import { formatCompactTime } from "../utils";
 
 type DashboardPanelProps = {
+  agents: AgentView[];
   error: string | null;
   loading: boolean;
   onNavigate: (drilldown: DashboardDrilldownRecord) => void;
@@ -77,6 +80,7 @@ const refreshIntervalOptions: Array<{ value: DashboardRefreshIntervalSecs; label
 ];
 
 export function DashboardPanel({
+  agents,
   error,
   loading,
   onNavigate,
@@ -241,10 +245,11 @@ export function DashboardPanel({
           ) : preferences.scopeKind === "client" ? (
             <label>
               <span>Scope value</span>
-              <input
-                aria-label="Dashboard scope value"
-                onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
-                placeholder="agent-sfo-01"
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="Dashboard scope value"
+                onChange={(value) => onPreferencesChange({ scopeValue: value })}
+                placeholder="Search scoped VPS"
                 value={preferences.scopeValue}
               />
             </label>

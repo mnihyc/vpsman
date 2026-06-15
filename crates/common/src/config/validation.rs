@@ -340,6 +340,22 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
         return Err("network_runtime_status_telemetry_interval_secs_out_of_range".to_string());
     }
     validate_network_hook_argv(&config.runtime_vnstat_argv, "network_runtime_vnstat_argv")?;
+    if !(15..=3600).contains(&config.latency_monitoring_interval_secs) {
+        return Err("network_latency_monitoring_interval_secs_out_of_range".to_string());
+    }
+    if !(1..=60).contains(&config.latency_down_windows) {
+        return Err("network_latency_down_windows_out_of_range".to_string());
+    }
+    if config.auto_ospf_min_cost_delta == 0 {
+        return Err("network_auto_ospf_min_cost_delta_out_of_range".to_string());
+    }
+    if !(1..=10).contains(&config.auto_ospf_healthy_windows) {
+        return Err("network_auto_ospf_healthy_windows_out_of_range".to_string());
+    }
+    if let Some(command) = &config.auto_ospf_updater {
+        validate_network_hook_argv(&command.argv, "network_auto_ospf_updater_argv")?;
+        validate_runtime_command_budget(command, "network_auto_ospf_updater")?;
+    }
     validate_runtime_status_telemetry_plans(&config.runtime_status_telemetry_plans)?;
     if config.validate_enabled
         && config.preset.is_none()
@@ -380,11 +396,14 @@ fn validate_runtime_status_telemetry_plans(
             .map_err(|_| "network_runtime_status_telemetry_control_invalid".to_string())?;
         validate_runtime_topology_intent(&plan.plan.runtime_topology, &plan.plan.interface_name)
             .map_err(|_| "network_runtime_status_telemetry_topology_invalid".to_string())?;
-        if plan.plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
-            return Err("network_runtime_status_telemetry_requires_adapter_plan".to_string());
-        }
-        if plan.plan.runtime_control.status.is_none() {
+        if plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter
+            && plan.plan.runtime_control.status.is_none()
+        {
             return Err("network_runtime_status_telemetry_status_command_required".to_string());
+        }
+        if let Some(command) = &plan.auto_ospf_updater {
+            validate_network_hook_argv(&command.argv, "network_runtime_auto_ospf_updater_argv")?;
+            validate_runtime_command_budget(command, "network_runtime_auto_ospf_updater")?;
         }
         match plan.traffic_source {
             AgentRuntimeTrafficSource::InterfaceCounters => {

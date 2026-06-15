@@ -447,7 +447,14 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut records = memory.telemetry_tunnels.read().await.clone();
-                let plans = memory.tunnel_plans.read().await.clone();
+                let plans = memory
+                    .tunnel_plans
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|plan| plan.deleted_at.is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 correlate_telemetry_tunnels_with_plans(&mut records, &plans);
                 records.retain(|record| {
                     client_id.is_none_or(|expected| record.client_id == expected)
@@ -490,7 +497,23 @@ impl Repository {
                         telemetry_plan_runtime_manager,
                         telemetry_endpoint_side,
                         telemetry_peer_client_id,
-                        adapter_health
+                        adapter_health,
+                        latency_monitoring_enabled,
+                        latency_status,
+                        latency_reason,
+                        latency_primary_family,
+                        latency_target,
+                        latency_checked_unix,
+                        latency_avg_ms,
+                        packet_loss_ratio,
+                        latency_healthy_windows,
+                        latency_missed_windows,
+                        auto_ospf_enabled,
+                        auto_ospf_status,
+                        auto_ospf_reason,
+                        auto_ospf_current_cost,
+                        auto_ospf_recommended_cost,
+                        auto_ospf_updated_unix
                     FROM telemetry_tunnels
                     WHERE ($1::TEXT IS NULL OR client_id = $1)
                       AND ($2::TEXT IS NULL OR interface = $2)
@@ -544,6 +567,24 @@ impl Repository {
                             traffic_reason: row.try_get("traffic_reason")?,
                             traffic_checked_unix: row.try_get("traffic_checked_unix")?,
                             adapter_health: parse_adapter_health(row.try_get("adapter_health")?),
+                            latency_monitoring_enabled: row
+                                .try_get("latency_monitoring_enabled")?,
+                            latency_status: row.try_get("latency_status")?,
+                            latency_reason: row.try_get("latency_reason")?,
+                            latency_primary_family: row.try_get("latency_primary_family")?,
+                            latency_target: row.try_get("latency_target")?,
+                            latency_checked_unix: row.try_get("latency_checked_unix")?,
+                            latency_avg_ms: row.try_get("latency_avg_ms")?,
+                            packet_loss_ratio: row.try_get("packet_loss_ratio")?,
+                            latency_healthy_windows: row.try_get("latency_healthy_windows")?,
+                            latency_missed_windows: row.try_get("latency_missed_windows")?,
+                            auto_ospf_enabled: row.try_get("auto_ospf_enabled")?,
+                            auto_ospf_status: row.try_get("auto_ospf_status")?,
+                            auto_ospf_reason: row.try_get("auto_ospf_reason")?,
+                            auto_ospf_current_cost: row.try_get("auto_ospf_current_cost")?,
+                            auto_ospf_recommended_cost: row
+                                .try_get("auto_ospf_recommended_cost")?,
+                            auto_ospf_updated_unix: row.try_get("auto_ospf_updated_unix")?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;

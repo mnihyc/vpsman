@@ -61,6 +61,14 @@ cleanup_docker_fleet_smoke() {
       "$runtime_image" \
       sh -c 'rm -rf object-store' >/dev/null 2>&1 || true
   fi
+  if [[ -n "${SMOKE_TMPDIR:-}" && -d "$SMOKE_TMPDIR" ]]; then
+    docker run --rm \
+      -v "$SMOKE_TMPDIR:$SMOKE_TMPDIR" \
+      -w "$SMOKE_TMPDIR" \
+      "$runtime_image" \
+      sh -c "chown -R $(id -u):$(id -g) . >/dev/null 2>&1 || true" \
+      >/dev/null 2>&1 || true
+  fi
   smoke_cleanup
 }
 trap cleanup_docker_fleet_smoke EXIT
@@ -524,6 +532,12 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   "right_underlay": "203.0.113.12",
   "address_pool_cidr": "10.254.24.0/30",
   "reserved_addresses": [],
+  "ipv4_tunnel": {
+    "left": "10.254.24.0",
+    "right": "10.254.24.1",
+    "prefix_len": 31
+  },
+  "latency_primary_family": "ipv4",
   "bandwidth": "1000m",
   "latency_ms": 12,
   "packet_loss_ratio": 0,

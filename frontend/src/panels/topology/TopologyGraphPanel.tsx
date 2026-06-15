@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { GitGraph, RefreshCcw, Search } from "lucide-react";
 import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../../panelDisplay";
+import { readableTelemetryToken } from "../../topologyRuntime";
 import type { TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
 import { formatTime, formatVpsName, type VpsNameDisplayMode } from "../../utils";
 
@@ -194,31 +195,33 @@ export function TopologyGraphPanel({
           <div className="topologyGraphSummary">
             {filtered.edges.map((edge) => (
               <div className="topologyGraphEdgeRow" key={edge.plan_id}>
-                <span className="historyPrimary">
+                <span className="historyPrimary topologySummaryCell" data-label="Tunnel">
                   <strong>{edge.plan_name}</strong>
                   <small>
-                    {edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}
+                    {edge.enabled ? edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode) : `disabled; ${edgeEndpointLabel(edge, nodeById, vpsNameDisplayMode)}`}
                   </small>
                 </span>
-                <span className={`status ${topologyEdgeHealthStatusBadgeClass(edge.health)}`}>{edge.health}</span>
-                <span className="topologyMetric">
+                <span className="topologySummaryCell" data-label="Health">
+                  <span className={`status ${topologyEdgeHealthStatusBadgeClass(edge.health)}`}>{humanStatus(edge.health)}</span>
+                </span>
+                <span className="topologyMetric" data-label="Metric">
                   <strong>{edgeMetric(edge)}</strong>
                   <small>{edgeStatusDetail(edge)}</small>
                 </span>
-                <span className="topologyMetric">
+                <span className="topologyMetric" data-label="Drift">
                   <strong>{humanStatus(edge.topology_drift_action)}</strong>
                   <small>{humanStatus(edge.topology_drift_policy)}</small>
                 </span>
-                <span className="topologyMetric">
+                <span className="topologyMetric" data-label="Neighbor">
                   <strong>{humanStatus(edge.neighbor_state)}</strong>
                   <small>{humanStatus(edge.probe_state)}</small>
                 </span>
-                <span className="topologyMetric">
+                <span className="topologyMetric" data-label="Runtime">
                   <strong>{humanStatus(edge.runtime_state)}</strong>
                   <small>{runtimeCoverageDetail(edge)}</small>
                 </span>
                 <LatencySparkline edge={edge} />
-                <span className="topologyMetric">
+                <span className="topologyMetric" data-label="Cost">
                   <strong>{edge.cost_delta === null ? `cost ${edge.recommended_ospf_cost}` : `delta ${edge.cost_delta}`}</strong>
                   <small>{edge.latest_observed_at ? formatTime(edge.latest_observed_at) : "no observations"}</small>
                 </span>
@@ -334,6 +337,7 @@ function edgeSearchText(edge: TopologyGraphEdge): string {
     edge.kind,
     edge.health,
     edge.status,
+    edge.enabled ? "enabled" : "disabled",
     edge.topology_drift_policy ?? "",
     edge.topology_drift_action ?? "",
     edge.neighbor_state ?? "",
@@ -379,6 +383,9 @@ function edgeMetric(edge: TopologyGraphEdge): string {
 }
 
 function edgeStatusDetail(edge: TopologyGraphEdge): string {
+  if (!edge.enabled) {
+    return "disabled";
+  }
   if (edge.convergence_blocked) {
     const blockedCount = edgeOfflineClientIds(edge).length;
     return blockedCount > 0 ? `${blockedCount} endpoint${blockedCount === 1 ? "" : "s"} offline` : "convergence blocked";
@@ -394,13 +401,13 @@ function edgeStatusDetail(edge: TopologyGraphEdge): string {
   }
   const serverDriftReasons = edgeServerDriftReasons(edge);
   if (serverDriftReasons.length > 0) {
-    return serverDriftReasons.join(", ");
+    return serverDriftReasons.map(humanStatus).join(", ");
   }
   const runtimeReasons = edgeRuntimeReasons(edge);
   if (runtimeReasons.length > 0) {
-    return runtimeReasons.join(", ");
+    return runtimeReasons.map(humanStatus).join(", ");
   }
-  return `${edge.left_status} / ${edge.right_status}`;
+  return `${humanStatus(edge.left_status)} / ${humanStatus(edge.right_status)}`;
 }
 
 function runtimeCoverageDetail(edge: TopologyGraphEdge): string {
@@ -423,7 +430,7 @@ function LatencySparkline({ edge }: { edge: TopologyGraphEdge }) {
   const series = Array.isArray(edge.latency_series_ms) ? edge.latency_series_ms.filter(Number.isFinite) : [];
   if (series.length === 0) {
     return (
-      <span className="topologyMetric">
+      <span className="topologyMetric" data-label="Curve">
         <strong>No curve</strong>
         <small>latency samples pending</small>
       </span>
@@ -431,14 +438,16 @@ function LatencySparkline({ edge }: { edge: TopologyGraphEdge }) {
   }
   const max = Math.max(1, ...series);
   return (
-    <span className="latencyMiniCurve" aria-label={`${edge.plan_name} latency curve`}>
-      {series.map((value, index) => (
-        <span
-          key={`${edge.plan_id}-${index}`}
-          style={{ height: `${Math.max(6, Math.round((value / max) * 28))}px` }}
-          title={`${value.toFixed(value < 10 ? 2 : 1)} ms`}
-        />
-      ))}
+    <span className="topologySummaryCell latencyCurveCell" data-label="Curve">
+      <span className="latencyMiniCurve" aria-label={`${edge.plan_name} latency curve`}>
+        {series.map((value, index) => (
+          <span
+            key={`${edge.plan_id}-${index}`}
+            style={{ height: `${Math.max(6, Math.round((value / max) * 28))}px` }}
+            title={`${value.toFixed(value < 10 ? 2 : 1)} ms`}
+          />
+        ))}
+      </span>
     </span>
   );
 }
@@ -456,7 +465,7 @@ function edgeRuntimeReasons(edge: TopologyGraphEdge): string[] {
 }
 
 function humanStatus(value: string | null | undefined): string {
-  return value ? value.replace(/_/g, " ") : "unknown";
+  return value ? readableTelemetryToken(value) : "Unknown";
 }
 
 function nodeLabel(node: Pick<TopologyGraphNode, "client_id" | "display_name">, mode: VpsNameDisplayMode): string {

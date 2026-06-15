@@ -929,6 +929,22 @@ async fn upsert_postgres_telemetry_tunnels(
                 telemetry_endpoint_side,
                 telemetry_peer_client_id,
                 adapter_health,
+                latency_monitoring_enabled,
+                latency_status,
+                latency_reason,
+                latency_primary_family,
+                latency_target,
+                latency_checked_unix,
+                latency_avg_ms,
+                packet_loss_ratio,
+                latency_healthy_windows,
+                latency_missed_windows,
+                auto_ospf_enabled,
+                auto_ospf_status,
+                auto_ospf_reason,
+                auto_ospf_current_cost,
+                auto_ospf_recommended_cost,
+                auto_ospf_updated_unix,
                 updated_at
             )
             VALUES (
@@ -956,6 +972,22 @@ async fn upsert_postgres_telemetry_tunnels(
                 $22,
                 $23,
                 $24,
+                $25,
+                $26,
+                $27,
+                $28,
+                $29,
+                $30,
+                $31,
+                $32,
+                $33,
+                $34,
+                $35,
+                $36,
+                $37,
+                $38,
+                $39,
+                $40,
                 now()
             )
             "#,
@@ -984,6 +1016,22 @@ async fn upsert_postgres_telemetry_tunnels(
         .bind(&tunnel.endpoint_side)
         .bind(&tunnel.peer_client_id)
         .bind(adapter_health)
+        .bind(tunnel.latency_monitoring_enabled)
+        .bind(&tunnel.latency_status)
+        .bind(&tunnel.latency_reason)
+        .bind(&tunnel.latency_primary_family)
+        .bind(&tunnel.latency_target)
+        .bind(tunnel.latency_checked_unix.map(u64_to_i64))
+        .bind(tunnel.latency_avg_ms)
+        .bind(tunnel.packet_loss_ratio)
+        .bind(tunnel.latency_healthy_windows.map(i32::from))
+        .bind(tunnel.latency_missed_windows.map(i32::from))
+        .bind(tunnel.auto_ospf_enabled)
+        .bind(&tunnel.auto_ospf_status)
+        .bind(&tunnel.auto_ospf_reason)
+        .bind(tunnel.auto_ospf_current_cost.map(i32::from))
+        .bind(tunnel.auto_ospf_recommended_cost.map(i32::from))
+        .bind(tunnel.auto_ospf_updated_unix.map(u64_to_i64))
         .execute(&mut **tx)
         .await?;
     }
@@ -1031,6 +1079,22 @@ fn telemetry_tunnel_view(
         traffic_reason: tunnel.traffic_reason.clone(),
         traffic_checked_unix: tunnel.traffic_checked_unix.map(u64_to_i64),
         adapter_health: tunnel.adapter_health.as_ref().map(adapter_health_view),
+        latency_monitoring_enabled: tunnel.latency_monitoring_enabled,
+        latency_status: tunnel.latency_status.clone(),
+        latency_reason: tunnel.latency_reason.clone(),
+        latency_primary_family: tunnel.latency_primary_family.clone(),
+        latency_target: tunnel.latency_target.clone(),
+        latency_checked_unix: tunnel.latency_checked_unix.map(u64_to_i64),
+        latency_avg_ms: tunnel.latency_avg_ms,
+        packet_loss_ratio: tunnel.packet_loss_ratio,
+        latency_healthy_windows: tunnel.latency_healthy_windows.map(i32::from),
+        latency_missed_windows: tunnel.latency_missed_windows.map(i32::from),
+        auto_ospf_enabled: tunnel.auto_ospf_enabled,
+        auto_ospf_status: tunnel.auto_ospf_status.clone(),
+        auto_ospf_reason: tunnel.auto_ospf_reason.clone(),
+        auto_ospf_current_cost: tunnel.auto_ospf_current_cost.map(i32::from),
+        auto_ospf_recommended_cost: tunnel.auto_ospf_recommended_cost.map(i32::from),
+        auto_ospf_updated_unix: tunnel.auto_ospf_updated_unix.map(u64_to_i64),
     })
 }
 

@@ -82,6 +82,7 @@ pub(crate) async fn collect_system_dashboard_snapshot(
 ) -> anyhow::Result<CollectedSystemDashboard> {
     let snapshot = state.repo.system_dashboard_snapshot().await?;
     let mut notes = Vec::new();
+    state.refresh_gateway_dispatch_timeouts();
     let gateway_events = match state.gateway.forward_metrics().await {
         Ok(metrics) => SystemDashboardGatewayEventsView {
             queued_events: Some(metrics.queued_events),
@@ -152,14 +153,15 @@ fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {
     let Ok(config) = SuiteConfig::load_optional(&state.suite_config_path) else {
         return SystemDashboardCapacityView::default();
     };
+    let dispatcher_config = state.dispatcher_runtime_config();
     SystemDashboardCapacityView {
         api_db_pool: config.capacity.api_db_pool,
         worker_db_pool: config.capacity.worker_db_pool,
-        dispatcher_batch: Some(state.dispatcher_config.batch_limit),
-        dispatcher_in_flight: Some(state.dispatcher_config.in_flight),
-        dispatch_ack_secs: Some(state.dispatcher_config.dispatch_ack_secs),
-        event_post_secs: Some(state.dispatcher_config.event_post_secs),
-        internal_http_read_secs: Some(state.dispatcher_config.internal_http_read_secs),
+        dispatcher_batch: Some(dispatcher_config.batch_limit),
+        dispatcher_in_flight: Some(dispatcher_config.in_flight),
+        dispatch_ack_secs: Some(dispatcher_config.dispatch_ack_secs),
+        event_post_secs: Some(dispatcher_config.event_post_secs),
+        internal_http_read_secs: Some(dispatcher_config.internal_http_read_secs),
         worker_schedule_command_secs: config
             .timeout
             .worker_schedule_command_secs

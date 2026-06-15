@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RuntimeTunnelCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan};
+use crate::{
+    OspfCostPolicy, RuntimeTunnelCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -14,7 +16,7 @@ pub struct ServerEndpoint {
 
 pub const MAX_AGENT_HOT_CONFIG_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub client_id: String,
@@ -221,7 +223,7 @@ pub enum AgentTelemetrySource {
     LinuxProcfsAndCustomCommand,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AgentNetworkConfig {
     #[serde(default)]
     pub apply_enabled: bool,
@@ -267,12 +269,28 @@ pub struct AgentNetworkConfig {
     pub status_probe_timeout_secs: u64,
     #[serde(default = "default_network_status_probe_max_output_bytes")]
     pub status_probe_max_output_bytes: u32,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub runtime_status_telemetry_enabled: bool,
     #[serde(default = "default_network_runtime_status_telemetry_interval_secs")]
     pub runtime_status_telemetry_interval_secs: u64,
     #[serde(default = "default_network_runtime_vnstat_argv")]
     pub runtime_vnstat_argv: Vec<String>,
+    #[serde(default = "default_true")]
+    pub latency_monitoring_enabled: bool,
+    #[serde(default = "default_network_latency_monitoring_interval_secs")]
+    pub latency_monitoring_interval_secs: u64,
+    #[serde(default = "default_network_latency_down_windows")]
+    pub latency_down_windows: u8,
+    #[serde(default)]
+    pub auto_ospf_enabled: bool,
+    #[serde(default = "default_network_auto_ospf_min_cost_delta")]
+    pub auto_ospf_min_cost_delta: u16,
+    #[serde(default = "default_network_auto_ospf_healthy_windows")]
+    pub auto_ospf_healthy_windows: u8,
+    #[serde(default)]
+    pub auto_ospf_policy: OspfCostPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_updater: Option<RuntimeTunnelCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_status_telemetry_plans: Vec<AgentRuntimeStatusTelemetryPlan>,
 }
@@ -287,6 +305,12 @@ pub struct AgentRuntimeStatusTelemetryPlan {
     pub traffic_source: AgentRuntimeTrafficSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_command: Option<RuntimeTunnelCommand>,
+    #[serde(default = "default_true")]
+    pub latency_monitoring_enabled: bool,
+    #[serde(default)]
+    pub auto_ospf_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_ospf_updater: Option<RuntimeTunnelCommand>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -377,6 +401,14 @@ impl Default for AgentNetworkConfig {
             runtime_status_telemetry_interval_secs:
                 default_network_runtime_status_telemetry_interval_secs(),
             runtime_vnstat_argv: default_network_runtime_vnstat_argv(),
+            latency_monitoring_enabled: true,
+            latency_monitoring_interval_secs: default_network_latency_monitoring_interval_secs(),
+            latency_down_windows: default_network_latency_down_windows(),
+            auto_ospf_enabled: false,
+            auto_ospf_min_cost_delta: default_network_auto_ospf_min_cost_delta(),
+            auto_ospf_healthy_windows: default_network_auto_ospf_healthy_windows(),
+            auto_ospf_policy: OspfCostPolicy::default(),
+            auto_ospf_updater: None,
             runtime_status_telemetry_plans: Vec::new(),
         }
     }
@@ -429,6 +461,26 @@ fn default_network_runtime_status_telemetry_interval_secs() -> u64 {
 
 fn default_network_runtime_vnstat_argv() -> Vec<String> {
     Vec::new()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_network_latency_monitoring_interval_secs() -> u64 {
+    60
+}
+
+fn default_network_latency_down_windows() -> u8 {
+    3
+}
+
+fn default_network_auto_ospf_min_cost_delta() -> u16 {
+    5
+}
+
+fn default_network_auto_ospf_healthy_windows() -> u8 {
+    2
 }
 
 fn default_telemetry_proc_root() -> String {

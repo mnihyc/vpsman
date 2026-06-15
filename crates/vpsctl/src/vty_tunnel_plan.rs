@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use vpsman_common::{
-    BandwidthTier, OspfCostPolicy, RuntimeTunnelManager, TunnelKind, TunnelPlanInput,
+    BandwidthTier, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
+    TunnelKind, TunnelPlanInput,
 };
 
 use crate::network_runtime_args::{
@@ -24,6 +25,14 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut right_underlay = None::<String>;
     let mut address_pool_cidr = None::<String>;
     let mut reserved_addresses = Vec::<String>::new();
+    let mut left_tunnel_ipv4 = None::<String>;
+    let mut right_tunnel_ipv4 = None::<String>;
+    let mut tunnel_ipv4_prefix_len = 31_u8;
+    let mut ipv6_address_pool_cidr = None::<String>;
+    let mut left_tunnel_ipv6 = None::<String>;
+    let mut right_tunnel_ipv6 = None::<String>;
+    let mut tunnel_ipv6_prefix_len = 127_u8;
+    let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut bandwidth = None::<BandwidthTier>;
     let mut latency_ms = None::<f64>;
     let mut packet_loss_ratio = 0.0_f64;
@@ -133,6 +142,97 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             }
             value if value.starts_with("--pool-cidr=") => {
                 address_pool_cidr = Some(flag_value(value, "--pool-cidr=").to_string());
+                index += 1;
+            }
+            "--left-tunnel-ipv4" => {
+                left_tunnel_ipv4 =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv4")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--left-tunnel-ipv4=") => {
+                left_tunnel_ipv4 = Some(flag_value(value, "--left-tunnel-ipv4=").to_string());
+                index += 1;
+            }
+            "--right-tunnel-ipv4" => {
+                right_tunnel_ipv4 =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv4")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--right-tunnel-ipv4=") => {
+                right_tunnel_ipv4 = Some(flag_value(value, "--right-tunnel-ipv4=").to_string());
+                index += 1;
+            }
+            "--tunnel-ipv4-prefix-len" => {
+                tunnel_ipv4_prefix_len = parse_u8(
+                    next_value(tokens, index, "--tunnel-ipv4-prefix-len")?,
+                    "--tunnel-ipv4-prefix-len",
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--tunnel-ipv4-prefix-len=") => {
+                tunnel_ipv4_prefix_len = parse_u8(
+                    flag_value(value, "--tunnel-ipv4-prefix-len="),
+                    "--tunnel-ipv4-prefix-len",
+                )?;
+                index += 1;
+            }
+            "--ipv6-address-pool-cidr" | "--ipv6-pool-cidr" => {
+                ipv6_address_pool_cidr =
+                    Some(next_value(tokens, index, tokens[index])?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--ipv6-address-pool-cidr=") => {
+                ipv6_address_pool_cidr =
+                    Some(flag_value(value, "--ipv6-address-pool-cidr=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--ipv6-pool-cidr=") => {
+                ipv6_address_pool_cidr = Some(flag_value(value, "--ipv6-pool-cidr=").to_string());
+                index += 1;
+            }
+            "--left-tunnel-ipv6" => {
+                left_tunnel_ipv6 =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv6")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--left-tunnel-ipv6=") => {
+                left_tunnel_ipv6 = Some(flag_value(value, "--left-tunnel-ipv6=").to_string());
+                index += 1;
+            }
+            "--right-tunnel-ipv6" => {
+                right_tunnel_ipv6 =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv6")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--right-tunnel-ipv6=") => {
+                right_tunnel_ipv6 = Some(flag_value(value, "--right-tunnel-ipv6=").to_string());
+                index += 1;
+            }
+            "--tunnel-ipv6-prefix-len" => {
+                tunnel_ipv6_prefix_len = parse_u8(
+                    next_value(tokens, index, "--tunnel-ipv6-prefix-len")?,
+                    "--tunnel-ipv6-prefix-len",
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--tunnel-ipv6-prefix-len=") => {
+                tunnel_ipv6_prefix_len = parse_u8(
+                    flag_value(value, "--tunnel-ipv6-prefix-len="),
+                    "--tunnel-ipv6-prefix-len",
+                )?;
+                index += 1;
+            }
+            "--latency-primary-family" => {
+                latency_primary_family = parse_tunnel_address_family(next_value(
+                    tokens,
+                    index,
+                    "--latency-primary-family",
+                )?)?;
+                index += 2;
+            }
+            value if value.starts_with("--latency-primary-family=") => {
+                latency_primary_family =
+                    parse_tunnel_address_family(flag_value(value, "--latency-primary-family="))?;
                 index += 1;
             }
             "--reserved-address" | "--reserved" => {
@@ -399,47 +499,60 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         }
     }
 
-    Ok(VtyTunnelPlanRequest {
-        input: TunnelPlanInput {
-            name: required(name, "--name")?,
-            interface_name: required(interface_name, "--interface-name")?,
-            kind: required(kind, "--kind")?,
-            runtime_control: build_runtime_control(RuntimeControlArgs {
-                manager: runtime_manager,
-                startup_argv: &runtime_startup_argv,
-                stop_argv: &runtime_stop_argv,
-                cleanup_argv: &runtime_cleanup_argv,
-                restart_argv: &runtime_restart_argv,
-                status_argv: &runtime_status_argv,
-                traffic_limit_argv: &runtime_traffic_limit_argv,
-                traffic_ingress_kbps,
-                traffic_egress_kbps,
-                traffic_burst_kb,
-                fou_port,
-                fou_peer_port,
-                fou_ipproto,
-            }),
-            runtime_topology: build_runtime_topology(RuntimeTopologyArgs {
-                version: topology_version.as_deref(),
-                desired_interfaces: &topology_desired_interfaces,
-                stale_interfaces: &topology_stale_interfaces,
-                routes: &topology_routes,
-                stale_routes: &topology_stale_routes,
-            })?,
-            left_client_id: required(left_client_id, "--left-client-id")?,
-            right_client_id: required(right_client_id, "--right-client-id")?,
-            left_underlay: required(left_underlay, "--left-underlay")?,
-            right_underlay: required(right_underlay, "--right-underlay")?,
-            address_pool_cidr: required(address_pool_cidr, "--address-pool-cidr")?,
-            reserved_addresses,
-            bandwidth: required(bandwidth, "--bandwidth")?,
-            latency_ms: required(latency_ms, "--latency-ms")?,
-            packet_loss_ratio,
-            preference,
-            ospf_policy: OspfCostPolicy::default(),
-        },
-        save,
-    })
+    let input = TunnelPlanInput {
+        name: required(name, "--name")?,
+        interface_name: required(interface_name, "--interface-name")?,
+        kind: required(kind, "--kind")?,
+        runtime_control: build_runtime_control(RuntimeControlArgs {
+            manager: runtime_manager,
+            startup_argv: &runtime_startup_argv,
+            stop_argv: &runtime_stop_argv,
+            cleanup_argv: &runtime_cleanup_argv,
+            restart_argv: &runtime_restart_argv,
+            status_argv: &runtime_status_argv,
+            traffic_limit_argv: &runtime_traffic_limit_argv,
+            traffic_ingress_kbps,
+            traffic_egress_kbps,
+            traffic_burst_kb,
+            fou_port,
+            fou_peer_port,
+            fou_ipproto,
+        }),
+        runtime_topology: build_runtime_topology(RuntimeTopologyArgs {
+            version: topology_version.as_deref(),
+            desired_interfaces: &topology_desired_interfaces,
+            stale_interfaces: &topology_stale_interfaces,
+            routes: &topology_routes,
+            stale_routes: &topology_stale_routes,
+        })?,
+        left_client_id: required(left_client_id, "--left-client-id")?,
+        right_client_id: required(right_client_id, "--right-client-id")?,
+        left_underlay: required(left_underlay, "--left-underlay")?,
+        right_underlay: required(right_underlay, "--right-underlay")?,
+        address_pool_cidr: address_pool_cidr.unwrap_or_default(),
+        reserved_addresses,
+        ipv4_tunnel: build_address_pair(
+            left_tunnel_ipv4,
+            right_tunnel_ipv4,
+            tunnel_ipv4_prefix_len,
+            "IPv4",
+        )?,
+        ipv6_address_pool_cidr,
+        ipv6_tunnel: build_address_pair(
+            left_tunnel_ipv6,
+            right_tunnel_ipv6,
+            tunnel_ipv6_prefix_len,
+            "IPv6",
+        )?,
+        latency_primary_family,
+        bandwidth: required(bandwidth, "--bandwidth")?,
+        latency_ms: required(latency_ms, "--latency-ms")?,
+        packet_loss_ratio,
+        preference,
+        ospf_policy: OspfCostPolicy::default(),
+    };
+    ensure_explicit_tunnel_endpoints(&input.ipv4_tunnel, &input.ipv6_tunnel, "tunnel-plan")?;
+    Ok(VtyTunnelPlanRequest { input, save })
 }
 
 fn next_value<'a>(tokens: &'a [&str], index: usize, flag: &str) -> Result<&'a str> {
@@ -455,6 +568,35 @@ fn flag_value<'a>(value: &'a str, prefix: &str) -> &'a str {
 
 fn required<T>(value: Option<T>, flag: &str) -> Result<T> {
     value.with_context(|| format!("missing required {flag}"))
+}
+
+fn build_address_pair(
+    left: Option<String>,
+    right: Option<String>,
+    prefix_len: u8,
+    label: &str,
+) -> Result<Option<TunnelAddressPair>> {
+    match (left, right) {
+        (Some(left), Some(right)) => Ok(Some(TunnelAddressPair {
+            left,
+            right,
+            prefix_len,
+        })),
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("{label} tunnel endpoints require both left and right addresses"),
+    }
+}
+
+fn ensure_explicit_tunnel_endpoints(
+    ipv4_tunnel: &Option<TunnelAddressPair>,
+    ipv6_tunnel: &Option<TunnelAddressPair>,
+    command: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        ipv4_tunnel.is_some() || ipv6_tunnel.is_some(),
+        "{command} requires explicit IPv4 or IPv6 tunnel endpoints; run tunnel-allocate for non-overlapping suggestions first"
+    );
+    Ok(())
 }
 
 fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
@@ -479,6 +621,14 @@ fn parse_bandwidth(value: &str) -> Result<BandwidthTier> {
         "100m" | "m100" => Ok(BandwidthTier::M100),
         "1000m" | "m1000" => Ok(BandwidthTier::M1000),
         _ => anyhow::bail!("--bandwidth must be one of 10m, 100m, 1000m"),
+    }
+}
+
+fn parse_tunnel_address_family(value: &str) -> Result<TunnelAddressFamily> {
+    match value {
+        "ipv4" | "IPv4" => Ok(TunnelAddressFamily::Ipv4),
+        "ipv6" | "IPv6" => Ok(TunnelAddressFamily::Ipv6),
+        _ => anyhow::bail!("--latency-primary-family must be one of ipv4, ipv6"),
     }
 }
 
@@ -509,7 +659,7 @@ fn parse_u8(value: &str, flag: &str) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::parse_vty_tunnel_plan;
-    use vpsman_common::{BandwidthTier, RuntimeTunnelManager, TunnelKind};
+    use vpsman_common::{BandwidthTier, RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
 
     #[test]
     fn parses_vty_tunnel_plan_for_local_render() {
@@ -527,6 +677,8 @@ mod tests {
             "--right-underlay=203.0.113.20",
             "--address-pool-cidr",
             "10.255.0.0/30",
+            "--left-tunnel-ipv4=10.255.0.0",
+            "--right-tunnel-ipv4=10.255.0.1",
             "--reserved-address",
             "10.255.0.2",
             "--bandwidth",
@@ -568,6 +720,8 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
+            "--left-tunnel-ipv4=10.255.10.0",
+            "--right-tunnel-ipv4=10.255.10.1",
             "--reserved=10.255.10.2",
             "--bandwidth=100m",
             "--latency-ms=20",
@@ -588,6 +742,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_vty_tunnel_plan_explicit_dual_stack_endpoints() {
+        let request = parse_vty_tunnel_plan(&[
+            "--name=sea-fra",
+            "--interface=vpsseafra",
+            "--kind=wireguard",
+            "--left-client=sea",
+            "--right-client=fra",
+            "--left-underlay=198.51.100.10",
+            "--right-underlay=203.0.113.20",
+            "--left-tunnel-ipv4=10.255.20.0",
+            "--right-tunnel-ipv4=10.255.20.1",
+            "--tunnel-ipv4-prefix-len=31",
+            "--left-tunnel-ipv6=fd7a:115c:a1e0::20",
+            "--right-tunnel-ipv6=fd7a:115c:a1e0::21",
+            "--tunnel-ipv6-prefix-len=127",
+            "--latency-primary-family=ipv6",
+            "--bandwidth=1000m",
+            "--latency-ms=87.5",
+        ])
+        .unwrap();
+
+        assert_eq!(request.input.address_pool_cidr, "");
+        assert_eq!(
+            request.input.ipv4_tunnel.as_ref().unwrap().left,
+            "10.255.20.0"
+        );
+        assert_eq!(
+            request.input.ipv6_tunnel.as_ref().unwrap().right,
+            "fd7a:115c:a1e0::21"
+        );
+        assert_eq!(
+            request.input.latency_primary_family,
+            TunnelAddressFamily::Ipv6
+        );
+    }
+
+    #[test]
     fn parses_vty_tunnel_plan_external_adapter_runtime() {
         let request = parse_vty_tunnel_plan(&[
             "--name=external-openvpn",
@@ -598,6 +789,8 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
+            "--left-tunnel-ipv4=10.255.10.0",
+            "--right-tunnel-ipv4=10.255.10.1",
             "--bandwidth=100m",
             "--latency-ms=20",
             "--runtime-manager=adapter",
@@ -663,6 +856,32 @@ mod tests {
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
             "--bandwidth=1g",
+            "--latency-ms=20",
+        ])
+        .is_err());
+        assert!(parse_vty_tunnel_plan(&[
+            "--name=edge",
+            "--interface=vpsedge",
+            "--kind=gre",
+            "--left-client=left",
+            "--right-client=right",
+            "--left-underlay=198.51.100.10",
+            "--right-underlay=203.0.113.20",
+            "--left-tunnel-ipv6=fd7a:115c:a1e0::20",
+            "--bandwidth=100m",
+            "--latency-ms=20",
+        ])
+        .is_err());
+        assert!(parse_vty_tunnel_plan(&[
+            "--name=edge",
+            "--interface=vpsedge",
+            "--kind=gre",
+            "--left-client=left",
+            "--right-client=right",
+            "--left-underlay=198.51.100.10",
+            "--right-underlay=203.0.113.20",
+            "--pool-cidr=10.255.10.0/29",
+            "--bandwidth=100m",
             "--latency-ms=20",
         ])
         .is_err());

@@ -1,4 +1,11 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use vpsman_common::{
@@ -18,8 +25,8 @@ pub(crate) struct GatewayState {
     pub(crate) privilege_assertions: Arc<Mutex<PrivilegeAssertionReplayCache>>,
     pub(crate) disconnected_at: Arc<RwLock<HashMap<String, Instant>>>,
     pub(crate) forward_metrics: Arc<GatewayForwardMetrics>,
-    pub(crate) reconnect_grace_secs: u64,
-    pub(crate) dispatch_ack_secs: u64,
+    pub(crate) reconnect_grace_secs: Arc<AtomicU64>,
+    pub(crate) dispatch_ack_secs: Arc<AtomicU64>,
 }
 
 impl Default for GatewayState {
@@ -29,9 +36,26 @@ impl Default for GatewayState {
             privilege_assertions: Arc::default(),
             disconnected_at: Arc::default(),
             forward_metrics: Arc::default(),
-            reconnect_grace_secs: 60,
-            dispatch_ack_secs: 30,
+            reconnect_grace_secs: Arc::new(AtomicU64::new(60)),
+            dispatch_ack_secs: Arc::new(AtomicU64::new(30)),
         }
+    }
+}
+
+impl GatewayState {
+    pub(crate) fn reconnect_grace_secs(&self) -> u64 {
+        self.reconnect_grace_secs.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn dispatch_ack_secs(&self) -> u64 {
+        self.dispatch_ack_secs.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_runtime_timing(&self, reconnect_grace_secs: u64, dispatch_ack_secs: u64) {
+        self.reconnect_grace_secs
+            .store(reconnect_grace_secs.max(1), Ordering::Relaxed);
+        self.dispatch_ack_secs
+            .store(dispatch_ack_secs.max(1), Ordering::Relaxed);
     }
 }
 

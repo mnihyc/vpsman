@@ -729,8 +729,58 @@ const suiteConfigRedacted = {
 };
 
 const suiteConfigValidation = {
-  hot_reload_fields: ["capacity.api_db_pool", "capacity.worker_db_pool", "worker.schedule_command_timeout_secs", "api.alert_*"],
-  restart_required_fields: ["api.bind", "gateway.bind", "gateway.control_bind", "database.postgres_url", "secrets.*", "storage.object_endpoint", "storage.update_object_endpoint", "capacity.dispatcher_batch", "capacity.dispatcher_in_flight", "timeout.*"],
+  hot_reload_fields: [
+    "capacity.dispatcher_batch",
+    "capacity.dispatcher_in_flight",
+    "timeout.dispatch_ack_secs",
+    "timeout.event_post_secs",
+    "timeout.internal_http_read_secs",
+    "gateway.reconnect_grace_secs",
+    "timeout.gateway_reconnect_grace_secs",
+    "api.job_output_artifact_min_bytes",
+    "api.require_registered_agent_updates",
+    "worker.schedule_command_timeout_secs",
+    "worker.tick_secs",
+    "worker.worker_lease_secs",
+    "worker.agent_offline_timeout_secs",
+    "worker.notification_*",
+    "worker.webhook_rule_*",
+    "worker.backup_policy_prune_*",
+    "worker.require_registered_agent_updates",
+    "timeout.worker_schedule_command_secs",
+    "timeout.agent_offline_secs",
+    "api.alert_*",
+  ],
+  restart_required_fields: [
+    "api.bind",
+    "api.gateway_control_url",
+    "api.update_artifact_public_base_url",
+    "gateway.bind",
+    "gateway.control_bind",
+    "gateway.api_url",
+    "gateway.gateway_id",
+    "gateway.expect_client_public_key_hex",
+    "database.postgres_url",
+    "database.migrations_dir",
+    "secrets.*",
+    "storage.object_store_dir",
+    "storage.backup_object_store_dir",
+    "storage.update_object_store_dir",
+    "storage.object_endpoint",
+    "storage.object_bucket",
+    "storage.object_region",
+    "storage.object_create_bucket",
+    "storage.update_object_endpoint",
+    "storage.update_object_bucket",
+    "storage.update_object_region",
+    "storage.update_object_create_bucket",
+    "capacity.api_db_pool",
+    "capacity.worker_db_pool",
+    "worker.once",
+    "worker.worker_id",
+    "timeout.internal_http_connect_secs",
+    "timeout.internal_http_write_secs",
+  ],
   valid: true,
   version: 1,
 };
@@ -774,7 +824,7 @@ const agents = [
     display_name: "edge-sfo-01",
     id: "agent-sfo-01",
     status: "online",
-    tags: ["country:US", "provider:alpha"],
+    tags: ["country:US", "provider:alpha", "role:edge"],
   },
   {
     capabilities: rootCapabilities,
@@ -1234,6 +1284,7 @@ export const tunnelPlans = [
     created_at: "2026-05-31T10:03:00Z",
     id: "dddddddd-eeee-4fff-8000-111111111111",
     kind: "gre",
+    enabled: true,
     last_apply_job_id: "33333333-aaaa-4bbb-8ccc-dddddddddddd",
     last_rollback_job_id: null,
     left_client_id: "agent-sfo-01",
@@ -1244,6 +1295,9 @@ export const tunnelPlans = [
     right_status: "applied",
     status: "applied",
     updated_at: "2026-05-31T10:09:00Z",
+    deleted_at: null,
+    deleted_by: null,
+    deleted_reason: null,
     input: {
       name: "sfo-fra-gre",
       interface_name: "tunab",
@@ -1306,6 +1360,7 @@ export const tunnelPlans = [
     created_at: "2026-05-31T10:04:00Z",
     id: "eeeeeeee-ffff-4000-8111-222222222222",
     kind: "openvpn",
+    enabled: true,
     last_apply_job_id: null,
     last_rollback_job_id: null,
     left_client_id: "agent-sfo-01",
@@ -1316,6 +1371,9 @@ export const tunnelPlans = [
     right_status: "planned",
     status: "planned",
     updated_at: "2026-05-31T10:04:00Z",
+    deleted_at: null,
+    deleted_by: null,
+    deleted_reason: null,
     input: {
       name: "external-openvpn-observed",
       interface_name: "ovpn42",
@@ -1730,6 +1788,7 @@ const topologyGraph = {
       bandwidth: "100m",
       cost_delta: 8,
       degraded_count: 0,
+      enabled: true,
       health: "healthy",
       interface_name: "tunab",
       kind: "gre",
@@ -1924,6 +1983,12 @@ export async function installConsoleApiMock(page: Page) {
       const deletedAgentIds = new Set<string>();
       const visibleAgents = () =>
         agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
+      const visibleTunnelPlans = () =>
+        tunnelPlansFixture.filter(
+          (plan) =>
+            !deletedAgentIds.has(plan.left_client_id) &&
+            !deletedAgentIds.has(plan.right_client_id),
+        );
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
@@ -1953,6 +2018,8 @@ export async function installConsoleApiMock(page: Page) {
         scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
+        tunnelPlanAllocations: [] as unknown[],
+        tunnelPlanEnabledMutations: [] as unknown[],
         tunnelPlans: [] as unknown[],
         webhookDeliveryRotations: [] as unknown[],
         webhookRuleDispatches: [] as unknown[],
@@ -2609,10 +2676,10 @@ export async function installConsoleApiMock(page: Page) {
           if (method === "GET") {
             return jsonResponse({
               exists: true,
-              hot_reload_note: "Pool sizes, dispatcher limits, timeouts, alert thresholds, schedule settings, and UI-visible limits are hot-reload tunables when the owning service reloads config.",
+              hot_reload_note: "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
               path: "config/vpsman.toml",
               redacted: suiteConfigRedactedFixture,
-              restart_required_note: "Bind addresses, database URL, secret refs, keys, and object-store clients require service restart.",
+              restart_required_note: "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker identity/once mode, and connect/write timeout changes require service restart.",
               toml: currentSuiteConfigToml,
               validation: suiteConfigValidationFixture,
             });
@@ -2971,13 +3038,55 @@ export async function installConsoleApiMock(page: Page) {
               bucket_start: "2026-05-31T10:00:00Z",
               bucket_secs: 300,
               sample_count: 2,
+              rx_bytes_avg: 45875200,
+              tx_bytes_avg: 62914560,
               rx_bytes_delta: 65536,
               tx_bytes_delta: 131072,
               rx_bps_avg: 8738,
               tx_bps_avg: 17476,
-              first_observed_at: "2026-05-31T10:01:00Z",
-              latest_observed_at: "2026-05-31T10:02:00Z",
               updated_at: "2026-05-31T10:02:05Z",
+            },
+            {
+              client_id: "agent-fra-02",
+              interface: "tunab",
+              bucket_start: "2026-05-31T10:00:00Z",
+              bucket_secs: 300,
+              sample_count: 2,
+              rx_bytes_avg: 18350080,
+              tx_bytes_avg: 22544384,
+              rx_bytes_delta: 0,
+              tx_bytes_delta: 0,
+              rx_bps_avg: 3125000,
+              tx_bps_avg: 2760000,
+              updated_at: "2026-05-31T10:02:05Z",
+            },
+            {
+              client_id: "agent-fra-02",
+              interface: "ovpn42",
+              bucket_start: "2026-05-31T09:55:00Z",
+              bucket_secs: 300,
+              sample_count: 1,
+              rx_bytes_avg: 7864320,
+              tx_bytes_avg: 7340032,
+              rx_bytes_delta: 0,
+              tx_bytes_delta: 0,
+              rx_bps_avg: 980000,
+              tx_bps_avg: 860000,
+              updated_at: "2026-05-31T10:00:10Z",
+            },
+            {
+              client_id: "agent-sfo-01",
+              interface: "eth0",
+              bucket_start: "2026-05-31T10:00:00Z",
+              bucket_secs: 300,
+              sample_count: 3,
+              rx_bytes_avg: 73400320,
+              tx_bytes_avg: 68157440,
+              rx_bytes_delta: 393216,
+              tx_bytes_delta: 458752,
+              rx_bps_avg: 19200000,
+              tx_bps_avg: 18400000,
+              updated_at: "2026-05-31T10:02:06Z",
             },
           ]);
         if (pathname === "/api/v1/telemetry/tunnels" && method === "GET")
@@ -2985,16 +3094,132 @@ export async function installConsoleApiMock(page: Page) {
             {
               client_id: "agent-fra-02",
               observed_at: "2026-05-31T10:02:00Z",
-              interface: "tun0",
-              kind: "tun_tap",
-              ownership_mode: "runtime_observed",
+              interface: "tunab",
+              kind: "gre",
+              ownership_mode: "agent_iproute2_managed",
+              mutation_policy: "managed_desired",
+              promotion_required: false,
+              plan_correlation: "matched_saved_plan",
+              plan_id: "dddddddd-eeee-4fff-8000-111111111111",
+              plan_name: "sfo-fra-gre",
+              plan_runtime_manager: "agent_iproute2_managed",
+              endpoint_side: "right",
+              peer_client_id: "agent-sfo-01",
               source: "sysfs_proc_net_dev",
               operstate: "up",
               mtu: 1500,
               link_type: 65534,
               address: "00:00:00:00:00:00",
-              rx_bytes: 65536,
-              tx_bytes: 131072,
+              rx_bytes: 18350080,
+              tx_bytes: 22544384,
+              traffic_source: "interface_counters",
+              traffic_status: "ok",
+              traffic_reason: null,
+              traffic_checked_unix: 1780202520,
+              adapter_health: null,
+              latency_monitoring_enabled: true,
+              latency_status: "down",
+              latency_reason: "latency_probe_missing_healthy_sample:3/3",
+              latency_primary_family: "ipv4",
+              latency_target: "10.255.0.0",
+              latency_checked_unix: 1780202520,
+              latency_avg_ms: null,
+              packet_loss_ratio: 1,
+              latency_healthy_windows: 0,
+              latency_missed_windows: 3,
+              auto_ospf_enabled: true,
+              auto_ospf_status: "report_only",
+              auto_ospf_reason:
+                "latency_probe_unhealthy_ospf_handles_dead_adjacency",
+              auto_ospf_current_cost: 14,
+              auto_ospf_recommended_cost: 80,
+              auto_ospf_updated_unix: null,
+            },
+            {
+              client_id: "agent-sfo-01",
+              observed_at: "2026-05-31T10:02:00Z",
+              interface: "tunab",
+              kind: "gre",
+              ownership_mode: "agent_iproute2_managed",
+              mutation_policy: "managed_desired",
+              promotion_required: false,
+              plan_correlation: "matched_saved_plan",
+              plan_id: "dddddddd-eeee-4fff-8000-111111111111",
+              plan_name: "sfo-fra-gre",
+              plan_runtime_manager: "agent_iproute2_managed",
+              endpoint_side: "left",
+              peer_client_id: "agent-fra-02",
+              source: "approved_runtime_status_telemetry",
+              operstate: "up",
+              mtu: 1476,
+              link_type: 778,
+              address: "00:00:00:00:00:00",
+              rx_bytes: 22544384,
+              tx_bytes: 18350080,
+              traffic_source: "interface_counters",
+              traffic_status: "ok",
+              traffic_reason: null,
+              traffic_checked_unix: 1780202520,
+              adapter_health: null,
+              latency_monitoring_enabled: true,
+              latency_status: "healthy",
+              latency_reason: "probe_ok",
+              latency_primary_family: "ipv4",
+              latency_target: "10.255.0.1",
+              latency_checked_unix: 1780202520,
+              latency_avg_ms: 18.4,
+              packet_loss_ratio: 0,
+              latency_healthy_windows: 5,
+              latency_missed_windows: 0,
+              auto_ospf_enabled: true,
+              auto_ospf_status: "updated",
+              auto_ospf_reason: "external_cost_program_succeeded",
+              auto_ospf_current_cost: 14,
+              auto_ospf_recommended_cost: 21,
+              auto_ospf_updated_unix: 1780202520,
+            },
+            {
+              client_id: "agent-fra-02",
+              observed_at: "2026-05-31T10:00:00Z",
+              interface: "ovpn42",
+              kind: "openvpn",
+              ownership_mode: "external_observed",
+              mutation_policy: "observe_only_saved_plan",
+              promotion_required: false,
+              plan_correlation: "matched_saved_plan",
+              plan_id: "eeeeeeee-ffff-4000-8111-222222222222",
+              plan_name: "external-openvpn-observed",
+              plan_runtime_manager: "external_observed",
+              endpoint_side: "right",
+              peer_client_id: "agent-sfo-01",
+              source: "approved_runtime_status_telemetry",
+              operstate: "unknown",
+              mtu: 1500,
+              link_type: null,
+              address: null,
+              rx_bytes: 7864320,
+              tx_bytes: 7340032,
+              traffic_source: "interface_counters",
+              traffic_status: "ok",
+              traffic_reason: null,
+              traffic_checked_unix: 1780202400,
+              adapter_health: null,
+              latency_monitoring_enabled: true,
+              latency_status: "missed",
+              latency_reason: "latency_probe_missing_healthy_sample:1/3",
+              latency_primary_family: "ipv4",
+              latency_target: "10.255.10.0",
+              latency_checked_unix: 1780202400,
+              latency_avg_ms: null,
+              packet_loss_ratio: 1,
+              latency_healthy_windows: 0,
+              latency_missed_windows: 1,
+              auto_ospf_enabled: false,
+              auto_ospf_status: "monitoring_only",
+              auto_ospf_reason: "external_cost_program_unconfigured",
+              auto_ospf_current_cost: 18,
+              auto_ospf_recommended_cost: 18,
+              auto_ospf_updated_unix: null,
             },
           ]);
         if (pathname === "/api/v1/data-source-presets" && method === "GET") {
@@ -3701,7 +3926,54 @@ export async function installConsoleApiMock(page: Page) {
           return emptyArrayResponse();
         }
         if (pathname === "/api/v1/tunnel-plans" && method === "GET") {
-          return jsonResponse(tunnelPlansFixture);
+          return jsonResponse(visibleTunnelPlans());
+        }
+        const tunnelPlanEnabledMatch = pathname.match(
+          /^\/api\/v1\/tunnel-plans\/([^/]+)\/(enable|disable)$/,
+        );
+        if (tunnelPlanEnabledMatch && method === "POST") {
+          const planId = decodeURIComponent(tunnelPlanEnabledMatch[1]);
+          const enabled = tunnelPlanEnabledMatch[2] === "enable";
+          requests.tunnelPlanEnabledMutations.push({ enabled, plan_id: planId });
+          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          if (plan) {
+            plan.enabled = enabled;
+            plan.updated_at = "2026-06-02T10:08:00Z";
+            return jsonResponse(plan);
+          }
+          return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
+        }
+        if (
+          pathname === "/api/v1/tunnel-plans/allocate" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            include_ipv4?: boolean;
+            include_ipv6?: boolean;
+          };
+          requests.tunnelPlanAllocations.push(body);
+          return jsonResponse({
+            ipv4_tunnel:
+              body.include_ipv4 === false
+                ? null
+                : {
+                    left: "10.255.50.0",
+                    right: "10.255.50.1",
+                    prefix_len: 31,
+                  },
+            ipv6_tunnel: body.include_ipv6
+              ? {
+                  left: "fd00:255:50::0",
+                  right: "fd00:255:50::1",
+                  prefix_len: 127,
+                }
+              : null,
+            latency_primary_family:
+              body.include_ipv4 === false && body.include_ipv6
+                ? "ipv6"
+                : "ipv4",
+            conflicts: [],
+          });
         }
         if (pathname === "/api/v1/tunnel-plans" && method === "POST") {
           const body = await readJsonBody(input, init);

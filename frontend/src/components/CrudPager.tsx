@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { SearchExpressionInput } from "./SearchExpressionInput";
+import {
+  buildParseableSearchValueSuggestions,
+  searchFieldsForSearchValues,
+} from "./searchSuggestions";
 import { filterBySearchExpression } from "../searchExpression";
 
 export type CrudSearchField<T> = {
@@ -60,12 +64,26 @@ export function CrudPager<T>({
   const fallbackField =
     defaultField === "__all" || fields.some((candidate) => candidate.label === defaultField) ? defaultField : "__all";
   const effectiveField = field === "__all" || fields.some((candidate) => candidate.label === field) ? field : fallbackField;
+  const activeFields = useMemo(
+    () => (effectiveField === "__all" ? fields : fields.filter((candidate) => candidate.label === effectiveField)),
+    [effectiveField, fields],
+  );
+  const searchValuesForItem = (item: T) =>
+    activeFields.map((candidate) => candidate.value(item));
+  const searchFieldsForItem = (item: T) =>
+    searchFieldsForSearchValues(searchValuesForItem(item));
   const filteredItems = useMemo(() => {
-    const activeFields = effectiveField === "__all" ? fields : fields.filter((candidate) => candidate.label === effectiveField);
-    return filterBySearchExpression(items, query, (item) => ({
-      all: activeFields.map((candidate) => String(candidate.value(item) ?? "")),
-    })).items;
-  }, [effectiveField, fields, items, query]);
+    return filterBySearchExpression(items, query, searchFieldsForItem).items;
+  }, [activeFields, items, query]);
+  const searchSuggestions = useMemo(
+    () =>
+      buildParseableSearchValueSuggestions(
+        items,
+        searchValuesForItem,
+        searchFieldsForItem,
+      ),
+    [activeFields, items],
+  );
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / activePageSize));
   const currentPage = Math.min(page, pageCount);
   const pagedItems = filteredItems.slice((currentPage - 1) * activePageSize, currentPage * activePageSize);
@@ -167,6 +185,7 @@ export function CrudPager<T>({
             inputRef={searchInputRef}
             onChange={setQuery}
             placeholder="Search"
+            suggestions={searchSuggestions}
             value={query}
           />
         </div>

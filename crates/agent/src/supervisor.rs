@@ -82,6 +82,64 @@ pub(crate) async fn execute_process_supervisor_command(
     .context("process supervisor command timed out")?
 }
 
+pub(crate) async fn reconcile_supervised_processes_on_start() -> Result<serde_json::Value> {
+    let root = supervisor_root();
+    tokio::task::spawn_blocking(move || reconcile_supervisor_records_at_root(&root)).await?
+}
+
+pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_json::Value> {
+    fs::create_dir_all(records_dir(root))?;
+    fs::create_dir_all(logs_dir(root))?;
+    let mut records = Vec::new();
+    let mut running = 0_u64;
+    let mut restarted = 0_u64;
+    let mut restart_pending = 0_u64;
+    let mut stopped = 0_u64;
+    let mut failed = 0_u64;
+    let mut no_retries_remaining = 0_u64;
+    for record in load_all_records(root)? {
+        let before_pid = record.pid;
+        let before_restart_attempts = record.restart_attempts;
+        let record = reconcile_and_save_record(root, record)?;
+        match record.status.as_str() {
+            "running" => running += 1,
+            "restart_pending" => restart_pending += 1,
+            "stopped" | "stop_requested" => stopped += 1,
+            "failed" | "exited" => failed += 1,
+            "failed_no_retries_remaining" | "exited_no_retries_remaining" => {
+                no_retries_remaining += 1
+            }
+            _ => failed += 1,
+        }
+        let was_restarted =
+            record.pid != before_pid || record.restart_attempts > before_restart_attempts;
+        if was_restarted {
+            restarted += 1;
+        }
+        records.push(serde_json::json!({
+            "name": record.name,
+            "status": record.status,
+            "pid": record.pid,
+            "restart_policy": record.policy.restart,
+            "restart_attempts": record.restart_attempts,
+            "restarted": was_restarted,
+        }));
+    }
+    Ok(serde_json::json!({
+        "type": "process_supervisor_startup_reconcile",
+        "status": "completed",
+        "root": root.display().to_string(),
+        "total": records.len(),
+        "running": running,
+        "restarted": restarted,
+        "restart_pending": restart_pending,
+        "stopped": stopped,
+        "failed": failed,
+        "no_retries_remaining": no_retries_remaining,
+        "processes": records,
+    }))
+}
+
 async fn execute_at_root(
     job_id: uuid::Uuid,
     command: &JobCommand,
@@ -446,6 +504,9 @@ fn ensure_restart_monitor(root: &Path, name: &str) {
         return;
     };
     if record.policy.restart == ProcessRestartPolicy::Never {
+        return;
+    }
+    if !matches!(record.status.as_str(), "running" | "restart_pending") {
         return;
     }
     let key = monitor_key(root, name);

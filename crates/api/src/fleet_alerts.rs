@@ -249,10 +249,11 @@ impl AppState {
         append_agent_status_alerts(&mut alerts, &agents);
 
         let rollups = self.repo.list_telemetry_rollups(200, None, None).await?;
+        let base_alert_policy = self.fleet_alert_policy();
         append_resource_alerts(
             &mut alerts,
             &latest_rollups(rollups),
-            &self.fleet_alert_policy,
+            &base_alert_policy,
             &alert_policies,
             &agent_scopes,
         )?;

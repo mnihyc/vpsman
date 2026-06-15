@@ -1,13 +1,12 @@
 import type { FormEvent } from "react";
 import { DatabaseBackup, Play } from "lucide-react";
-import { usePanelDisplaySettings } from "../../panelDisplay";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   BACKUP_PATH_PLACEHOLDER,
   BACKUP_PATH_PRESETS,
 } from "../../presets/backupPathPresets";
 import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView } from "../../types";
-import { formatVpsName } from "../../utils";
 
 type BackupRequestFormProps = {
   agents: AgentView[];
@@ -44,7 +43,6 @@ export function BackupRequestForm({
   privilegeReady,
   selectedAgentName,
 }: BackupRequestFormProps) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   return (
     <>
       <div className="sectionHeader compact">
@@ -54,18 +52,13 @@ export function BackupRequestForm({
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
           <span>VPS</span>
-          <select
-            aria-label="Backup client"
-            onChange={(event) => onClientIdChange(event.target.value)}
+          <VpsCombobox
+            agents={agents}
+            ariaLabel="Backup client"
+            onChange={onClientIdChange}
+            placeholder="Search backup VPS"
             value={clientId}
-          >
-            <option value="">Select VPS</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {formatVpsName(agent, vpsNameDisplayMode)}
-              </option>
-            ))}
-          </select>
+          />
         </label>
         <label>
           <span>Selected paths</span>

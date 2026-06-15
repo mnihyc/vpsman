@@ -46,6 +46,21 @@ gateway_container="vpsman-$run_id-gateway"
 
 cleanup_fault_fuzz_smoke() {
   docker ps -aq --filter "label=$label_key=$run_id" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  if [[ -n "${SMOKE_TMPDIR:-}" && -d "$SMOKE_TMPDIR/object-store" ]]; then
+    docker run --rm \
+      -v "$SMOKE_TMPDIR:$SMOKE_TMPDIR" \
+      -w "$SMOKE_TMPDIR" \
+      "$runtime_image" \
+      sh -c 'rm -rf object-store' >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${SMOKE_TMPDIR:-}" && -d "$SMOKE_TMPDIR" ]]; then
+    docker run --rm \
+      -v "$SMOKE_TMPDIR:$SMOKE_TMPDIR" \
+      -w "$SMOKE_TMPDIR" \
+      "$runtime_image" \
+      sh -c "chown -R $(id -u):$(id -g) . >/dev/null 2>&1 || true" \
+      >/dev/null 2>&1 || true
+  fi
   smoke_cleanup
 }
 
@@ -435,6 +450,28 @@ fi
 providers=(alpha beta gamma)
 countries=(US DE SG NL)
 roles=(edge core backup batch)
+provider_alpha_count=0
+country_us_count=0
+provider_alpha_country_us_count=0
+role_edge_count=0
+for ((i = 1; i <= agent_count; i += 1)); do
+  index=$((i - 1))
+  provider="${providers[$((index % ${#providers[@]}))]}"
+  country="${countries[$((index % ${#countries[@]}))]}"
+  role="${roles[$((index % ${#roles[@]}))]}"
+  if [[ "$provider" == "alpha" ]]; then
+    provider_alpha_count=$((provider_alpha_count + 1))
+  fi
+  if [[ "$country" == "US" ]]; then
+    country_us_count=$((country_us_count + 1))
+  fi
+  if [[ "$provider" == "alpha" && "$country" == "US" ]]; then
+    provider_alpha_country_us_count=$((provider_alpha_country_us_count + 1))
+  fi
+  if [[ "$role" == "edge" ]]; then
+    role_edge_count=$((role_edge_count + 1))
+  fi
+done
 for ((i = 1; i <= agent_count; i += 1)); do
   index=$((i - 1))
   provider="${providers[$((index % ${#providers[@]}))]}"
@@ -461,7 +498,8 @@ for ((i = 1; i <= agent_count; i += 1)); do
     "$display_name" \
     "$tag_csv" \
     "$gateway_public_hex" \
-    "$endpoint_csv"
+    "$endpoint_csv" \
+    90
   start_agent_container "$i"
 done
 
@@ -475,7 +513,7 @@ for index in "${disconnect_indexes[@]}"; do
   disconnect_clients+=("$(agent_id "$index")")
   docker stop "$(agent_name "$index")" >/dev/null
 done
-wait_clients_status offline 45 "${disconnect_clients[@]}"
+wait_clients_status disconnected 45 "${disconnect_clients[@]}"
 sleep 3
 
 expected_partial_completed=$((agent_count - ${#disconnect_indexes[@]}))
@@ -493,10 +531,10 @@ jq -e --argjson expected "$agent_count" '
 api_get "/api/v1/jobs/$partial_job_id/targets" | jq -e \
   --argjson expected "$agent_count" \
   --argjson completed "$expected_partial_completed" \
-  --argjson failed "${#disconnect_indexes[@]}" '
+  --argjson control_timeout "${#disconnect_indexes[@]}" '
     length == $expected and
     ([.[] | select(.status == "completed")] | length) == $completed and
-    ([.[] | select(.status == "failed" and (.message | contains("agent_not_online")))] | length) == $failed
+    ([.[] | select(.status == "control_timeout" and (.message | contains("agent_not_online")))] | length) == $control_timeout
   ' >/dev/null
 
 for index in 9 10 11 12; do
@@ -563,10 +601,92 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --left-underlay 203.0.113.41 \
   --right-underlay 203.0.113.42 \
   --address-pool-cidr 10.254.25.0/30 \
+  --left-tunnel-ipv4 10.254.25.0 \
+  --right-tunnel-ipv4 10.254.25.1 \
   --bandwidth 1000m \
   --latency-ms 18 \
   --save)"
 jq -e '.name == "docker-fault-fuzz-gre" and .status == "planned"' <<<"$tunnel_plan_json" >/dev/null
+
+alert_policy_json="$(vpsctl_json fleet-alert-policy-upsert \
+  --name docker-edge-resource-alerts \
+  --scope-kind tag \
+  --scope-value role:edge \
+  --memory-available-warning-ratio 0.99 \
+  --memory-available-critical-ratio 0.98 \
+  --disk-available-warning-ratio 0.99 \
+  --disk-available-critical-ratio 0.98 \
+  --cpu-load-warning 0.5 \
+  --cpu-load-critical 0.9 \
+  --priority 25 \
+  --notes docker-fault-fuzz-live-review \
+  --confirmed)"
+jq -e '
+  .name == "docker-edge-resource-alerts" and
+  .scope_kind == "tag" and
+  .scope_value == "role:edge" and
+  .enabled == true
+' <<<"$alert_policy_json" >/dev/null
+
+alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
+  --name docker-resource-audit \
+  --scope-kind global \
+  --min-severity warning \
+  --categories resource \
+  --operator-states open \
+  --delivery-kind audit_log \
+  --target audit:fleet \
+  --cooldown-secs 600 \
+  --notes docker-fault-fuzz-live-review \
+  --confirmed)"
+alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
+jq -e '
+  .name == "docker-resource-audit" and
+  .scope_kind == "global" and
+  .delivery_kind == "audit_log" and
+  .enabled == true
+' <<<"$alert_notification_channel_json" >/dev/null
+
+alert_notification_custom_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
+  --name docker-resource-pager \
+  --scope-kind global \
+  --min-severity warning \
+  --categories resource \
+  --operator-states open \
+  --delivery-kind custom_pager \
+  --target adapter:docker-pager \
+  --cooldown-secs 600 \
+  --notes docker-fault-fuzz-live-review-custom \
+  --confirmed)"
+jq -e '
+  .name == "docker-resource-pager" and
+  .delivery_kind == "custom_pager" and
+  .enabled == true
+' <<<"$alert_notification_custom_channel_json" >/dev/null
+
+alert_notification_dispatch_json="$(vpsctl_json fleet-alert-notification-dispatch \
+  --category resource \
+  --include-muted \
+  --confirmed \
+  --limit 50)"
+jq -e --arg channel_id "$alert_notification_channel_id" '
+  length >= 1 and
+  any(.[]; .channel_id == $channel_id and .status == "delivered")
+' <<<"$alert_notification_dispatch_json" >/dev/null
+
+cleanup_expression='artifact.domain = "file_transfer_source"'
+cleanup_source="$SMOKE_TMPDIR/docker-fleet-q2-capacity-reconciliation.csv"
+printf 'account,provider,country,role,instance_count\nacme-network,alpha,US,edge,2\nacme-network,alpha,DE,core,2\nrun,%s,total,%s\n' "$run_id" "$agent_count" >"$cleanup_source"
+cleanup_source_json="$(vpsctl_json file-transfer-source-upload \
+  --source "$cleanup_source" \
+  --name docker-fleet-q2-capacity-reconciliation.csv \
+  --confirmed)"
+jq -e '
+  .name == "docker-fleet-q2-capacity-reconciliation.csv" and
+  .size_bytes > 0 and
+  (.object_key | startswith("file-transfer-sources/")) and
+  (.sha256_hex | length) == 64
+' <<<"$cleanup_source_json" >/dev/null
 
 if ! env \
   VPSMAN_API_PROXY="$api_url" \
@@ -574,6 +694,11 @@ if ! env \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
+  VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNT="$provider_alpha_count" \
+  VPSMAN_DOCKER_FLEET_COUNTRY_US_COUNT="$country_us_count" \
+  VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNTRY_US_COUNT="$provider_alpha_country_us_count" \
+  VPSMAN_DOCKER_FLEET_ROLE_EDGE_COUNT="$role_edge_count" \
+  VPSMAN_DOCKER_FLEET_CLEANUP_EXPRESSION="$cleanup_expression" \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
   VPSMAN_DOCKER_FLEET_PASSWORD="$operator_password" \
   VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR="$screenshot_dir" \
@@ -605,7 +730,7 @@ jq -n \
     checks: [
       "twenty_plus_enrolled_agents_online",
       "lossy_proxy_latency_and_connection_drops",
-      "offline_subset_partial_dispatch_accounting",
+      "disconnected_subset_partial_dispatch_accounting",
       "container_reboot_recovery",
       "same_identity_snapshot_recreate_recovery",
       "no_duplicate_agent_identity_after_recovery",

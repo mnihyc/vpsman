@@ -23,6 +23,7 @@ pub(crate) async fn verify_privilege_intent<T: Serialize>(
     let assertion = assertion.ok_or_else(|| ApiError::forbidden("privilege_assertion_required"))?;
     let intent = serde_json::to_string(intent)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    state.refresh_gateway_dispatch_timeouts();
     let result = state
         .gateway
         .verify_privilege(intent, assertion)

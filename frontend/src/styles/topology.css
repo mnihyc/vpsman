@@ -197,16 +197,17 @@
 .topologyGraphEdgeRow {
   display: grid;
   grid-template-columns:
-    minmax(180px, 1fr)
-    minmax(100px, 0.42fr)
-    minmax(130px, 0.62fr)
-    minmax(135px, 0.62fr)
-    minmax(120px, 0.55fr)
-    minmax(100px, 0.45fr)
-    minmax(150px, 0.6fr);
+    minmax(168px, 1fr)
+    minmax(92px, 0.4fr)
+    minmax(118px, 0.55fr)
+    minmax(112px, 0.5fr)
+    minmax(112px, 0.5fr)
+    minmax(122px, 0.55fr)
+    minmax(108px, 0.46fr)
+    minmax(128px, 0.56fr);
   align-items: center;
   gap: 12px;
-  min-width: max(100%, 920px);
+  min-width: max(100%, 1050px);
   min-height: 58px;
   padding: 0 18px;
   border-bottom: 1px solid #eef1f6;
@@ -214,6 +215,15 @@
 
 .topologyGraphEdgeRow:last-child {
   border-bottom: 0;
+}
+
+.topologySummaryCell {
+  min-width: 0;
+}
+
+.latencyCurveCell {
+  display: flex;
+  align-items: center;
 }
 
 .latencyMiniCurve {
@@ -351,5 +361,50 @@
 
   .promotionAdapterCard {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .topologyGraphSummary {
+    gap: 8px;
+    max-height: none;
+    overflow: visible;
+    padding: 10px 14px 14px;
+  }
+
+  .topologyGraphEdgeRow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    min-width: 0;
+    min-height: 0;
+    padding: 10px 11px;
+    border: 1px solid #dfe3eb;
+    border-left: 3px solid #1a73e8;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .topologyGraphEdgeRow > [data-label] {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .topologyGraphEdgeRow > [data-label]::before {
+    content: attr(data-label);
+    color: #5f6368;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .topologyGraphEdgeRow .status {
+    justify-self: start;
+  }
+
+  .topologyGraphEdgeRow .latencyMiniCurve {
+    min-width: 0;
   }
 }

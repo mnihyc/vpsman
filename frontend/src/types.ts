@@ -791,6 +791,22 @@ export type TelemetryTunnelRecord = {
   traffic_reason?: string | null;
   traffic_checked_unix?: number | null;
   adapter_health: TelemetryTunnelAdapterHealth | null;
+  latency_monitoring_enabled?: boolean | null;
+  latency_status?: string | null;
+  latency_reason?: string | null;
+  latency_primary_family?: TunnelAddressFamily | null;
+  latency_target?: string | null;
+  latency_checked_unix?: number | null;
+  latency_avg_ms?: number | null;
+  packet_loss_ratio?: number | null;
+  latency_healthy_windows?: number | null;
+  latency_missed_windows?: number | null;
+  auto_ospf_enabled?: boolean | null;
+  auto_ospf_status?: string | null;
+  auto_ospf_reason?: string | null;
+  auto_ospf_current_cost?: number | null;
+  auto_ospf_recommended_cost?: number | null;
+  auto_ospf_updated_unix?: number | null;
 };
 
 export type TelemetryTunnelAdapterHealth = {
@@ -1103,10 +1119,22 @@ export type TunnelPlanInput = {
   right_underlay: string;
   address_pool_cidr: string;
   reserved_addresses: string[];
+  ipv4_tunnel?: TunnelAddressPair | null;
+  ipv6_address_pool_cidr?: string | null;
+  ipv6_tunnel?: TunnelAddressPair | null;
+  latency_primary_family?: TunnelAddressFamily;
   bandwidth: BandwidthTier;
   latency_ms: number;
   packet_loss_ratio: number;
   preference: number;
+};
+
+export type TunnelAddressFamily = "ipv4" | "ipv6";
+
+export type TunnelAddressPair = {
+  left: string;
+  right: string;
+  prefix_len: number;
 };
 
 export type RuntimeTunnelRoute = {
@@ -1128,6 +1156,9 @@ export type TunnelPlan = TunnelPlanInput & {
   left_tunnel_address: string;
   right_tunnel_address: string;
   tunnel_prefix_len: number;
+  ipv4_tunnel?: TunnelAddressPair | null;
+  ipv6_tunnel?: TunnelAddressPair | null;
+  latency_primary_family?: TunnelAddressFamily;
   runtime_control?: RuntimeTunnelControl;
   recommended_ospf_cost: number;
   ifupdown_file: string;
@@ -1145,6 +1176,7 @@ export type TunnelPlanRecord = {
   id: string;
   name: string;
   kind: TunnelKind;
+  enabled: boolean;
   left_client_id: string;
   right_client_id: string;
   left_status: TunnelEndpointStatus;
@@ -1157,6 +1189,9 @@ export type TunnelPlanRecord = {
   plan: TunnelPlan;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  deleted_reason: string | null;
 };
 
 export type PromoteTelemetryTunnelRequest = {
@@ -1166,6 +1201,10 @@ export type PromoteTelemetryTunnelRequest = {
   local_underlay: string;
   peer_underlay: string;
   address_pool_cidr: string;
+  ipv4_tunnel?: TunnelAddressPair | null;
+  ipv6_address_pool_cidr?: string | null;
+  ipv6_tunnel?: TunnelAddressPair | null;
+  latency_primary_family?: TunnelAddressFamily;
   side?: TunnelEndpointSide;
   name?: string | null;
   topology_version?: string | null;
@@ -1196,6 +1235,7 @@ export type TopologyGraphEdge = {
   left_status: TunnelEndpointStatus;
   right_status: TunnelEndpointStatus;
   status: TunnelPlanStatus;
+  enabled: boolean;
   health: TopologyEdgeHealthStatus;
   convergence_blocked: boolean;
   offline_client_ids: string[];
@@ -1230,6 +1270,9 @@ export type TopologyGraphEdge = {
   last_rollback_job_id: string | null;
   left_tunnel_address: string;
   right_tunnel_address: string;
+  ipv4_tunnel?: TunnelAddressPair | null;
+  ipv6_tunnel?: TunnelAddressPair | null;
+  latency_primary_family?: TunnelAddressFamily;
 };
 
 export type TopologyGraph = {
@@ -1911,6 +1954,21 @@ export type CreateBackupPolicyRequest = {
 };
 
 export type CreateTunnelPlanRequest = TunnelPlanInput;
+
+export type AllocateTunnelEndpointsRequest = {
+  ipv4_pool_cidr?: string | null;
+  ipv6_pool_cidr?: string | null;
+  reserved_addresses?: string[];
+  include_ipv4?: boolean;
+  include_ipv6?: boolean;
+};
+
+export type AllocateTunnelEndpointsResponse = {
+  ipv4_tunnel: TunnelAddressPair | null;
+  ipv6_tunnel: TunnelAddressPair | null;
+  latency_primary_family: TunnelAddressFamily;
+  conflicts: string[];
+};
 
 export type BackupRequestRecord = {
   id: string;

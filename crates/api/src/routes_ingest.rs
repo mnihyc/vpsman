@@ -144,7 +144,7 @@ pub(crate) async fn ingest_command_output(
             Some(received_at.clone()),
             JobOutputPersistConfig {
                 object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes,
+                artifact_min_bytes: state.job_output_artifact_min_bytes(),
             },
         )
         .await?;
@@ -319,7 +319,7 @@ pub(crate) async fn ingest_terminal_output(
             &event.output.output,
             JobOutputPersistConfig {
                 object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes,
+                artifact_min_bytes: state.job_output_artifact_min_bytes(),
             },
         )
         .await?;

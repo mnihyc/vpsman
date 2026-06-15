@@ -4,6 +4,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import { VpsCombobox } from "../components/VpsCombobox";
 import { dataSourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
@@ -467,14 +468,13 @@ export function DataSourcePresetPanel({
           {createScope === "vps_local" && (
             <label>
               <span>Owner VPS</span>
-              <select aria-label="VPS-local owner" onChange={(event) => setOwnerClientId(event.target.value)} value={ownerClientId}>
-                <option value="">Owner VPS</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {formatVpsName(agent, vpsNameDisplayMode)}
-                  </option>
-                ))}
-              </select>
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="VPS-local owner"
+                onChange={setOwnerClientId}
+                placeholder="Search owner VPS"
+                value={ownerClientId}
+              />
             </label>
           )}
           <label>
@@ -582,18 +582,13 @@ export function DataSourcePresetPanel({
           </span>
           <label>
             <span>Review VPS</span>
-            <select
-              aria-label="Hot-config preview VPS"
-              onChange={(event) => setRenderClientId(event.target.value)}
+            <VpsCombobox
+              agents={agents}
+              ariaLabel="Hot-config preview VPS"
+              onChange={setRenderClientId}
+              placeholder="Search review VPS"
               value={renderClientId}
-            >
-              <option value="">VPS</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {formatVpsName(agent, vpsNameDisplayMode)}
-                  </option>
-                ))}
-            </select>
+            />
           </label>
           <button className="secondaryAction" disabled={pending || !renderClientId} type="submit">
             Render config

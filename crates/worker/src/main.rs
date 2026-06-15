@@ -51,7 +51,7 @@ use webhook_rules::{
 };
 use worker_leases::acquire_worker_lease;
 
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 #[command(name = "vpsman-worker", about = "Background scheduler for vpsman")]
 struct Args {
     #[arg(
@@ -174,6 +174,63 @@ struct Args {
         default_value_t = false
     )]
     require_registered_agent_updates: bool,
+}
+
+#[derive(Clone)]
+struct WorkerRuntimeConfig {
+    tick_secs: u64,
+    worker_lease_secs: i32,
+    agent_offline_timeout_secs: i64,
+    alert_notification_config: AlertNotificationWorkerConfig,
+    webhook_rule_config: WebhookRuleWorkerConfig,
+    backup_policy_prune_config: BackupPolicyRetentionPruneConfig,
+    schedule_dispatch_config: ScheduleDispatchConfig,
+    backup_policy_prune_object_store_dir: Option<PathBuf>,
+}
+
+impl WorkerRuntimeConfig {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            tick_secs: args.tick_secs.max(1),
+            worker_lease_secs: args.worker_lease_secs,
+            agent_offline_timeout_secs: args.agent_offline_timeout_secs,
+            alert_notification_config: AlertNotificationWorkerConfig::new(
+                args.notification_delivery_limit,
+                args.notification_retention_days,
+                args.notification_retention_prune_limit,
+                args.notification_webhook_timeout_secs,
+            ),
+            webhook_rule_config: WebhookRuleWorkerConfig::new(
+                args.webhook_rule_delivery_limit,
+                args.webhook_rule_materialize_limit,
+                args.webhook_rule_retention_days,
+                args.webhook_rule_retention_prune_limit,
+                args.webhook_rule_timeout_secs,
+            ),
+            backup_policy_prune_config: BackupPolicyRetentionPruneConfig::new(
+                args.backup_policy_prune_enabled,
+                args.backup_policy_prune_limit,
+                args.backup_policy_prune_dry_run,
+                args.backup_policy_prune_include_disabled,
+                args.backup_policy_prune_delete_objects,
+                args.backup_policy_prune_object_store_dir.clone(),
+            ),
+            schedule_dispatch_config: ScheduleDispatchConfig::new(
+                args.schedule_command_timeout_secs,
+                args.require_registered_agent_updates,
+            ),
+            backup_policy_prune_object_store_dir: args.backup_policy_prune_object_store_dir.clone(),
+        }
+    }
+}
+
+fn load_worker_runtime_config(base_args: &Args) -> Result<WorkerRuntimeConfig> {
+    let mut args = base_args.clone();
+    let suite_config =
+        SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    args.apply_suite_config(&suite_config)
+        .map_err(anyhow::Error::msg)?;
+    Ok(WorkerRuntimeConfig::from_args(&args))
 }
 
 impl Args {
@@ -391,6 +448,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = Args::parse();
+    let base_args = args.clone();
     let suite_config =
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
     args.apply_suite_config(&suite_config)
@@ -421,67 +479,43 @@ async fn main() -> Result<()> {
         .worker_id
         .clone()
         .unwrap_or_else(|| format!("vpsman-worker-{}", std::process::id()));
-    let alert_notification_config = AlertNotificationWorkerConfig::new(
-        args.notification_delivery_limit,
-        args.notification_retention_days,
-        args.notification_retention_prune_limit,
-        args.notification_webhook_timeout_secs,
-    );
-    let webhook_rule_config = WebhookRuleWorkerConfig::new(
-        args.webhook_rule_delivery_limit,
-        args.webhook_rule_materialize_limit,
-        args.webhook_rule_retention_days,
-        args.webhook_rule_retention_prune_limit,
-        args.webhook_rule_timeout_secs,
-    );
-    let backup_policy_prune_config = BackupPolicyRetentionPruneConfig::new(
-        args.backup_policy_prune_enabled,
-        args.backup_policy_prune_limit,
-        args.backup_policy_prune_dry_run,
-        args.backup_policy_prune_include_disabled,
-        args.backup_policy_prune_delete_objects,
-        args.backup_policy_prune_object_store_dir.clone(),
-    );
-    let schedule_dispatch_config = ScheduleDispatchConfig::new(
-        args.schedule_command_timeout_secs,
-        args.require_registered_agent_updates,
-    );
     info!(tick_secs = args.tick_secs, "worker started");
     if args.once {
+        let runtime_config = WorkerRuntimeConfig::from_args(&args);
         let schedules_processed = process_due_schedules_if_leader(
             &pool,
             25,
             &worker_id,
-            args.worker_lease_secs,
-            &schedule_dispatch_config,
+            runtime_config.worker_lease_secs,
+            &runtime_config.schedule_dispatch_config,
         )
         .await?;
         let alert_notifications = process_alert_notifications_if_leader(
             &pool,
-            alert_notification_config,
+            runtime_config.alert_notification_config,
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await?;
         let webhook_rules = process_webhook_rules_if_leader(
             &pool,
-            webhook_rule_config,
+            runtime_config.webhook_rule_config,
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await?;
         let backup_policy_prune = process_backup_policy_retention_prune_if_leader(
             &pool,
-            backup_policy_prune_config.clone(),
+            runtime_config.backup_policy_prune_config.clone(),
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await?;
         let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
             &pool,
-            args.backup_policy_prune_object_store_dir.as_ref(),
+            runtime_config.backup_policy_prune_object_store_dir.as_ref(),
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await?;
         info!(
@@ -505,7 +539,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut ticker = time::interval(Duration::from_secs(args.tick_secs.max(1)));
+    let mut current_tick_secs = args.tick_secs.max(1);
+    let mut ticker = time::interval(Duration::from_secs(current_tick_secs));
     let mut last_offline_check = tokio::time::Instant::now();
     let mut webhook_listener = match connect_webhook_listener(postgres_url).await {
         Ok(listener) => Some(listener),
@@ -548,12 +583,27 @@ async fn main() -> Result<()> {
                 Err(error) => debug!(%error, "webhook event listener reconnect failed"),
             }
         }
+        let runtime_config = match load_worker_runtime_config(&base_args) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(%error, "failed to hot-reload worker suite config; using startup runtime config");
+                WorkerRuntimeConfig::from_args(&args)
+            }
+        };
+        if runtime_config.tick_secs != current_tick_secs {
+            current_tick_secs = runtime_config.tick_secs;
+            ticker = time::interval(Duration::from_secs(current_tick_secs));
+            info!(
+                tick_secs = current_tick_secs,
+                "worker tick interval hot-reloaded"
+            );
+        }
         match process_due_schedules_if_leader(
             &pool,
             25,
             &worker_id,
-            args.worker_lease_secs,
-            &schedule_dispatch_config,
+            runtime_config.worker_lease_secs,
+            &runtime_config.schedule_dispatch_config,
         )
         .await
         {
@@ -566,9 +616,9 @@ async fn main() -> Result<()> {
         }
         match process_alert_notifications_if_leader(
             &pool,
-            alert_notification_config,
+            runtime_config.alert_notification_config,
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await
         {
@@ -587,9 +637,9 @@ async fn main() -> Result<()> {
         }
         match process_webhook_rules_if_leader(
             &pool,
-            webhook_rule_config,
+            runtime_config.webhook_rule_config,
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await
         {
@@ -609,9 +659,9 @@ async fn main() -> Result<()> {
         }
         match process_backup_policy_retention_prune_if_leader(
             &pool,
-            backup_policy_prune_config.clone(),
+            runtime_config.backup_policy_prune_config.clone(),
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await
         {
@@ -629,9 +679,9 @@ async fn main() -> Result<()> {
         }
         match process_artifact_cleanup_jobs_if_leader(
             &pool,
-            args.backup_policy_prune_object_store_dir.as_ref(),
+            runtime_config.backup_policy_prune_object_store_dir.as_ref(),
             &worker_id,
-            args.worker_lease_secs,
+            runtime_config.worker_lease_secs,
         )
         .await
         {
@@ -649,7 +699,7 @@ async fn main() -> Result<()> {
         }
         if last_offline_check.elapsed() >= Duration::from_secs(60) {
             last_offline_check = tokio::time::Instant::now();
-            match detect_offline_agents(&pool, args.agent_offline_timeout_secs).await {
+            match detect_offline_agents(&pool, runtime_config.agent_offline_timeout_secs).await {
                 Ok(count) => {
                     if count > 0 {
                         info!(count, "detected offline agents");
@@ -2305,6 +2355,106 @@ mod schedule_tests {
     }
 
     #[test]
+    fn worker_runtime_config_reloads_suite_file_from_base_args() {
+        with_cleared_worker_env(WORKER_HOT_RELOAD_ENV, || {
+            let path = temp_suite_config_path("worker-hot-reload");
+            let object_dir = path.with_extension("objects");
+            std::fs::write(
+                &path,
+                worker_runtime_toml(
+                    7,
+                    17,
+                    333,
+                    41,
+                    true,
+                    5,
+                    45,
+                    500,
+                    9,
+                    6,
+                    11,
+                    3,
+                    300,
+                    13,
+                    true,
+                    object_dir.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+            let args =
+                Args::parse_from(["vpsman-worker", "--suite-config", path.to_str().unwrap()]);
+
+            let runtime = load_worker_runtime_config(&args).unwrap();
+
+            assert_eq!(runtime.tick_secs, 7);
+            assert_eq!(runtime.worker_lease_secs, 17);
+            assert_eq!(runtime.agent_offline_timeout_secs, 333);
+            assert_eq!(runtime.schedule_dispatch_config.timeout_secs, 41);
+            assert!(
+                runtime
+                    .schedule_dispatch_config
+                    .require_registered_agent_updates
+            );
+            assert_eq!(runtime.alert_notification_config.delivery_limit, 5);
+            assert_eq!(runtime.alert_notification_config.retention_days, 45);
+            assert_eq!(runtime.alert_notification_config.retention_prune_limit, 500);
+            assert_eq!(runtime.alert_notification_config.webhook_timeout_secs, 9);
+            assert_eq!(runtime.webhook_rule_config.delivery_limit, 6);
+            assert_eq!(runtime.webhook_rule_config.materialize_limit, 11);
+            assert_eq!(runtime.webhook_rule_config.retention_days, 3);
+            assert_eq!(runtime.webhook_rule_config.retention_prune_limit, 300);
+            assert_eq!(runtime.webhook_rule_config.webhook_timeout_secs, 13);
+            assert!(runtime.backup_policy_prune_config.enabled);
+            assert_eq!(
+                runtime
+                    .backup_policy_prune_config
+                    .object_store_dir
+                    .as_deref(),
+                Some(object_dir.as_path())
+            );
+
+            std::fs::write(
+                &path,
+                worker_runtime_toml(
+                    19,
+                    29,
+                    444,
+                    55,
+                    false,
+                    8,
+                    60,
+                    700,
+                    12,
+                    10,
+                    14,
+                    4,
+                    400,
+                    16,
+                    false,
+                    object_dir.to_string_lossy().as_ref(),
+                ),
+            )
+            .unwrap();
+
+            let runtime = load_worker_runtime_config(&args).unwrap();
+            assert_eq!(runtime.tick_secs, 19);
+            assert_eq!(runtime.worker_lease_secs, 29);
+            assert_eq!(runtime.agent_offline_timeout_secs, 444);
+            assert_eq!(runtime.schedule_dispatch_config.timeout_secs, 55);
+            assert!(
+                !runtime
+                    .schedule_dispatch_config
+                    .require_registered_agent_updates
+            );
+            assert_eq!(runtime.alert_notification_config.delivery_limit, 8);
+            assert_eq!(runtime.webhook_rule_config.materialize_limit, 14);
+            assert!(!runtime.backup_policy_prune_config.enabled);
+
+            let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[test]
     fn suite_bool_defaults_do_not_disable_explicit_true_flags() {
         let env_name = "VPSMAN_WORKER_APPLY_BOOL_DEFAULT_TEST_UNSET";
 
@@ -2315,5 +2465,97 @@ mod schedule_tests {
         let mut default_false = false;
         apply_bool_default(&mut default_false, env_name, Some(true));
         assert!(default_false);
+    }
+
+    const WORKER_HOT_RELOAD_ENV: &[&str] = &[
+        "VPSMAN_WORKER_TICK_SECS",
+        "VPSMAN_WORKER_LEASE_SECS",
+        "VPSMAN_AGENT_OFFLINE_TIMEOUT_SECS",
+        "VPSMAN_WORKER_NOTIFICATION_DELIVERY_LIMIT",
+        "VPSMAN_WORKER_NOTIFICATION_RETENTION_DAYS",
+        "VPSMAN_WORKER_NOTIFICATION_RETENTION_PRUNE_LIMIT",
+        "VPSMAN_WORKER_NOTIFICATION_WEBHOOK_TIMEOUT_SECS",
+        "VPSMAN_WORKER_WEBHOOK_RULE_DELIVERY_LIMIT",
+        "VPSMAN_WORKER_WEBHOOK_RULE_MATERIALIZE_LIMIT",
+        "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_DAYS",
+        "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_PRUNE_LIMIT",
+        "VPSMAN_WORKER_WEBHOOK_RULE_TIMEOUT_SECS",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_ENABLED",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_LIMIT",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DRY_RUN",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_INCLUDE_DISABLED",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DELETE_OBJECTS",
+        "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR",
+        "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
+        "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
+    ];
+
+    static WORKER_SUITE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_cleared_worker_env<R>(names: &[&str], run: impl FnOnce() -> R) -> R {
+        let _guard = WORKER_SUITE_ENV_LOCK.lock().unwrap();
+        let saved = names
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        for name in names {
+            std::env::remove_var(name);
+        }
+        let result = run();
+        for (name, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        result
+    }
+
+    fn temp_suite_config_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vpsman-{label}-{}.toml", Uuid::new_v4()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn worker_runtime_toml(
+        tick_secs: u64,
+        worker_lease_secs: i32,
+        agent_offline_timeout_secs: i64,
+        schedule_command_timeout_secs: u64,
+        require_registered_agent_updates: bool,
+        notification_delivery_limit: i64,
+        notification_retention_days: i64,
+        notification_retention_prune_limit: i64,
+        notification_webhook_timeout_secs: u64,
+        webhook_rule_delivery_limit: i64,
+        webhook_rule_materialize_limit: i64,
+        webhook_rule_retention_days: i64,
+        webhook_rule_retention_prune_limit: i64,
+        webhook_rule_timeout_secs: u64,
+        backup_policy_prune_enabled: bool,
+        object_store_dir: &str,
+    ) -> String {
+        format!(
+            r#"version = 1
+
+[worker]
+tick_secs = {tick_secs}
+worker_lease_secs = {worker_lease_secs}
+agent_offline_timeout_secs = {agent_offline_timeout_secs}
+schedule_command_timeout_secs = {schedule_command_timeout_secs}
+require_registered_agent_updates = {require_registered_agent_updates}
+notification_delivery_limit = {notification_delivery_limit}
+notification_retention_days = {notification_retention_days}
+notification_retention_prune_limit = {notification_retention_prune_limit}
+notification_webhook_timeout_secs = {notification_webhook_timeout_secs}
+webhook_rule_delivery_limit = {webhook_rule_delivery_limit}
+webhook_rule_materialize_limit = {webhook_rule_materialize_limit}
+webhook_rule_retention_days = {webhook_rule_retention_days}
+webhook_rule_retention_prune_limit = {webhook_rule_retention_prune_limit}
+webhook_rule_timeout_secs = {webhook_rule_timeout_secs}
+backup_policy_prune_enabled = {backup_policy_prune_enabled}
+backup_policy_prune_object_store_dir = "{object_store_dir}"
+"#
+        )
     }
 }

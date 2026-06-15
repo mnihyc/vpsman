@@ -1,8 +1,8 @@
 use super::{
     models::{
-        RuntimeTunnelManager, TunnelBackendConfig, TunnelBackendFile, TunnelConfigBackend,
-        TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan, MANAGED_IFUPDOWN_FILE,
-        MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
+        RuntimeTunnelManager, TunnelAddressPair, TunnelBackendConfig, TunnelBackendFile,
+        TunnelConfigBackend, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelPlan,
+        MANAGED_IFUPDOWN_FILE, MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
         MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
     },
     planner::{render_tunnel_endpoint_config, NetworkPlanError},
@@ -113,7 +113,7 @@ network:
       remote: {}
       ttl: 255
       addresses:
-        - {}/{}
+{}
 ",
         plan.name,
         endpoint.local_client_id,
@@ -121,8 +121,7 @@ network:
         mode,
         local_underlay(plan, endpoint),
         remote_underlay(plan, endpoint),
-        local_address(plan, endpoint),
-        plan.tunnel_prefix_len
+        render_netplan_addresses(plan, endpoint)
     ))
 }
 
@@ -177,15 +176,12 @@ fn render_systemd_network(plan: &TunnelPlan, endpoint: &TunnelEndpointConfig) ->
 Name={}
 
 [Network]
-Address={}/{}
-Peer={}
+{}
 ",
         plan.name,
         endpoint.local_client_id,
         plan.interface_name,
-        local_address(plan, endpoint),
-        plan.tunnel_prefix_len,
-        remote_address(plan, endpoint)
+        render_systemd_addresses(plan, endpoint)
     )
 }
 
@@ -209,18 +205,63 @@ fn remote_underlay<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) ->
     }
 }
 
-fn local_address<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint_is_left(plan, endpoint) {
-        &plan.left_tunnel_address
+fn endpoint_address_pair<'a>(
+    pair: &'a TunnelAddressPair,
+    endpoint: &TunnelEndpointConfig,
+) -> (&'a str, &'a str, u8) {
+    if matches!(endpoint.side, TunnelEndpointSide::Left) {
+        (&pair.left, &pair.right, pair.prefix_len)
     } else {
-        &plan.right_tunnel_address
+        (&pair.right, &pair.left, pair.prefix_len)
     }
 }
 
-fn remote_address<'a>(plan: &'a TunnelPlan, endpoint: &TunnelEndpointConfig) -> &'a str {
-    if endpoint_is_left(plan, endpoint) {
-        &plan.right_tunnel_address
-    } else {
-        &plan.left_tunnel_address
+fn endpoint_addresses<'a>(
+    plan: &'a TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Vec<(&'a str, &'a str, u8)> {
+    let mut addresses = Vec::new();
+    if let Some(pair) = &plan.ipv4_tunnel {
+        addresses.push(endpoint_address_pair(pair, endpoint));
     }
+    if let Some(pair) = &plan.ipv6_tunnel {
+        addresses.push(endpoint_address_pair(pair, endpoint));
+    }
+    if addresses.is_empty() {
+        addresses.push((
+            if endpoint_is_left(plan, endpoint) {
+                &plan.left_tunnel_address
+            } else {
+                &plan.right_tunnel_address
+            },
+            if endpoint_is_left(plan, endpoint) {
+                &plan.right_tunnel_address
+            } else {
+                &plan.left_tunnel_address
+            },
+            plan.tunnel_prefix_len,
+        ));
+    }
+    addresses
+}
+
+fn render_netplan_addresses(plan: &TunnelPlan, endpoint: &TunnelEndpointConfig) -> String {
+    endpoint_addresses(plan, endpoint)
+        .into_iter()
+        .map(|(local, _remote, prefix_len)| format!("        - {local}/{prefix_len}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_systemd_addresses(plan: &TunnelPlan, endpoint: &TunnelEndpointConfig) -> String {
+    endpoint_addresses(plan, endpoint)
+        .into_iter()
+        .flat_map(|(local, remote, prefix_len)| {
+            [
+                format!("Address={local}/{prefix_len}"),
+                format!("Peer={remote}"),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

@@ -473,7 +473,7 @@ async fn agent_update_release_policy_allows(
     state: &AppState,
     job_command: &JobCommand,
 ) -> Result<bool, ApiError> {
-    if !state.require_registered_agent_updates {
+    if !state.require_registered_agent_updates() {
         return Ok(true);
     }
     let JobCommand::UpdateAgent {
@@ -513,7 +513,7 @@ async fn precomplete_capability_skips(
                 &outcome.outputs,
                 JobOutputPersistConfig {
                     object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes,
+                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
                 },
             )
             .await?;

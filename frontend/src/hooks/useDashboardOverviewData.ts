@@ -97,8 +97,9 @@ export function useDashboardOverviewData(
 
   const updateDashboardPreferences = useCallback(
     (patch: Partial<DashboardPreferences>) => {
+      const currentPreferences = dashboardPreferencesRef.current;
       const nextPreferences = normalizeDashboardPreferences({
-        ...dashboardPreferences,
+        ...currentPreferences,
         ...patch,
       });
       writeDashboardPreferences(nextPreferences);
@@ -106,12 +107,12 @@ export function useDashboardOverviewData(
       setDashboardPreferencesState(nextPreferences);
       if (
         dashboardPreferencesToParams(nextPreferences).toString() !==
-        dashboardPreferencesToParams(dashboardPreferences).toString()
+        dashboardPreferencesToParams(currentPreferences).toString()
       ) {
         void loadDashboardOverview(nextPreferences);
       }
     },
-    [dashboardPreferences, loadDashboardOverview],
+    [loadDashboardOverview],
   );
 
   const clearDashboardOverview = useCallback(() => {

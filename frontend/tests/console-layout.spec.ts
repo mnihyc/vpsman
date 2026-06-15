@@ -11,6 +11,7 @@ import {
   openConsoleSubpage,
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
+import { renderTunnelEndpointConfig } from "../src/topologyApply";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -27,6 +28,18 @@ async function checkControl(locator: Locator) {
       input.click();
     }
   });
+}
+
+async function chooseVpsBySearch(
+  root: Locator,
+  label: string,
+  query: string,
+  optionName: RegExp,
+) {
+  await root.getByRole("combobox", { name: label }).fill(query);
+  const option = root.getByRole("option", { name: optionName });
+  await expect(option).toBeVisible();
+  await option.click();
 }
 
 async function dispatchWithPrompt(composer: Locator) {
@@ -117,26 +130,45 @@ test("renders an operational cloud-console fleet workspace", async ({
   await page.getByLabel("Dashboard refresh interval").selectOption("5");
   await page.getByLabel("Dashboard chart point density").selectOption("dense");
   await page.getByLabel("Dashboard group by").selectOption("countries");
+  await page.getByLabel("Dashboard scope kind").selectOption("client");
+  await chooseVpsBySearch(
+    page.locator(".dashboardControlBar"),
+    "Dashboard scope value",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await expect(
+    page.getByText(/agent-sfo-01; grouped by Countries/),
+  ).toBeVisible();
+  const dashboardVpsScope = page.getByRole("combobox", {
+    name: "Dashboard scope value",
+  });
+  await dashboardVpsScope.fill("not-a-real-vps");
+  await page.keyboard.press("Tab");
+  await expect(dashboardVpsScope).toHaveValue("edge-sfo-01 (fo01)");
   await page.getByLabel("Dashboard scope kind").selectOption("provider");
   await page.getByLabel("Dashboard scope value").selectOption("alpha");
   await expect(
     page.getByText(/provider:alpha; grouped by Countries/),
   ).toBeVisible();
-  const dashboardPreferences = await page.evaluate(() =>
-    JSON.parse(
-      window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}",
-    ),
-  );
-  expect(dashboardPreferences).toMatchObject({
-    groupBy: "countries",
-    networkView: "traffic",
-    pointDensity: "dense",
-    refreshIntervalSecs: 5,
-    resourceMetric: "memory_used",
-    scopeKind: "provider",
-    scopeValue: "alpha",
-    window: "all",
-  });
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        JSON.parse(
+          window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}",
+        ),
+      ),
+    )
+    .toMatchObject({
+      groupBy: "countries",
+      networkView: "traffic",
+      pointDensity: "dense",
+      refreshIntervalSecs: 5,
+      resourceMetric: "memory_used",
+      scopeKind: "provider",
+      scopeValue: "alpha",
+      window: "all",
+    });
   await expect(
     page.getByRole("button", { name: /Fleet health/ }),
   ).toBeVisible();
@@ -243,10 +275,11 @@ test("renders an operational cloud-console fleet workspace", async ({
     coreDetail.getByText("Client-managed runtime tunnels enabled"),
   ).toBeVisible();
   await expect(coreDetail.getByText("bgp, bird2")).toBeVisible();
-  await expect(coreDetail.getByText(/tun0 tun_tap up/)).toBeVisible();
-  await expect(
-    coreDetail.getByText(/eth0 RX 8.7 Kbps \/ TX 17 Kbps/),
-  ).toBeVisible();
+  await expect(coreDetail.getByText(/tunab/).first()).toBeVisible();
+  await expect(coreDetail.getByText(/Latency Down \/ 100\.0% loss/)).toBeVisible();
+  await expect(coreDetail.getByText(/OSPF Report only 14->80/)).toBeVisible();
+  await expect(coreDetail.getByText("eth0").first()).toBeVisible();
+  await expect(coreDetail.getByText(/RX 8.7 Kbps \/ TX 17 Kbps/)).toBeVisible();
 
   const backupNetworkRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
@@ -392,6 +425,17 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await expect(
     notifications.getByText("Webhook rules", { exact: true }).first(),
   ).toBeVisible();
+  await activate(notifications.getByRole("button", { name: "Create rule" }).first());
+  const webhookExpression = notifications.getByRole("searchbox", {
+    name: "Webhook expression",
+  });
+  await webhookExpression.click();
+  await webhookExpression.fill("");
+  await page.keyboard.type("interval.");
+  await expect(page.getByRole("option", { name: /^interval\.30sec$/ })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(webhookExpression).toContainText("interval.30sec");
+  await activate(notifications.getByLabel("Close detail panel"));
 
   await activate(
     notifications.getByRole("button", { name: "Review queue dispatch" }),
@@ -608,6 +652,15 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
     grid.getByRole("columnheader", { name: "Actions" }),
   ).toHaveCount(0);
   await expect(page.getByText("Policy detail")).toHaveCount(0);
+  const policySearch = grid.getByRole("searchbox", {
+    name: "Alert policy rules search",
+  });
+  await policySearch.click();
+  await page.keyboard.type("enabled");
+  await expect(page.getByRole("option", { name: /^enabled$/ })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(policySearch).toContainText("enabled");
+  await policySearch.fill("");
 
   const policyRow = grid
     .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
@@ -846,6 +899,14 @@ test("manages data-source preset assignments from the config view", async ({
       .getByText("no server store, 1 releases, 1 external"),
   ).toBeVisible();
   await activeSourcesSearchField.selectOption("Preset");
+  await activeSourcesSearch.click();
+  await page.keyboard.type("vnstat");
+  await expect(
+    page.getByRole("option", { name: /^shared:vnstat-json$/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(activeSourcesSearch).toContainText("shared:vnstat-json");
+  await activeSourcesSearch.fill("");
   await activeSourcesSearch.fill("shared:vnstat-json");
   await expect(
     panel
@@ -919,6 +980,58 @@ test("manages data-source preset assignments from the config view", async ({
     domain: "runtime_traffic_accounting_source",
     preset_id: "11111111-1111-4111-8111-111111111111",
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
+  });
+});
+
+test("uses an exact VPS combobox for single config jobs", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "single config combobox behavior is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Single VPS");
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Config", "Single VPS");
+
+  const targetPicker = page.getByRole("combobox", {
+    name: "Single VPS config target",
+  });
+  await expect(targetPicker).toHaveValue("");
+  await targetPicker.fill("not-a-real-vps");
+  await targetPicker.blur();
+  await expect(targetPicker).toHaveValue("");
+  await chooseVpsBySearch(
+    page.locator(".configApplyGrid"),
+    "Single VPS config target",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await expect(targetPicker).toHaveValue("core-fra-02 (ra02)");
+  await activate(page.getByRole("button", { name: "Read config" }));
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
+        ).__vpsmanTestRequests;
+        return requests.jobs.some((item) => item.command === "config_read");
+      }),
+    )
+    .toBe(true);
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.find((item) => item.command === "config_read");
+  });
+  expect(request).toMatchObject({
+    command: "config_read",
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
   });
 });
 
@@ -1032,7 +1145,12 @@ test("imports direct gateway identities and revokes current keys from the access
     tags: ["country:JP", "role:edge"],
   });
 
-  await inspector.getByLabel("VPS key revoke VPS ID").fill("agent-sfo-01");
+  await chooseVpsBySearch(
+    inspector,
+    "VPS key revoke VPS ID",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
   await inspector.getByLabel("VPS key revoke reason").fill("lost host rebuild");
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));
   await expect(page.getByLabel("Confirm current key revocation")).toBeVisible();
@@ -1132,7 +1250,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     page
       .locator(".topologyGraphPanel")
-      .getByText("healthy", { exact: true })
+      .getByText("Healthy", { exact: true })
       .first(),
   ).toBeVisible();
   await page.getByLabel("Filter topology graph").fill("fra");
@@ -1156,7 +1274,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Refresh evidence" }));
   const evidence = page.locator(".topologyEvidence");
-  await expect(evidence.getByText("network_probe").first()).toBeVisible();
+  await expect(evidence.getByText("Network probe").first()).toBeVisible();
   await expect(evidence.getByText("1 OSPF update plans")).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(evidence.getByText("14 -> 22").first()).toBeVisible();
@@ -1166,7 +1284,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   ).toBeVisible();
   await expect(evidence.getByText("10.9-14.8 ms; 0.25% loss")).toBeVisible();
   const observationTable = evidence.locator(".observationTable");
-  await expect(observationTable.getByText("network_speed_test")).toBeVisible();
+  await expect(observationTable.getByText("Network speed test")).toBeVisible();
   await expect(observationTable.getByText("10.1 Mbps")).toBeVisible();
   await expect(observationTable.getByText("12.4 ms")).toBeVisible();
   await expect(observationTable.getByText("0.25% loss")).toBeVisible();
@@ -1177,7 +1295,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     observationTable.getByText("Runtime adapter unhealthy"),
   ).toBeVisible();
   await expect(
-    observationTable.getByText("adapter status failed"),
+    observationTable.getByText("Adapter status failed"),
   ).toBeVisible();
   await expect(evidence.getByText("Managed blocks match")).toBeVisible();
 });
@@ -1191,7 +1309,34 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   );
 
   await page.goto("/");
+  await page.getByLabel("Search fleet").fill("sfo");
   await openConsoleSubpage(page, "Topology", "Tunnel plans");
+  await expect(page.getByText("OSPF cost model")).toBeVisible();
+  await expect(page.getByText(/Latency\/loss plus bandwidth tier/)).toBeVisible();
+
+  const planGrid = page.getByLabel("Tunnel plans data grid");
+  const savedPlanRow = planGrid
+    .locator(".gridBody [role=row]", { hasText: "sfo-fra-gre" })
+    .first();
+  await savedPlanRow.getByLabel("Select Tunnel plans row").check();
+  await planGrid.getByRole("button", { name: "Selection" }).click();
+  await page.getByRole("menuitem", { name: "Disable plan" }).click();
+  await expect(savedPlanRow.getByText("disabled")).toBeVisible();
+  await savedPlanRow.getByLabel("Select Tunnel plans row").check();
+  await planGrid.getByRole("button", { name: "Selection" }).click();
+  await page.getByRole("menuitem", { name: "Enable plan" }).click();
+  await expect(savedPlanRow.getByText("enabled")).toBeVisible();
+
+  const enabledMutations = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { tunnelPlanEnabledMutations: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.tunnelPlanEnabledMutations;
+  });
+  expect(enabledMutations).toMatchObject([
+    { enabled: false, plan_id: tunnelPlans[0].id },
+    { enabled: true, plan_id: tunnelPlans[0].id },
+  ]);
 
   const composer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
@@ -1200,8 +1345,8 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   await composer.getByLabel("Name", { exact: true }).fill("external-openvpn");
   await composer.getByLabel("Interface", { exact: true }).fill("ovpn42");
   await composer.getByLabel("Kind").selectOption("openvpn");
-  await composer.getByLabel("Left VPS").selectOption("agent-sfo-01");
-  await composer.getByLabel("Right VPS").selectOption("agent-fra-02");
+  await chooseVpsBySearch(composer, "Left VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await chooseVpsBySearch(composer, "Right VPS", "fra", /core-fra-02.*agent-fra-02/);
   await composer
     .getByLabel("Left underlay", { exact: true })
     .fill("198.51.100.10");
@@ -1209,8 +1354,19 @@ test("authors external adapter tunnel plans from the topology panel", async ({
     .getByLabel("Right underlay", { exact: true })
     .fill("203.0.113.20");
   await composer
+    .getByLabel("IPv4 allocation pool", { exact: true })
+    .fill("10.255.50.0/30");
+  await activate(composer.getByRole("button", { name: "Generate endpoints" }));
+  await expect(composer.getByLabel("Left IPv4", { exact: true })).toHaveValue(
+    "10.255.50.0",
+  );
+  await expect(composer.getByLabel("Right IPv4", { exact: true })).toHaveValue(
+    "10.255.50.1",
+  );
+  await composer
     .getByLabel("Runtime owner")
     .selectOption("external_managed_adapter");
+  await checkControl(composer.getByLabel("Enable traffic shaping"));
   await composer.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await composer.getByLabel("Burst KB", { exact: true }).fill("4096");
   await composer
@@ -1235,6 +1391,16 @@ test("authors external adapter tunnel plans from the topology panel", async ({
     .getByLabel("Routes", { exact: true })
     .fill("10.42.0.0/24,dev=ovpn42,metric=42");
   await activate(composer.getByRole("button", { name: "Save plan" }));
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as { __vpsmanTestRequests: { tunnelPlans: unknown[] } }
+        ).__vpsmanTestRequests;
+        return requests.tunnelPlans.length;
+      }),
+    )
+    .toBeGreaterThan(0);
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -1244,7 +1410,14 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   });
   expect(request).toMatchObject({
     interface_name: "ovpn42",
+    address_pool_cidr: "10.255.50.0/30",
+    ipv4_tunnel: {
+      left: "10.255.50.0",
+      prefix_len: 31,
+      right: "10.255.50.1",
+    },
     kind: "openvpn",
+    latency_primary_family: "ipv4",
     name: "external-openvpn",
     runtime_control: {
       manager: "external_managed_adapter",
@@ -1334,6 +1507,7 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({
   await adapterForm
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
+  await checkControl(adapterForm.getByLabel("Enable traffic shaping"));
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
   await adapterForm
@@ -1479,10 +1653,53 @@ test("generates local privilege assertions before dispatching a privileged job",
 
   await page.getByLabel("Command argv").fill("/usr/bin/uptime");
   const targetExpression = page.getByLabel("Bulk target selector expression");
-  await targetExpression.fill("name:s");
+  await targetExpression.click();
+  await page.keyboard.type("name:s");
   await expect(
-    page.getByRole("option", { name: "name:edge-sfo-01" }),
+    page.getByRole("option", { name: /edge-sfo-01.*Name.*agent-sfo-01/ }),
   ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("name:edge-sfo-01");
+  await targetExpression.fill("");
+  await targetExpression.click();
+  await page.keyboard.type("fo01");
+  await expect(
+    page.getByRole("option", { name: /edge-sfo-01.*ID.*agent-sfo-01/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("id:agent-sfo-01");
+  await targetExpression.fill("");
+  await targetExpression.click();
+  await page.keyboard.type("status:on");
+  await expect(
+    page.getByRole("option", { name: /^status:online$/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("status:online");
+  await targetExpression.fill("");
+  await targetExpression.click();
+  await page.keyboard.type("vps.status:on");
+  await expect(
+    page.getByRole("option", { name: /^vps\.status:online$/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("vps.status:online");
+  await targetExpression.fill("");
+  await targetExpression.click();
+  await page.keyboard.type("role:e");
+  await expect(
+    page.getByRole("option", { name: /^role:edge$/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("role:edge");
+  await targetExpression.fill("");
+  await targetExpression.click();
+  await page.keyboard.type("*");
+  await expect(
+    page.getByRole("option", { name: /^\*$/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(targetExpression).toContainText("*");
   await targetExpression.fill("");
   await page
     .getByLabel("Bulk target selector expression")
@@ -1519,6 +1736,61 @@ test("generates local privilege assertions before dispatching a privileged job",
     (request as { privilege_assertion?: { assertion_hex?: string } })
       .privilege_assertion?.assertion_hex,
   ).toMatch(/^[0-9a-f]+$/);
+});
+
+test("keeps long search expressions horizontally editable and inspectable", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop expression scrolling covers keyboard and mouse mechanics",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+
+  const expression = page.getByRole("searchbox", {
+    name: "Bulk target selector expression",
+  });
+  const longSelector =
+    "provider:alpha && country:US && status:online && role:edge && id:agent-sfo-01 || id:agent-fra-02 || id:agent-nyc-03 || " +
+    "vps.status:online && vps.provider:alpha && vps.country:US && tag:role:edge && name:edge-sfo-01 || " +
+    "id:agent-sfo-01 || id:agent-fra-02 || id:agent-nyc-03";
+
+  await expression.fill(longSelector);
+  await expect
+    .poll(() =>
+      expression.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    )
+    .toBeGreaterThan(20);
+  await expression.press("Home");
+  await expect
+    .poll(() => expression.evaluate((element) => element.scrollLeft))
+    .toBeLessThanOrEqual(2);
+  await expression.press("End");
+  await expect
+    .poll(() => expression.evaluate((element) => element.scrollLeft))
+    .toBeGreaterThan(20);
+
+  await page.getByLabel("Command argv").click();
+  await expect
+    .poll(() =>
+      expression.evaluate((element) =>
+        element.closest(".searchExpressionInput")?.classList.contains("previewing"),
+      ),
+    )
+    .toBe(true);
+  await expect(expression.locator(".searchExpressionChip").first()).toBeVisible();
+  await expression.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  await expression.hover();
+  await page.mouse.wheel(0, 500);
+  await expect
+    .poll(() => expression.evaluate((element) => element.scrollLeft))
+    .toBeGreaterThan(20);
 });
 
 test("dispatches terminal session control operations with local privilege unlock", async ({
@@ -1678,9 +1950,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
   await restoreWorkflow
     .getByLabel("Restore source backup request")
     .selectOption(backupId);
-  await restoreWorkflow
-    .getByLabel("Restore target client")
-    .selectOption("agent-fra-02");
+  await chooseVpsBySearch(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
   await restoreWorkflow.getByLabel("Restore destination root").fill("/restore");
   await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeVisible();
@@ -1819,7 +2089,7 @@ test("prepares backup artifacts server-side before dispatching executable restor
   ).toHaveValue(restoreJobId);
   await expect(
     restoreWorkflow.getByLabel("Restore rollback target VPS ID"),
-  ).toHaveValue("agent-fra-02");
+  ).toHaveValue("core-fra-02 (ra02)");
   await restoreWorkflow
     .getByLabel("Restore rollback timeout seconds")
     .fill("45");
@@ -1976,8 +2246,9 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       };
     }
   ).operation;
+  const endpoint = renderTunnelEndpointConfig(tunnelPlans[0].plan, "left");
   expect(operation.ifupdown_sha256_hex).toBe(
-    sha256Hex(new TextEncoder().encode(tunnelPlans[0].plan.ifupdown_snippet)),
+    sha256Hex(new TextEncoder().encode(endpoint.ifupdownSnippet)),
   );
   expect(operation.config_backend).toBe("ifupdown");
   expect(operation.config_sha256_hex).toBe(
@@ -1989,16 +2260,14 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
           "path=/etc/network/interfaces.d/vpsman-tunnels",
           "kind=ifupdown",
           "contents-sha256-context",
-          tunnelPlans[0].plan.ifupdown_snippet,
+          endpoint.ifupdownSnippet,
           "",
         ].join("\n"),
       ),
     ),
   );
   expect(operation.bird2_sha256_hex).toBe(
-    sha256Hex(
-      new TextEncoder().encode(tunnelPlans[0].plan.bird2_interface_snippet),
-    ),
+    sha256Hex(new TextEncoder().encode(endpoint.bird2InterfaceSnippet)),
   );
   expectPrivilegeAssertion(request);
 

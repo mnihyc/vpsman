@@ -39,6 +39,14 @@ pub enum TunnelEndpointSide {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TunnelAddressFamily {
+    #[default]
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeTunnelManager {
     #[default]
     AgentIproute2Managed,
@@ -292,6 +300,13 @@ pub struct IfupdownInterface {
     pub tunnel_remote: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TunnelAddressPair {
+    pub left: String,
+    pub right: String,
+    pub prefix_len: u8,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TunnelPlanInput {
     pub name: String,
@@ -311,6 +326,14 @@ pub struct TunnelPlanInput {
     pub address_pool_cidr: String,
     #[serde(default)]
     pub reserved_addresses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_tunnel: Option<TunnelAddressPair>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_address_pool_cidr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(default)]
+    pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth: BandwidthTier,
     pub latency_ms: f64,
     pub packet_loss_ratio: f64,
@@ -338,6 +361,12 @@ pub struct TunnelPlan {
     pub left_tunnel_address: String,
     pub right_tunnel_address: String,
     pub tunnel_prefix_len: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_tunnel: Option<TunnelAddressPair>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_tunnel: Option<TunnelAddressPair>,
+    #[serde(default)]
+    pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth: BandwidthTier,
     pub recommended_ospf_cost: u16,
     pub ifupdown_file: String,
@@ -362,6 +391,15 @@ pub struct TunnelEndpointConfig {
     pub bird2_file: String,
     pub ifupdown_snippet: String,
     pub bird2_interface_snippet: String,
+    pub local_tunnel_address: String,
+    pub remote_tunnel_address: String,
+    pub tunnel_prefix_len: u8,
+    #[serde(default)]
+    pub primary_family: TunnelAddressFamily,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_tunnel: Option<TunnelAddressPair>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_tunnel: Option<TunnelAddressPair>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

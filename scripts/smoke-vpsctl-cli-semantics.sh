@@ -58,6 +58,8 @@ for kind in gre ipip sit fou; do
     --left-underlay 203.0.113.10 \
     --right-underlay 203.0.113.20 \
     --address-pool-cidr 10.255.0.0/30 \
+    --left-tunnel-ipv4 10.255.0.0 \
+    --right-tunnel-ipv4 10.255.0.1 \
     --bandwidth 100m \
     --latency-ms 20)"
   require_contains "$plan" "\"kind\": \"$kind\"" "tunnel-plan $kind"

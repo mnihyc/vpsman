@@ -20,6 +20,7 @@ impl Repository {
         let trends = self.list_network_observation_trends(1_000).await?;
         let mut recommendations = plans
             .iter()
+            .filter(|plan| plan.enabled)
             .map(|plan| recommend_plan_ospf_cost(plan, &trends))
             .collect::<Vec<_>>();
         recommendations.sort_by(|left, right| {
@@ -39,6 +40,7 @@ impl Repository {
         let trends = self.list_network_observation_trends(1_000).await?;
         let mut update_plans = plans
             .iter()
+            .filter(|plan| plan.enabled)
             .map(|plan| {
                 let recommendation = recommend_plan_ospf_cost(plan, &trends);
                 build_ospf_update_plan(plan, recommendation)

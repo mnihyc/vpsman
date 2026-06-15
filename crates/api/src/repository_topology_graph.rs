@@ -66,6 +66,7 @@ impl Repository {
                 left_status: plan.left_status.clone(),
                 right_status: plan.right_status.clone(),
                 status: plan.status.clone(),
+                enabled: plan.enabled,
                 health: health.clone(),
                 convergence_blocked: drift.convergence_blocked,
                 offline_client_ids: drift.offline_client_ids.clone(),
@@ -114,6 +115,10 @@ impl Repository {
                 last_rollback_job_id: plan.last_rollback_job_id,
                 left_tunnel_address: plan.plan.left_tunnel_address.clone(),
                 right_tunnel_address: plan.plan.right_tunnel_address.clone(),
+                ipv4_tunnel: plan.plan.ipv4_tunnel.clone(),
+                ipv6_tunnel: plan.plan.ipv6_tunnel.clone(),
+                latency_primary_family: format!("{:?}", plan.plan.latency_primary_family)
+                    .to_ascii_lowercase(),
             };
             update_node_from_edge(&mut nodes, &edge.left_client_id, &edge);
             update_node_from_edge(&mut nodes, &edge.right_client_id, &edge);

@@ -1,12 +1,16 @@
-use std::{collections::HashSet, net::Ipv4Addr};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use super::{
     cost::ospf_cost,
     models::{
         RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
         RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
-        TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation, TunnelPlan,
-        TunnelPlanInput, MANAGED_BIRD2_FILE, MANAGED_IFUPDOWN_FILE,
+        TunnelAddressFamily, TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide,
+        TunnelKind, TunnelObservation, TunnelPlan, TunnelPlanInput, MANAGED_BIRD2_FILE,
+        MANAGED_IFUPDOWN_FILE,
     },
 };
 
@@ -24,6 +28,10 @@ pub enum NetworkPlanError {
     AddressPoolTooSmall,
     #[error("address pool is exhausted")]
     AddressPoolExhausted,
+    #[error("address pool is required for endpoint allocation")]
+    AddressPoolRequired,
+    #[error("tunnel plan requires at least one IPv4 or IPv6 endpoint pair")]
+    TunnelAddressRequired,
     #[error("tunnel kind is not supported by selected network backend")]
     UnsupportedBackendTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
@@ -50,18 +58,38 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
     {
         return Err(NetworkPlanError::UnsupportedBackendTunnelKind);
     }
-    let cidr = Ipv4Cidr::parse(&input.address_pool_cidr)?;
-    if cidr.prefix_len > 31 {
-        return Err(NetworkPlanError::AddressPoolTooSmall);
-    }
-
-    let reserved = input
+    let reserved_ipv4 = input
         .reserved_addresses
         .iter()
         .filter_map(|address| address.parse::<Ipv4Addr>().ok())
         .map(ipv4_to_u32)
         .collect::<HashSet<_>>();
-    let (left_address, right_address) = allocate_tunnel_pair(cidr, &reserved)?;
+    let reserved_ipv6 = input
+        .reserved_addresses
+        .iter()
+        .filter_map(|address| address.parse::<Ipv6Addr>().ok())
+        .map(ipv6_to_u128)
+        .collect::<HashSet<_>>();
+    let ipv4_tunnel = resolve_ipv4_tunnel(input, &reserved_ipv4)?;
+    let ipv6_tunnel = resolve_ipv6_tunnel(input, &reserved_ipv6)?;
+    if ipv4_tunnel.is_none() && ipv6_tunnel.is_none() {
+        return Err(NetworkPlanError::TunnelAddressRequired);
+    }
+    let primary_family = primary_family(
+        input.latency_primary_family,
+        ipv4_tunnel.as_ref(),
+        ipv6_tunnel.as_ref(),
+    );
+    let primary_tunnel = match primary_family {
+        TunnelAddressFamily::Ipv4 => ipv4_tunnel
+            .as_ref()
+            .or(ipv6_tunnel.as_ref())
+            .expect("at least one tunnel address pair exists"),
+        TunnelAddressFamily::Ipv6 => ipv6_tunnel
+            .as_ref()
+            .or(ipv4_tunnel.as_ref())
+            .expect("at least one tunnel address pair exists"),
+    };
     let observation = TunnelObservation {
         latency_ms: input.latency_ms,
         packet_loss_ratio: input.packet_loss_ratio,
@@ -69,8 +97,8 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         preference: input.preference,
     };
     let recommended_ospf_cost = ospf_cost(input.ospf_policy, observation);
-    let left_address = left_address.to_string();
-    let right_address = right_address.to_string();
+    let left_address = primary_tunnel.left.clone();
+    let right_address = primary_tunnel.right.clone();
     let ifupdown_file = MANAGED_IFUPDOWN_FILE.to_string();
     let bird2_file = MANAGED_BIRD2_FILE.to_string();
     let ifupdown_snippet = render_runtime_snippet(
@@ -80,13 +108,22 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
             kind: input.kind,
             local_underlay: &input.left_underlay,
             remote_underlay: &input.right_underlay,
-            local_address: &left_address,
-            remote_address: &right_address,
+            ipv4: ipv4_tunnel.as_ref().map(|pair| EndpointAddressPair {
+                local: pair.left.as_str(),
+                remote: pair.right.as_str(),
+                prefix_len: pair.prefix_len,
+            }),
+            ipv6: ipv6_tunnel.as_ref().map(|pair| EndpointAddressPair {
+                local: pair.left.as_str(),
+                remote: pair.right.as_str(),
+                prefix_len: pair.prefix_len,
+            }),
             fou: &input.runtime_control.fou,
         },
         input.runtime_control.manager,
     );
     let touched_files = touched_files_for_runtime(input.runtime_control.manager);
+    let conflicts = plan_conflicts(input, &reserved_ipv4, &reserved_ipv6)?;
 
     Ok(TunnelPlan {
         name: input.name.clone(),
@@ -100,7 +137,10 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         right_underlay: input.right_underlay.clone(),
         left_tunnel_address: left_address.clone(),
         right_tunnel_address: right_address.clone(),
-        tunnel_prefix_len: 31,
+        tunnel_prefix_len: primary_tunnel.prefix_len,
+        ipv4_tunnel: ipv4_tunnel.clone(),
+        ipv6_tunnel: ipv6_tunnel.clone(),
+        latency_primary_family: primary_family,
         bandwidth: input.bandwidth,
         recommended_ospf_cost,
         ifupdown_file: ifupdown_file.clone(),
@@ -117,14 +157,85 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         touched_files,
         validation_steps: validation_steps_for_runtime(input.runtime_control.manager),
         rollback_notes: rollback_notes_for_runtime(input.runtime_control.manager),
-        conflicts: reserved
-            .iter()
-            .copied()
-            .filter(|address| *address >= cidr.network && *address <= cidr.broadcast)
-            .map(u32_to_ipv4)
-            .map(|address| format!("reserved address {address} is inside requested pool"))
-            .collect(),
+        conflicts,
         mutates_host: false,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunnelEndpointAllocation {
+    pub ipv4_tunnel: Option<TunnelAddressPair>,
+    pub ipv6_tunnel: Option<TunnelAddressPair>,
+    pub latency_primary_family: TunnelAddressFamily,
+}
+
+pub fn allocate_tunnel_endpoints(
+    ipv4_pool_cidr: Option<&str>,
+    ipv6_pool_cidr: Option<&str>,
+    reserved_addresses: &[String],
+    include_ipv4: bool,
+    include_ipv6: bool,
+) -> Result<TunnelEndpointAllocation, NetworkPlanError> {
+    if !include_ipv4 && !include_ipv6 {
+        return Err(NetworkPlanError::TunnelAddressRequired);
+    }
+    let reserved_ipv4 = reserved_addresses
+        .iter()
+        .filter_map(|address| address.parse::<Ipv4Addr>().ok())
+        .map(ipv4_to_u32)
+        .collect::<HashSet<_>>();
+    let reserved_ipv6 = reserved_addresses
+        .iter()
+        .filter_map(|address| address.parse::<Ipv6Addr>().ok())
+        .map(ipv6_to_u128)
+        .collect::<HashSet<_>>();
+
+    let ipv4_tunnel = if include_ipv4 {
+        let pool = ipv4_pool_cidr
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(NetworkPlanError::AddressPoolRequired)?;
+        let cidr = Ipv4Cidr::parse(pool)?;
+        if cidr.prefix_len > 31 {
+            return Err(NetworkPlanError::AddressPoolTooSmall);
+        }
+        let (left, right) = allocate_tunnel_pair(cidr, &reserved_ipv4)?;
+        Some(TunnelAddressPair {
+            left: left.to_string(),
+            right: right.to_string(),
+            prefix_len: 31,
+        })
+    } else {
+        None
+    };
+
+    let ipv6_tunnel = if include_ipv6 {
+        let pool = ipv6_pool_cidr
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(NetworkPlanError::AddressPoolRequired)?;
+        let cidr = Ipv6Cidr::parse(pool)?;
+        if cidr.prefix_len > 127 {
+            return Err(NetworkPlanError::AddressPoolTooSmall);
+        }
+        let (left, right) = allocate_tunnel_pair_v6(cidr, &reserved_ipv6)?;
+        Some(TunnelAddressPair {
+            left: left.to_string(),
+            right: right.to_string(),
+            prefix_len: 127,
+        })
+    } else {
+        None
+    };
+
+    Ok(TunnelEndpointAllocation {
+        latency_primary_family: primary_family(
+            TunnelAddressFamily::Ipv4,
+            ipv4_tunnel.as_ref(),
+            ipv6_tunnel.as_ref(),
+        ),
+        ipv4_tunnel,
+        ipv6_tunnel,
     })
 }
 
@@ -172,8 +283,16 @@ pub fn render_tunnel_endpoint_config(
                 kind: plan.kind,
                 local_underlay,
                 remote_underlay,
-                local_address,
-                remote_address,
+                ipv4: plan.ipv4_tunnel.as_ref().map(|pair| EndpointAddressPair {
+                    local: address_for_side(pair, side, true),
+                    remote: address_for_side(pair, side, false),
+                    prefix_len: pair.prefix_len,
+                }),
+                ipv6: plan.ipv6_tunnel.as_ref().map(|pair| EndpointAddressPair {
+                    local: address_for_side(pair, side, true),
+                    remote: address_for_side(pair, side, false),
+                    prefix_len: pair.prefix_len,
+                }),
                 fou: &plan.runtime_control.fou,
             },
             plan.runtime_control.manager,
@@ -186,6 +305,12 @@ pub fn render_tunnel_endpoint_config(
             peer_client_id,
             plan.recommended_ospf_cost,
         ),
+        local_tunnel_address: local_address.clone(),
+        remote_tunnel_address: remote_address.clone(),
+        tunnel_prefix_len: plan.tunnel_prefix_len,
+        primary_family: plan.latency_primary_family,
+        ipv4_tunnel: plan.ipv4_tunnel.clone(),
+        ipv6_tunnel: plan.ipv6_tunnel.clone(),
     })
 }
 
@@ -310,10 +435,10 @@ fn validate_runtime_routes(routes: &[RuntimeTunnelRoute]) -> Result<(), NetworkP
     }
     let mut seen = HashSet::new();
     for route in routes {
-        Ipv4Cidr::parse(&route.destination_cidr)
+        parse_ip_cidr(&route.destination_cidr)
             .map_err(|_| NetworkPlanError::InvalidRuntimeTunnelRoute)?;
         if let Some(via) = &route.via {
-            via.parse::<Ipv4Addr>()
+            via.parse::<IpAddr>()
                 .map_err(|_| NetworkPlanError::InvalidRuntimeTunnelRoute)?;
         }
         if let Some(interface) = &route.interface_name {
@@ -447,14 +572,186 @@ fn allocate_tunnel_pair(
     Err(NetworkPlanError::AddressPoolExhausted)
 }
 
+#[derive(Clone, Copy)]
+struct Ipv6Cidr {
+    network: u128,
+    broadcast: u128,
+    prefix_len: u8,
+}
+
+impl Ipv6Cidr {
+    fn parse(value: &str) -> Result<Self, NetworkPlanError> {
+        let (address, prefix) = value.split_once('/').ok_or(NetworkPlanError::InvalidCidr)?;
+        let address = address
+            .parse::<Ipv6Addr>()
+            .map_err(|_| NetworkPlanError::InvalidCidr)?;
+        let prefix_len = prefix
+            .parse::<u8>()
+            .map_err(|_| NetworkPlanError::InvalidCidr)?;
+        if prefix_len > 128 {
+            return Err(NetworkPlanError::InvalidCidr);
+        }
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix_len)
+        };
+        let network = ipv6_to_u128(address) & mask;
+        let broadcast = network | !mask;
+        Ok(Self {
+            network,
+            broadcast,
+            prefix_len,
+        })
+    }
+}
+
+fn allocate_tunnel_pair_v6(
+    cidr: Ipv6Cidr,
+    reserved: &HashSet<u128>,
+) -> Result<(Ipv6Addr, Ipv6Addr), NetworkPlanError> {
+    let mut candidate = cidr.network;
+    while candidate < cidr.broadcast {
+        let peer = candidate.saturating_add(1);
+        if peer > cidr.broadcast {
+            break;
+        }
+        if !reserved.contains(&candidate) && !reserved.contains(&peer) {
+            return Ok((u128_to_ipv6(candidate), u128_to_ipv6(peer)));
+        }
+        candidate = candidate.saturating_add(2);
+    }
+    Err(NetworkPlanError::AddressPoolExhausted)
+}
+
+fn resolve_ipv4_tunnel(
+    input: &TunnelPlanInput,
+    _reserved: &HashSet<u32>,
+) -> Result<Option<TunnelAddressPair>, NetworkPlanError> {
+    if let Some(pair) = &input.ipv4_tunnel {
+        validate_ipv4_pair(pair)?;
+        return Ok(Some(pair.clone()));
+    }
+    Ok(None)
+}
+
+fn resolve_ipv6_tunnel(
+    input: &TunnelPlanInput,
+    _reserved: &HashSet<u128>,
+) -> Result<Option<TunnelAddressPair>, NetworkPlanError> {
+    if let Some(pair) = &input.ipv6_tunnel {
+        validate_ipv6_pair(pair)?;
+        return Ok(Some(pair.clone()));
+    }
+    Ok(None)
+}
+
+fn validate_ipv4_pair(pair: &TunnelAddressPair) -> Result<(), NetworkPlanError> {
+    pair.left
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NetworkPlanError::InvalidCidr)?;
+    pair.right
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NetworkPlanError::InvalidCidr)?;
+    if pair.prefix_len > 32 {
+        return Err(NetworkPlanError::InvalidCidr);
+    }
+    Ok(())
+}
+
+fn validate_ipv6_pair(pair: &TunnelAddressPair) -> Result<(), NetworkPlanError> {
+    pair.left
+        .parse::<Ipv6Addr>()
+        .map_err(|_| NetworkPlanError::InvalidCidr)?;
+    pair.right
+        .parse::<Ipv6Addr>()
+        .map_err(|_| NetworkPlanError::InvalidCidr)?;
+    if pair.prefix_len > 128 {
+        return Err(NetworkPlanError::InvalidCidr);
+    }
+    Ok(())
+}
+
+fn primary_family(
+    requested: TunnelAddressFamily,
+    ipv4: Option<&TunnelAddressPair>,
+    ipv6: Option<&TunnelAddressPair>,
+) -> TunnelAddressFamily {
+    match requested {
+        TunnelAddressFamily::Ipv4 if ipv4.is_some() => TunnelAddressFamily::Ipv4,
+        TunnelAddressFamily::Ipv6 if ipv6.is_some() => TunnelAddressFamily::Ipv6,
+        _ if ipv4.is_some() => TunnelAddressFamily::Ipv4,
+        _ => TunnelAddressFamily::Ipv6,
+    }
+}
+
+fn plan_conflicts(
+    input: &TunnelPlanInput,
+    reserved_ipv4: &HashSet<u32>,
+    reserved_ipv6: &HashSet<u128>,
+) -> Result<Vec<String>, NetworkPlanError> {
+    let mut conflicts = Vec::new();
+    if !input.address_pool_cidr.trim().is_empty() {
+        let cidr = Ipv4Cidr::parse(&input.address_pool_cidr)?;
+        conflicts.extend(
+            reserved_ipv4
+                .iter()
+                .copied()
+                .filter(|address| *address >= cidr.network && *address <= cidr.broadcast)
+                .map(u32_to_ipv4)
+                .map(|address| format!("reserved address {address} is inside requested IPv4 pool")),
+        );
+    }
+    if let Some(pool) = input
+        .ipv6_address_pool_cidr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let cidr = Ipv6Cidr::parse(pool)?;
+        conflicts.extend(
+            reserved_ipv6
+                .iter()
+                .copied()
+                .filter(|address| *address >= cidr.network && *address <= cidr.broadcast)
+                .map(u128_to_ipv6)
+                .map(|address| format!("reserved address {address} is inside requested IPv6 pool")),
+        );
+    }
+    Ok(conflicts)
+}
+
+fn parse_ip_cidr(value: &str) -> Result<(), NetworkPlanError> {
+    if Ipv4Cidr::parse(value).is_ok() || Ipv6Cidr::parse(value).is_ok() {
+        Ok(())
+    } else {
+        Err(NetworkPlanError::InvalidCidr)
+    }
+}
+
+fn address_for_side(pair: &TunnelAddressPair, side: TunnelEndpointSide, local: bool) -> &str {
+    match (side, local) {
+        (TunnelEndpointSide::Left, true) | (TunnelEndpointSide::Right, false) => &pair.left,
+        (TunnelEndpointSide::Left, false) | (TunnelEndpointSide::Right, true) => &pair.right,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EndpointAddressPair<'a> {
+    local: &'a str,
+    remote: &'a str,
+    prefix_len: u8,
+}
+
+#[derive(Clone, Copy)]
 struct TunnelSnippetInput<'a> {
     name: &'a str,
     interface_name: &'a str,
     kind: TunnelKind,
     local_underlay: &'a str,
     remote_underlay: &'a str,
-    local_address: &'a str,
-    remote_address: &'a str,
+    ipv4: Option<EndpointAddressPair<'a>>,
+    ipv6: Option<EndpointAddressPair<'a>>,
     fou: &'a RuntimeTunnelFouOptions,
 }
 
@@ -463,14 +760,67 @@ fn render_ifupdown_snippet(input: TunnelSnippetInput<'_>) -> String {
         .kind
         .linux_tunnel_mode()
         .expect("iproute2-managed tunnel kind is validated before rendering");
+    let mut lines = vec![format!(
+        "# vpsman tunnel {}: generated plan only",
+        input.name
+    )];
+    if let Some(ipv4) = input.ipv4 {
+        lines.extend(render_ifupdown_ipv4_stanza(input, ipv4, linux_mode, true));
+    }
+    if let Some(ipv6) = input.ipv6 {
+        lines.extend(render_ifupdown_ipv6_stanza(
+            input,
+            ipv6,
+            linux_mode,
+            input.ipv4.is_none(),
+        ));
+    }
+    lines.join("\n")
+}
+
+fn render_ifupdown_ipv4_stanza(
+    input: TunnelSnippetInput<'_>,
+    address: EndpointAddressPair<'_>,
+    linux_mode: &str,
+    include_lifecycle: bool,
+) -> Vec<String> {
     let mut lines = vec![
-        format!("# vpsman tunnel {}: generated plan only", input.name),
         format!("auto {}", input.interface_name),
         format!("iface {} inet static", input.interface_name),
-        format!("    address {}", input.local_address),
-        "    netmask 255.255.255.254".to_string(),
-        format!("    pointopoint {}", input.remote_address),
+        format!("    address {}", address.local),
+        format!("    netmask {}", ipv4_netmask(address.prefix_len)),
+        format!("    pointopoint {}", address.remote),
     ];
+    if include_lifecycle {
+        append_tunnel_lifecycle(&mut lines, input, linux_mode);
+    }
+    lines
+}
+
+fn render_ifupdown_ipv6_stanza(
+    input: TunnelSnippetInput<'_>,
+    address: EndpointAddressPair<'_>,
+    linux_mode: &str,
+    include_lifecycle: bool,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("auto {}", input.interface_name),
+        format!("iface {} inet6 static", input.interface_name),
+        format!("    address {}", address.local),
+        format!("    netmask {}", address.prefix_len),
+        format!("    pointopoint {}", address.remote),
+    ];
+    if include_lifecycle {
+        append_tunnel_lifecycle(&mut lines, input, linux_mode);
+    }
+    lines
+}
+
+fn append_tunnel_lifecycle(
+    lines: &mut Vec<String>,
+    input: TunnelSnippetInput<'_>,
+    linux_mode: &str,
+) {
     if input.kind == TunnelKind::Fou {
         lines.push(format!(
             "    pre-up ip fou add port {} ipproto {} || true",
@@ -496,7 +846,6 @@ fn render_ifupdown_snippet(input: TunnelSnippetInput<'_>) -> String {
             input.fou.port
         ));
     }
-    lines.join("\n")
 }
 
 fn render_runtime_snippet(input: TunnelSnippetInput<'_>, manager: RuntimeTunnelManager) -> String {
@@ -623,4 +972,22 @@ fn ipv4_to_u32(address: Ipv4Addr) -> u32 {
 
 fn u32_to_ipv4(value: u32) -> Ipv4Addr {
     Ipv4Addr::from(value.to_be_bytes())
+}
+
+fn ipv6_to_u128(address: Ipv6Addr) -> u128 {
+    u128::from_be_bytes(address.octets())
+}
+
+fn u128_to_ipv6(value: u128) -> Ipv6Addr {
+    Ipv6Addr::from(value.to_be_bytes())
+}
+
+fn ipv4_netmask(prefix_len: u8) -> Ipv4Addr {
+    let prefix_len = prefix_len.min(32);
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    u32_to_ipv4(mask)
 }

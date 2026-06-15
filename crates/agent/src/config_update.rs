@@ -182,7 +182,18 @@ fn supported_config_autocomplete() -> serde_json::Value {
                 "apply_enabled",
                 "validate_enabled",
                 "reload_enabled",
-                "runtime_reconcile_enabled"
+                "runtime_reconcile_enabled",
+                "runtime_status_telemetry_enabled",
+                "runtime_status_telemetry_interval_secs",
+                "latency_monitoring_enabled",
+                "latency_monitoring_interval_secs",
+                "latency_down_windows",
+                "auto_ospf_enabled",
+                "auto_ospf_min_cost_delta",
+                "auto_ospf_healthy_windows",
+                "auto_ospf_policy",
+                "auto_ospf_updater",
+                "runtime_status_telemetry_plans"
             ]
         }
     })
@@ -337,7 +348,11 @@ fn temp_config_path(config_path: &Path) -> PathBuf {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use vpsman_common::{AgentConfig, ServerEndpoint};
+    use vpsman_common::{
+        plan_tunnel, AgentConfig, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
+        BandwidthTier, ServerEndpoint, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+        TunnelPlanInput,
+    };
 
     use super::{apply_data_source_config_patch, apply_hot_config_update};
 
@@ -428,6 +443,120 @@ mod tests {
         assert_eq!(current.telemetry.proc_root, "/tmp/vpsman-proc");
         assert_eq!(saved.telemetry.proc_root, "/tmp/vpsman-proc");
         assert_eq!(outputs.len(), 1);
+
+        let _ = fs::remove_file(path.with_file_name(format!(
+            "{}.rollback",
+            path.file_name().unwrap().to_string_lossy()
+        )));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn applies_network_runtime_telemetry_patch() {
+        let mut current = AgentConfig::default();
+        let path = temp_config_path("vpsman-network-telemetry-config-patch");
+        fs::write(&path, toml::to_string_pretty(&current).unwrap()).unwrap();
+
+        let plan = plan_tunnel(&TunnelPlanInput {
+            name: "edge-a-edge-b-gre".to_string(),
+            interface_name: "gre101".to_string(),
+            kind: TunnelKind::Gre,
+            left_client_id: current.client_id.clone(),
+            right_client_id: "edge-b".to_string(),
+            left_underlay: "203.0.113.10".to_string(),
+            right_underlay: "203.0.113.11".to_string(),
+            address_pool_cidr: String::new(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(TunnelAddressPair {
+                left: "10.88.0.0".to_string(),
+                right: "10.88.0.1".to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: BandwidthTier::M100,
+            latency_ms: 10.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            ospf_policy: Default::default(),
+        })
+        .unwrap();
+
+        let mut patch_network = current.network.clone();
+        patch_network.runtime_status_telemetry_enabled = true;
+        patch_network.latency_monitoring_enabled = true;
+        patch_network.auto_ospf_enabled = true;
+        patch_network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+            plan_id: Some("plan-edge-a-edge-b".to_string()),
+            endpoint_side: TunnelEndpointSide::Left,
+            plan,
+            traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
+            traffic_command: None,
+            latency_monitoring_enabled: true,
+            auto_ospf_enabled: true,
+            auto_ospf_updater: None,
+        }];
+        let mut patch_table = toml::map::Map::new();
+        patch_table.insert(
+            "network".to_string(),
+            toml::Value::try_from(&patch_network).unwrap(),
+        );
+
+        let outputs = apply_data_source_config_patch(
+            uuid::Uuid::new_v4(),
+            &mut current,
+            &path,
+            &toml::to_string_pretty(&toml::Value::Table(patch_table)).unwrap(),
+        )
+        .unwrap();
+
+        let saved: AgentConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert!(current.network.runtime_status_telemetry_enabled);
+        assert!(current.network.latency_monitoring_enabled);
+        assert!(current.network.auto_ospf_enabled);
+        assert_eq!(current.network.runtime_status_telemetry_plans.len(), 1);
+        assert_eq!(
+            current.network.runtime_status_telemetry_plans[0]
+                .plan_id
+                .as_deref(),
+            Some("plan-edge-a-edge-b")
+        );
+        assert_eq!(saved.network, current.network);
+
+        let _ = fs::remove_file(path.with_file_name(format!(
+            "{}.rollback",
+            path.file_name().unwrap().to_string_lossy()
+        )));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn applies_frontend_style_inline_network_runtime_telemetry_patch() {
+        let mut current = AgentConfig::default();
+        let path = temp_config_path("vpsman-inline-network-telemetry-config-patch");
+        fs::write(&path, toml::to_string_pretty(&current).unwrap()).unwrap();
+        let client_id = current.client_id.clone();
+        let patch = format!(
+            r#"
+[network]
+runtime_status_telemetry_enabled = true
+latency_monitoring_enabled = true
+auto_ospf_enabled = true
+runtime_status_telemetry_plans = [{{ plan_id = "plan-inline", endpoint_side = "left", latency_monitoring_enabled = true, auto_ospf_enabled = true, plan = {{ name = "edge-a-edge-b-gre", interface_name = "gre101", kind = "gre", runtime_control = {{ manager = "agent_iproute2_managed" }}, runtime_topology = {{ }}, left_client_id = "{client_id}", right_client_id = "edge-b", left_underlay = "203.0.113.10", right_underlay = "203.0.113.11", left_tunnel_address = "10.88.0.0", right_tunnel_address = "10.88.0.1", tunnel_prefix_len = 31, ipv4_tunnel = {{ left = "10.88.0.0", right = "10.88.0.1", prefix_len = 31 }}, latency_primary_family = "ipv4", bandwidth = "100m", recommended_ospf_cost = 25, ifupdown_file = "/etc/network/interfaces.d/vpsman-tunnels", bird2_file = "/etc/bird/vpsman-ospf.conf", ifupdown_snippet = "", bird2_interface_snippet = "", touched_files = [], validation_steps = [], rollback_notes = [], conflicts = [], mutates_host = false }} }}]
+"#
+        );
+
+        apply_data_source_config_patch(uuid::Uuid::new_v4(), &mut current, &path, &patch).unwrap();
+
+        assert_eq!(current.network.runtime_status_telemetry_plans.len(), 1);
+        let telemetry_plan = &current.network.runtime_status_telemetry_plans[0];
+        assert_eq!(telemetry_plan.plan_id.as_deref(), Some("plan-inline"));
+        assert_eq!(telemetry_plan.plan.interface_name, "gre101");
+        assert!(telemetry_plan.auto_ospf_enabled);
 
         let _ = fs::remove_file(path.with_file_name(format!(
             "{}.rollback",

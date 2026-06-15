@@ -4,6 +4,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import { VpsCombobox } from "../components/VpsCombobox";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
@@ -46,6 +47,7 @@ import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
 const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
+const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
 
 export function ConfigPanel({
   activeSubpage,
@@ -194,7 +196,6 @@ export function ConfigPanel({
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onResolveBulk={onResolveBulk}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
@@ -630,7 +631,6 @@ function SingleVpsConfig({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onResolveBulk,
   pending,
   privilegeMaterial,
   runAction,
@@ -642,39 +642,34 @@ function SingleVpsConfig({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY));
-  const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
+  const [clientId, setClientId] = useState(() => readSingleConfigClientId());
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
   const [timeoutSecs, setTimeoutSecs] = useState(30);
   const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
-  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
-  const singleTarget = preview?.target_count === 1 ? preview.targets[0] : null;
+  const singleTarget = useMemo(() => agents.find((agent) => agent.id === clientId) ?? null, [agents, clientId]);
 
-  useEffect(() => writeLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
+  useEffect(() => writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId), [clientId]);
 
-  async function previewSingle() {
-    await runAction(async () => {
-      if (selectorParse.error) {
-        throw new Error(selectorParse.error);
-      }
-      setPreview(await onResolveBulk(selectorExpression.trim()));
-    });
+  function selectClientId(value: string) {
+    setClientId(value);
+    setRedactedToml("");
+    setBaseHash("");
+    setProgress(null);
   }
 
   async function readConfig() {
     await runAction(async () => {
       if (!singleTarget || !privilegeMaterial) {
-        throw new Error("Resolve exactly one VPS and unlock privilege");
+        throw new Error("Select one VPS and unlock privilege");
       }
       const operation: JobOperation = { type: "config_read" };
       const selectorExpressionForTarget = selectorExpressionForClientIds([singleTarget.id]);
@@ -780,24 +775,14 @@ function SingleVpsConfig({
     <div className="configApplyGrid">
       <div className="compactForm">
         <strong>Single VPS target</strong>
-        <SearchExpressionInput
+        <VpsCombobox
           agents={agents}
-          ariaLabel="Single VPS config selector expression"
-          className="targetExpressionBar"
-          onChange={(value) => {
-            setSelectorExpression(value);
-            setPreview(null);
-          }}
-          placeholder="id:edge-a"
-          showMatchCount
-          value={selectorExpression}
-          verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-          verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
+          ariaLabel="Single VPS config target"
+          onChange={selectClientId}
+          placeholder="Search config VPS"
+          value={clientId}
         />
-        <button className="secondaryAction" disabled={pending || !selectorExpression.trim()} onClick={previewSingle} type="button">
-          Resolve target
-        </button>
-        <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : `${preview?.target_count ?? 0} targets resolved`}</span>
+        <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}</span>
         <div className="inlinePrivilege">
           <input aria-label="Single config timeout seconds" max={3600} min={1} onChange={(event) => setTimeoutSecs(Number(event.target.value))} type="number" value={timeoutSecs} />
         </div>
@@ -964,6 +949,24 @@ function readLocalString(key: string): string {
   } catch {
     return "";
   }
+}
+
+function readSingleConfigClientId(): string {
+  const storedClientId = readLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY).trim();
+  if (storedClientId) {
+    return storedClientId;
+  }
+  return clientIdFromLegacySelector(readLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY));
+}
+
+function clientIdFromLegacySelector(value: string): string {
+  const match = value
+    .trim()
+    .match(/^id:(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s()&|]+))$/i);
+  if (!match) {
+    return "";
+  }
+  return (match[1] ?? match[2] ?? match[3] ?? "").replace(/\\(["'\\])/g, "$1");
 }
 
 function writeLocalString(key: string, value: string) {

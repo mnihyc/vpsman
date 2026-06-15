@@ -508,6 +508,8 @@ nav {
 }
 
 .searchExpressionAutocomplete button {
+  display: grid;
+  gap: 2px;
   min-width: 0;
   border: 0;
   border-radius: 6px;
@@ -517,13 +519,143 @@ nav {
   overflow: hidden;
   padding: 7px 8px;
   text-align: left;
+}
+
+.searchExpressionAutocomplete button span,
+.searchExpressionAutocomplete button small {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.searchExpressionAutocomplete button span {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.searchExpressionAutocomplete button small {
+  color: #5f6368;
+  font-size: 11px;
 }
 
 .searchExpressionAutocomplete button:hover {
   background: #e8f0fe;
   color: #174ea6;
+}
+
+.vpsCombobox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+  color: #5f6368;
+  padding: 0 8px;
+}
+
+.vpsCombobox:focus-within {
+  border-color: #1a73e8;
+}
+
+.vpsCombobox.disabled {
+  background: #f8fafd;
+  color: #9aa0a6;
+}
+
+.vpsCombobox > svg {
+  flex: 0 0 auto;
+}
+
+.vpsCombobox input,
+.dispatchControls .vpsCombobox input,
+.dashboardControlBar .vpsCombobox input,
+.consoleField .vpsCombobox input,
+.sideForm .vpsCombobox input,
+.compactForm .vpsCombobox input {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #202124;
+  outline: 0;
+  padding: 0;
+  font-size: 13px;
+}
+
+.vpsCombobox input::placeholder {
+  color: #80868b;
+}
+
+.vpsComboboxMenu {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  display: grid;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
+  padding: 4px;
+}
+
+.vpsComboboxMenu button {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #202124;
+  cursor: pointer;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.vpsComboboxMenu button:hover,
+.vpsComboboxMenu button.active {
+  background: #e8f0fe;
+  color: #174ea6;
+}
+
+.vpsComboboxMenu strong,
+.vpsComboboxMenu small,
+.vpsComboboxEmpty {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsComboboxMenu strong {
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.vpsComboboxMenu small,
+.vpsComboboxEmpty {
+  color: #5f6368;
+  font-size: 11px;
+}
+
+.vpsComboboxEmpty {
+  padding: 8px;
 }
 
 .iconButton,
