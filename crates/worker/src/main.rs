@@ -219,6 +219,8 @@ struct WorkerRuntimeConfig {
 impl WorkerRuntimeConfig {
     fn from_args(args: &Args) -> Result<Self> {
         let artifact_object_store = build_artifact_object_store(args)?;
+        let backup_policy_prune_object_store =
+            build_backup_policy_prune_object_store(args)?.or_else(|| artifact_object_store.clone());
         Ok(Self {
             tick_secs: args.tick_secs.max(1),
             worker_lease_secs: args.worker_lease_secs,
@@ -242,7 +244,7 @@ impl WorkerRuntimeConfig {
                 args.backup_policy_prune_dry_run,
                 args.backup_policy_prune_include_disabled,
                 args.backup_policy_prune_delete_objects,
-                artifact_object_store.clone(),
+                backup_policy_prune_object_store,
             ),
             schedule_dispatch_config: ScheduleDispatchConfig::new(
                 args.schedule_command_timeout_secs,
@@ -477,6 +479,14 @@ impl Args {
 
 fn build_artifact_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
     Ok(build_backup_object_store(args)?.or(build_update_object_store(args)?))
+}
+
+fn build_backup_policy_prune_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+    args.backup_policy_prune_object_store_dir
+        .clone()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(BackupObjectStore::filesystem)
+        .transpose()
 }
 
 fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
@@ -2696,6 +2706,33 @@ mod schedule_tests {
             assert!(!runtime.backup_policy_prune_config.enabled);
 
             let _ = std::fs::remove_file(path);
+        });
+    }
+
+    #[test]
+    fn backup_policy_prune_store_flag_configures_retention_store() {
+        with_cleared_worker_env(WORKER_HOT_RELOAD_ENV, || {
+            let object_dir =
+                temp_suite_config_path("worker-policy-prune-store").with_extension("objects");
+            let args = Args::parse_from([
+                "vpsman-worker",
+                "--backup-policy-prune-enabled",
+                "--backup-policy-prune-delete-objects",
+                "--backup-policy-prune-object-store-dir",
+                object_dir.to_str().unwrap(),
+            ]);
+
+            let runtime = WorkerRuntimeConfig::from_args(&args).unwrap();
+
+            assert_eq!(
+                runtime
+                    .backup_policy_prune_config
+                    .object_store
+                    .as_ref()
+                    .map(BackupObjectStore::kind),
+                Some("filesystem")
+            );
+            assert!(runtime.artifact_object_store.is_none());
         });
     }
 

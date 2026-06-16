@@ -61,7 +61,7 @@ struct BackupPolicyRetentionPruneOutcome {
     pruned_rows: i64,
     object_key_count: usize,
     object_delete_attempted: bool,
-    object_delete_errors: usize,
+    object_delete_errors: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -160,17 +160,27 @@ async fn prune_backup_policy(
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
     let object_delete_attempted = config.delete_objects && !config.dry_run;
-    if object_delete_attempted {
+    let mut pruned_rows = 0_i64;
+    let mut object_delete_errors = Vec::new();
+    if !config.dry_run && object_delete_attempted {
         let object_store = config
             .object_store
             .as_ref()
             .expect("object store checked before pruning");
         for candidate in &candidates {
-            object_store.delete_confirmed(&candidate.object_key).await?;
+            match object_store.delete_confirmed(&candidate.object_key).await {
+                Ok(()) => {
+                    pruned_rows +=
+                        prune_backup_policy_rows(pool, std::slice::from_ref(candidate)).await?;
+                }
+                Err(error) => {
+                    object_delete_errors.push(format!("{}: {error}", candidate.object_key));
+                    break;
+                }
+            }
         }
-    }
-    if !config.dry_run && !candidates.is_empty() {
-        prune_backup_policy_rows(pool, &candidates).await?;
+    } else if !config.dry_run && !candidates.is_empty() {
+        pruned_rows = prune_backup_policy_rows(pool, &candidates).await?;
     }
     Ok(BackupPolicyRetentionPruneOutcome {
         schedule_id: policy.schedule_id,
@@ -179,14 +189,10 @@ async fn prune_backup_policy(
         retention_days: policy.retention_days,
         keep_last: policy.keep_last,
         matched_rows: candidates.len() as i64,
-        pruned_rows: if config.dry_run {
-            0
-        } else {
-            candidates.len() as i64
-        },
+        pruned_rows,
         object_key_count: candidates.len(),
         object_delete_attempted,
-        object_delete_errors: 0,
+        object_delete_errors,
     })
 }
 
@@ -206,7 +212,7 @@ fn backup_policy_retention_candidate_query() -> &'static str {
             JOIN backup_artifacts artifact ON artifact.id = request.artifact_id
             WHERE request.source_schedule_id = $1
         )
-        SELECT object_key
+        SELECT request_id, artifact_id, object_key
         FROM ranked
         WHERE retained_rank > $2
           AND created_at < now() - ($3::int * interval '1 day')
@@ -217,7 +223,7 @@ fn backup_policy_retention_candidate_query() -> &'static str {
 async fn prune_backup_policy_rows(
     pool: &PgPool,
     candidates: &[BackupPolicyRetentionCandidate],
-) -> Result<()> {
+) -> Result<i64> {
     let request_ids = candidates
         .iter()
         .map(|candidate| candidate.request_id)
@@ -226,7 +232,7 @@ async fn prune_backup_policy_rows(
         .iter()
         .map(|candidate| candidate.artifact_id)
         .collect::<Vec<_>>();
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         WITH doomed AS (
             SELECT *
@@ -238,6 +244,7 @@ async fn prune_backup_policy_rows(
                 status = 'requested_metadata_only'
             FROM doomed
             WHERE request.id = doomed.request_id
+              AND request.artifact_id = doomed.artifact_id
             RETURNING request.id
         )
         DELETE FROM backup_artifacts artifact
@@ -249,7 +256,7 @@ async fn prune_backup_policy_rows(
     .bind(artifact_ids)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() as i64)
 }
 
 async fn insert_prune_audit(
@@ -290,7 +297,8 @@ async fn insert_prune_audit(
             "pruned_rows": outcome.pruned_rows,
             "object_key_count": outcome.object_key_count,
             "object_delete_attempted": outcome.object_delete_attempted,
-            "object_delete_errors": outcome.object_delete_errors,
+            "object_delete_errors": outcome.object_delete_errors.len(),
+            "object_delete_error_messages": &outcome.object_delete_errors,
         })).collect::<Vec<_>>(),
     })))
     .execute(pool)
@@ -313,5 +321,11 @@ mod tests {
         assert!(high.dry_run);
         assert!(high.include_disabled);
         assert!(high.delete_objects);
+    }
+
+    #[test]
+    fn backup_policy_retention_candidate_query_returns_prune_identities() {
+        let query = super::backup_policy_retention_candidate_query();
+        assert!(query.contains("SELECT request_id, artifact_id, object_key"));
     }
 }

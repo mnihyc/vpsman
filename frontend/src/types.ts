@@ -2006,6 +2006,7 @@ export type BackupPolicyPrunePolicyRecord = {
   pruned_rows: number;
   object_keys: string[];
   object_delete_attempted: boolean;
+  object_delete_errors: string[];
   metadata_only: boolean;
   status: string;
 };

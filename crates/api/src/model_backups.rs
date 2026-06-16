@@ -147,6 +147,7 @@ pub(crate) struct BackupPolicyPrunePolicyView {
     pub(crate) pruned_rows: i64,
     pub(crate) object_keys: Vec<String>,
     pub(crate) object_delete_attempted: bool,
+    pub(crate) object_delete_errors: Vec<String>,
     pub(crate) metadata_only: bool,
     pub(crate) status: String,
 }

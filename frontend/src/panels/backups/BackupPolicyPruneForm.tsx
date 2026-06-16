@@ -33,13 +33,15 @@ export function BackupPolicyPruneForm({
   const totals = result
     ? result.policies.reduce(
         (acc, policy) => ({
+          errors: acc.errors + policy.object_delete_errors.length,
           matched: acc.matched + policy.matched_rows,
           pruned: acc.pruned + policy.pruned_rows,
           objects: acc.objects + policy.object_keys.length,
         }),
-        { matched: 0, objects: 0, pruned: 0 },
+        { errors: 0, matched: 0, objects: 0, pruned: 0 },
       )
     : null;
+  const partialError = result?.policies.some((policy) => policy.status === "partial_error") ?? false;
 
   return (
     <>
@@ -69,10 +71,11 @@ export function BackupPolicyPruneForm({
         </label>
         {result && totals && (
           <div className="backupScopeList">
-            <span>{result.dry_run ? "dry run" : "applied"}</span>
+            <span>{result.dry_run ? "dry run" : partialError ? "partial error" : "applied"}</span>
             <span>{totals.matched} matched</span>
             <span>{totals.pruned} pruned</span>
             <span>{totals.objects} object{totals.objects === 1 ? "" : "s"}</span>
+            {totals.errors > 0 && <span>{totals.errors} delete error{totals.errors === 1 ? "" : "s"}</span>}
           </div>
         )}
         {!confirmationOpen && (

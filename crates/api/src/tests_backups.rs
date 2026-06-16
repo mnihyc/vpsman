@@ -660,6 +660,116 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 }
 
 #[tokio::test]
+async fn backup_policy_prune_partial_error_keeps_failed_metadata() {
+    let repo = Repository::Memory(MemoryState::default());
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-backup-policy-prune-partial-{}",
+        Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let (_, Json(policy)) = create_backup_policy(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateBackupPolicyRequest {
+            name: "nightly-prune-partial".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            recipient_public_key_hex: None,
+            retention_days: Some(1),
+            keep_last: Some(1),
+            rotation_generation: None,
+            cron_expr: "0 3 * * *".to_string(),
+            timezone: "UTC".to_string(),
+            enabled: true,
+            catch_up_policy: "skip_missed".to_string(),
+            catch_up_limit: 1,
+            retry_delay_secs: 120,
+            max_failures: 3,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let missing_ok = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "missing-ok",
+        3,
+    )
+    .await;
+    let delete_fails = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "delete-fails",
+        2,
+    )
+    .await;
+    let retained = seed_policy_backup_artifact(
+        &repo,
+        state.backup_object_store.as_ref().unwrap(),
+        policy.schedule_id,
+        "partial-retained",
+        0,
+    )
+    .await;
+    tokio::fs::remove_file(object_root.join(&missing_ok))
+        .await
+        .unwrap();
+    tokio::fs::remove_file(object_root.join(&delete_fails))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(object_root.join(&delete_fails))
+        .await
+        .unwrap();
+
+    let Json(pruned) = prune_backup_policies(
+        State(state.clone()),
+        headers,
+        Json(BackupPolicyPruneRequest {
+            schedule_id: Some(policy.schedule_id),
+            dry_run: false,
+            metadata_only: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let policy_result = &pruned.policies[0];
+    assert_eq!(policy_result.status, "partial_error");
+    assert_eq!(policy_result.matched_rows, 2);
+    assert_eq!(policy_result.pruned_rows, 1);
+    assert_eq!(policy_result.object_keys, vec![missing_ok.clone()]);
+    assert_eq!(policy_result.object_delete_errors.len(), 1);
+    assert!(policy_result.object_delete_errors[0].contains(&delete_fails));
+    let artifacts = repo.list_backup_artifacts(10).await.unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.object_key == delete_fails));
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.object_key == retained));
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    assert_eq!(
+        backups
+            .iter()
+            .filter(|backup| backup.artifact_id.is_some())
+            .count(),
+        2
+    );
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
 async fn backup_artifact_metadata_links_request_and_audits() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

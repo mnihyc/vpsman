@@ -401,7 +401,7 @@ export function BackupsPanel({
         schedule_id: policyPruneScheduleId || null,
         dry_run: policyPruneDryRun,
         metadata_only: policyPruneMetadataOnly,
-        confirmed: true,
+        confirmed: !policyPruneDryRun,
       });
       setLastPolicyPrune(result);
     });
@@ -1007,7 +1007,9 @@ export function BackupsPanel({
       case "policy":
         return "Confirm the saved schedule, target snapshot, and backup scope.";
       case "policy-prune":
-        return "Confirm pruning retained backup metadata and object references for the selected policy scope.";
+        return policyPruneMetadataOnly
+          ? "Confirm pruning retained backup metadata for the selected policy scope."
+          : "Confirm pruning retained backup metadata and deleting retained object files for the selected policy scope.";
       case "backup-request":
         return "Confirm this browser-unlocked backup request before it is written.";
       case "artifact-upload":
@@ -1435,7 +1437,9 @@ function policyPruneStatus(result: BackupPolicyPruneResponse): string {
     }),
     { matched: 0, pruned: 0 },
   );
-  return `Policy prune ${result.dry_run ? "previewed" : "applied"} ${totals.pruned || totals.matched} artifact${
+  const partial = result.policies.some((policy) => policy.status === "partial_error");
+  const action = result.dry_run ? "previewed" : partial ? "partially applied" : "applied";
+  return `Policy prune ${action} ${totals.pruned || totals.matched} artifact${
     totals.pruned === 1 || (!totals.pruned && totals.matched === 1) ? "" : "s"
   }`;
 }

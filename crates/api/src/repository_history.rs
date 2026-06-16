@@ -7,7 +7,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    model::{AuditLogView, AuthContext},
+    model::{AuditLogView, AuthContext, BackupRequestStatus},
     model_history::{
         HistoryDomain, HistoryRetentionPolicyView, HistoryRetentionPruneOutcome,
         HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
@@ -378,6 +378,114 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn list_history_retention_object_candidates(
+        &self,
+        plan: &HistoryRetentionPrunePlan,
+        cutoff_unix: u64,
+    ) -> Result<Vec<HistoryRetentionObjectCandidate>> {
+        if !plan.enabled {
+            return Ok(Vec::new());
+        }
+        let limit = plan.prune_limit as usize;
+        match self {
+            Self::Memory(memory) => match plan.domain {
+                HistoryDomain::JobOutputs => {
+                    let rows = memory.job_outputs.read().await;
+                    Ok(rows
+                        .iter()
+                        .filter(|row| timestamp_before(&row.created_at, cutoff_unix))
+                        .take(limit)
+                        .map(|row| HistoryRetentionObjectCandidate::JobOutput {
+                            job_id: row.job_id,
+                            client_id: row.client_id.clone(),
+                            seq: row.seq,
+                            object_key: row.artifact_object_key.clone(),
+                        })
+                        .collect())
+                }
+                HistoryDomain::BackupArtifacts => {
+                    let rows = memory.backup_artifacts.read().await;
+                    Ok(rows
+                        .iter()
+                        .filter(|row| timestamp_before(&row.created_at, cutoff_unix))
+                        .take(limit)
+                        .map(|row| HistoryRetentionObjectCandidate::BackupArtifact {
+                            artifact_id: row.id,
+                            object_key: row.object_key.clone(),
+                        })
+                        .collect())
+                }
+                _ => Ok(Vec::new()),
+            },
+            Self::Postgres(pool) => {
+                list_postgres_history_retention_object_candidates(
+                    pool,
+                    plan.domain,
+                    cutoff_unix,
+                    plan.prune_limit,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(crate) async fn prune_history_retention_object_candidate(
+        &self,
+        candidate: &HistoryRetentionObjectCandidate,
+    ) -> Result<i64> {
+        match self {
+            Self::Memory(memory) => match candidate {
+                HistoryRetentionObjectCandidate::JobOutput {
+                    job_id,
+                    client_id,
+                    seq,
+                    ..
+                } => {
+                    let mut rows = memory.job_outputs.write().await;
+                    let before = rows.len();
+                    rows.retain(|row| {
+                        row.job_id != *job_id || row.client_id != *client_id || row.seq != *seq
+                    });
+                    Ok((before.saturating_sub(rows.len())) as i64)
+                }
+                HistoryRetentionObjectCandidate::BackupArtifact { artifact_id, .. } => {
+                    {
+                        let mut requests = memory.backup_requests.write().await;
+                        for request in requests
+                            .iter_mut()
+                            .filter(|request| request.artifact_id == Some(*artifact_id))
+                        {
+                            request.artifact_id = None;
+                            request.status = BackupRequestStatus::RequestedMetadataOnly
+                                .as_str()
+                                .to_string();
+                        }
+                    }
+                    let mut rows = memory.backup_artifacts.write().await;
+                    let before = rows.len();
+                    rows.retain(|row| row.id != *artifact_id);
+                    Ok((before.saturating_sub(rows.len())) as i64)
+                }
+            },
+            Self::Postgres(pool) => {
+                prune_postgres_history_retention_object_candidate(pool, candidate).await
+            }
+        }
+    }
+
+    pub(crate) async fn prune_history_retention_object_candidates(
+        &self,
+        candidates: &[HistoryRetentionObjectCandidate],
+    ) -> Result<i64> {
+        let mut pruned_rows = 0_i64;
+        for candidate in candidates {
+            pruned_rows += self
+                .prune_history_retention_object_candidate(candidate)
+                .await?;
+        }
+        Ok(pruned_rows)
+    }
+
     pub(crate) async fn record_history_retention_prune_audit(
         &self,
         operator: &AuthContext,
@@ -548,6 +656,29 @@ fn history_retention_policy_from_row(
     })
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum HistoryRetentionObjectCandidate {
+    JobOutput {
+        job_id: Uuid,
+        client_id: String,
+        seq: i32,
+        object_key: Option<String>,
+    },
+    BackupArtifact {
+        artifact_id: Uuid,
+        object_key: String,
+    },
+}
+
+impl HistoryRetentionObjectCandidate {
+    pub(crate) fn object_key(&self) -> Option<&str> {
+        match self {
+            Self::JobOutput { object_key, .. } => object_key.as_deref(),
+            Self::BackupArtifact { object_key, .. } => Some(object_key),
+        }
+    }
+}
+
 async fn prune_memory_vec<T>(
     rows: &tokio::sync::RwLock<Vec<T>>,
     cutoff_unix: u64,
@@ -571,6 +702,117 @@ async fn prune_memory_vec<T>(
         }
     }
     Ok(matched_rows as i64)
+}
+
+async fn list_postgres_history_retention_object_candidates(
+    pool: &sqlx::PgPool,
+    domain: HistoryDomain,
+    cutoff_unix: u64,
+    limit: i32,
+) -> Result<Vec<HistoryRetentionObjectCandidate>> {
+    match domain {
+        HistoryDomain::JobOutputs => {
+            let rows = sqlx::query(
+                r#"
+                SELECT job_id, client_id, seq, object_key
+                FROM job_outputs
+                WHERE created_at < to_timestamp($1)
+                ORDER BY created_at ASC, job_id ASC, client_id ASC, seq ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            rows.into_iter()
+                .map(|row| {
+                    Ok(HistoryRetentionObjectCandidate::JobOutput {
+                        job_id: row.try_get("job_id")?,
+                        client_id: row.try_get("client_id")?,
+                        seq: row.try_get("seq")?,
+                        object_key: row.try_get("object_key")?,
+                    })
+                })
+                .collect()
+        }
+        HistoryDomain::BackupArtifacts => {
+            let rows = sqlx::query(
+                r#"
+                SELECT id AS artifact_id, object_key
+                FROM backup_artifacts
+                WHERE created_at < to_timestamp($1)
+                ORDER BY created_at ASC, id ASC
+                LIMIT $2
+                "#,
+            )
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            rows.into_iter()
+                .map(|row| {
+                    Ok(HistoryRetentionObjectCandidate::BackupArtifact {
+                        artifact_id: row.try_get("artifact_id")?,
+                        object_key: row.try_get("object_key")?,
+                    })
+                })
+                .collect()
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+async fn prune_postgres_history_retention_object_candidate(
+    pool: &sqlx::PgPool,
+    candidate: &HistoryRetentionObjectCandidate,
+) -> Result<i64> {
+    let result = match candidate {
+        HistoryRetentionObjectCandidate::JobOutput {
+            job_id,
+            client_id,
+            seq,
+            ..
+        } => {
+            sqlx::query(
+                r#"
+                DELETE FROM job_outputs
+                WHERE job_id = $1
+                  AND client_id = $2
+                  AND seq = $3
+                "#,
+            )
+            .bind(job_id)
+            .bind(client_id)
+            .bind(seq)
+            .execute(pool)
+            .await?
+        }
+        HistoryRetentionObjectCandidate::BackupArtifact { artifact_id, .. } => {
+            sqlx::query(
+                r#"
+                WITH doomed AS (
+                    SELECT $1::uuid AS artifact_id
+                ),
+                cleared_requests AS (
+                    UPDATE backup_requests request
+                    SET artifact_id = NULL,
+                        status = 'requested_metadata_only'
+                    FROM doomed
+                    WHERE request.artifact_id = doomed.artifact_id
+                    RETURNING request.id
+                )
+                DELETE FROM backup_artifacts artifact
+                USING doomed
+                WHERE artifact.id = doomed.artifact_id
+                "#,
+            )
+            .bind(artifact_id)
+            .execute(pool)
+            .await?
+        }
+    };
+    Ok(result.rows_affected() as i64)
 }
 
 async fn prune_postgres_history_domain(

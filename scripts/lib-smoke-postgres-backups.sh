@@ -128,7 +128,8 @@ jq -e --arg schedule_id "$backup_prune_policy_schedule_id" '
   .policies[0].matched_rows == 0 and
   .policies[0].pruned_rows == 0 and
   .policies[0].metadata_only == true and
-  .policies[0].object_delete_attempted == false
+  .policies[0].object_delete_attempted == false and
+  .policies[0].object_delete_errors == []
 ' <<<"$policy_prune_api_json" >/dev/null
   pruned_artifact_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM backup_artifacts WHERE id IN ('$prune_old_a_artifact_id', '$prune_old_b_artifact_id')")"
   if [[ "$pruned_artifact_count" != "0" ]]; then
@@ -154,7 +155,7 @@ jq -e --arg schedule_id "$backup_prune_policy_schedule_id" '
     echo "expected policy prune to clear old backup request artifact links" >&2
     exit 1
   fi
-api_get "/api/v1/audit?limit=120" | jq -e '
-  any(.[]; .action == "backup_policy.retention_pruned" and .metadata.worker == "backup_policy_retention_worker" and .metadata.pruned_rows == 2 and .metadata.object_delete_requested == true and .metadata.object_delete_configured == true)
-' >/dev/null
+  api_get "/api/v1/audit?limit=120" | jq -e '
+    any(.[]; .action == "backup_policy.retention_pruned" and .metadata.worker == "backup_policy_retention_worker" and .metadata.pruned_rows == 2 and .metadata.object_delete_requested == true and .metadata.object_delete_configured == true and .metadata.policies[0].object_delete_errors == 0)
+  ' >/dev/null
 }

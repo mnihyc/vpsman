@@ -257,7 +257,11 @@ export function AuditLogPanel({
         </div>
         <ConfirmationPrompt
           confirmLabel="Prune history"
-          detail="Deletes history rows that match the selected domain, retention days, and prune limit."
+          detail={
+            metadataOnly
+              ? "Deletes history metadata rows that match the selected domain, retention days, and prune limit."
+              : "Deletes history rows and retained object files that match the selected domain, retention days, and prune limit."
+          }
           items={[
             { label: "Domain", value: selectedPolicy?.domain ?? selectedDomain },
             { label: "Retention days", value: retentionDays },
@@ -275,6 +279,7 @@ export function AuditLogPanel({
             {historyPruneResult.domains.slice(0, 4).map((domain) => (
               <span key={domain.domain}>
                 <strong>{domain.domain}</strong> {domain.status}: {domain.pruned_rows || domain.matched_rows} rows
+                {domain.object_delete_errors.length > 0 ? `, ${domain.object_delete_errors.length} delete error${domain.object_delete_errors.length === 1 ? "" : "s"}` : ""}
               </span>
             ))}
           </div>

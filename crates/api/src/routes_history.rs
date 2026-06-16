@@ -86,30 +86,69 @@ pub(crate) async fn prune_history_retention(
             prune_limit: policy.prune_limit,
             enabled: policy.enabled,
         };
-        let outcome = state
-            .repo
-            .prune_history_domain(&plan, cutoff_unix, request.dry_run)
-            .await?;
         let mut object_delete_attempted = false;
         let mut object_delete_errors = Vec::new();
-        if domain.object_backed()
-            && !request.dry_run
-            && !metadata_only
-            && !outcome.object_keys.is_empty()
-        {
-            object_delete_attempted = true;
-            if let Some(store) = state.backup_object_store.as_ref() {
-                for object_key in &outcome.object_keys {
-                    store.delete_best_effort(object_key).await;
-                }
+        let outcome = if domain.object_backed() {
+            let candidates = state
+                .repo
+                .list_history_retention_object_candidates(&plan, cutoff_unix)
+                .await?;
+            let matched_rows = candidates.len() as i64;
+            let mut pruned_rows = 0_i64;
+            let mut object_keys = if request.dry_run || metadata_only {
+                candidates
+                    .iter()
+                    .filter_map(|candidate| candidate.object_key().map(str::to_string))
+                    .collect::<Vec<_>>()
             } else {
-                object_delete_errors.push("object_store_not_configured".to_string());
+                Vec::new()
+            };
+            if !request.dry_run {
+                if metadata_only {
+                    pruned_rows = state
+                        .repo
+                        .prune_history_retention_object_candidates(&candidates)
+                        .await?;
+                } else if !candidates.is_empty() {
+                    object_delete_attempted = true;
+                    if let Some(store) = state.backup_object_store.as_ref() {
+                        for candidate in &candidates {
+                            if let Some(object_key) = candidate.object_key() {
+                                match store.delete_confirmed(object_key).await {
+                                    Ok(()) => object_keys.push(object_key.to_string()),
+                                    Err(error) => {
+                                        object_delete_errors.push(format!("{object_key}: {error}"));
+                                        break;
+                                    }
+                                }
+                            }
+                            if object_delete_errors.is_empty() {
+                                pruned_rows += state
+                                    .repo
+                                    .prune_history_retention_object_candidate(candidate)
+                                    .await?;
+                            }
+                        }
+                    }
+                }
             }
-        }
+            crate::model_history::HistoryRetentionPruneOutcome {
+                matched_rows,
+                pruned_rows,
+                object_keys,
+            }
+        } else {
+            state
+                .repo
+                .prune_history_domain(&plan, cutoff_unix, request.dry_run)
+                .await?
+        };
         let status = if !policy.enabled {
             "disabled"
         } else if request.dry_run {
             "dry_run"
+        } else if !object_delete_errors.is_empty() {
+            "partial_error"
         } else if outcome.pruned_rows == 0 {
             "no_matches"
         } else {
@@ -142,6 +181,8 @@ pub(crate) async fn prune_history_retention(
                     "pruned_rows": domain.pruned_rows,
                     "metadata_only": domain.metadata_only,
                     "object_delete_attempted": domain.object_delete_attempted,
+                    "object_delete_errors": &domain.object_delete_errors,
+                    "status": &domain.status,
                 })
             })
             .collect::<Vec<_>>();

@@ -113,19 +113,70 @@ pub(crate) async fn prune_backup_policies(
     let mut outputs = Vec::new();
     for policy in policies {
         let cutoff_unix = unix_now().saturating_sub(policy.retention_days.max(1) as u64 * 86_400);
-        let mut output = state
+        let candidates = state
             .repo
-            .prune_backup_policy_artifacts(&policy, cutoff_unix, request.dry_run)
+            .list_backup_policy_prune_candidates(&policy, cutoff_unix)
             .await?;
-        output.metadata_only = metadata_only;
-        if !request.dry_run && !metadata_only && !output.object_keys.is_empty() {
-            output.object_delete_attempted = true;
-            if let Some(store) = state.backup_object_store.as_ref() {
-                for object_key in &output.object_keys {
-                    store.delete_best_effort(object_key).await;
+        let matched_rows = candidates.len() as i64;
+        let mut pruned_rows = 0_i64;
+        let mut object_keys = if request.dry_run || metadata_only {
+            candidates
+                .iter()
+                .map(|candidate| candidate.object_key.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut object_delete_attempted = false;
+        let mut object_delete_errors = Vec::new();
+        if !request.dry_run {
+            if metadata_only {
+                pruned_rows = state
+                    .repo
+                    .prune_backup_policy_candidates_metadata(&candidates)
+                    .await?;
+            } else if !candidates.is_empty() {
+                object_delete_attempted = true;
+                if let Some(store) = state.backup_object_store.as_ref() {
+                    for candidate in &candidates {
+                        match store.delete_confirmed(&candidate.object_key).await {
+                            Ok(()) => {
+                                pruned_rows += state
+                                    .repo
+                                    .prune_backup_policy_candidate_metadata(candidate)
+                                    .await?;
+                                object_keys.push(candidate.object_key.clone());
+                            }
+                            Err(error) => {
+                                object_delete_errors
+                                    .push(format!("{}: {error}", candidate.object_key));
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
+        let status = if request.dry_run {
+            "dry_run"
+        } else if !object_delete_errors.is_empty() {
+            "partial_error"
+        } else if pruned_rows == 0 {
+            "no_matches"
+        } else {
+            "pruned"
+        };
+        let output = state.repo.backup_policy_prune_view(
+            &policy,
+            cutoff_unix,
+            matched_rows,
+            pruned_rows,
+            object_keys,
+            object_delete_attempted,
+            object_delete_errors,
+            metadata_only,
+            status,
+        );
         outputs.push(output);
     }
     if !request.dry_run {

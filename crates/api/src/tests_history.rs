@@ -1,12 +1,19 @@
+use axum::{extract::State, Json};
 use serde_json::json;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    model::{AuditLogView, AuthContext, ListQuery, OperatorView},
+    gateway_client::GatewayDispatchClient,
+    model::{AuditLogView, AuthContext, JobOutputView, ListQuery, OperatorView},
     model_history::{
-        HistoryDomain, HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
+        HistoryDomain, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
+        UpsertHistoryRetentionPolicyRequest,
     },
+    object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
+    routes_history::prune_history_retention,
+    state::AppState,
     unix_now,
 };
 
@@ -141,6 +148,87 @@ async fn audit_list_query_sorts_searches_and_offsets_memory_rows() {
 }
 
 #[tokio::test]
+async fn history_retention_object_prune_partial_error_keeps_failed_metadata() {
+    let repo = Repository::Memory(MemoryState::default());
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-history-prune-partial-{}",
+        Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let old_job = Uuid::new_v4();
+    let failed_job = Uuid::new_v4();
+    let retained_job = Uuid::new_v4();
+    let missing_ok_key = "job-outputs/client-a/missing-ok.bin".to_string();
+    let delete_fails_key = "job-outputs/client-a/delete-fails.bin".to_string();
+    let retained_key = "job-outputs/client-a/retained.bin".to_string();
+    store.put_new(&missing_ok_key, b"old").await.unwrap();
+    store.put_new(&delete_fails_key, b"fail").await.unwrap();
+    store.put_new(&retained_key, b"keep").await.unwrap();
+    tokio::fs::remove_file(object_root.join(&missing_ok_key))
+        .await
+        .unwrap();
+    tokio::fs::remove_file(object_root.join(&delete_fails_key))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(object_root.join(&delete_fails_key))
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let old_created_at = unix_now().saturating_sub(40 * 86_400).to_string();
+        let mut outputs = memory.job_outputs.write().await;
+        outputs.push(job_output(
+            old_job,
+            0,
+            Some(missing_ok_key.clone()),
+            &old_created_at,
+        ));
+        outputs.push(job_output(
+            failed_job,
+            1,
+            Some(delete_fails_key.clone()),
+            &old_created_at,
+        ));
+        outputs.push(job_output(
+            retained_job,
+            2,
+            Some(retained_key.clone()),
+            &unix_now().to_string(),
+        ));
+    }
+
+    let Json(response) = prune_history_retention(
+        State(state),
+        headers,
+        Json(HistoryRetentionPruneRequest {
+            domain: Some("job_outputs".to_string()),
+            dry_run: false,
+            metadata_only: Some(false),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let domain = &response.domains[0];
+    assert_eq!(domain.domain, "job_outputs");
+    assert_eq!(domain.status, "partial_error");
+    assert_eq!(domain.matched_rows, 2);
+    assert_eq!(domain.pruned_rows, 1);
+    assert_eq!(domain.object_keys, vec![missing_ok_key]);
+    assert_eq!(domain.object_delete_errors.len(), 1);
+    assert!(domain.object_delete_errors[0].contains(&delete_fails_key));
+    if let Repository::Memory(memory) = &repo {
+        let outputs = memory.job_outputs.read().await;
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs.iter().any(|output| output.job_id == failed_job));
+        assert!(outputs.iter().any(|output| output.job_id == retained_job));
+    }
+
+    let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
 async fn history_retention_rejects_unconfirmed_policy_update() {
     let repo = Repository::Memory(MemoryState::default());
     let error = repo
@@ -173,6 +261,53 @@ fn audit_with_created_at(target: &str, created_at: String) -> AuditLogView {
         command_hash: None,
         metadata: json!({}),
         created_at,
+    }
+}
+
+fn job_output(
+    job_id: Uuid,
+    seq: i32,
+    object_key: Option<String>,
+    created_at: &str,
+) -> JobOutputView {
+    JobOutputView {
+        job_id,
+        client_id: "client-a".to_string(),
+        seq,
+        stream: "stdout".to_string(),
+        data_base64: String::new(),
+        storage: if object_key.is_some() {
+            "object".to_string()
+        } else {
+            "inline".to_string()
+        },
+        artifact_object_key: object_key,
+        artifact_sha256_hex: None,
+        artifact_size_bytes: None,
+        exit_code: None,
+        done: false,
+        received_at: None,
+        created_at: created_at.to_string(),
+    }
+}
+
+fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState {
+    let (events, _) = broadcast::channel(1);
+    AppState {
+        repo,
+        events,
+        internal_token: None,
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
+        backup_object_store: Some(store),
+        update_object_store: None,
+        update_artifact_public_base_url: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: 32768,
+        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
+        require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use sqlx::Row;
@@ -86,13 +86,12 @@ impl Repository {
             .expect("backup policy schedule must carry backup operation"))
     }
 
-    pub(crate) async fn prune_backup_policy_artifacts(
+    pub(crate) async fn list_backup_policy_prune_candidates(
         &self,
         policy: &BackupPolicyView,
         cutoff_unix: u64,
-        dry_run: bool,
-    ) -> Result<BackupPolicyPrunePolicyView> {
-        let outcome = match self {
+    ) -> Result<Vec<BackupPolicyPruneCandidate>> {
+        match self {
             Self::Memory(memory) => {
                 let artifacts = memory.backup_artifacts.read().await.clone();
                 let requests = memory.backup_requests.read().await.clone();
@@ -104,7 +103,7 @@ impl Repository {
                         let artifact = artifacts
                             .iter()
                             .find(|artifact| artifact.id == artifact_id)?;
-                        Some(BackupPolicyArtifactCandidate {
+                        Some(BackupPolicyPruneCandidate {
                             request_id: request.id,
                             artifact_id,
                             client_id: request.client_id.clone(),
@@ -134,75 +133,127 @@ impl Repository {
                         selected.push(candidate);
                     }
                 }
-                let object_keys = selected
-                    .iter()
-                    .map(|candidate| candidate.object_key.clone())
-                    .collect::<Vec<_>>();
-                let matched_rows = selected.len() as i64;
-                if !dry_run {
-                    let selected_artifact_ids = selected
-                        .iter()
-                        .map(|candidate| candidate.artifact_id)
-                        .collect::<std::collections::HashSet<_>>();
-                    let selected_request_ids = selected
-                        .iter()
-                        .map(|candidate| candidate.request_id)
-                        .collect::<std::collections::HashSet<_>>();
-                    {
-                        let mut stored_requests = memory.backup_requests.write().await;
-                        for request in stored_requests
-                            .iter_mut()
-                            .filter(|request| selected_request_ids.contains(&request.id))
-                        {
-                            request.artifact_id = None;
-                            request.status = BackupRequestStatus::RequestedMetadataOnly
-                                .as_str()
-                                .to_string();
-                        }
-                    }
-                    memory
-                        .backup_artifacts
-                        .write()
-                        .await
-                        .retain(|artifact| !selected_artifact_ids.contains(&artifact.id));
-                }
-                BackupPolicyPruneOutcome {
-                    matched_rows,
-                    pruned_rows: if dry_run { 0 } else { matched_rows },
-                    object_keys,
-                }
+                selected.sort_by(|left, right| {
+                    left.created_at
+                        .cmp(&right.created_at)
+                        .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+                });
+                Ok(selected)
             }
             Self::Postgres(pool) => {
-                prune_postgres_backup_policy_artifacts(
+                list_postgres_backup_policy_prune_candidates(
                     pool,
                     policy.schedule_id,
                     policy.keep_last,
                     cutoff_unix,
-                    dry_run,
                 )
-                .await?
+                .await
             }
-        };
-        Ok(BackupPolicyPrunePolicyView {
+        }
+    }
+
+    pub(crate) async fn prune_backup_policy_candidate_metadata(
+        &self,
+        candidate: &BackupPolicyPruneCandidate,
+    ) -> Result<i64> {
+        match self {
+            Self::Memory(memory) => {
+                {
+                    let mut stored_requests = memory.backup_requests.write().await;
+                    for request in stored_requests.iter_mut().filter(|request| {
+                        request.id == candidate.request_id
+                            && request.artifact_id == Some(candidate.artifact_id)
+                    }) {
+                        request.artifact_id = None;
+                        request.status = BackupRequestStatus::RequestedMetadataOnly
+                            .as_str()
+                            .to_string();
+                    }
+                }
+                {
+                    let mut artifacts = memory.backup_artifacts.write().await;
+                    let before = artifacts.len();
+                    artifacts.retain(|artifact| artifact.id != candidate.artifact_id);
+                    let pruned_rows = (before.saturating_sub(artifacts.len())) as i64;
+                    Ok(pruned_rows)
+                }
+            }
+            Self::Postgres(pool) => {
+                prune_postgres_backup_policy_candidate_metadata(pool, candidate)
+                    .await
+                    .map(|rows| rows.rows_affected() as i64)
+            }
+        }
+    }
+
+    pub(crate) async fn prune_backup_policy_candidates_metadata(
+        &self,
+        candidates: &[BackupPolicyPruneCandidate],
+    ) -> Result<i64> {
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        match self {
+            Self::Memory(memory) => {
+                let selected_artifact_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.artifact_id)
+                    .collect::<HashSet<_>>();
+                let selected_request_artifacts = candidates
+                    .iter()
+                    .map(|candidate| (candidate.request_id, candidate.artifact_id))
+                    .collect::<HashSet<_>>();
+                {
+                    let mut stored_requests = memory.backup_requests.write().await;
+                    for request in stored_requests.iter_mut().filter(|request| {
+                        request.artifact_id.is_some_and(|artifact_id| {
+                            selected_request_artifacts.contains(&(request.id, artifact_id))
+                        })
+                    }) {
+                        request.artifact_id = None;
+                        request.status = BackupRequestStatus::RequestedMetadataOnly
+                            .as_str()
+                            .to_string();
+                    }
+                }
+                let mut artifacts = memory.backup_artifacts.write().await;
+                let before = artifacts.len();
+                artifacts.retain(|artifact| !selected_artifact_ids.contains(&artifact.id));
+                Ok((before.saturating_sub(artifacts.len())) as i64)
+            }
+            Self::Postgres(pool) => {
+                prune_postgres_backup_policy_candidates_metadata(pool, candidates).await
+            }
+        }
+    }
+
+    pub(crate) fn backup_policy_prune_view(
+        &self,
+        policy: &BackupPolicyView,
+        cutoff_unix: u64,
+        matched_rows: i64,
+        pruned_rows: i64,
+        object_keys: Vec<String>,
+        object_delete_attempted: bool,
+        object_delete_errors: Vec<String>,
+        metadata_only: bool,
+        status: &str,
+    ) -> BackupPolicyPrunePolicyView {
+        BackupPolicyPrunePolicyView {
             schedule_id: policy.schedule_id,
             name: policy.name.clone(),
             enabled: policy.enabled,
             retention_days: policy.retention_days,
             keep_last: policy.keep_last,
             cutoff_unix,
-            matched_rows: outcome.matched_rows,
-            pruned_rows: outcome.pruned_rows,
-            object_keys: outcome.object_keys,
-            object_delete_attempted: false,
-            metadata_only: true,
-            status: if dry_run {
-                "dry_run".to_string()
-            } else if outcome.pruned_rows == 0 {
-                "no_matches".to_string()
-            } else {
-                "pruned".to_string()
-            },
-        })
+            matched_rows,
+            pruned_rows,
+            object_keys,
+            object_delete_attempted,
+            object_delete_errors,
+            metadata_only,
+            status: status.to_string(),
+        }
     }
 
     pub(crate) async fn record_backup_policy_prune_audit(
@@ -223,6 +274,8 @@ impl Repository {
                 "object_key_count": policy.object_keys.len(),
                 "metadata_only": policy.metadata_only,
                 "object_delete_attempted": policy.object_delete_attempted,
+                "object_delete_errors": &policy.object_delete_errors,
+                "status": &policy.status,
             })).collect::<Vec<_>>(),
             "operator_username": &operator.operator.username,
             "operator_role": &operator.operator.role,
@@ -436,34 +489,27 @@ impl Repository {
 }
 
 #[derive(Clone, Debug)]
-struct BackupPolicyArtifactCandidate {
-    request_id: Uuid,
-    artifact_id: Uuid,
+pub(crate) struct BackupPolicyPruneCandidate {
+    pub(crate) request_id: Uuid,
+    pub(crate) artifact_id: Uuid,
     client_id: String,
-    object_key: String,
+    pub(crate) object_key: String,
     created_at: String,
 }
 
-#[derive(Clone, Debug)]
-struct BackupPolicyPruneOutcome {
-    matched_rows: i64,
-    pruned_rows: i64,
-    object_keys: Vec<String>,
-}
-
-async fn prune_postgres_backup_policy_artifacts(
+async fn list_postgres_backup_policy_prune_candidates(
     pool: &sqlx::PgPool,
     schedule_id: Uuid,
     keep_last: i32,
     cutoff_unix: u64,
-    dry_run: bool,
-) -> Result<BackupPolicyPruneOutcome> {
-    let query = if dry_run {
+) -> Result<Vec<BackupPolicyPruneCandidate>> {
+    let rows = sqlx::query(
         r#"
         WITH ranked AS (
             SELECT
                 request.id AS request_id,
                 artifact.id AS artifact_id,
+                request.client_id,
                 artifact.object_key,
                 artifact.created_at,
                 row_number() OVER (
@@ -474,34 +520,39 @@ async fn prune_postgres_backup_policy_artifacts(
             JOIN backup_artifacts artifact ON artifact.id = request.artifact_id
             WHERE request.source_schedule_id = $1
         )
-        SELECT object_key
+        SELECT request_id, artifact_id, client_id, object_key, created_at::text AS created_at
         FROM ranked
         WHERE retained_rank > $2
           AND created_at < to_timestamp($3)
         ORDER BY created_at ASC, artifact_id ASC
-        "#
-    } else {
+        "#,
+    )
+    .bind(schedule_id)
+    .bind(keep_last)
+    .bind(cutoff_unix as i64)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(BackupPolicyPruneCandidate {
+                request_id: row.try_get("request_id")?,
+                artifact_id: row.try_get("artifact_id")?,
+                client_id: row.try_get("client_id")?,
+                object_key: row.try_get("object_key")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect()
+}
+
+async fn prune_postgres_backup_policy_candidate_metadata(
+    pool: &sqlx::PgPool,
+    candidate: &BackupPolicyPruneCandidate,
+) -> Result<sqlx::postgres::PgQueryResult> {
+    let result = sqlx::query(
         r#"
-        WITH ranked AS (
-            SELECT
-                request.id AS request_id,
-                artifact.id AS artifact_id,
-                artifact.object_key,
-                artifact.created_at,
-                row_number() OVER (
-                    PARTITION BY request.client_id
-                    ORDER BY artifact.created_at DESC, artifact.id DESC
-                ) AS retained_rank
-            FROM backup_requests request
-            JOIN backup_artifacts artifact ON artifact.id = request.artifact_id
-            WHERE request.source_schedule_id = $1
-        ),
-        doomed AS (
-            SELECT request_id, artifact_id, object_key
-            FROM ranked
-            WHERE retained_rank > $2
-              AND created_at < to_timestamp($3)
-            ORDER BY created_at ASC, artifact_id ASC
+        WITH doomed AS (
+            SELECT $1::uuid AS request_id, $2::uuid AS artifact_id
         ),
         cleared_requests AS (
             UPDATE backup_requests request
@@ -509,34 +560,58 @@ async fn prune_postgres_backup_policy_artifacts(
                 status = 'requested_metadata_only'
             FROM doomed
             WHERE request.id = doomed.request_id
+              AND request.artifact_id = doomed.artifact_id
             RETURNING request.id
         )
         DELETE FROM backup_artifacts artifact
         USING doomed
         WHERE artifact.id = doomed.artifact_id
-        RETURNING artifact.object_key
-        "#
-    };
-    let rows = sqlx::query(query)
-        .bind(schedule_id)
-        .bind(keep_last)
-        .bind(cutoff_unix as i64)
-        .fetch_all(pool)
-        .await?;
-    let object_keys = rows
+        "#,
+    )
+    .bind(candidate.request_id)
+    .bind(candidate.artifact_id)
+    .execute(pool)
+    .await?;
+    Ok(result)
+}
+
+async fn prune_postgres_backup_policy_candidates_metadata(
+    pool: &sqlx::PgPool,
+    candidates: &[BackupPolicyPruneCandidate],
+) -> Result<i64> {
+    let request_ids = candidates
         .iter()
-        .filter_map(|row| {
-            row.try_get::<Option<String>, _>("object_key")
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<String, _>("object_key").ok())
-        })
+        .map(|candidate| candidate.request_id)
         .collect::<Vec<_>>();
-    Ok(BackupPolicyPruneOutcome {
-        matched_rows: rows.len() as i64,
-        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
-        object_keys,
-    })
+    let artifact_ids = candidates
+        .iter()
+        .map(|candidate| candidate.artifact_id)
+        .collect::<Vec<_>>();
+    let result = sqlx::query(
+        r#"
+        WITH doomed AS (
+            SELECT *
+            FROM unnest($1::uuid[], $2::uuid[]) AS doomed(request_id, artifact_id)
+        ),
+        cleared_requests AS (
+            UPDATE backup_requests request
+            SET artifact_id = NULL,
+                status = 'requested_metadata_only'
+            FROM doomed
+            WHERE request.id = doomed.request_id
+              AND request.artifact_id = doomed.artifact_id
+            RETURNING request.id
+        )
+        DELETE FROM backup_artifacts artifact
+        USING doomed
+        WHERE artifact.id = doomed.artifact_id
+        "#,
+    )
+    .bind(request_ids)
+    .bind(artifact_ids)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() as i64)
 }
 
 fn backup_policy_view(
