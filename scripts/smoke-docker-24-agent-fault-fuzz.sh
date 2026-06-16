@@ -13,6 +13,7 @@ agent_count="${VPSMAN_DOCKER_FLEET_AGENT_COUNT:-24}"
 if ((agent_count < 20)); then
   smoke_fail "VPSMAN_DOCKER_FLEET_AGENT_COUNT must be at least 20"
 fi
+gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
 
 rollup_bucket_secs=60
 run_id="docker-fault-fuzz-$(date +%s%N)"
@@ -415,6 +416,7 @@ docker run -d \
   -e VPSMAN_GATEWAY_RECONNECT_GRACE_SECS=2 \
   -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
   -e VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
+  -e VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS="$gateway_command_output_ttl_secs" \
   -e RUST_LOG=vpsman_gateway=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \

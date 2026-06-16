@@ -18,6 +18,7 @@ use vpsman_common::{
 };
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+use crate::command_worker::{run_cancelable, CommandCancelToken};
 use crate::telemetry::unix_now;
 
 pub(crate) const BACKUP_ARTIFACT_FORMAT: &str = "vpsman.backup_artifact.v1";
@@ -80,6 +81,7 @@ pub(crate) struct BackupCommandInput<'a> {
     pub(crate) recipient_public_key_hex: Option<&'a str>,
     pub(crate) output_tx: Option<mpsc::Sender<CommandOutput>>,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_backup_command(
@@ -94,21 +96,26 @@ pub(crate) async fn execute_backup_command(
         recipient_public_key_hex,
         output_tx,
         timeout_secs,
+        cancel_token,
     } = input;
-    time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
-        create_encrypted_backup(
-            job_id,
-            config,
-            config_path,
-            paths,
-            include_config,
-            recipient_public_key_hex,
-            output_tx,
-        ),
-    )
+    run_cancelable("backup", cancel_token.clone(), async move {
+        time::timeout(
+            Duration::from_secs(timeout_secs.max(1)),
+            create_encrypted_backup(
+                job_id,
+                config,
+                config_path,
+                paths,
+                include_config,
+                recipient_public_key_hex,
+                output_tx,
+                cancel_token,
+            ),
+        )
+        .await
+        .context("backup timed out")?
+    })
     .await
-    .context("backup timed out")?
 }
 
 async fn create_encrypted_backup(
@@ -119,19 +126,24 @@ async fn create_encrypted_backup(
     include_config: bool,
     recipient_public_key_hex: Option<&str>,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("backup")?;
     validate_backup_scope(paths, include_config)?;
     let recipient_public_key_hex = recipient_public_key_hex
         .or(config.backup.recipient_public_key_hex.as_deref())
         .context("backup recipient public key is not configured")?;
+    cancel_token.check("backup")?;
     let recipient_public_key = decode_public_key(recipient_public_key_hex)?;
     let files = collect_backup_files(
         config_path,
         paths,
         include_config,
         config.backup.max_plaintext_bytes,
+        &cancel_token,
     )
     .await?;
+    cancel_token.check("backup")?;
     let file_count = files.len();
     let created_unix = unix_now();
     let archive = BackupArchive {
@@ -142,6 +154,7 @@ async fn create_encrypted_backup(
     };
     let plaintext = encode_backup_tar_archive(&archive, &files)
         .context("failed to encode backup tar archive")?;
+    cancel_token.check("backup")?;
     if plaintext.len() as u64 > config.backup.max_plaintext_bytes {
         anyhow::bail!(
             "backup archive exceeds plaintext limit: {} > {} bytes",
@@ -150,7 +163,9 @@ async fn create_encrypted_backup(
         );
     }
     let compressed = lz4_flex::compress_prepend_size(&plaintext);
+    cancel_token.check("backup")?;
     let artifact = encrypt_backup_artifact(config, &recipient_public_key, &compressed)?;
+    cancel_token.check("backup")?;
     let artifact_bytes =
         serde_json::to_vec(&artifact).context("failed to encode encrypted backup artifact")?;
     let (mut outputs, streamed, chunk_count, chunk_bytes, artifact_sha256_hex) =
@@ -163,6 +178,7 @@ async fn create_encrypted_backup(
                 "backup artifact output receiver dropped",
             )
             .await?;
+            cancel_token.check("backup")?;
             (
                 Vec::new(),
                 true,
@@ -216,10 +232,12 @@ async fn collect_backup_files(
     paths: &[String],
     include_config: bool,
     max_plaintext_bytes: u64,
+    cancel_token: &CommandCancelToken,
 ) -> Result<Vec<BackupFilePayload>> {
     let mut files = Vec::new();
     let mut total_bytes = 0_u64;
     for (index, path) in paths.iter().enumerate() {
+        cancel_token.check("backup")?;
         files.push(
             read_backup_file(
                 Path::new(path),
@@ -228,11 +246,13 @@ async fn collect_backup_files(
                 index,
                 &mut total_bytes,
                 max_plaintext_bytes,
+                cancel_token,
             )
             .await?,
         );
     }
     if include_config {
+        cancel_token.check("backup")?;
         files.push(
             read_backup_file(
                 config_path,
@@ -241,6 +261,7 @@ async fn collect_backup_files(
                 files.len(),
                 &mut total_bytes,
                 max_plaintext_bytes,
+                cancel_token,
             )
             .await?,
         );
@@ -255,7 +276,9 @@ async fn read_backup_file(
     tar_index: usize,
     total_bytes: &mut u64,
     max_plaintext_bytes: u64,
+    cancel_token: &CommandCancelToken,
 ) -> Result<BackupFilePayload> {
+    cancel_token.check("backup")?;
     if matches!(source, BackupFileSource::SelectedPath) {
         validate_absolute_file_path(archive_path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -263,6 +286,7 @@ async fn read_backup_file(
     let metadata = tokio::fs::metadata(path)
         .await
         .with_context(|| format!("failed to stat backup path {}", path.display()))?;
+    cancel_token.check("backup")?;
     if !metadata.is_file() {
         anyhow::bail!("backup path is not a regular file: {}", path.display());
     }
@@ -279,6 +303,7 @@ async fn read_backup_file(
     let data = tokio::fs::read(path)
         .await
         .with_context(|| format!("failed to read backup path {}", path.display()))?;
+    cancel_token.check("backup")?;
     let mtime_unix = metadata
         .modified()
         .ok()
@@ -456,6 +481,7 @@ mod tests {
             recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap();
@@ -528,6 +554,7 @@ mod tests {
             recipient_public_key_hex: None,
             output_tx: Some(tx),
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap();
@@ -577,6 +604,7 @@ mod tests {
             recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -603,6 +631,7 @@ mod tests {
             recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -617,6 +646,7 @@ mod tests {
             recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();

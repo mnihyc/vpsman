@@ -15,8 +15,9 @@ use tokio::{
 };
 use vpsman_common::{CommandOutput, OutputStream};
 
-use crate::process_cleanup::{
-    signal_process_group, terminate_process_blocking, ProcessCleanupReport,
+use crate::{
+    command_worker::CommandCancelToken,
+    process_cleanup::{signal_process_group, terminate_process_blocking, ProcessCleanupReport},
 };
 
 const STREAM_OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
@@ -26,6 +27,10 @@ const CHILD_TERMINATION_GRACE_MS: u64 = 500;
 pub(crate) enum ChildRunResult {
     Completed(ChildRunOutput),
     TimedOut(ProcessCleanupReport),
+    Canceled {
+        cleanup: ProcessCleanupReport,
+        reason: String,
+    },
 }
 
 pub(crate) struct ChildRunOutput {
@@ -54,6 +59,7 @@ pub(crate) enum ChildCleanupPolicy {
     DirectChild,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_child_with_bounded_output(
     command: tokio::process::Command,
     timeout_secs: u64,
@@ -66,10 +72,30 @@ pub(crate) async fn run_child_with_bounded_output(
         max_output_bytes,
         cleanup_policy,
         None,
+        None,
     )
     .await
 }
 
+pub(crate) async fn run_child_with_bounded_output_cancelable(
+    command: tokio::process::Command,
+    timeout_secs: u64,
+    max_output_bytes: usize,
+    cleanup_policy: ChildCleanupPolicy,
+    cancel_token: CommandCancelToken,
+) -> Result<ChildRunResult> {
+    run_child(
+        command,
+        timeout_secs,
+        max_output_bytes,
+        cleanup_policy,
+        Some(cancel_token),
+        None,
+    )
+    .await
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_child_with_streaming_output(
     command: tokio::process::Command,
     timeout_secs: u64,
@@ -82,11 +108,32 @@ pub(crate) async fn run_child_with_streaming_output(
         timeout_secs,
         max_output_bytes,
         cleanup_policy,
+        None,
         Some(sink),
     )
     .await
 }
 
+pub(crate) async fn run_child_with_streaming_output_cancelable(
+    command: tokio::process::Command,
+    timeout_secs: u64,
+    max_output_bytes: usize,
+    cleanup_policy: ChildCleanupPolicy,
+    sink: ChildOutputSink,
+    cancel_token: CommandCancelToken,
+) -> Result<ChildRunResult> {
+    run_child(
+        command,
+        timeout_secs,
+        max_output_bytes,
+        cleanup_policy,
+        Some(cancel_token),
+        Some(sink),
+    )
+    .await
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_pty_with_bounded_output(
     command: tokio::process::Command,
     timeout_secs: u64,
@@ -99,10 +146,30 @@ pub(crate) async fn run_pty_with_bounded_output(
         max_output_bytes,
         cleanup_policy,
         None,
+        None,
     )
     .await
 }
 
+pub(crate) async fn run_pty_with_bounded_output_cancelable(
+    command: tokio::process::Command,
+    timeout_secs: u64,
+    max_output_bytes: usize,
+    cleanup_policy: ChildCleanupPolicy,
+    cancel_token: CommandCancelToken,
+) -> Result<ChildRunResult> {
+    run_pty(
+        command,
+        timeout_secs,
+        max_output_bytes,
+        cleanup_policy,
+        Some(cancel_token),
+        None,
+    )
+    .await
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_pty_with_streaming_output(
     command: tokio::process::Command,
     timeout_secs: u64,
@@ -115,6 +182,26 @@ pub(crate) async fn run_pty_with_streaming_output(
         timeout_secs,
         max_output_bytes,
         cleanup_policy,
+        None,
+        Some(sink),
+    )
+    .await
+}
+
+pub(crate) async fn run_pty_with_streaming_output_cancelable(
+    command: tokio::process::Command,
+    timeout_secs: u64,
+    max_output_bytes: usize,
+    cleanup_policy: ChildCleanupPolicy,
+    sink: ChildOutputSink,
+    cancel_token: CommandCancelToken,
+) -> Result<ChildRunResult> {
+    run_pty(
+        command,
+        timeout_secs,
+        max_output_bytes,
+        cleanup_policy,
+        Some(cancel_token),
         Some(sink),
     )
     .await
@@ -125,6 +212,7 @@ async fn run_child(
     timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
+    cancel_token: Option<CommandCancelToken>,
     sink: Option<ChildOutputSink>,
 ) -> Result<ChildRunResult> {
     command.kill_on_drop(true);
@@ -151,15 +239,23 @@ async fn run_child(
         OutputStream::Stderr,
     ));
 
-    let status = match time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
+    let status = match wait_for_child(&mut child, timeout_secs, cancel_token).await? {
+        ChildWaitOutcome::Completed(status) => status,
+        ChildWaitOutcome::TimedOut => {
             let cleanup = child
                 .terminate(Duration::from_millis(CHILD_TERMINATION_GRACE_MS))
                 .await;
             stdout_task.abort();
             stderr_task.abort();
             return Ok(ChildRunResult::TimedOut(cleanup));
+        }
+        ChildWaitOutcome::Canceled(reason) => {
+            let cleanup = child
+                .terminate(Duration::from_millis(CHILD_TERMINATION_GRACE_MS))
+                .await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Ok(ChildRunResult::Canceled { cleanup, reason });
         }
     };
     child.disarm();
@@ -187,6 +283,7 @@ async fn run_pty(
     timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
+    cancel_token: Option<CommandCancelToken>,
     sink: Option<ChildOutputSink>,
 ) -> Result<ChildRunResult> {
     command.kill_on_drop(true);
@@ -206,14 +303,21 @@ async fn run_pty(
         sink,
     ));
 
-    let status = match time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
+    let status = match wait_for_child(&mut child, timeout_secs, cancel_token).await? {
+        ChildWaitOutcome::Completed(status) => status,
+        ChildWaitOutcome::TimedOut => {
             let cleanup = child
                 .terminate(Duration::from_millis(CHILD_TERMINATION_GRACE_MS))
                 .await;
             reader_task.abort();
             return Ok(ChildRunResult::TimedOut(cleanup));
+        }
+        ChildWaitOutcome::Canceled(reason) => {
+            let cleanup = child
+                .terminate(Duration::from_millis(CHILD_TERMINATION_GRACE_MS))
+                .await;
+            reader_task.abort();
+            return Ok(ChildRunResult::Canceled { cleanup, reason });
         }
     };
     child.disarm();
@@ -230,6 +334,36 @@ async fn run_pty(
         stderr_truncated: false,
         pty_truncated: output.truncated,
     }))
+}
+
+enum ChildWaitOutcome {
+    Completed(ExitStatus),
+    TimedOut,
+    Canceled(String),
+}
+
+async fn wait_for_child(
+    child: &mut RunningChild,
+    timeout_secs: u64,
+    cancel_token: Option<CommandCancelToken>,
+) -> std::io::Result<ChildWaitOutcome> {
+    let timeout = time::sleep(Duration::from_secs(timeout_secs));
+    tokio::pin!(timeout);
+    if let Some(cancel_token) = cancel_token {
+        let canceled = cancel_token.cancelled();
+        tokio::pin!(canceled);
+        tokio::select! {
+            biased;
+            reason = &mut canceled => Ok(ChildWaitOutcome::Canceled(reason)),
+            status = child.wait() => status.map(ChildWaitOutcome::Completed),
+            _ = &mut timeout => Ok(ChildWaitOutcome::TimedOut),
+        }
+    } else {
+        tokio::select! {
+            status = child.wait() => status.map(ChildWaitOutcome::Completed),
+            _ = &mut timeout => Ok(ChildWaitOutcome::TimedOut),
+        }
+    }
 }
 
 pub(crate) struct PtyStdio {
@@ -673,6 +807,7 @@ mod tests {
         let output = match task.await.unwrap().unwrap() {
             ChildRunResult::Completed(output) => output,
             ChildRunResult::TimedOut(_) => panic!("child timed out"),
+            ChildRunResult::Canceled { .. } => panic!("non-cancelable child was canceled"),
         };
         assert_eq!(output.stdout, b"startend");
 
@@ -695,6 +830,7 @@ mod tests {
             {
                 ChildRunResult::Completed(output) => output,
                 ChildRunResult::TimedOut(_) => panic!("child timed out"),
+                ChildRunResult::Canceled { .. } => panic!("non-cancelable child was canceled"),
             };
 
         assert_eq!(output.stdout.len(), 64);
@@ -716,6 +852,7 @@ mod tests {
             {
                 ChildRunResult::Completed(output) => output,
                 ChildRunResult::TimedOut(_) => panic!("child timed out"),
+                ChildRunResult::Canceled { .. } => panic!("non-cancelable child was canceled"),
             };
 
         assert_eq!(output.stderr.len(), 64);
@@ -737,6 +874,7 @@ mod tests {
             {
                 ChildRunResult::Completed(output) => output,
                 ChildRunResult::TimedOut(_) => panic!("pty command timed out"),
+                ChildRunResult::Canceled { .. } => panic!("non-cancelable pty was canceled"),
             };
 
         assert_eq!(output.stdout.len(), 64);
@@ -765,6 +903,7 @@ mod tests {
         {
             ChildRunResult::Completed(output) => output,
             ChildRunResult::TimedOut(_) => panic!("pty command timed out"),
+            ChildRunResult::Canceled { .. } => panic!("non-cancelable pty was canceled"),
         };
 
         assert_eq!(output.stdout, b"tty");
@@ -788,12 +927,62 @@ mod tests {
             {
                 ChildRunResult::Completed(_) => panic!("sleep command should time out"),
                 ChildRunResult::TimedOut(cleanup) => cleanup,
+                ChildRunResult::Canceled { .. } => {
+                    panic!("non-cancelable child was canceled")
+                }
             };
 
         assert_eq!(cleanup.target_kind, "process_group");
         assert!(cleanup.target_id > 0);
         assert!(cleanup.graceful_signal_sent);
         assert!(!cleanup.final_running);
+    }
+
+    #[tokio::test]
+    async fn cancellation_reports_process_group_cleanup() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-child-cancel-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let pid_file = root.join("child.pid");
+        let mut command = tokio::process::Command::new(TEST_SHELL);
+        command.arg("-lc").arg(format!(
+            "sleep 30 & echo $! > '{}'; wait",
+            pid_file.display()
+        ));
+        let cancel_token = CommandCancelToken::default();
+        let task = tokio::spawn(run_child_with_bounded_output_cancelable(
+            command,
+            60,
+            64,
+            ChildCleanupPolicy::ProcessGroup,
+            cancel_token.clone(),
+        ));
+        let child_pid = wait_for_pid_file(&pid_file).await;
+        assert!(process_running(child_pid));
+
+        cancel_token.cancel("operator requested cancellation".to_string());
+        let (cleanup, reason) = match task.await.unwrap().unwrap() {
+            ChildRunResult::Completed(_) => panic!("canceled command should not complete"),
+            ChildRunResult::TimedOut(_) => panic!("canceled command should not time out"),
+            ChildRunResult::Canceled { cleanup, reason } => (cleanup, reason),
+        };
+
+        assert_eq!(reason, "operator requested cancellation");
+        assert_eq!(cleanup.target_kind, "process_group");
+        assert!(cleanup.target_id > 0);
+        assert!(cleanup.graceful_signal_sent);
+        assert!(!cleanup.final_running);
+        for _ in 0..40 {
+            if !process_running(child_pid) {
+                break;
+            }
+            time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            !process_running(child_pid),
+            "child pid {child_pid} survived cancellation"
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
@@ -844,6 +1033,9 @@ mod tests {
             {
                 ChildRunResult::Completed(_) => panic!("sleep command should time out"),
                 ChildRunResult::TimedOut(cleanup) => cleanup,
+                ChildRunResult::Canceled { .. } => {
+                    panic!("non-cancelable child was canceled")
+                }
             };
 
         assert_eq!(cleanup.target_kind, "process");

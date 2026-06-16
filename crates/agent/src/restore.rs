@@ -8,10 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
-use tokio::{
-    process::Command,
-    time::{self, Duration},
-};
+use tokio::time::{self, Duration};
 use vpsman_common::{
     decode_inline_file_payload, payload_hash, validate_absolute_file_path, validate_file_mode,
     CommandOutput, OutputStream,
@@ -20,6 +17,10 @@ use vpsman_common::{
 use crate::backup::{
     BackupArchive, BackupFileEntry, BackupFileSource, BACKUP_ARCHIVE_FORMAT,
     BACKUP_ARCHIVE_MANIFEST_PATH,
+};
+use crate::{
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
+    command_worker::{run_cancelable, CommandCancelToken, CommandCanceled},
 };
 
 #[derive(Debug, Serialize)]
@@ -86,46 +87,41 @@ pub(crate) struct RestoreCommandInput<'a> {
     pub(crate) dry_run: bool,
     pub(crate) post_restore_argv: &'a [String],
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_restore_command(
     input: RestoreCommandInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
     let deadline = time::Instant::now() + Duration::from_secs(input.timeout_secs.max(1));
-    restore_archive(
-        input.job_id,
-        input.source_backup_request_id,
-        input.paths,
-        input.include_config,
-        input.destination_root,
-        input.archive_path,
-        input.archive_base64,
-        input.archive_size_bytes,
-        input.archive_sha256_hex,
-        input.dry_run,
-        input.post_restore_argv,
-        deadline,
-    )
-    .await
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("restore", cancel_token, restore_archive(input, deadline)).await
 }
 
 async fn restore_archive(
-    job_id: uuid::Uuid,
-    source_backup_request_id: uuid::Uuid,
-    paths: &[String],
-    include_config: bool,
-    destination_root: Option<&str>,
-    archive_path: Option<&str>,
-    archive_base64: Option<&str>,
-    archive_size_bytes: Option<u64>,
-    archive_sha256_hex: Option<&str>,
-    dry_run: bool,
-    post_restore_argv: &[String],
+    input: RestoreCommandInput<'_>,
     deadline: time::Instant,
 ) -> Result<Vec<CommandOutput>> {
+    let RestoreCommandInput {
+        job_id,
+        source_backup_request_id,
+        paths,
+        include_config,
+        destination_root,
+        archive_path,
+        archive_base64,
+        archive_size_bytes,
+        archive_sha256_hex,
+        dry_run,
+        post_restore_argv,
+        cancel_token,
+        timeout_secs: _,
+    } = input;
+    cancel_token.check("restore")?;
     validate_restore_scope(paths, include_config, destination_root)?;
     validate_post_restore_argv(post_restore_argv)?;
     ensure_restore_deadline(deadline)?;
+    cancel_token.check("restore")?;
     let archive_bytes = archive_bytes_from_source(
         archive_path,
         archive_base64,
@@ -133,11 +129,14 @@ async fn restore_archive(
         archive_sha256_hex,
     )
     .await?;
+    cancel_token.check("restore")?;
     let archive = decode_backup_archive(&archive_bytes)?;
+    cancel_token.check("restore")?;
 
     let mut restored = Vec::new();
     let mut matched_count = 0_usize;
     for entry in archive.files {
+        cancel_token.check("restore")?;
         ensure_restore_deadline(deadline)?;
         if !entry_requested(&entry.entry, paths, include_config) {
             continue;
@@ -222,7 +221,8 @@ async fn restore_archive(
         .saturating_duration_since(time::Instant::now())
         .as_secs()
         .max(1);
-    let post_restore = run_post_restore_argv(post_restore_argv, post_restore_timeout_secs).await?;
+    let post_restore =
+        run_post_restore_argv(post_restore_argv, post_restore_timeout_secs, cancel_token).await?;
 
     let status = serde_json::json!({
         "type": "restore",
@@ -487,17 +487,37 @@ fn validate_post_restore_argv(argv: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn run_post_restore_argv(argv: &[String], timeout_secs: u64) -> Result<serde_json::Value> {
+async fn run_post_restore_argv(
+    argv: &[String],
+    timeout_secs: u64,
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     if argv.is_empty() {
         return Ok(post_restore_status(argv, None, false));
     }
-    let output = time::timeout(Duration::from_secs(timeout_secs.max(1)), async {
-        Command::new(&argv[0]).args(&argv[1..]).output().await
-    })
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    match run_child_with_bounded_output_cancelable(
+        command,
+        timeout_secs.max(1),
+        8192,
+        ChildCleanupPolicy::ProcessGroup,
+        cancel_token,
+    )
     .await
-    .context("post-restore command timed out")?
-    .context("failed to run post-restore command")?;
-    Ok(post_restore_status(argv, Some(&output), false))
+    .context("failed to run post-restore command")?
+    {
+        ChildRunResult::Completed(output) => Ok(post_restore_output_status(
+            argv,
+            output.exit_code,
+            &output.stdout,
+            &output.stderr,
+        )),
+        ChildRunResult::TimedOut(_) => anyhow::bail!("post-restore command timed out"),
+        ChildRunResult::Canceled { reason, .. } => {
+            Err(CommandCanceled::new("restore", reason).into())
+        }
+    }
 }
 
 fn post_restore_status(
@@ -519,6 +539,22 @@ fn post_restore_status(
         "exit_code": output.status.code(),
         "stdout_preview": String::from_utf8_lossy(&output.stdout).chars().take(4096).collect::<String>(),
         "stderr_preview": String::from_utf8_lossy(&output.stderr).chars().take(4096).collect::<String>(),
+    })
+}
+
+fn post_restore_output_status(
+    argv: &[String],
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> serde_json::Value {
+    serde_json::json!({
+        "configured": true,
+        "status": if exit_code == Some(0) { "passed" } else { "failed" },
+        "argv": argv,
+        "exit_code": exit_code,
+        "stdout_preview": String::from_utf8_lossy(stdout).chars().take(4096).collect::<String>(),
+        "stderr_preview": String::from_utf8_lossy(stderr).chars().take(4096).collect::<String>(),
     })
 }
 
@@ -729,6 +765,7 @@ mod tests {
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap();
@@ -770,6 +807,7 @@ mod tests {
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -790,6 +828,7 @@ mod tests {
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -857,6 +896,7 @@ mod tests {
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();

@@ -96,6 +96,19 @@ Timeout, cancel, terminal close, and process-stop status output includes a
 for the signal path, fallback use, and final running state during incident
 review.
 
+Operator cancellation is active, not just advisory, for shell/script/PTY jobs
+and the long-running backup, restore, network, and terminal workflows. The API
+marks running targets `canceled` only after the agent emits structured
+`command_canceled` output; a cancellation requested after host mutation starts
+can still require a normal rollback or compensating operation.
+
+Gateway command-output forwarding is RAM-first with disk spool overflow. Final
+output drives target terminal state, so production gateways should keep
+`[gateway].command_output_event_ttl_secs` high enough for expected API or
+database maintenance windows. The default is 24 hours, and the
+`VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS` environment variable overrides
+the suite config for smoke tests and emergency tuning.
+
 ## Use Record Tables In The Panel
 
 Traditional management tabs such as Jobs, Schedules, Audit, and data-source
@@ -319,6 +332,11 @@ same review flow. If tag changes make a schedule selector resolve to a different
 set of VPSs, the schedule shows **Update targets**; use it to deliberately
 replace the saved fixed snapshot. Tag mutation dialogs show this as a target
 update notice, not as an automatic schedule edit.
+
+Manual **Apply now** runs use the same schedule command timeout source as the
+worker: `worker.schedule_command_timeout_secs`, then legacy
+`timeout.worker_schedule_command_secs`, then the 30 second default, with the
+existing target capability clamp applied during job creation.
 
 Submitted and scheduled jobs enter the durable queue first. As soon as the
 dispatcher claims any target and gives it a control deadline, the parent job is

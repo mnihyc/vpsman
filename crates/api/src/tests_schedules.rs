@@ -312,6 +312,10 @@ async fn scheduled_job_finish_is_idempotent_for_failure_accounting() {
 
     assert!(repo.finish_job(job_id, "failed").await.unwrap());
     assert!(!repo.finish_job(job_id, "failed").await.unwrap());
+    assert_eq!(
+        repo.refresh_job_status_from_targets(job_id).await.unwrap(),
+        None
+    );
 
     let failed_once = repo.schedule_by_id(schedule.id).await.unwrap();
     assert_eq!(failed_once.failure_count, 1);
@@ -330,6 +334,17 @@ async fn scheduled_job_finish_is_idempotent_for_failure_accounting() {
         })
         .count();
     assert_eq!(schedule_failed_events, 1);
+    let schedule_failed_audits = memory
+        .audits
+        .read()
+        .await
+        .iter()
+        .filter(|audit| {
+            audit.action == "schedule.job_failed"
+                && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
+        })
+        .count();
+    assert_eq!(schedule_failed_audits, 1);
 }
 
 #[tokio::test]

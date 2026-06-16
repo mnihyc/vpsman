@@ -10,7 +10,9 @@ use vpsman_common::{
 
 mod command_runner;
 
-use self::command_runner::run_runtime_command;
+use crate::command_worker::CommandCancelToken;
+
+use self::command_runner::run_runtime_command_cancelable;
 
 pub(crate) struct NetworkRuntimeReconcileInput<'a> {
     pub(crate) config: &'a AgentConfig,
@@ -41,20 +43,35 @@ struct RuntimeCommandSpec {
 pub(crate) async fn execute_runtime_tunnel_reconcile_report(
     input: NetworkRuntimeReconcileInput<'_>,
 ) -> Result<serde_json::Value> {
+    execute_runtime_tunnel_reconcile_report_cancelable(input, CommandCancelToken::default()).await
+}
+
+pub(crate) async fn execute_runtime_tunnel_reconcile_report_cancelable(
+    input: NetworkRuntimeReconcileInput<'_>,
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     time::timeout(
         Duration::from_secs(input.timeout_secs.max(1)),
-        reconcile_runtime_tunnel(input),
+        reconcile_runtime_tunnel(input, cancel_token),
     )
     .await
     .context("runtime tunnel reconcile timed out")?
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn execute_runtime_tunnel_remove_report(
     input: NetworkRuntimeRemoveInput<'_>,
 ) -> Result<serde_json::Value> {
+    execute_runtime_tunnel_remove_report_cancelable(input, CommandCancelToken::default()).await
+}
+
+pub(crate) async fn execute_runtime_tunnel_remove_report_cancelable(
+    input: NetworkRuntimeRemoveInput<'_>,
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     time::timeout(
         Duration::from_secs(input.timeout_secs.max(1)),
-        remove_runtime_tunnel(input),
+        remove_runtime_tunnel(input, cancel_token),
     )
     .await
     .context("runtime tunnel remove timed out")?
@@ -62,6 +79,7 @@ pub(crate) async fn execute_runtime_tunnel_remove_report(
 
 async fn reconcile_runtime_tunnel(
     input: NetworkRuntimeReconcileInput<'_>,
+    cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     let endpoint = render_tunnel_endpoint_config(input.plan, input.side)
         .map_err(|error| anyhow::anyhow!("invalid runtime tunnel endpoint config: {error}"))?;
@@ -99,8 +117,13 @@ async fn reconcile_runtime_tunnel(
     if link_exists
         && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
     {
-        let (reports, validation) =
-            validate_existing_iproute2_tunnel(input.config, input.plan, &endpoint).await?;
+        let (reports, validation) = validate_existing_iproute2_tunnel(
+            input.config,
+            input.plan,
+            &endpoint,
+            cancel_token.clone(),
+        )
+        .await?;
         preflight_reports.extend(reports);
         existing_link_validation = validation;
     }
@@ -144,13 +167,14 @@ async fn reconcile_runtime_tunnel(
             }
             continue;
         }
-        let report = run_runtime_command(
+        let report = run_runtime_command_cancelable(
             spec.label,
             &spec.argv,
             spec.mutates,
             spec.required,
             input.config.network.runtime_command_timeout_secs,
             input.config.network.runtime_command_max_output_bytes as usize,
+            cancel_token.clone(),
         )
         .await?;
         if spec.required && report["success"].as_bool() != Some(true) {
@@ -169,6 +193,7 @@ async fn reconcile_runtime_tunnel(
                 &endpoint,
                 link_exists,
                 failed_required_label.unwrap_or("unknown_required_step"),
+                cancel_token.clone(),
             )
             .await?,
         )
@@ -207,7 +232,10 @@ async fn reconcile_runtime_tunnel(
     }))
 }
 
-async fn remove_runtime_tunnel(input: NetworkRuntimeRemoveInput<'_>) -> Result<serde_json::Value> {
+async fn remove_runtime_tunnel(
+    input: NetworkRuntimeRemoveInput<'_>,
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     let endpoint = render_tunnel_endpoint_config(input.plan, input.side)
         .map_err(|error| anyhow::anyhow!("invalid runtime tunnel endpoint config: {error}"))?;
     if endpoint.local_client_id != input.config.client_id {
@@ -278,13 +306,14 @@ async fn remove_runtime_tunnel(input: NetworkRuntimeRemoveInput<'_>) -> Result<s
             }
             continue;
         }
-        let report = run_runtime_command(
+        let report = run_runtime_command_cancelable(
             spec.label,
             &spec.argv,
             spec.mutates,
             spec.required,
             input.config.network.runtime_command_timeout_secs,
             input.config.network.runtime_command_max_output_bytes as usize,
+            cancel_token.clone(),
         )
         .await?;
         if spec.required && report["success"].as_bool() != Some(true) {
@@ -541,6 +570,7 @@ async fn validate_existing_iproute2_tunnel(
     config: &AgentConfig,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
+    cancel_token: CommandCancelToken,
 ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
     ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
     let link_argv = extend_argv(
@@ -554,13 +584,14 @@ async fn validate_existing_iproute2_tunnel(
             &plan.interface_name,
         ],
     );
-    let link_report = run_runtime_command(
+    let link_report = run_runtime_command_cancelable(
         "runtime_tunnel_inspect",
         &link_argv,
         false,
         true,
         config.network.runtime_command_timeout_secs,
         config.network.runtime_command_max_output_bytes as usize,
+        cancel_token.clone(),
     )
     .await?;
     if link_report["success"].as_bool() != Some(true) {
@@ -586,13 +617,14 @@ async fn validate_existing_iproute2_tunnel(
             &plan.interface_name,
         ],
     );
-    let addr_report = run_runtime_command(
+    let addr_report = run_runtime_command_cancelable(
         "runtime_addr_inspect",
         &addr_argv,
         false,
         true,
         config.network.runtime_command_timeout_secs,
         config.network.runtime_command_max_output_bytes as usize,
+        cancel_token,
     )
     .await?;
     if addr_report["success"].as_bool() != Some(true) {
@@ -1097,6 +1129,7 @@ async fn run_runtime_compensation(
     endpoint: &TunnelEndpointConfig,
     link_exists_before: bool,
     triggered_by: &'static str,
+    cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     let (specs, unavailable_reason) =
         build_runtime_compensation_steps(config, plan, endpoint, link_exists_before)?;
@@ -1112,13 +1145,14 @@ async fn run_runtime_compensation(
     let mut reports = Vec::new();
     for spec in specs {
         reports.push(
-            run_runtime_command(
+            run_runtime_command_cancelable(
                 spec.label,
                 &spec.argv,
                 spec.mutates,
                 spec.required,
                 config.network.runtime_command_timeout_secs,
                 config.network.runtime_command_max_output_bytes as usize,
+                cancel_token.clone(),
             )
             .await?,
         );

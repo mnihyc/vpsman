@@ -229,20 +229,12 @@ pub(crate) async fn apply_schedule_now(
         command: String::new(),
         argv: Vec::new(),
         operation: Some(schedule.operation.clone()),
-        timeout_secs: Some(schedule_apply_now_timeout_secs()),
+        timeout_secs: Some(state.schedule_apply_now_timeout_secs()),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
     };
     create_job_from_saved_schedule(&state, &operator, job_request, schedule_id).await
-}
-
-fn schedule_apply_now_timeout_secs() -> u64 {
-    std::env::var("VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(30)
-        .clamp(1, 3600)
 }
 
 pub(crate) async fn delete_schedule(

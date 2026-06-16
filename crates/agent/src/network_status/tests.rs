@@ -52,6 +52,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -61,6 +62,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -95,6 +97,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -104,6 +107,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -157,6 +161,7 @@ async fn reports_malformed_or_non_utf8_managed_files_without_writing() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -242,6 +247,7 @@ async fn reports_runtime_interface_and_bird2_probe_status() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -334,6 +340,7 @@ async fn reports_external_adapter_runtime_health_and_drift() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -377,6 +384,7 @@ async fn reports_declared_stale_and_external_import_candidates() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -464,6 +472,7 @@ async fn reports_external_adapter_status_failure_as_runtime_unhealthy() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();

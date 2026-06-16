@@ -18,6 +18,7 @@ if ((agent_count < 20)); then
 fi
 long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
 simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
+gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
 bulk_job_timeout_secs=45
 agent_command_timeout_secs=$((bulk_job_timeout_secs + 15))
 if ((long_running_secs > 0)); then
@@ -199,6 +200,7 @@ docker run -d \
   -e VPSMAN_GATEWAY_ID=docker-fleet-gateway \
   -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
   -e VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
+  -e VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS="$gateway_command_output_ttl_secs" \
   -e RUST_LOG=vpsman_gateway=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \

@@ -440,6 +440,37 @@ impl Repository {
         operation: &JobCommand,
         job_status: &str,
     ) -> Result<()> {
+        self.record_tunnel_plan_execution_with_mode(
+            job_id,
+            operation,
+            job_status,
+            TunnelPlanExecutionRecordMode::Normal,
+        )
+        .await
+    }
+
+    pub(crate) async fn repair_tunnel_plan_execution(
+        &self,
+        job_id: Uuid,
+        operation: &JobCommand,
+        job_status: &str,
+    ) -> Result<()> {
+        self.record_tunnel_plan_execution_with_mode(
+            job_id,
+            operation,
+            job_status,
+            TunnelPlanExecutionRecordMode::Repair,
+        )
+        .await
+    }
+
+    async fn record_tunnel_plan_execution_with_mode(
+        &self,
+        job_id: Uuid,
+        operation: &JobCommand,
+        job_status: &str,
+        mode: TunnelPlanExecutionRecordMode,
+    ) -> Result<()> {
         if job_status != "completed" {
             return Ok(());
         }
@@ -457,6 +488,11 @@ impl Repository {
                     else {
                         return Ok(());
                     };
+                    if mode == TunnelPlanExecutionRecordMode::Repair
+                        && !repair_can_record_tunnel_execution(plan, &update, job_id)
+                    {
+                        return Ok(());
+                    }
                     match update.side {
                         TunnelEndpointSide::Left => {
                             plan.left_status = update.endpoint_status.to_string()
@@ -482,12 +518,19 @@ impl Repository {
                     plan.updated_at = now.clone();
                     (plan.id, plan.status.clone())
                 };
-                memory.audits.write().await.push(tunnel_plan_state_audit(
-                    aggregate_status.0,
-                    &update,
-                    aggregate_status.1.as_str(),
-                    now,
-                ));
+                let mut audits = memory.audits.write().await;
+                let job_id_string = job_id.to_string();
+                if !audits.iter().any(|audit| {
+                    audit.action == update.audit_action
+                        && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
+                }) {
+                    audits.push(tunnel_plan_state_audit(
+                        aggregate_status.0,
+                        &update,
+                        aggregate_status.1.as_str(),
+                        now,
+                    ));
+                }
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
@@ -507,6 +550,11 @@ impl Repository {
                         last_rollback_job_id = COALESCE($7, last_rollback_job_id),
                         updated_at = now()
                     WHERE name = $1 AND deleted_at IS NULL
+                      AND (
+                          NOT $8
+                          OR ($6::uuid IS NOT NULL AND (last_apply_job_id IS NULL OR last_apply_job_id = $6))
+                          OR ($7::uuid IS NOT NULL AND (last_rollback_job_id IS NULL OR last_rollback_job_id = $7))
+                      )
                     RETURNING id, status
                     "#,
                 )
@@ -523,6 +571,7 @@ impl Repository {
                     TunnelPlanExecutionKind::Apply => None,
                     TunnelPlanExecutionKind::Rollback => Some(job_id),
                 })
+                .bind(mode == TunnelPlanExecutionRecordMode::Repair)
                 .fetch_optional(pool)
                 .await?;
                 let Some(row) = row else {
@@ -535,13 +584,21 @@ impl Repository {
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    SELECT $1, NULL, $2, $3, NULL, $4
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM audit_logs
+                        WHERE action = $2
+                          AND target = $3
+                          AND metadata->>'job_id' = $5
+                    )
                     "#,
                 )
                 .bind(Uuid::new_v4())
                 .bind(update.audit_action)
                 .bind(format!("tunnel_plan:{plan_id}"))
                 .bind(tunnel_plan_state_metadata(&update, status.as_str()))
+                .bind(job_id.to_string())
                 .execute(pool)
                 .await?;
             }
@@ -719,6 +776,12 @@ enum TunnelPlanExecutionKind {
     Rollback,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TunnelPlanExecutionRecordMode {
+    Normal,
+    Repair,
+}
+
 struct TunnelPlanStatusUpdate {
     kind: TunnelPlanExecutionKind,
     plan_name: String,
@@ -728,6 +791,21 @@ struct TunnelPlanStatusUpdate {
     partial_status: &'static str,
     audit_action: &'static str,
     job_id: Uuid,
+}
+
+fn repair_can_record_tunnel_execution(
+    plan: &TunnelPlanView,
+    update: &TunnelPlanStatusUpdate,
+    job_id: Uuid,
+) -> bool {
+    match update.kind {
+        TunnelPlanExecutionKind::Apply => plan
+            .last_apply_job_id
+            .is_none_or(|last_job_id| last_job_id == job_id),
+        TunnelPlanExecutionKind::Rollback => plan
+            .last_rollback_job_id
+            .is_none_or(|last_job_id| last_job_id == job_id),
+    }
 }
 
 fn tunnel_plan_status_update(

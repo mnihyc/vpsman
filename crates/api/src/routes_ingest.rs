@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use axum::{extract::State, http::HeaderMap, Json};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
+use tracing::warn;
 use vpsman_common::{
     CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputAckRequest,
     GatewayCommandOutputAckResponse, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
@@ -174,9 +175,6 @@ pub(crate) async fn ingest_command_output(
             .repo
             .update_job_target_result(event.job_id, &event.client_id, &outcome)
             .await?;
-        if outcome.status == TARGET_STATUS_COMPLETED {
-            try_auto_record_backup_artifact_from_ingest(&state, &event).await?;
-        }
         if let Some(status) = state
             .repo
             .refresh_job_status_from_targets(event.job_id)
@@ -187,6 +185,16 @@ pub(crate) async fn ingest_command_output(
                     job_id: event.job_id,
                     status,
                 });
+            }
+        }
+        if outcome.status == TARGET_STATUS_COMPLETED {
+            if let Err(error) = try_auto_record_backup_artifact_from_ingest(&state, &event).await {
+                warn!(
+                    ?error,
+                    job_id = %event.job_id,
+                    client_id = %event.client_id,
+                    "backup artifact auto-record failed after command output ingest"
+                );
             }
         }
     } else {

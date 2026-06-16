@@ -52,13 +52,20 @@ Target statuses are:
   output may be persisted as diagnostic evidence, but it must not rewrite the
   target or parent job terminal state.
 - Agent-side timeouts are reported as structured `command_timeout` status
-  output and map to `agent_timeout`. Operator cancellation is cooperative:
+  output and map to `agent_timeout`. Operator cancellation is operational for
+  active shell/script/PTY children, backup, restore, network apply/rollback,
+  OSPF updates, network status/probe/speed-test, and terminal operations:
   cancel requests are acknowledged as accepted while the worker is still
-  finalizing, and the terminal target state becomes `canceled` only after the
-  agent emits structured `command_canceled` output.
+  finalizing, the agent interrupts the operation through its cancel token, and
+  the terminal target state becomes `canceled` only after the agent emits
+  structured `command_canceled` output. Cancellation can occur after a command
+  has already changed host state; operators should use status output and normal
+  rollback/remediation workflows to inspect partial effects.
 - Final output must be durably recorded before a target is marked terminal.
   Job-finished side effects are published only after both output and terminal
-  target state are durable.
+  target state are durable. Backup artifact auto-recording from async gateway
+  ingest is best-effort after target/job finalization; failure to stage or store
+  the artifact must not prevent the parent job from reaching a terminal state.
 - Gateway command-output forwarding is RAM-first. Command-output events remain
   in memory up to the configured RAM cap, spill to gateway disk spool when that
   cap is exceeded, replay pending spool files after restart, and best-effort
@@ -66,12 +73,19 @@ Target statuses are:
   `/internal/v1/gateway/command-output/acks` before reposting spooled command
   outputs. Non-final chunks are ACKed when the output row is durable; final
   chunks are ACKed only after both the output row and terminal target state are
-  durable. Hard process crashes can still lose command-output events that were
-  only in RAM.
-- Job finalization is idempotent. Only the first process that transitions a job
-  from non-terminal to terminal may emit terminal side effects such as schedule
-  outcome accounting, webhook events, tunnel execution recording, and job-finish
-  notifications.
+  durable. Command-output retry retention defaults to 24 hours and can be
+  adjusted with `[gateway].command_output_event_ttl_secs` or the
+  `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS` override. Queue pressure must
+  not delete already spooled command-output files; they remain on disk for later
+  replay. Accepted residual loss boundaries are spool disabled, disk cap or disk
+  write failure, hard gateway process crash before a RAM-resident event is
+  spooled, and sustained overload beyond configured retention.
+- Job finalization is idempotent and repairable. The first process that
+  transitions a job from non-terminal to terminal emits terminal side effects,
+  and later refresh/replay paths may re-materialize deterministic terminal
+  webhooks and schedule outcome events without double-incrementing schedule
+  failure counters or moving a schedule backward after a newer job has already
+  completed.
 - Job output rows are first-writer-wins by `(job_id, client_id, seq)`. Same
   duplicate rows are no-ops; conflicting replay rows are audit evidence and do
   not overwrite previously durable output. Agent duplicate replay preserves the

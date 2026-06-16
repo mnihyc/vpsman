@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt,
+    future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -9,12 +10,34 @@ use std::{
 
 use anyhow::Result;
 use serde_json::json;
+use tokio::sync::Notify;
 use vpsman_common::{CommandOutput, OutputStream};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub(crate) struct CommandCancelToken {
     canceled: Arc<AtomicBool>,
     reason: Arc<Mutex<Option<String>>>,
+    notify: Arc<Notify>,
+}
+
+impl Default for CommandCancelToken {
+    fn default() -> Self {
+        Self {
+            canceled: Arc::new(AtomicBool::new(false)),
+            reason: Arc::new(Mutex::new(None)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl fmt::Debug for CommandCancelToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandCancelToken")
+            .field("canceled", &self.is_canceled())
+            .field("reason", &self.reason())
+            .finish()
+    }
 }
 
 impl CommandCancelToken {
@@ -23,6 +46,7 @@ impl CommandCancelToken {
             *current = Some(reason);
         }
         self.canceled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 
     pub(crate) fn is_canceled(&self) -> bool {
@@ -39,13 +63,19 @@ impl CommandCancelToken {
 
     pub(crate) fn check(&self, operation_type: &'static str) -> Result<()> {
         if self.is_canceled() {
-            return Err(CommandCanceled {
-                operation_type,
-                reason: self.reason(),
-            }
-            .into());
+            return Err(CommandCanceled::new(operation_type, self.reason()).into());
         }
         Ok(())
+    }
+
+    pub(crate) async fn cancelled(&self) -> String {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_canceled() {
+                return self.reason();
+            }
+            notified.await;
+        }
     }
 }
 
@@ -56,6 +86,13 @@ pub(crate) struct CommandCanceled {
 }
 
 impl CommandCanceled {
+    pub(crate) fn new(operation_type: &'static str, reason: String) -> Self {
+        Self {
+            operation_type,
+            reason,
+        }
+    }
+
     pub(crate) fn operation_type(&self) -> &'static str {
         self.operation_type
     }
@@ -76,6 +113,22 @@ impl fmt::Display for CommandCanceled {
 }
 
 impl Error for CommandCanceled {}
+
+pub(crate) async fn run_cancelable<T, F>(
+    operation_type: &'static str,
+    cancel_token: CommandCancelToken,
+    operation: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    cancel_token.check(operation_type)?;
+    tokio::select! {
+        biased;
+        reason = cancel_token.cancelled() => Err(CommandCanceled::new(operation_type, reason).into()),
+        result = operation => result,
+    }
+}
 
 pub(crate) fn command_canceled_output(
     job_id: uuid::Uuid,

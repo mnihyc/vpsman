@@ -11,9 +11,9 @@ use vpsman_common::{
 
 use crate::{
     child_process::{
-        run_child_with_bounded_output, run_child_with_streaming_output,
-        run_pty_with_bounded_output, run_pty_with_streaming_output, ChildCleanupPolicy,
-        ChildOutputSink, ChildRunOutput, ChildRunResult,
+        run_child_with_bounded_output_cancelable, run_child_with_streaming_output_cancelable,
+        run_pty_with_bounded_output_cancelable, run_pty_with_streaming_output_cancelable,
+        ChildCleanupPolicy, ChildOutputSink, ChildRunOutput, ChildRunResult,
     },
     command_worker::CommandCancelToken,
     file_browser::execute_file_browser_command,
@@ -106,10 +106,27 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
     cancel_token.check(job_command_type_label(command))?;
     match command {
         JobCommand::Shell { argv, pty } => {
-            execute_shell_command(config, job_id, argv, *pty, timeout_secs, output_tx).await
+            execute_shell_command(
+                config,
+                job_id,
+                argv,
+                *pty,
+                timeout_secs,
+                cancel_token,
+                output_tx,
+            )
+            .await
         }
         JobCommand::ShellScript { script } => {
-            execute_shell_script(config, job_id, script, timeout_secs, output_tx).await
+            execute_shell_script(
+                config,
+                job_id,
+                script,
+                timeout_secs,
+                cancel_token,
+                output_tx,
+            )
+            .await
         }
         JobCommand::TerminalOpen { .. }
         | JobCommand::TerminalInput { .. }
@@ -304,7 +321,9 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 }
             }
         }
-        JobCommand::UserSessions => execute_user_sessions(config, job_id, timeout_secs).await,
+        JobCommand::UserSessions => {
+            execute_user_sessions(config, job_id, timeout_secs, cancel_token).await
+        }
         JobCommand::ProcessList { limit } => {
             execute_process_list(config, job_id, *limit, timeout_secs).await
         }
@@ -410,6 +429,7 @@ async fn execute_shell_command(
     argv: &[String],
     pty: bool,
     timeout_secs: u64,
+    cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     if argv.is_empty() {
@@ -422,7 +442,15 @@ async fn execute_shell_command(
     let cleanup_policy = child_cleanup_policy(config);
     if pty {
         ensure_pty_allowed(config)?;
-        execute_pty_child_with_output(job_id, child, timeout_secs, cleanup_policy, output_tx).await
+        execute_pty_child_with_output(
+            job_id,
+            child,
+            timeout_secs,
+            cleanup_policy,
+            cancel_token,
+            output_tx,
+        )
+        .await
     } else {
         execute_child_with_output(
             job_id,
@@ -431,6 +459,7 @@ async fn execute_shell_command(
             cleanup_policy,
             "shell_argv",
             None,
+            cancel_token,
             output_tx,
         )
         .await
@@ -442,6 +471,7 @@ async fn execute_shell_script(
     job_id: uuid::Uuid,
     script: &str,
     timeout_secs: u64,
+    cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     validate_shell_script(script)?;
@@ -468,6 +498,7 @@ async fn execute_shell_script(
         child_cleanup_policy(config),
         "shell_script",
         Some(status),
+        cancel_token,
         output_tx,
     )
     .await
@@ -492,27 +523,30 @@ async fn execute_child_with_output(
     cleanup_policy: ChildCleanupPolicy,
     mode: &'static str,
     success_status: Option<serde_json::Value>,
+    cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     let timeout_secs = timeout_secs.max(1);
     let streaming = output_tx.is_some();
     let output = match output_tx {
         Some(sender) => {
-            run_child_with_streaming_output(
+            run_child_with_streaming_output_cancelable(
                 child,
                 timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 ChildOutputSink { job_id, sender },
+                cancel_token,
             )
             .await?
         }
         None => {
-            run_child_with_bounded_output(
+            run_child_with_bounded_output_cancelable(
                 child,
                 timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
+                cancel_token,
             )
             .await?
         }
@@ -531,6 +565,22 @@ async fn execute_child_with_output(
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&status)?,
                 exit_code: Some(124),
+                done: true,
+            }]);
+        }
+        ChildRunResult::Canceled { cleanup, reason } => {
+            let status = serde_json::json!({
+                "type": "command_canceled",
+                "operation_type": mode,
+                "reason": reason,
+                "mode": mode,
+                "cleanup": cleanup,
+            });
+            return Ok(vec![CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: serde_json::to_vec(&status)?,
+                exit_code: Some(130),
                 done: true,
             }]);
         }
@@ -570,27 +620,30 @@ async fn execute_pty_child_with_output(
     child: tokio::process::Command,
     timeout_secs: u64,
     cleanup_policy: ChildCleanupPolicy,
+    cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     let timeout_secs = timeout_secs.max(1);
     let streaming = output_tx.is_some();
     let output = match output_tx {
         Some(sender) => {
-            run_pty_with_streaming_output(
+            run_pty_with_streaming_output_cancelable(
                 child,
                 timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 ChildOutputSink { job_id, sender },
+                cancel_token,
             )
             .await?
         }
         None => {
-            run_pty_with_bounded_output(
+            run_pty_with_bounded_output_cancelable(
                 child,
                 timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
+                cancel_token,
             )
             .await?
         }
@@ -609,6 +662,22 @@ async fn execute_pty_child_with_output(
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&status)?,
                 exit_code: Some(124),
+                done: true,
+            }]);
+        }
+        ChildRunResult::Canceled { cleanup, reason } => {
+            let status = serde_json::json!({
+                "type": "command_canceled",
+                "operation_type": "shell_pty",
+                "reason": reason,
+                "mode": "shell_pty",
+                "cleanup": cleanup,
+            });
+            return Ok(vec![CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: serde_json::to_vec(&status)?,
+                exit_code: Some(130),
                 done: true,
             }]);
         }
@@ -723,11 +792,20 @@ async fn execute_user_sessions(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     timeout_secs: u64,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     let (args, command_source, command_timeout_secs) =
         user_sessions_argv(config, timeout_secs.max(1))?;
-    let mut outputs =
-        execute_shell_command(config, job_id, &args, false, command_timeout_secs, None).await?;
+    let mut outputs = execute_shell_command(
+        config,
+        job_id,
+        &args,
+        false,
+        command_timeout_secs,
+        cancel_token,
+        None,
+    )
+    .await?;
     let exit_code = outputs
         .iter()
         .rev()

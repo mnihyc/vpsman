@@ -24,7 +24,8 @@ use vpsman_common::{
 use crate::{
     backup::{execute_backup_command, BackupCommandInput},
     command_worker::{
-        command_canceled_output, command_timeout_output, CommandCancelToken, CommandCanceled,
+        command_canceled_output, command_timeout_output, run_cancelable, CommandCancelToken,
+        CommandCanceled,
     },
     config_update::{
         apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
@@ -1327,6 +1328,7 @@ async fn execute_authorized_command(
                 recipient_public_key_hex: recipient_public_key_hex.as_deref(),
                 output_tx: Some(streamed_output_tx),
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1355,6 +1357,7 @@ async fn execute_authorized_command(
                 dry_run: *dry_run,
                 post_restore_argv,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1367,6 +1370,7 @@ async fn execute_authorized_command(
                 source_restore_job_id: *source_restore_job_id,
                 restored_files,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1388,6 +1392,7 @@ async fn execute_authorized_command(
                 ifupdown_sha256_hex,
                 bird2_sha256_hex,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1398,6 +1403,7 @@ async fn execute_authorized_command(
                 plan,
                 side: *side,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1417,6 +1423,7 @@ async fn execute_authorized_command(
                 recommended_ospf_cost: *recommended_ospf_cost,
                 bird2_sha256_hex,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1427,6 +1434,7 @@ async fn execute_authorized_command(
                 plan,
                 side: *side,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1444,6 +1452,7 @@ async fn execute_authorized_command(
                 count: *count,
                 interval_ms: *interval_ms,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1467,6 +1476,7 @@ async fn execute_authorized_command(
                 port: *port,
                 connect_timeout_ms: *connect_timeout_ms,
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1518,12 +1528,16 @@ async fn execute_authorized_command(
         | JobCommand::TerminalPoll { .. }
         | JobCommand::TerminalResize { .. }
         | JobCommand::TerminalClose { .. } => {
-            execute_terminal_command_with_stream_sink(
-                &config,
-                request.job_id,
-                &request.command,
-                timeout_secs,
-                Some(terminal_stream_tx),
+            run_cancelable(
+                "terminal",
+                cancel_token,
+                execute_terminal_command_with_stream_sink(
+                    &config,
+                    request.job_id,
+                    &request.command,
+                    timeout_secs,
+                    Some(terminal_stream_tx),
+                ),
             )
             .await
         }

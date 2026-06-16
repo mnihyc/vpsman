@@ -28,7 +28,10 @@ use vpsman_common::{
 };
 
 use crate::{
-    api_client::{GatewayControlClient, GatewayHttpTimeouts, GatewaySpoolConfig},
+    api_client::{
+        GatewayControlClient, GatewayForwardConfig, GatewayHttpTimeouts, GatewaySpoolConfig,
+        DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS,
+    },
     control::run_control_listener,
     state::{
         cancel_ack_result, finish_pending_command_response, GatewaySession, GatewaySessionMessage,
@@ -107,6 +110,12 @@ pub(crate) struct Args {
         default_value_t = 30
     )]
     spool_shutdown_flush_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS",
+        default_value_t = DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS
+    )]
+    command_output_event_ttl_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +123,7 @@ struct GatewayRuntimeConfig {
     reconnect_grace_secs: u64,
     dispatch_ack_secs: u64,
     http_timeouts: GatewayHttpTimeouts,
+    forward_config: GatewayForwardConfig,
 }
 
 impl GatewayRuntimeConfig {
@@ -122,6 +132,7 @@ impl GatewayRuntimeConfig {
             reconnect_grace_secs: args.reconnect_grace_secs.clamp(1, 3600),
             dispatch_ack_secs: args.dispatch_ack_secs.clamp(1, 3600),
             http_timeouts: args.gateway_http_timeouts(),
+            forward_config: args.gateway_forward_config(),
         }
     }
 }
@@ -154,6 +165,7 @@ async fn main() -> Result<()> {
         args.internal_token.clone(),
         runtime_config.http_timeouts,
         args.gateway_spool_config(),
+        runtime_config.forward_config,
     );
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
@@ -296,6 +308,11 @@ impl Args {
             "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
             config.gateway.spool_shutdown_flush_secs,
         );
+        apply_u64_default(
+            &mut self.command_output_event_ttl_secs,
+            "VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS",
+            config.gateway.command_output_event_ttl_secs,
+        );
     }
 
     fn gateway_http_timeouts(&self) -> GatewayHttpTimeouts {
@@ -314,6 +331,10 @@ impl Args {
             self.spool_disk_max_bytes,
             self.spool_shutdown_flush_secs,
         )
+    }
+
+    fn gateway_forward_config(&self) -> GatewayForwardConfig {
+        GatewayForwardConfig::new(self.command_output_event_ttl_secs)
     }
 }
 
@@ -339,6 +360,7 @@ fn spawn_gateway_runtime_config_reloader(
                 Ok(next) if next != current => {
                     state.set_runtime_timing(next.reconnect_grace_secs, next.dispatch_ack_secs);
                     api_client.set_timeouts(next.http_timeouts);
+                    api_client.set_forward_config(next.forward_config);
                     current = next;
                     info!(
                         reconnect_grace_secs = next.reconnect_grace_secs,
@@ -347,6 +369,8 @@ fn spawn_gateway_runtime_config_reloader(
                         internal_http_write_secs = next.http_timeouts.write.as_secs(),
                         internal_http_read_secs = next.http_timeouts.read.as_secs(),
                         event_post_secs = next.http_timeouts.event_post.as_secs(),
+                        command_output_event_ttl_secs =
+                            next.forward_config.command_output_event_ttl_secs,
                         "gateway runtime suite config hot-reloaded"
                     );
                 }
@@ -1135,7 +1159,7 @@ mod tests {
     fn gateway_runtime_config_reloads_suite_file_from_base_args() {
         with_cleared_gateway_env(GATEWAY_HOT_RELOAD_ENV, || {
             let path = temp_suite_config_path("gateway-hot-reload");
-            std::fs::write(&path, gateway_runtime_toml(45, 31, 4, 5, 6, 7)).unwrap();
+            std::fs::write(&path, gateway_runtime_toml(45, 31, 4, 5, 6, 7, 900)).unwrap();
             let mut args = test_args();
             args.suite_config = path.clone();
 
@@ -1147,8 +1171,9 @@ mod tests {
             assert_eq!(runtime.http_timeouts.write.as_secs(), 5);
             assert_eq!(runtime.http_timeouts.read.as_secs(), 6);
             assert_eq!(runtime.http_timeouts.event_post.as_secs(), 7);
+            assert_eq!(runtime.forward_config.command_output_event_ttl_secs, 900);
 
-            std::fs::write(&path, gateway_runtime_toml(75, 41, 8, 9, 10, 11)).unwrap();
+            std::fs::write(&path, gateway_runtime_toml(75, 41, 8, 9, 10, 11, 1800)).unwrap();
 
             let runtime = load_gateway_runtime_config(&args).unwrap();
             assert_eq!(runtime.reconnect_grace_secs, 75);
@@ -1157,6 +1182,7 @@ mod tests {
             assert_eq!(runtime.http_timeouts.write.as_secs(), 9);
             assert_eq!(runtime.http_timeouts.read.as_secs(), 10);
             assert_eq!(runtime.http_timeouts.event_post.as_secs(), 11);
+            assert_eq!(runtime.forward_config.command_output_event_ttl_secs, 1800);
 
             let _ = std::fs::remove_file(path);
         });
@@ -1183,6 +1209,7 @@ mod tests {
             spool_ram_max_bytes: 1024 * 1024 * 1024,
             spool_disk_max_bytes: 4 * 1024 * 1024 * 1024,
             spool_shutdown_flush_secs: 30,
+            command_output_event_ttl_secs: DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS,
         }
     }
 
@@ -1197,6 +1224,7 @@ mod tests {
         "VPSMAN_GATEWAY_SPOOL_RAM_MAX_BYTES",
         "VPSMAN_GATEWAY_SPOOL_DISK_MAX_BYTES",
         "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
+        "VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS",
     ];
 
     static GATEWAY_SUITE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1232,12 +1260,14 @@ mod tests {
         write_secs: u64,
         read_secs: u64,
         event_post_secs: u64,
+        command_output_event_ttl_secs: u64,
     ) -> String {
         format!(
             r#"version = 1
 
 [gateway]
 reconnect_grace_secs = {reconnect_grace_secs}
+command_output_event_ttl_secs = {command_output_event_ttl_secs}
 
 [timeout]
 dispatch_ack_secs = {dispatch_ack_secs}

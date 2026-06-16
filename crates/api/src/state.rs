@@ -167,6 +167,21 @@ impl AppState {
         self.require_registered_agent_updates
     }
 
+    pub(crate) fn schedule_apply_now_timeout_secs(&self) -> u64 {
+        if let Ok(value) = std::env::var("VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                return parsed.clamp(1, 3600);
+            }
+        }
+        let configured = self.current_suite_config().and_then(|suite| {
+            suite
+                .worker
+                .schedule_command_timeout_secs
+                .or(suite.timeout.worker_schedule_command_secs)
+        });
+        configured.unwrap_or(30).clamp(1, 3600)
+    }
+
     pub(crate) fn fleet_alert_policy(&self) -> FleetAlertPolicy {
         let mut policy = self.fleet_alert_policy.clone();
         if let Some(suite) = self.current_suite_config() {

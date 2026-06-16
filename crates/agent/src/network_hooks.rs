@@ -1,11 +1,13 @@
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
-use tokio::{
-    process::Command,
-    time::{self, Duration},
-};
+use tokio::process::Command;
 use vpsman_common::{AgentNetworkConfig, AgentNetworkPreset, TunnelEndpointConfig, TunnelPlan};
+
+use crate::{
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
+    command_worker::{CommandCancelToken, CommandCanceled},
+};
 
 pub(crate) struct NetworkHookContext<'a> {
     pub(crate) plan: &'a TunnelPlan,
@@ -137,10 +139,11 @@ pub(crate) fn pre_rollback_hook_specs(
 pub(crate) async fn run_network_hooks(
     specs: &[NetworkHookSpec],
     timeout_secs: u64,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<serde_json::Value>> {
     let mut reports = Vec::new();
     for spec in specs {
-        reports.push(run_hook(spec, timeout_secs).await?);
+        reports.push(run_hook(spec, timeout_secs, cancel_token.clone()).await?);
     }
     Ok(reports)
 }
@@ -385,7 +388,11 @@ impl NetworkHookSpec {
     }
 }
 
-async fn run_hook(spec: &NetworkHookSpec, timeout_secs: u64) -> Result<serde_json::Value> {
+async fn run_hook(
+    spec: &NetworkHookSpec,
+    timeout_secs: u64,
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     if spec.argv.is_empty() {
         anyhow::bail!("network hook {} argv is empty", spec.label);
     }
@@ -393,26 +400,39 @@ async fn run_hook(spec: &NetworkHookSpec, timeout_secs: u64) -> Result<serde_jso
     command.args(&spec.argv[1..]);
     command.kill_on_drop(true);
     command.stdin(Stdio::null());
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
-    let status = time::timeout(
-        Duration::from_secs(timeout_secs.clamp(1, 120)),
-        command.status(),
+    let result = run_child_with_bounded_output_cancelable(
+        command,
+        timeout_secs.clamp(1, 120),
+        0,
+        ChildCleanupPolicy::ProcessGroup,
+        cancel_token,
     )
     .await
-    .with_context(|| format!("network hook {} timed out", spec.label))?
     .with_context(|| format!("failed to run network hook {}", spec.label))?;
-    if !status.success() {
+    let exit_code = match result {
+        ChildRunResult::Completed(output) => output.exit_code,
+        ChildRunResult::TimedOut(cleanup) => {
+            anyhow::bail!(
+                "network hook {} timed out; cleanup={}",
+                spec.label,
+                serde_json::to_string(&cleanup).unwrap_or_else(|_| "<unavailable>".to_string())
+            );
+        }
+        ChildRunResult::Canceled { reason, .. } => {
+            return Err(CommandCanceled::new("network_hook", reason).into());
+        }
+    };
+    if exit_code != Some(0) {
         anyhow::bail!(
             "network hook {} failed with exit code {:?}",
             spec.label,
-            status.code()
+            exit_code
         );
     }
     Ok(serde_json::json!({
         "label": spec.label,
         "argv": spec.argv,
-        "exit_code": status.code(),
+        "exit_code": exit_code,
     }))
 }
 

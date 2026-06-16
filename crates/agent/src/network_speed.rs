@@ -18,6 +18,8 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
+use crate::command_worker::{run_cancelable, CommandCancelToken};
+
 const SPEED_CHUNK_BYTES: usize = 16 * 1024;
 const CONNECT_RETRY_MS: u64 = 100;
 
@@ -32,17 +34,22 @@ pub(crate) struct NetworkSpeedTestInput<'a> {
     pub(crate) port: u16,
     pub(crate) connect_timeout_ms: u16,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_network_speed_test_command(
     input: NetworkSpeedTestInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        run_network_speed_test(input),
-    )
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_speed_test", cancel_token, async move {
+        time::timeout(
+            Duration::from_secs(input.timeout_secs.max(1)),
+            run_network_speed_test(input),
+        )
+        .await
+        .context("network speed test timed out")?
+    })
     .await
-    .context("network speed test timed out")?
 }
 
 async fn run_network_speed_test(input: NetworkSpeedTestInput<'_>) -> Result<Vec<CommandOutput>> {
@@ -338,6 +345,7 @@ mod tests {
             port,
             connect_timeout_ms: 3000,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         });
         time::sleep(Duration::from_millis(50)).await;
         let client = execute_network_speed_test_command(NetworkSpeedTestInput {
@@ -351,6 +359,7 @@ mod tests {
             port,
             connect_timeout_ms: 3000,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         });
         let (server_outputs, client_outputs) = tokio::join!(server, client);
         let server_status = status_json(server_outputs.unwrap());
@@ -385,6 +394,7 @@ mod tests {
             port: unused_loopback_port(),
             connect_timeout_ms: 200,
             timeout_secs: 1,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -412,6 +422,7 @@ mod tests {
             port: unused_loopback_port(),
             connect_timeout_ms: 200,
             timeout_secs: 1,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();

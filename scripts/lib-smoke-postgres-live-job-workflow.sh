@@ -17,6 +17,7 @@ VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
 VPSMAN_GATEWAY_ID="postgres-live-job-gateway" \
 VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
+VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS="${VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS:-86400}" \
 RUST_LOG="vpsman_gateway=warn" \
   target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"

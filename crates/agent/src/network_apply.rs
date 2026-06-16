@@ -13,13 +13,15 @@ use vpsman_common::{
     MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
 };
 
+use crate::command_worker::{run_cancelable, CommandCancelToken};
 use crate::network_hooks::{
     bird2_reload_hook_specs, bird2_validation_hook_specs, pre_rollback_hook_specs,
     reload_hook_specs, run_network_hooks, validation_hook_specs, NetworkHookContext,
 };
 use crate::network_runtime::{
-    execute_runtime_tunnel_reconcile_report, execute_runtime_tunnel_remove_report,
-    NetworkRuntimeReconcileInput, NetworkRuntimeRemoveInput,
+    execute_runtime_tunnel_reconcile_report_cancelable,
+    execute_runtime_tunnel_remove_report_cancelable, NetworkRuntimeReconcileInput,
+    NetworkRuntimeRemoveInput,
 };
 
 const MAX_MANAGED_NETWORK_FILE_BYTES: u64 = 256 * 1024;
@@ -34,6 +36,7 @@ pub(crate) struct NetworkApplyInput<'a> {
     pub(crate) ifupdown_sha256_hex: &'a str,
     pub(crate) bird2_sha256_hex: &'a str,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) struct NetworkRollbackInput<'a> {
@@ -42,6 +45,7 @@ pub(crate) struct NetworkRollbackInput<'a> {
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) struct NetworkOspfCostUpdateInput<'a> {
@@ -53,27 +57,40 @@ pub(crate) struct NetworkOspfCostUpdateInput<'a> {
     pub(crate) recommended_ospf_cost: u16,
     pub(crate) bird2_sha256_hex: &'a str,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_network_apply_command(
     input: NetworkApplyInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    let deadline = network_operation_deadline(input.timeout_secs);
-    apply_network_plan(input, deadline).await
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_apply", cancel_token, async move {
+        let deadline = network_operation_deadline(input.timeout_secs);
+        apply_network_plan(input, deadline).await
+    })
+    .await
 }
 
 pub(crate) async fn execute_network_rollback_command(
     input: NetworkRollbackInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    let deadline = network_operation_deadline(input.timeout_secs);
-    rollback_network_plan(input, deadline).await
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_rollback", cancel_token, async move {
+        let deadline = network_operation_deadline(input.timeout_secs);
+        rollback_network_plan(input, deadline).await
+    })
+    .await
 }
 
 pub(crate) async fn execute_network_ospf_cost_update_command(
     input: NetworkOspfCostUpdateInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    let deadline = network_operation_deadline(input.timeout_secs);
-    update_network_ospf_cost(input, deadline).await
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_ospf_cost_update", cancel_token, async move {
+        let deadline = network_operation_deadline(input.timeout_secs);
+        update_network_ospf_cost(input, deadline).await
+    })
+    .await
 }
 
 async fn apply_network_plan(
@@ -129,14 +146,17 @@ async fn apply_network_plan(
         "bird2",
     )?;
     let runtime_reconcile = if input.config.network.runtime_reconcile_enabled {
-        let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
-            config: input.config,
-            plan: input.plan,
-            side: input.side,
-            timeout_secs: input.timeout_secs,
-            #[cfg(test)]
-            effective_uid_override: None,
-        })
+        let report = execute_runtime_tunnel_reconcile_report_cancelable(
+            NetworkRuntimeReconcileInput {
+                config: input.config,
+                plan: input.plan,
+                side: input.side,
+                timeout_secs: input.timeout_secs,
+                #[cfg(test)]
+                effective_uid_override: None,
+            },
+            input.cancel_token.clone(),
+        )
         .await?;
         if report["status"].as_str() == Some("failed") {
             anyhow::bail!("runtime tunnel reconcile failed before managed-file apply");
@@ -182,14 +202,19 @@ async fn apply_network_plan(
         rollback_updates(&applied).await;
         return Err(error);
     }
-    let validation =
-        match run_network_hooks(&validation_specs, input.config.network.hook_timeout_secs).await {
-            Ok(reports) => reports,
-            Err(error) => {
-                rollback_updates(&applied).await;
-                return Err(error);
-            }
-        };
+    let validation = match run_network_hooks(
+        &validation_specs,
+        input.config.network.hook_timeout_secs,
+        input.cancel_token.clone(),
+    )
+    .await
+    {
+        Ok(reports) => reports,
+        Err(error) => {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
+    };
     let hook_context = NetworkHookContext {
         plan: input.plan,
         endpoint: &endpoint,
@@ -199,14 +224,19 @@ async fn apply_network_plan(
         rollback_updates(&applied).await;
         return Err(error);
     }
-    let reload =
-        match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
-            Ok(reports) => reports,
-            Err(error) => {
-                rollback_updates(&applied).await;
-                return Err(error);
-            }
-        };
+    let reload = match run_network_hooks(
+        &reload_specs,
+        input.config.network.hook_timeout_secs,
+        input.cancel_token.clone(),
+    )
+    .await
+    {
+        Ok(reports) => reports,
+        Err(error) => {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
+    };
 
     let files = applied
         .iter()
@@ -322,14 +352,19 @@ async fn update_network_ospf_cost(
         rollback_updates(&applied).await;
         return Err(error);
     }
-    let validation =
-        match run_network_hooks(&validation_specs, input.config.network.hook_timeout_secs).await {
-            Ok(reports) => reports,
-            Err(error) => {
-                rollback_updates(&applied).await;
-                return Err(error);
-            }
-        };
+    let validation = match run_network_hooks(
+        &validation_specs,
+        input.config.network.hook_timeout_secs,
+        input.cancel_token.clone(),
+    )
+    .await
+    {
+        Ok(reports) => reports,
+        Err(error) => {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
+    };
     let hook_context = NetworkHookContext {
         plan: input.plan,
         endpoint: &endpoint,
@@ -339,14 +374,19 @@ async fn update_network_ospf_cost(
         rollback_updates(&applied).await;
         return Err(error);
     }
-    let reload =
-        match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
-            Ok(reports) => reports,
-            Err(error) => {
-                rollback_updates(&applied).await;
-                return Err(error);
-            }
-        };
+    let reload = match run_network_hooks(
+        &reload_specs,
+        input.config.network.hook_timeout_secs,
+        input.cancel_token.clone(),
+    )
+    .await
+    {
+        Ok(reports) => reports,
+        Err(error) => {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
+    };
 
     let files = applied
         .iter()
@@ -486,14 +526,17 @@ async fn rollback_network_plan(
 
     let root = Path::new(&input.config.network.root_dir);
     let runtime_remove = if input.config.network.runtime_reconcile_enabled {
-        let report = execute_runtime_tunnel_remove_report(NetworkRuntimeRemoveInput {
-            config: input.config,
-            plan: input.plan,
-            side: input.side,
-            timeout_secs: input.timeout_secs,
-            #[cfg(test)]
-            effective_uid_override: None,
-        })
+        let report = execute_runtime_tunnel_remove_report_cancelable(
+            NetworkRuntimeRemoveInput {
+                config: input.config,
+                plan: input.plan,
+                side: input.side,
+                timeout_secs: input.timeout_secs,
+                #[cfg(test)]
+                effective_uid_override: None,
+            },
+            input.cancel_token.clone(),
+        )
         .await?;
         if report["status"].as_str() == Some("failed") {
             anyhow::bail!("runtime tunnel remove failed before managed-file rollback");
@@ -534,8 +577,12 @@ async fn rollback_network_plan(
         };
         let pre_rollback_specs = pre_rollback_hook_specs(&input.config.network, hook_context);
         ensure_network_deadline(deadline, "network rollback")?;
-        let reports =
-            run_network_hooks(&pre_rollback_specs, input.config.network.hook_timeout_secs).await?;
+        let reports = run_network_hooks(
+            &pre_rollback_specs,
+            input.config.network.hook_timeout_secs,
+            input.cancel_token.clone(),
+        )
+        .await?;
         ensure_network_deadline(deadline, "network rollback")?;
         reports
     } else {
@@ -556,6 +603,7 @@ async fn rollback_network_plan(
         let validation = match run_network_hooks(
             &validation_specs,
             input.config.network.hook_timeout_secs,
+            input.cancel_token.clone(),
         )
         .await
         {
@@ -574,14 +622,19 @@ async fn rollback_network_plan(
             rollback_updates(&applied).await;
             return Err(error);
         }
-        let reload =
-            match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
-                Ok(reports) => reports,
-                Err(error) => {
-                    rollback_updates(&applied).await;
-                    return Err(error);
-                }
-            };
+        let reload = match run_network_hooks(
+            &reload_specs,
+            input.config.network.hook_timeout_secs,
+            input.cancel_token.clone(),
+        )
+        .await
+        {
+            Ok(reports) => reports,
+            Err(error) => {
+                rollback_updates(&applied).await;
+                return Err(error);
+            }
+        };
         (validation, reload)
     } else {
         (Vec::new(), Vec::new())

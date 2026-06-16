@@ -23,6 +23,7 @@ spool_dir = "/var/lib/vpsman/gateway-spool"
 spool_ram_max_bytes = 1073741824
 spool_disk_max_bytes = 4294967296
 spool_shutdown_flush_secs = 30
+command_output_event_ttl_secs = 86400
 
 [worker]
 tick_secs = 30

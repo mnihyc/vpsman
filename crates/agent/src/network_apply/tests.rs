@@ -46,6 +46,7 @@ async fn applies_managed_network_files_with_backups() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -113,6 +114,7 @@ async fn applies_netplan_backend_files_with_config_signature_hash() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -167,6 +169,7 @@ async fn runtime_apply_rejects_bird2_when_reconcile_is_degraded_without_override
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap_err();
@@ -217,6 +220,7 @@ async fn runtime_apply_records_degraded_routing_gate_when_override_enabled() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -262,6 +266,7 @@ async fn rejects_disabled_or_hash_mismatched_apply() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .is_err());
@@ -284,6 +289,7 @@ async fn rejects_disabled_or_hash_mismatched_apply() {
         ifupdown_sha256_hex: &"00".repeat(32),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .is_err());
@@ -348,6 +354,7 @@ async fn runs_validation_and_reload_hooks_after_apply() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -405,6 +412,7 @@ async fn rolls_back_files_when_validation_hook_fails() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .is_err());
@@ -532,6 +540,7 @@ async fn updates_only_bird2_managed_block_for_ospf_cost_change() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -552,6 +561,7 @@ async fn updates_only_bird2_managed_block_for_ospf_cost_change() {
         recommended_ospf_cost,
         bird2_sha256_hex: &payload_hash(proposed_endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -607,6 +617,7 @@ async fn ospf_cost_update_requires_runtime_link_when_runtime_reconcile_enabled()
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -638,6 +649,7 @@ async fn ospf_cost_update_requires_runtime_link_when_runtime_reconcile_enabled()
         recommended_ospf_cost,
         bird2_sha256_hex: &payload_hash(proposed_endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap_err();
@@ -657,6 +669,7 @@ async fn ospf_cost_update_requires_runtime_link_when_runtime_reconcile_enabled()
         recommended_ospf_cost,
         bird2_sha256_hex: &payload_hash(proposed_endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -708,6 +721,7 @@ async fn removes_managed_blocks_during_operator_rollback() {
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -718,6 +732,7 @@ async fn removes_managed_blocks_during_operator_rollback() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -773,6 +788,7 @@ async fn rollback_reports_runtime_tunnel_remove_when_runtime_reconcile_enabled()
         ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
         bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -786,6 +802,7 @@ async fn rollback_reports_runtime_tunnel_remove_when_runtime_reconcile_enabled()
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();
@@ -842,6 +859,7 @@ async fn rollback_is_idempotent_when_managed_block_is_absent() {
         plan: &plan,
         side: TunnelEndpointSide::Left,
         timeout_secs: 5,
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     .unwrap();

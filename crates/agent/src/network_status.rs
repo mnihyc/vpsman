@@ -1,17 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    process::{ExitStatus, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    task::JoinHandle,
-    time,
-};
+use tokio::{process::Command, time};
 use vpsman_common::{
     payload_hash, render_backend_config_for_endpoint, render_tunnel_endpoint_config, AgentConfig,
     AgentNetworkConfig, CommandOutput, OutputStream, RuntimeTunnelManager, TunnelEndpointConfig,
@@ -22,6 +16,10 @@ use crate::network_apply::{
     managed_block, managed_block_bounds, managed_destination, read_existing_regular_file,
 };
 use crate::network_runtime::render_runtime_adapter_command;
+use crate::{
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
+    command_worker::{run_cancelable, CommandCancelToken, CommandCanceled},
+};
 
 const DEFAULT_PROC_SELF_NETNS_PATH: &str = "/proc/self/ns/net";
 
@@ -31,17 +29,22 @@ pub(crate) struct NetworkStatusInput<'a> {
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_network_status_command(
     input: NetworkStatusInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        inspect_network_plan(input),
-    )
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_status", cancel_token, async move {
+        time::timeout(
+            Duration::from_secs(input.timeout_secs.max(1)),
+            inspect_network_plan(input),
+        )
+        .await
+        .context("network status timed out")?
+    })
     .await
-    .context("network status timed out")?
 }
 
 async fn inspect_network_plan(input: NetworkStatusInput<'_>) -> Result<Vec<CommandOutput>> {
@@ -90,7 +93,14 @@ async fn inspect_network_plan(input: NetworkStatusInput<'_>) -> Result<Vec<Comma
     let malformed = files
         .iter()
         .any(|file| file["managed_block_malformed"].as_bool() == Some(true));
-    let runtime = inspect_runtime_status(&input.config.network, root, input.plan, &endpoint).await;
+    let runtime = inspect_runtime_status(
+        &input.config.network,
+        root,
+        input.plan,
+        &endpoint,
+        input.cancel_token,
+    )
+    .await?;
     let status = serde_json::json!({
         "type": "network_status",
         "plan": input.plan.name,
@@ -189,15 +199,17 @@ async fn inspect_runtime_status(
     root: &Path,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
-) -> serde_json::Value {
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     let interface = inspect_interface_sysfs(root, &plan.interface_name).await;
     let desired_interfaces = inspect_desired_interfaces(root, plan).await;
     let declared_stale_interfaces = inspect_declared_stale_interfaces(root, plan).await;
     let observed_tunnels = discover_observed_tunnels(root, plan).await;
     let kernel_namespace = inspect_kernel_namespace(root).await;
-    let kernel = inspect_kernel_status(config, root, plan, endpoint).await;
-    let adapter = inspect_runtime_adapter_status(config, plan, endpoint).await;
-    let bird2 = inspect_bird2_status(config, plan, endpoint).await;
+    let kernel = inspect_kernel_status(config, root, plan, endpoint, cancel_token.clone()).await?;
+    let adapter =
+        inspect_runtime_adapter_status(config, plan, endpoint, cancel_token.clone()).await?;
+    let bird2 = inspect_bird2_status(config, plan, endpoint, cancel_token).await?;
     let summary = summarize_runtime_status(RuntimeStatusSummaryInput {
         plan,
         interface: &interface,
@@ -209,7 +221,7 @@ async fn inspect_runtime_status(
         adapter: &adapter,
         bird2: &bird2,
     });
-    serde_json::json!({
+    Ok(serde_json::json!({
         "manager": plan.runtime_control.manager,
         "topology_version": &plan.runtime_topology.version,
         "desired_interfaces": desired_interfaces,
@@ -221,7 +233,7 @@ async fn inspect_runtime_status(
         "adapter": adapter,
         "bird2": bird2,
         "summary": summary,
-    })
+    }))
 }
 
 async fn inspect_interface_sysfs(root: &Path, interface_name: &str) -> serde_json::Value {
@@ -433,22 +445,23 @@ async fn inspect_kernel_status(
     root: &Path,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
-) -> serde_json::Value {
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     if root != Path::new("/") {
-        return serde_json::json!({
+        return Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
             "reason": "kernel_probes_require_real_root_namespace",
             "probe_scope": "read_only",
-        });
+        }));
     }
     if config.runtime_ip_argv.is_empty() {
-        return serde_json::json!({
+        return Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
             "reason": "runtime_ip_argv_unconfigured",
             "probe_scope": "read_only",
-        });
+        }));
     }
     let link = run_kernel_ip_probe(
         config,
@@ -456,31 +469,34 @@ async fn inspect_kernel_status(
         plan,
         endpoint,
         &["-j", "-s", "link", "show", "dev", "{interface}"],
+        cancel_token.clone(),
     )
-    .await;
+    .await?;
     let neighbors = run_kernel_ip_probe(
         config,
         "kernel_neighbors",
         plan,
         endpoint,
         &["-j", "neigh", "show", "dev", "{interface}"],
+        cancel_token.clone(),
     )
-    .await;
+    .await?;
     let routes = run_kernel_ip_probe(
         config,
         "kernel_routes",
         plan,
         endpoint,
         &["-j", "route", "show", "dev", "{interface}"],
+        cancel_token,
     )
-    .await;
-    serde_json::json!({
+    .await?;
+    Ok(serde_json::json!({
         "configured": true,
         "probe_scope": "read_only",
         "link": link,
         "neighbors": neighbors,
         "routes": routes,
-    })
+    }))
 }
 
 async fn run_kernel_ip_probe(
@@ -489,7 +505,8 @@ async fn run_kernel_ip_probe(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     args: &[&str],
-) -> serde_json::Value {
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     let mut argv = config.runtime_ip_argv.clone();
     argv.extend(args.iter().map(|part| part.to_string()));
     let argv = render_probe_argv(&argv, plan, endpoint);
@@ -498,17 +515,19 @@ async fn run_kernel_ip_probe(
         &argv,
         config.status_probe_timeout_secs,
         config.status_probe_max_output_bytes as usize,
+        cancel_token,
     )
     .await
     {
-        Ok(report) => report,
-        Err(error) => serde_json::json!({
+        Ok(report) => Ok(report),
+        Err(error) if error.downcast_ref::<CommandCanceled>().is_some() => Err(error),
+        Err(error) => Ok(serde_json::json!({
             "configured": true,
             "label": label,
             "argv": argv,
             "success": false,
             "error": error.to_string(),
-        }),
+        })),
     }
 }
 
@@ -516,12 +535,13 @@ async fn inspect_bird2_status(
     config: &AgentNetworkConfig,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
-) -> serde_json::Value {
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     if config.bird2_status_argv.is_empty() {
-        return serde_json::json!({
+        return Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
-        });
+        }));
     }
     let argv = render_probe_argv(&config.bird2_status_argv, plan, endpoint);
     match run_status_probe(
@@ -529,6 +549,7 @@ async fn inspect_bird2_status(
         &argv,
         config.status_probe_timeout_secs,
         config.status_probe_max_output_bytes as usize,
+        cancel_token,
     )
     .await
     {
@@ -553,15 +574,16 @@ async fn inspect_bird2_status(
                 );
                 object.insert("parsed_ospf".to_string(), parsed);
             }
-            report
+            Ok(report)
         }
-        Err(error) => serde_json::json!({
+        Err(error) if error.downcast_ref::<CommandCanceled>().is_some() => Err(error),
+        Err(error) => Ok(serde_json::json!({
             "configured": true,
             "label": "bird2_status",
             "argv": argv,
             "success": false,
             "error": error.to_string(),
-        }),
+        })),
     }
 }
 
@@ -569,35 +591,36 @@ async fn inspect_runtime_adapter_status(
     config: &AgentNetworkConfig,
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
-) -> serde_json::Value {
+    cancel_token: CommandCancelToken,
+) -> Result<serde_json::Value> {
     match plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => serde_json::json!({
+        RuntimeTunnelManager::AgentIproute2Managed => Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
             "reason": "agent_iproute2_managed",
-        }),
-        RuntimeTunnelManager::ExternalObserved => serde_json::json!({
+        })),
+        RuntimeTunnelManager::ExternalObserved => Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
             "reason": "external_observed",
-        }),
+        })),
         RuntimeTunnelManager::ExternalManagedAdapter => {
             let Some(command) = &plan.runtime_control.status else {
-                return serde_json::json!({
+                return Ok(serde_json::json!({
                     "configured": false,
                     "skipped": true,
                     "reason": "adapter_status_unconfigured",
-                });
+                }));
             };
             let argv = match render_runtime_adapter_command(command, plan, endpoint) {
                 Ok(argv) => argv,
                 Err(error) => {
-                    return serde_json::json!({
+                    return Ok(serde_json::json!({
                         "configured": true,
                         "label": "runtime_adapter_status",
                         "success": false,
                         "error": error.to_string(),
-                    });
+                    }));
                 }
             };
             match run_status_probe(
@@ -613,17 +636,19 @@ async fn inspect_runtime_adapter_status(
                         .min(config.runtime_command_max_output_bytes),
                 )
                 .unwrap_or(config.runtime_command_max_output_bytes as usize),
+                cancel_token,
             )
             .await
             {
-                Ok(report) => report,
-                Err(error) => serde_json::json!({
+                Ok(report) => Ok(report),
+                Err(error) if error.downcast_ref::<CommandCanceled>().is_some() => Err(error),
+                Err(error) => Ok(serde_json::json!({
                     "configured": true,
                     "label": "runtime_adapter_status",
                     "argv": argv,
                     "success": false,
                     "error": error.to_string(),
-                }),
+                })),
             }
         }
     }
@@ -881,121 +906,65 @@ async fn run_status_probe(
     argv: &[String],
     timeout_secs: u64,
     max_output_bytes: usize,
+    cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     if argv.is_empty() {
         anyhow::bail!("network status probe {label} argv is empty");
     }
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
-    command.kill_on_drop(true);
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to run network status probe {label}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("network status probe stdout pipe missing")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("network status probe stderr pipe missing")?;
-    let mut stdout_task = Some(tokio::spawn(read_limited(stdout, max_output_bytes)));
-    let mut stderr_task = Some(tokio::spawn(read_limited(stderr, max_output_bytes)));
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs.clamp(1, 30));
-    let mut timed_out = false;
-    let mut killed_for_output_limit = false;
-    let mut stdout_output = None;
-    let mut stderr_output = None;
-
-    let status = loop {
-        if let Some(exit_status) = child.try_wait()? {
-            break Some(exit_status);
-        }
-        if stdout_output.is_none() && task_is_finished(&stdout_task) {
-            let output = join_limited(stdout_task.take()).await?;
-            killed_for_output_limit |= output.truncated;
-            stdout_output = Some(output);
-        }
-        if stderr_output.is_none() && task_is_finished(&stderr_task) {
-            let output = join_limited(stderr_task.take()).await?;
-            killed_for_output_limit |= output.truncated;
-            stderr_output = Some(output);
-        }
-        if killed_for_output_limit {
-            child.start_kill()?;
-            break child.wait().await.ok();
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            child.start_kill()?;
-            break child.wait().await.ok();
-        }
-        time::sleep(Duration::from_millis(20)).await;
-    };
-
-    let stdout = match stdout_output {
-        Some(output) => output,
-        None => join_limited(stdout_task.take()).await?,
-    };
-    let stderr = match stderr_output {
-        Some(output) => output,
-        None => join_limited(stderr_task.take()).await?,
-    };
-    Ok(probe_report(ProbeReportInput {
-        label,
-        argv,
-        status,
-        timed_out,
-        killed_for_output_limit,
+    let result = run_child_with_bounded_output_cancelable(
+        command,
+        timeout_secs.clamp(1, 30),
         max_output_bytes,
-        stdout,
-        stderr,
-    }))
-}
-
-fn task_is_finished(task: &Option<JoinHandle<std::io::Result<LimitedOutput>>>) -> bool {
-    task.as_ref().is_some_and(JoinHandle::is_finished)
-}
-
-async fn join_limited(
-    task: Option<JoinHandle<std::io::Result<LimitedOutput>>>,
-) -> Result<LimitedOutput> {
-    let task = task.context("network status probe output task missing")?;
-    Ok(task
-        .await
-        .context("network status probe output task panicked")??)
-}
-
-async fn read_limited<R>(mut reader: R, limit: usize) -> std::io::Result<LimitedOutput>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut chunk = [0_u8; 1024];
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            break;
+        ChildCleanupPolicy::ProcessGroup,
+        cancel_token,
+    )
+    .await
+    .with_context(|| format!("failed to run network status probe {label}"))?;
+    match result {
+        ChildRunResult::Completed(output) => Ok(probe_report(ProbeReportInput {
+            label,
+            argv,
+            exit_code: output.exit_code,
+            timed_out: false,
+            killed_for_output_limit: output.stdout_truncated || output.stderr_truncated,
+            max_output_bytes,
+            stdout: LimitedOutput {
+                bytes: output.stdout,
+                truncated: output.stdout_truncated,
+            },
+            stderr: LimitedOutput {
+                bytes: output.stderr,
+                truncated: output.stderr_truncated,
+            },
+        })),
+        ChildRunResult::TimedOut(_) => Ok(probe_report(ProbeReportInput {
+            label,
+            argv,
+            exit_code: None,
+            timed_out: true,
+            killed_for_output_limit: false,
+            max_output_bytes,
+            stdout: LimitedOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            stderr: LimitedOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+        })),
+        ChildRunResult::Canceled { reason, .. } => {
+            Err(CommandCanceled::new("network_status", reason).into())
         }
-        let remaining = limit.saturating_sub(bytes.len());
-        if read > remaining {
-            bytes.extend_from_slice(&chunk[..remaining]);
-            truncated = true;
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..read]);
     }
-    Ok(LimitedOutput { bytes, truncated })
 }
 
 struct ProbeReportInput<'a> {
     label: &'a str,
     argv: &'a [String],
-    status: Option<ExitStatus>,
+    exit_code: Option<i32>,
     timed_out: bool,
     killed_for_output_limit: bool,
     max_output_bytes: usize,
@@ -1004,16 +973,13 @@ struct ProbeReportInput<'a> {
 }
 
 fn probe_report(input: ProbeReportInput<'_>) -> serde_json::Value {
-    let success = input.status.as_ref().is_some_and(|status| status.success())
-        && !input.timed_out
-        && !input.killed_for_output_limit;
-    let exit_code = input.status.as_ref().and_then(ExitStatus::code);
+    let success = input.exit_code == Some(0) && !input.timed_out && !input.killed_for_output_limit;
     serde_json::json!({
         "configured": true,
         "label": input.label,
         "argv": input.argv,
         "success": success,
-        "exit_code": exit_code,
+        "exit_code": input.exit_code,
         "timed_out": input.timed_out,
         "killed_for_output_limit": input.killed_for_output_limit,
         "max_output_bytes": input.max_output_bytes,

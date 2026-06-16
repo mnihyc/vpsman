@@ -1315,6 +1315,10 @@ impl Repository {
             return Ok(None);
         };
         if job.completed_at.is_some() {
+            if !matches!(job.status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
+                self.record_job_terminal_side_effects(job_id, &job.status, None)
+                    .await?;
+            }
             return Ok(None);
         }
         let targets = self.list_job_targets(job_id).await?;
@@ -1764,87 +1768,96 @@ impl Repository {
                         target.completed_at = Some(completed_at.clone());
                         updated = true;
                     }
+                    if !updated
+                        && !targets.iter().any(|target| {
+                            target.job_id == job_id
+                                && target.client_id == client_id
+                                && target.completed_at.is_some()
+                                && target.status == outcome.status
+                        })
+                    {
+                        return Ok(());
+                    }
                 }
-                if !updated {
-                    return Ok(());
-                }
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: None,
-                    action: "job.target_result".to_string(),
-                    target: format!("client:{client_id}"),
-                    command_hash: None,
-                    metadata: json!({
-                        "job_id": job_id,
-                        "status": outcome.status,
-                        "exit_code": outcome.exit_code,
-                        "accepted": outcome.accepted,
-                        "message": outcome.message,
-                        "received_at": outcome.received_at,
-                    }),
-                    created_at: completed_at,
-                });
-                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
-                    || agent_update_activation_failure_status(&outcome.status)
-                {
-                    match memory.job_operations.read().await.get(&job_id).cloned() {
-                        Some(
-                            operation @ (JobCommand::AgentUpdateActivate { .. }
-                            | JobCommand::AgentUpdateRollback { .. }),
-                        ) => Some(operation),
-                        _ => None,
+                if updated {
+                    memory.audits.write().await.push(AuditLogView {
+                        id: Uuid::new_v4(),
+                        actor_id: None,
+                        action: "job.target_result".to_string(),
+                        target: format!("client:{client_id}"),
+                        command_hash: None,
+                        metadata: json!({
+                            "job_id": job_id,
+                            "status": outcome.status,
+                            "exit_code": outcome.exit_code,
+                            "accepted": outcome.accepted,
+                            "message": outcome.message,
+                            "received_at": outcome.received_at,
+                        }),
+                        created_at: completed_at,
+                    });
+                    let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
+                        || agent_update_activation_failure_status(&outcome.status)
+                    {
+                        match memory.job_operations.read().await.get(&job_id).cloned() {
+                            Some(
+                                operation @ (JobCommand::AgentUpdateActivate { .. }
+                                | JobCommand::AgentUpdateRollback { .. }),
+                            ) => Some(operation),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match update_lifecycle_operation {
+                        Some(JobCommand::AgentUpdateActivate {
+                            staged_sha256_hex, ..
+                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                            self.record_agent_update_activation_completed(
+                                client_id,
+                                job_id,
+                                &staged_sha256_hex,
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateActivate {
+                            staged_sha256_hex, ..
+                        }) if agent_update_activation_failure_status(&outcome.status) => {
+                            self.record_agent_update_activation_failed(
+                                client_id,
+                                job_id,
+                                &staged_sha256_hex,
+                                &outcome.status,
+                                outcome.exit_code,
+                                &outcome.message,
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateRollback {
+                            rollback_sha256_hex,
+                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                            self.record_agent_update_rollback_completed(
+                                client_id,
+                                job_id,
+                                rollback_sha256_hex.as_deref(),
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateRollback {
+                            rollback_sha256_hex,
+                        }) if agent_update_activation_failure_status(&outcome.status) => {
+                            self.record_agent_update_rollback_failed(
+                                client_id,
+                                job_id,
+                                rollback_sha256_hex.as_deref(),
+                                &outcome.status,
+                                outcome.exit_code,
+                                &outcome.message,
+                            )
+                            .await?;
+                        }
+                        _ => {}
                     }
-                } else {
-                    None
-                };
-                match update_lifecycle_operation {
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_activation_completed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_activation_failed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_rollback_completed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_rollback_failed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
-                        )
-                        .await?;
-                    }
-                    _ => {}
                 }
             }
             Self::Postgres(pool) => {
@@ -1873,105 +1886,123 @@ impl Repository {
                 .execute(pool)
                 .await?;
                 if updated.rows_affected() == 0 {
-                    return Ok(());
-                }
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, NULL, $2, $3, NULL, $4)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind("job.target_result")
-                .bind(format!("client:{client_id}"))
-                .bind(json!({
-                    "job_id": job_id,
-                    "status": outcome.status,
-                    "exit_code": outcome.exit_code,
-                    "accepted": outcome.accepted,
-                    "message": outcome.message,
-                    "received_at": outcome.received_at,
-                }))
-                .execute(pool)
-                .await?;
-                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
-                    || agent_update_activation_failure_status(&outcome.status)
-                {
-                    let row = sqlx::query(
+                    let terminal_matches: Option<i64> = sqlx::query_scalar(
                         r#"
-                        SELECT operation
-                        FROM jobs
-                        WHERE id = $1
+                        SELECT 1
+                        FROM job_targets
+                        WHERE job_id = $1
+                          AND client_id = $2
+                          AND completed_at IS NOT NULL
+                          AND status = $3
                         "#,
                     )
                     .bind(job_id)
+                    .bind(client_id)
+                    .bind(&outcome.status)
                     .fetch_optional(pool)
                     .await?;
-                    match row {
-                        Some(row) => {
-                            let operation: sqlx::types::Json<JobCommand> =
-                                row.try_get("operation")?;
-                            match operation.0 {
-                                operation @ (JobCommand::AgentUpdateActivate { .. }
-                                | JobCommand::AgentUpdateRollback { .. }) => Some(operation),
-                                _ => None,
-                            }
-                        }
-                        None => None,
+                    if terminal_matches.is_none() {
+                        return Ok(());
                     }
                 } else {
-                    None
-                };
-                match update_lifecycle_operation {
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_activation_completed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
                         )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_activation_failed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
+                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind("job.target_result")
+                    .bind(format!("client:{client_id}"))
+                    .bind(json!({
+                        "job_id": job_id,
+                        "status": outcome.status,
+                        "exit_code": outcome.exit_code,
+                        "accepted": outcome.accepted,
+                        "message": outcome.message,
+                        "received_at": outcome.received_at,
+                    }))
+                    .execute(pool)
+                    .await?;
+                    let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
+                        || agent_update_activation_failure_status(&outcome.status)
+                    {
+                        let row = sqlx::query(
+                            r#"
+                            SELECT operation
+                            FROM jobs
+                            WHERE id = $1
+                            "#,
                         )
+                        .bind(job_id)
+                        .fetch_optional(pool)
                         .await?;
+                        match row {
+                            Some(row) => {
+                                let operation: sqlx::types::Json<JobCommand> =
+                                    row.try_get("operation")?;
+                                match operation.0 {
+                                    operation @ (JobCommand::AgentUpdateActivate { .. }
+                                    | JobCommand::AgentUpdateRollback { .. }) => Some(operation),
+                                    _ => None,
+                                }
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match update_lifecycle_operation {
+                        Some(JobCommand::AgentUpdateActivate {
+                            staged_sha256_hex, ..
+                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                            self.record_agent_update_activation_completed(
+                                client_id,
+                                job_id,
+                                &staged_sha256_hex,
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateActivate {
+                            staged_sha256_hex, ..
+                        }) if agent_update_activation_failure_status(&outcome.status) => {
+                            self.record_agent_update_activation_failed(
+                                client_id,
+                                job_id,
+                                &staged_sha256_hex,
+                                &outcome.status,
+                                outcome.exit_code,
+                                &outcome.message,
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateRollback {
+                            rollback_sha256_hex,
+                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                            self.record_agent_update_rollback_completed(
+                                client_id,
+                                job_id,
+                                rollback_sha256_hex.as_deref(),
+                            )
+                            .await?;
+                        }
+                        Some(JobCommand::AgentUpdateRollback {
+                            rollback_sha256_hex,
+                        }) if agent_update_activation_failure_status(&outcome.status) => {
+                            self.record_agent_update_rollback_failed(
+                                client_id,
+                                job_id,
+                                rollback_sha256_hex.as_deref(),
+                                &outcome.status,
+                                outcome.exit_code,
+                                &outcome.message,
+                            )
+                            .await?;
+                        }
+                        _ => {}
                     }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_rollback_completed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_rollback_failed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
-                        )
-                        .await?;
-                    }
-                    _ => {}
                 }
             }
         }
@@ -2025,13 +2056,57 @@ impl Repository {
                 }
             }
         };
-        if let Some(operation) = completed_operation {
-            self.record_tunnel_plan_execution(job_id, &operation, status)
-                .await?;
+        self.record_job_terminal_side_effects(job_id, status, completed_operation)
+            .await?;
+        Ok(true)
+    }
+
+    async fn record_job_terminal_side_effects(
+        &self,
+        job_id: Uuid,
+        status: &str,
+        completed_operation: Option<JobCommand>,
+    ) -> Result<()> {
+        if status == JOB_STATUS_COMPLETED {
+            match completed_operation {
+                Some(operation) => {
+                    self.record_tunnel_plan_execution(job_id, &operation, status)
+                        .await?;
+                }
+                None => {
+                    if let Some(operation) = self.job_operation(job_id).await? {
+                        self.repair_tunnel_plan_execution(job_id, &operation, status)
+                            .await?;
+                    }
+                }
+            }
         }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
-        Ok(true)
+        Ok(())
+    }
+
+    async fn job_operation(&self, job_id: Uuid) -> Result<Option<JobCommand>> {
+        match self {
+            Self::Memory(memory) => Ok(memory.job_operations.read().await.get(&job_id).cloned()),
+            Self::Postgres(pool) => {
+                let Some(row) = sqlx::query(
+                    r#"
+                    SELECT operation
+                    FROM jobs
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                Ok(Some(operation.0))
+            }
+        }
     }
 
     async fn record_schedule_job_outcome(&self, job_id: Uuid, status: &str) -> Result<()> {
@@ -2043,8 +2118,12 @@ impl Repository {
         };
         let outcome_error = schedule_job_outcome_error(status);
         let outcome_skipped = status == JOB_STATUS_SKIPPED;
+        let event_id = format!("schedule:{}:job:{}:finished", schedule_id, job_id);
         let schedule_outcome = match self {
             Self::Memory(memory) => {
+                let already_recorded = memory.webhook_events.read().await.iter().any(|event| {
+                    event.kind == "schedule.job_finished" && event.event_id == event_id
+                });
                 let mut schedules = memory.schedules.write().await;
                 let schedule = schedules
                     .iter_mut()
@@ -2052,21 +2131,23 @@ impl Repository {
                 let Some(schedule) = schedule else {
                     return Ok(());
                 };
-                if let Some(error) = outcome_error {
-                    schedule.failure_count += 1;
-                    schedule.last_error = Some(error.to_string());
-                    if schedule.failure_count >= schedule.max_failures {
-                        schedule.enabled = false;
-                    } else {
-                        schedule.next_run_at = (Utc::now()
-                            + Duration::seconds(schedule.retry_delay_secs.max(0)))
-                        .to_rfc3339();
+                if !already_recorded {
+                    if let Some(error) = outcome_error {
+                        schedule.failure_count += 1;
+                        schedule.last_error = Some(error.to_string());
+                        if schedule.failure_count >= schedule.max_failures {
+                            schedule.enabled = false;
+                        } else {
+                            schedule.next_run_at = (Utc::now()
+                                + Duration::seconds(schedule.retry_delay_secs.max(0)))
+                            .to_rfc3339();
+                        }
+                    } else if !outcome_skipped {
+                        schedule.failure_count = 0;
+                        schedule.last_error = None;
                     }
-                } else if !outcome_skipped {
-                    schedule.failure_count = 0;
-                    schedule.last_error = None;
+                    schedule.updated_at = unix_now().to_string();
                 }
-                schedule.updated_at = unix_now().to_string();
                 Some(ScheduleJobOutcome {
                     schedule_id,
                     schedule_name: schedule.name.clone(),
@@ -2092,6 +2173,14 @@ impl Repository {
                             last_job_error = NULL,
                             updated_at = now()
                         WHERE id = $1
+                          AND (
+                              last_job_id IS NULL
+                              OR last_job_id = $2
+                              OR last_job_completed_at IS NULL
+                              OR last_job_completed_at <= (
+                                  SELECT completed_at FROM jobs WHERE id = $2
+                              )
+                          )
                         RETURNING
                             name,
                             enabled,
@@ -2115,18 +2204,31 @@ impl Repository {
                             last_job_status = $3,
                             last_job_completed_at = now(),
                             last_job_error = $4,
-                            failure_count = failure_count + 1,
+                            failure_count = CASE
+                                WHEN last_job_id = $2 AND last_job_status = $3 THEN failure_count
+                                ELSE failure_count + 1
+                            END,
                             last_error = $4,
                             enabled = CASE
+                                WHEN last_job_id = $2 AND last_job_status = $3 THEN enabled
                                 WHEN failure_count + 1 >= max_failures THEN FALSE
                                 ELSE enabled
                             END,
                             next_run_at = CASE
+                                WHEN last_job_id = $2 AND last_job_status = $3 THEN next_run_at
                                 WHEN failure_count + 1 >= max_failures THEN next_run_at
                                 ELSE now() + (retry_delay_secs * interval '1 second')
                             END,
                             updated_at = now()
                         WHERE id = $1
+                          AND (
+                              last_job_id IS NULL
+                              OR last_job_id = $2
+                              OR last_job_completed_at IS NULL
+                              OR last_job_completed_at <= (
+                                  SELECT completed_at FROM jobs WHERE id = $2
+                              )
+                          )
                         RETURNING
                             name,
                             enabled,
@@ -2155,6 +2257,14 @@ impl Repository {
                             last_error = NULL,
                             updated_at = now()
                         WHERE id = $1
+                          AND (
+                              last_job_id IS NULL
+                              OR last_job_id = $2
+                              OR last_job_completed_at IS NULL
+                              OR last_job_completed_at <= (
+                                  SELECT completed_at FROM jobs WHERE id = $2
+                              )
+                          )
                         RETURNING
                             name,
                             enabled,
@@ -2191,7 +2301,6 @@ impl Repository {
         let Some(schedule_outcome) = schedule_outcome else {
             return Ok(());
         };
-        let event_id = format!("schedule:{}:job:{}:finished", schedule_id, job_id);
         let mut predicates = vec![
             "schedule.job_finished".to_string(),
             format!("schedule.id:{}", schedule_outcome.schedule_id),
@@ -2249,26 +2358,34 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
-                memory.audits.write().await.push(AuditLogView {
-                    id: Uuid::new_v4(),
-                    actor_id: summary.actor_id,
-                    action: "schedule.job_failed".to_string(),
-                    target: format!("schedule:{}", schedule_outcome.schedule_id),
-                    command_hash: None,
-                    metadata: json!({
-                        "schedule_id": schedule_outcome.schedule_id,
-                        "schedule_name": &schedule_outcome.schedule_name,
-                        "failure_count": schedule_outcome.failure_count,
-                        "max_failures": schedule_outcome.max_failures,
-                        "retry_delay_secs": schedule_outcome.retry_delay_secs,
-                        "next_run_at": &schedule_outcome.next_run_at,
-                        "disabled": !schedule_outcome.enabled,
-                        "error": error,
-                        "job_id": schedule_outcome.job_id,
-                        "job_status": &schedule_outcome.status,
-                    }),
-                    created_at: unix_now().to_string(),
+                let job_id_string = schedule_outcome.job_id.to_string();
+                let mut audits = memory.audits.write().await;
+                let audit_exists = audits.iter().any(|audit| {
+                    audit.action == "schedule.job_failed"
+                        && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
                 });
+                if !audit_exists {
+                    audits.push(AuditLogView {
+                        id: Uuid::new_v4(),
+                        actor_id: summary.actor_id,
+                        action: "schedule.job_failed".to_string(),
+                        target: format!("schedule:{}", schedule_outcome.schedule_id),
+                        command_hash: None,
+                        metadata: json!({
+                            "schedule_id": schedule_outcome.schedule_id,
+                            "schedule_name": &schedule_outcome.schedule_name,
+                            "failure_count": schedule_outcome.failure_count,
+                            "max_failures": schedule_outcome.max_failures,
+                            "retry_delay_secs": schedule_outcome.retry_delay_secs,
+                            "next_run_at": &schedule_outcome.next_run_at,
+                            "disabled": !schedule_outcome.enabled,
+                            "error": error,
+                            "job_id": schedule_outcome.job_id,
+                            "job_status": &schedule_outcome.status,
+                        }),
+                        created_at: unix_now().to_string(),
+                    });
+                }
             }
             Self::Postgres(pool) => {
                 sqlx::query(
@@ -2276,7 +2393,14 @@ impl Repository {
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    SELECT $1, $2, $3, $4, NULL, $5
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM audit_logs
+                        WHERE action = $3
+                          AND target = $4
+                          AND metadata->>'job_id' = $6
+                    )
                     "#,
                 )
                 .bind(Uuid::new_v4())
@@ -2295,6 +2419,7 @@ impl Repository {
                     "job_id": schedule_outcome.job_id,
                     "job_status": &schedule_outcome.status,
                 }))
+                .bind(schedule_outcome.job_id.to_string())
                 .execute(pool)
                 .await?;
             }
@@ -2398,11 +2523,7 @@ impl Repository {
         let Some(summary) = self.webhook_job_summary(job_id).await? else {
             return Ok(());
         };
-        let event_id = format!(
-            "job:{job_id}:target:{client_id}:status:{}:{}",
-            outcome.status,
-            Uuid::new_v4()
-        );
+        let event_id = format!("job:{job_id}:target:{client_id}:status:{}", outcome.status);
         let mut predicates = job_webhook_predicates(&summary.command_type, &summary.status, false);
         predicates.push(format!("job.target.status:{}", outcome.status));
         predicates.sort();

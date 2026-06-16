@@ -6,22 +6,37 @@ use vpsman_common::{
     payload_hash, validate_absolute_file_path, CommandOutput, OutputStream, RestoreRollbackFile,
 };
 
+use crate::command_worker::{run_cancelable, CommandCancelToken};
+
 pub(crate) struct RestoreRollbackCommandInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) source_restore_job_id: uuid::Uuid,
     pub(crate) restored_files: &'a [RestoreRollbackFile],
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_restore_rollback_command(
     input: RestoreRollbackCommandInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    let deadline = time::Instant::now() + Duration::from_secs(input.timeout_secs.max(1));
-    rollback_successful_restore(
-        input.job_id,
-        input.source_restore_job_id,
-        input.restored_files,
-        deadline,
+    let RestoreRollbackCommandInput {
+        job_id,
+        source_restore_job_id,
+        restored_files,
+        timeout_secs,
+        cancel_token,
+    } = input;
+    let deadline = time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    run_cancelable(
+        "restore_rollback",
+        cancel_token.clone(),
+        rollback_successful_restore(
+            job_id,
+            source_restore_job_id,
+            restored_files,
+            deadline,
+            cancel_token,
+        ),
     )
     .await
 }
@@ -31,12 +46,15 @@ async fn rollback_successful_restore(
     source_restore_job_id: uuid::Uuid,
     restored_files: &[RestoreRollbackFile],
     deadline: time::Instant,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
-    validate_restore_rollback_files(restored_files, deadline).await?;
+    cancel_token.check("restore_rollback")?;
+    validate_restore_rollback_files(restored_files, deadline, &cancel_token).await?;
     let mut rolled_back = Vec::with_capacity(restored_files.len());
     for file in restored_files.iter().rev() {
+        cancel_token.check("restore_rollback")?;
         ensure_restore_rollback_deadline(deadline)?;
-        let status = rollback_one_successful_restore(job_id, file, deadline).await?;
+        let status = rollback_one_successful_restore(job_id, file, deadline, &cancel_token).await?;
         rolled_back.push(status);
         ensure_restore_rollback_deadline(deadline)?;
     }
@@ -59,17 +77,19 @@ async fn rollback_successful_restore(
 async fn validate_restore_rollback_files(
     restored_files: &[RestoreRollbackFile],
     deadline: time::Instant,
+    cancel_token: &CommandCancelToken,
 ) -> Result<()> {
     if restored_files.is_empty() {
         anyhow::bail!("restore rollback files are required");
     }
     for file in restored_files {
+        cancel_token.check("restore_rollback")?;
         ensure_restore_rollback_deadline(deadline)?;
         validate_safe_absolute_path(&file.destination_path)?;
         if let Some(rollback_path) = &file.rollback_path {
             validate_safe_absolute_path(rollback_path)?;
         }
-        validate_current_restored_file(file, deadline).await?;
+        validate_current_restored_file(file, deadline, cancel_token).await?;
         ensure_restore_rollback_deadline(deadline)?;
     }
     Ok(())
@@ -78,7 +98,9 @@ async fn validate_restore_rollback_files(
 async fn validate_current_restored_file(
     file: &RestoreRollbackFile,
     deadline: time::Instant,
+    cancel_token: &CommandCancelToken,
 ) -> Result<()> {
+    cancel_token.check("restore_rollback")?;
     ensure_restore_rollback_deadline(deadline)?;
     let destination = Path::new(&file.destination_path);
     let metadata = tokio::fs::metadata(destination).await.with_context(|| {
@@ -87,6 +109,7 @@ async fn validate_current_restored_file(
             destination.display()
         )
     })?;
+    cancel_token.check("restore_rollback")?;
     ensure_restore_rollback_deadline(deadline)?;
     if metadata.is_dir() {
         anyhow::bail!(
@@ -106,6 +129,7 @@ async fn validate_current_restored_file(
             destination.display()
         )
     })?;
+    cancel_token.check("restore_rollback")?;
     ensure_restore_rollback_deadline(deadline)?;
     if payload_hash(&data) != file.restored_sha256_hex {
         anyhow::bail!(
@@ -118,6 +142,7 @@ async fn validate_current_restored_file(
         let rollback_metadata = tokio::fs::metadata(rollback).await.with_context(|| {
             format!("restore rollback snapshot missing: {}", rollback.display())
         })?;
+        cancel_token.check("restore_rollback")?;
         if rollback_metadata.is_dir() {
             anyhow::bail!(
                 "restore rollback snapshot is a directory: {}",
@@ -133,7 +158,9 @@ async fn rollback_one_successful_restore(
     job_id: uuid::Uuid,
     file: &RestoreRollbackFile,
     deadline: time::Instant,
+    cancel_token: &CommandCancelToken,
 ) -> Result<serde_json::Value> {
+    cancel_token.check("restore_rollback")?;
     ensure_restore_rollback_deadline(deadline)?;
     let destination = Path::new(&file.destination_path);
     match &file.rollback_path {
@@ -142,6 +169,7 @@ async fn rollback_one_successful_restore(
             let rollback_metadata = tokio::fs::metadata(rollback).await.with_context(|| {
                 format!("restore rollback snapshot missing: {}", rollback.display())
             })?;
+            cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
             let parent = destination
                 .parent()
@@ -158,6 +186,7 @@ async fn rollback_one_successful_restore(
                 .with_context(|| {
                     format!("failed to copy rollback snapshot {}", rollback.display())
                 })?;
+            cancel_token.check("restore_rollback")?;
             if let Err(error) = ensure_restore_rollback_deadline(deadline) {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 return Err(error);
@@ -167,6 +196,7 @@ async fn rollback_one_successful_restore(
                 .with_context(|| {
                     format!("failed to set rollback temp mode {}", temp_path.display())
                 })?;
+            cancel_token.check("restore_rollback")?;
             if let Err(error) = ensure_restore_rollback_deadline(deadline) {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 return Err(error);
@@ -177,6 +207,7 @@ async fn rollback_one_successful_restore(
                     format!("failed to move rollback into {}", destination.display())
                 });
             }
+            cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
             Ok(serde_json::json!({
                 "archive_path": file.archive_path,
@@ -189,6 +220,7 @@ async fn rollback_one_successful_restore(
             tokio::fs::remove_file(destination).await.with_context(|| {
                 format!("failed to remove restored file {}", destination.display())
             })?;
+            cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
             Ok(serde_json::json!({
                 "archive_path": file.archive_path,
@@ -227,6 +259,7 @@ mod tests {
     use super::{
         execute_restore_rollback_command, rollback_successful_restore, RestoreRollbackCommandInput,
     };
+    use crate::command_worker::CommandCancelToken;
     use tokio::time::{self, Duration};
     use vpsman_common::{payload_hash, RestoreRollbackFile};
 
@@ -272,6 +305,7 @@ mod tests {
             source_restore_job_id: restore_job_id,
             restored_files: &restored_files,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap();
@@ -322,6 +356,7 @@ mod tests {
             source_restore_job_id: uuid::Uuid::new_v4(),
             restored_files: &restored_files,
             timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
@@ -357,6 +392,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             &restored_files,
             time::Instant::now() - Duration::from_millis(1),
+            CommandCancelToken::default(),
         )
         .await
         .unwrap_err();

@@ -176,6 +176,45 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
 }
 
 #[test]
+fn apply_now_schedule_timeout_matches_worker_suite_precedence() {
+    with_cleared_suite_env(&["VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS"], || {
+        let path = temp_suite_config_path("schedule-apply-now-timeout");
+        let mut state = test_state(Repository::Memory(MemoryState::default()));
+        state.suite_config_path = path.clone();
+
+        std::fs::write(
+            &path,
+            r#"version = 1
+
+[worker]
+schedule_command_timeout_secs = 600
+
+[timeout]
+worker_schedule_command_secs = 120
+"#,
+        )
+        .unwrap();
+        assert_eq!(state.schedule_apply_now_timeout_secs(), 600);
+
+        std::fs::write(
+            &path,
+            r#"version = 1
+
+[timeout]
+worker_schedule_command_secs = 120
+"#,
+        )
+        .unwrap();
+        assert_eq!(state.schedule_apply_now_timeout_secs(), 120);
+
+        std::env::set_var("VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS", "45");
+        assert_eq!(state.schedule_apply_now_timeout_secs(), 45);
+
+        let _ = std::fs::remove_file(path);
+    });
+}
+
+#[test]
 fn validates_agent_update_job_document() {
     let command = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),

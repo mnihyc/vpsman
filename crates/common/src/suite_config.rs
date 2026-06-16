@@ -46,6 +46,7 @@ pub struct SuiteGatewayConfig {
     pub spool_ram_max_bytes: Option<u64>,
     pub spool_disk_max_bytes: Option<u64>,
     pub spool_shutdown_flush_secs: Option<u64>,
+    pub command_output_event_ttl_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -211,6 +212,12 @@ impl SuiteConfig {
             "gateway.reconnect_grace_secs",
         )?;
         validate_optional_u64(
+            self.gateway.command_output_event_ttl_secs,
+            300,
+            30 * 24 * 60 * 60,
+            "gateway.command_output_event_ttl_secs",
+        )?;
+        validate_optional_u64(
             self.timeout.gateway_reconnect_grace_secs,
             0,
             3600,
@@ -325,6 +332,7 @@ impl SuiteConfig {
                 "timeout.internal_http_read_secs".to_string(),
                 "timeout.control_deadline_grace_secs".to_string(),
                 "gateway.reconnect_grace_secs".to_string(),
+                "gateway.command_output_event_ttl_secs".to_string(),
                 "timeout.gateway_reconnect_grace_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),

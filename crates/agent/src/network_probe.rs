@@ -1,10 +1,15 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::{process::Command, time};
 use vpsman_common::{
     payload_hash, render_tunnel_endpoint_config, AgentConfig, CommandOutput, OutputStream,
     TunnelEndpointSide, TunnelPlan,
+};
+
+use crate::{
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
+    command_worker::{run_cancelable, CommandCancelToken, CommandCanceled},
 };
 
 const MAX_PING_OUTPUT_BYTES: usize = 16 * 1024;
@@ -18,17 +23,22 @@ pub(crate) struct NetworkProbeInput<'a> {
     pub(crate) count: u8,
     pub(crate) interval_ms: u16,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_network_probe_command(
     input: NetworkProbeInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        probe_network_plan(input),
-    )
+    let cancel_token = input.cancel_token.clone();
+    run_cancelable("network_probe", cancel_token, async move {
+        time::timeout(
+            Duration::from_secs(input.timeout_secs.max(1)),
+            probe_network_plan(input),
+        )
+        .await
+        .context("network probe timed out")?
+    })
     .await
-    .context("network probe timed out")?
 }
 
 async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandOutput>> {
@@ -59,16 +69,23 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
     ]);
     let command_sha256_hex = payload_hash(&serde_json::to_vec(&ping_argv).unwrap_or_default());
     let mut command = Command::new(&ping_argv[0]);
-    command
-        .args(&ping_argv[1..])
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = command
-        .output()
-        .await
-        .with_context(|| format!("failed to run latency probe to {target}"))?;
+    command.args(&ping_argv[1..]);
+    let output = match run_child_with_bounded_output_cancelable(
+        command,
+        input.timeout_secs,
+        MAX_PING_OUTPUT_BYTES,
+        ChildCleanupPolicy::ProcessGroup,
+        input.cancel_token,
+    )
+    .await
+    .with_context(|| format!("failed to run latency probe to {target}"))?
+    {
+        ChildRunResult::Completed(output) => output,
+        ChildRunResult::TimedOut(_) => anyhow::bail!("network probe timed out"),
+        ChildRunResult::Canceled { reason, .. } => {
+            return Err(CommandCanceled::new("network_probe", reason).into());
+        }
+    };
     let stdout = limit_bytes(output.stdout);
     let stderr = limit_bytes(output.stderr);
     let parsed = parse_ping_output(std::str::from_utf8(&stdout).unwrap_or_default());
@@ -85,8 +102,8 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
         "interval_ms": interval_ms,
         "command_source": command_source,
         "command_sha256_hex": command_sha256_hex,
-        "exit_code": output.status.code(),
-        "success": output.status.success(),
+        "exit_code": output.exit_code,
+        "success": output.exit_code == Some(0),
         "stdout_sha256_hex": payload_hash(&stdout),
         "stderr_sha256_hex": payload_hash(&stderr),
         "stdout_bytes": stdout.len(),
@@ -97,7 +114,7 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
         job_id: input.job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
-        exit_code: output.status.code(),
+        exit_code: output.exit_code,
         done: true,
     }])
 }
@@ -249,11 +266,85 @@ mod tests {
             count: 3,
             interval_ms: 500,
             timeout_secs: 1,
+            cancel_token: CommandCancelToken::default(),
         })
         .await
         .unwrap_err();
 
         assert!(error.to_string().contains("side targets left-a"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_configured_probe_process_group_children() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-network-probe-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let pid_file = root.join("child.pid");
+        let plan = test_plan();
+        let cancel_token = CommandCancelToken::default();
+        let task_cancel_token = cancel_token.clone();
+        let mut config = AgentConfig {
+            client_id: "left-a".to_string(),
+            display_name: "left-a".to_string(),
+            ..AgentConfig::default()
+        };
+        config.network.probe_ping_argv = vec![
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+        ];
+        let task = tokio::spawn(async move {
+            execute_network_probe_command(NetworkProbeInput {
+                job_id: uuid::Uuid::new_v4(),
+                config: &config,
+                plan: &plan,
+                side: TunnelEndpointSide::Left,
+                count: 3,
+                interval_ms: 500,
+                timeout_secs: 60,
+                cancel_token: task_cancel_token,
+            })
+            .await
+        });
+        let child_pid = wait_for_pid_file(&pid_file).await;
+        assert!(process_running(child_pid));
+
+        cancel_token.cancel("operator requested cancellation".to_string());
+        let error = task.await.unwrap().unwrap_err();
+        let canceled = error
+            .downcast_ref::<CommandCanceled>()
+            .expect("network probe should return CommandCanceled");
+        assert_eq!(canceled.reason(), "operator requested cancellation");
+
+        for _ in 0..40 {
+            if !process_running(child_pid) {
+                break;
+            }
+            time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            !process_running(child_pid),
+            "probe child pid {child_pid} survived cancellation"
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    async fn wait_for_pid_file(path: &std::path::Path) -> u32 {
+        for _ in 0..40 {
+            if let Ok(contents) = tokio::fs::read_to_string(path).await {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    return pid;
+                }
+            }
+            time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("pid file {} was not written", path.display());
+    }
+
+    fn process_running(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
     fn test_plan() -> TunnelPlan {

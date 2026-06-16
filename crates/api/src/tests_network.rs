@@ -482,6 +482,159 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
         .any(|audit| audit.action == "network.tunnel_plan_rolled_back"));
 }
 
+#[tokio::test]
+async fn completed_network_job_refresh_repairs_missing_tunnel_plan_execution_once() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    repo.record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+
+    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let job_id = Uuid::new_v4();
+    let operation = JobCommand::NetworkApply {
+        plan: Box::new(plan.clone()),
+        side: TunnelEndpointSide::Left,
+        config_backend: TunnelConfigBackend::Ifupdown,
+        config_sha256_hex: None,
+        ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
+        bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
+    };
+    seed_completed_network_job(&memory, job_id, operation).await;
+
+    repo.refresh_job_status_from_targets(job_id).await.unwrap();
+    repo.refresh_job_status_from_targets(job_id).await.unwrap();
+
+    let plans = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(plans[0].left_status, "applied");
+    assert_eq!(plans[0].right_status, "planned");
+    assert_eq!(plans[0].status, "partially_applied");
+    assert_eq!(plans[0].last_apply_job_id, Some(job_id));
+
+    let job_id_string = job_id.to_string();
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    let repaired_audit_count = audits
+        .iter()
+        .filter(|audit| {
+            audit.action == "network.tunnel_plan_applied"
+                && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
+        })
+        .count();
+    assert_eq!(repaired_audit_count, 1);
+}
+
+#[tokio::test]
+async fn completed_network_job_refresh_does_not_rewrite_newer_tunnel_plan_execution() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    repo.record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+
+    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let old_job = Uuid::new_v4();
+    seed_completed_network_job(
+        &memory,
+        old_job,
+        JobCommand::NetworkApply {
+            plan: Box::new(plan.clone()),
+            side: TunnelEndpointSide::Left,
+            config_backend: TunnelConfigBackend::Ifupdown,
+            config_sha256_hex: None,
+            ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
+            bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
+        },
+    )
+    .await;
+
+    let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+    let newer_job = Uuid::new_v4();
+    repo.record_tunnel_plan_execution(
+        newer_job,
+        &JobCommand::NetworkApply {
+            plan: Box::new(plan.clone()),
+            side: TunnelEndpointSide::Right,
+            config_backend: TunnelConfigBackend::Ifupdown,
+            config_sha256_hex: None,
+            ifupdown_sha256_hex: payload_hash(right.ifupdown_snippet.as_bytes()),
+            bird2_sha256_hex: payload_hash(right.bird2_interface_snippet.as_bytes()),
+        },
+        "completed",
+    )
+    .await
+    .unwrap();
+
+    repo.refresh_job_status_from_targets(old_job).await.unwrap();
+
+    let plans = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(plans[0].left_status, "planned");
+    assert_eq!(plans[0].right_status, "applied");
+    assert_eq!(plans[0].status, "partially_applied");
+    assert_eq!(plans[0].last_apply_job_id, Some(newer_job));
+
+    let old_job_string = old_job.to_string();
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    assert!(!audits.iter().any(|audit| {
+        audit.action == "network.tunnel_plan_applied"
+            && audit.metadata["job_id"].as_str() == Some(old_job_string.as_str())
+    }));
+}
+
+async fn seed_completed_network_job(memory: &MemoryState, job_id: Uuid, operation: JobCommand) {
+    let completed_at = unix_now().to_string();
+    memory.jobs.write().await.push(JobHistoryView {
+        id: job_id,
+        actor_id: None,
+        command_type: "network_apply".to_string(),
+        privileged: true,
+        status: "completed".to_string(),
+        target_count: 1,
+        payload_hash: payload_hash(format!("{operation:?}").as_bytes()),
+        created_at: completed_at.clone(),
+        completed_at: Some(completed_at.clone()),
+    });
+    memory
+        .job_operations
+        .write()
+        .await
+        .insert(job_id, operation);
+    memory.job_targets.write().await.push(JobTargetView {
+        job_id,
+        client_id: "client-a".to_string(),
+        status: "completed".to_string(),
+        message: None,
+        exit_code: Some(0),
+        started_at: Some(completed_at.clone()),
+        completed_at: Some(completed_at),
+    });
+}
+
 async fn wait_for_job_status(
     repo: &crate::repository::Repository,
     job_id: uuid::Uuid,

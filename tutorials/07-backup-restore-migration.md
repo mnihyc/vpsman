@@ -106,7 +106,10 @@ cargo run -p vpsctl -- backup-run \
 `backup-run` auto-creates a per-target backup request when no open request
 already matches the client and payload hash. If the agent emits a valid
 encrypted backup artifact and the backup object store is configured, the API
-links the artifact automatically.
+links the artifact automatically after the output row, target state, and parent
+job terminal state are durable. Auto-linking is best-effort; if object storage
+or artifact validation fails, the backup job still reaches a terminal state and
+the retained output can be handed off manually.
 
 Inspect artifacts:
 
