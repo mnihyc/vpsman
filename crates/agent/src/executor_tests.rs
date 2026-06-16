@@ -1,9 +1,16 @@
 mod tests {
+    use crate::command_worker::{CommandCancelToken, CommandCanceled};
     use crate::executor::{
         execute_job_command, execute_job_command_with_config_and_output_sink,
         execute_job_command_with_output_sink,
     };
-    use std::{io::Cursor, os::unix::fs::PermissionsExt};
+    use crate::file_download::{
+        execute_file_transfer_download_chunk, execute_file_transfer_download_start,
+    };
+    use crate::file_push::{
+        execute_file_transfer_abort, execute_file_transfer_chunk, execute_file_transfer_start,
+    };
+    use std::{io::Cursor, os::unix::fs::PermissionsExt, time::Duration};
     use tokio::sync::mpsc;
     use vpsman_common::{
         payload_hash, AgentConfig, AgentExecutionConfig, AgentExecutionEnvironmentPolicy,
@@ -1288,6 +1295,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_resumable_file_transfer_chunk_completion_wins_after_write() {
+        let session_id = uuid::Uuid::new_v4();
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-resume-cancel-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("cancel.bin");
+        let temp_path = dir.join(format!(".vpsman-transfer-cancel.bin-{session_id}.part"));
+        let data = vec![3_u8; 1024];
+        let token_hash = payload_hash(b"resume-token");
+
+        execute_file_transfer_start(
+            job_id,
+            session_id,
+            path.to_str().unwrap(),
+            0o640,
+            data.len() as u64,
+            &payload_hash(&data),
+            data.len() as u32,
+            1,
+            FileExistingPolicy::Replace,
+            &token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        let cancel_token = CommandCancelToken::default();
+        let task_token = cancel_token.clone();
+        let task_token_hash = token_hash.clone();
+        let task_chunk = transfer_chunk(0, &data);
+        let handle = tokio::spawn(async move {
+            execute_file_transfer_chunk(
+                job_id,
+                session_id,
+                0,
+                &task_chunk,
+                &task_token_hash,
+                task_token,
+            )
+            .await
+        });
+
+        for _ in 0..200 {
+            if tokio::fs::metadata(&temp_path)
+                .await
+                .map(|metadata| metadata.len() == data.len() as u64)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            tokio::fs::metadata(&temp_path).await.unwrap().len(),
+            data.len() as u64
+        );
+
+        cancel_token.cancel("operator canceled".to_string());
+        let outputs = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_transfer_next_offset(&outputs, "file_transfer_chunk_ack", data.len() as u64);
+
+        let _ = execute_file_transfer_abort(
+            job_id,
+            session_id,
+            &token_hash,
+            CommandCancelToken::default(),
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn execute_resumable_file_download_start_and_chunks() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-file-download-{job_id}"));
@@ -1355,6 +1438,63 @@ mod tests {
             payload_hash(data)
         );
 
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_resumable_file_download_chunk_observes_cancel_before_output() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-download-cancel-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("source.txt");
+        let data = vec![5_u8; 1024];
+        tokio::fs::write(&path, &data).await.unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let token_hash = payload_hash(b"download-token");
+
+        execute_file_transfer_download_start(
+            job_id,
+            session_id,
+            path.to_str().unwrap(),
+            data.len() as u32,
+            1,
+            &token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        let cancel_token = CommandCancelToken::default();
+        let task_token = cancel_token.clone();
+        let task_token_hash = token_hash.clone();
+        let handle = tokio::spawn(async move {
+            execute_file_transfer_download_chunk(
+                job_id,
+                session_id,
+                0,
+                data.len() as u32,
+                &task_token_hash,
+                task_token,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel_token.cancel("operator canceled".to_string());
+
+        let error = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        let canceled = error
+            .downcast_ref::<CommandCanceled>()
+            .expect("command canceled error");
+        assert_eq!(canceled.operation_type(), "file_transfer_download_chunk");
+
+        let _ = tokio::fs::remove_file(
+            std::env::temp_dir().join(format!("vpsman-download-{session_id}.json")),
+        )
+        .await;
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 

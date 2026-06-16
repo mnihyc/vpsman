@@ -54,13 +54,18 @@ Target statuses are:
 - Agent-side timeouts are reported as structured `command_timeout` status
   output and map to `agent_timeout`. Operator cancellation is operational for
   active shell/script/PTY children, backup, restore, network apply/rollback,
-  OSPF updates, network status/probe/speed-test, and terminal operations:
+  OSPF updates, network status/probe/speed-test, resumable file-transfer
+  steps, and terminal operations:
   cancel requests are acknowledged as accepted while the worker is still
   finalizing, the agent interrupts the operation through its cancel token, and
   the terminal target state becomes `canceled` only after the agent emits
   structured `command_canceled` output. Cancellation can occur after a command
   has already changed host state; operators should use status output and normal
-  rollback/remediation workflows to inspect partial effects.
+  rollback/remediation workflows to inspect partial effects. For resumable
+  uploads, cancellation before a chunk temp-file write or before commit's final
+  move reports canceled; once a chunk write or final move has succeeded, the
+  completed transfer status wins. Resumable download chunks do not mutate host
+  state and can cancel before stdout/status is emitted.
 - Final output must be durably recorded before a target is marked terminal.
   Job-finished side effects are published only after both output and terminal
   target state are durable. Backup artifact auto-recording from async gateway

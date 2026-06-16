@@ -98,8 +98,12 @@ graceful-shutdown spool settings under `[gateway]` in
 the API before reposting saved events. Active operator cancellation interrupts
 agent shell/script/PTY children and long-running backup, restore, network, and
 terminal operations; canceled targets become terminal only after the agent sends
-structured `command_canceled` output. Command-output retry retention defaults
-to 24 hours and can be tuned with
+structured `command_canceled` output. Resumable file-transfer steps use the
+same structured cancellation path: upload chunks cancel before a temp-file write
+starts, upload chunk completion wins after that write has succeeded, commits
+cancel before the final move starts, and download chunks cancel before emitting
+stdout/status. Command-output retry retention defaults to 24 hours and can be
+tuned with
 `[gateway].command_output_event_ttl_secs` or
 `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS`; this remains a best-effort
 gateway spool, not an end-to-end gateway-agent ACK protocol.

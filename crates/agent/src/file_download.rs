@@ -20,7 +20,7 @@ use vpsman_common::{
     FILE_TRANSFER_CHUNK_BYTES, MAX_DIRECT_FILE_DOWNLOAD_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
 
-use crate::command_worker::CommandCancelToken;
+use crate::command_worker::{CommandCancelToken, CommandCanceled};
 use crate::file_pull::{
     chunked_output, stream_buffered_payload_output, COMMAND_OUTPUT_CHUNK_BYTES,
 };
@@ -605,7 +605,9 @@ pub(crate) async fn execute_file_transfer_download_start(
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_download_start")?;
     validate_file_transfer_download_session(
         session_id,
         path,
@@ -629,7 +631,12 @@ pub(crate) async fn execute_file_transfer_download_start(
             MAX_RESUMABLE_FILE_DOWNLOAD_BYTES
         );
     }
-    let sha256_hex = hash_file(Path::new(path)).await?;
+    let sha256_hex = hash_file(
+        Path::new(path),
+        &cancel_token,
+        "file_transfer_download_start",
+    )
+    .await?;
     let resumed = if let Ok(existing) = read_download_metadata(&metadata_path).await {
         ensure_download_metadata_matches(
             &existing,
@@ -653,6 +660,7 @@ pub(crate) async fn execute_file_transfer_download_start(
         rate_limit_kbps,
         resume_token_hash: resume_token_hash.to_ascii_lowercase(),
     };
+    cancel_token.check("file_transfer_download_start")?;
     write_download_metadata(&metadata_path, &metadata).await?;
     download_status(
         job_id,
@@ -676,7 +684,9 @@ pub(crate) async fn execute_file_transfer_download_chunk(
     offset: u64,
     max_bytes: u32,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_download_chunk")?;
     validate_file_transfer_download_chunk_request(session_id, offset, max_bytes, resume_token_hash)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let metadata = read_download_metadata(&download_metadata_path(session_id)).await?;
@@ -688,7 +698,14 @@ pub(crate) async fn execute_file_transfer_download_chunk(
         .min(u64::from(max_bytes))
         .min(u64::from(metadata.chunk_size_bytes)) as usize;
     let chunk = read_file_chunk(Path::new(&metadata.path), offset, read_size).await?;
-    maybe_throttle(metadata.rate_limit_kbps, chunk.len()).await;
+    cancel_token.check("file_transfer_download_chunk")?;
+    maybe_throttle_cancelable(
+        "file_transfer_download_chunk",
+        metadata.rate_limit_kbps,
+        chunk.len(),
+        &cancel_token,
+    )
+    .await?;
     let next_offset = offset + chunk.len() as u64;
     let mut outputs = Vec::new();
     if !chunk.is_empty() {
@@ -763,13 +780,18 @@ async fn read_file_chunk(path: &Path, offset: u64, size: usize) -> Result<Vec<u8
     Ok(chunk)
 }
 
-async fn hash_file(path: &Path) -> Result<String> {
+async fn hash_file(
+    path: &Path,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("failed to open download source {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
     loop {
+        cancel_token.check(operation_type)?;
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
@@ -796,14 +818,25 @@ async fn write_download_metadata(
         .with_context(|| format!("failed to write download metadata {}", path.display()))
 }
 
-async fn maybe_throttle(rate_limit_kbps: u32, byte_count: usize) {
+async fn maybe_throttle_cancelable(
+    operation_type: &'static str,
+    rate_limit_kbps: u32,
+    byte_count: usize,
+    cancel_token: &CommandCancelToken,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
     if rate_limit_kbps == 0 || byte_count == 0 {
-        return;
+        return Ok(());
     }
     let bits = byte_count as u64 * 8;
     let millis = bits.saturating_mul(1000) / (rate_limit_kbps as u64 * 1000);
     if millis > 0 {
-        sleep(Duration::from_millis(millis)).await;
+        tokio::select! {
+            reason = cancel_token.cancelled() => Err(CommandCanceled::new(operation_type, reason).into()),
+            _ = sleep(Duration::from_millis(millis)) => Ok(()),
+        }
+    } else {
+        Ok(())
     }
 }
 

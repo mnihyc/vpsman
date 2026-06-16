@@ -9,6 +9,7 @@ import {
   sha256Hex,
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
+import { bulkProgressTimeoutMs } from "./bulkJobProgress";
 import { JOB_TERMINAL_STATUSES } from "./generated/protocolContracts";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privilege";
 import { selectorExpressionForClientIds } from "./searchExpression";
@@ -23,6 +24,10 @@ export const MAX_FILE_TRANSFER_RATE_LIMIT_KBPS = 1_000_000;
 
 export type BrowserTransferMultiTargetPolicy = "same-offset" | "independent-offsets";
 export type BrowserDownloadSinkMode = "browser-download" | "stream-to-file";
+
+export function resumableTransferWaitTimeoutMs(timeoutSecs: number): number {
+  return bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600));
+}
 
 export type ResumableUploadProgress = {
   event: "ready" | "started" | "chunk" | "committed";
@@ -512,7 +517,11 @@ async function waitForTransferStatus(
   const expectedClientSet = expectedClientIds ? new Set(expectedClientIds) : null;
   const expectedStatusCount = expectedClientIds?.length ?? expectedTargets;
   let lastOutputs: JobOutputRecord[] = [];
-  for (let poll = 0; poll < 120; poll += 1) {
+  let lastJobStatus = "unknown";
+  const timeoutMs = resumableTransferWaitTimeoutMs(request.timeoutSecs);
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  while (Date.now() <= deadline) {
     lastOutputs = await request.loadOutputs(jobId);
     for (const output of lastOutputs) {
       const payload = parseTransferStatus(output, sessionId, expectedType);
@@ -521,6 +530,7 @@ async function waitForTransferStatus(
       }
     }
     const job = await request.loadJob(jobId);
+    lastJobStatus = job.status;
     if (isTerminalJobStatus(job.status)) {
       if (job.status !== "completed") {
         throw new Error(`${expectedType} job ${jobId} ended ${job.status}`);
@@ -532,9 +542,19 @@ async function waitForTransferStatus(
       }
       return [...statuses.values()];
     }
-    await sleep(250);
+    const elapsedMs = Date.now() - startedAt;
+    const pollIntervalMs = elapsedMs < 30_000 ? 250 : 1_000;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await sleep(Math.min(pollIntervalMs, remainingMs));
   }
-  throw new Error(`${expectedType} job ${jobId} did not complete; outputs=${lastOutputs.length}`);
+  const missing = expectedClientIds?.filter((clientId) => !statuses.has(clientId)) ?? [];
+  const missingText = missing.length > 0 ? `; missing ${missing.join(", ")}` : "";
+  throw new Error(
+    `${expectedType} job ${jobId} did not complete within ${timeoutMs}ms; status=${lastJobStatus}; ACKs=${statuses.size}/${expectedStatusCount}; outputs=${lastOutputs.length}${missingText}`,
+  );
 }
 
 function parseTransferStatus(output: JobOutputRecord, sessionId: string, expectedType: string): TransferStatusPayload | null {

@@ -19,6 +19,7 @@ use vpsman_common::{
     FilePushChunk, OutputStream, FILE_TRANSFER_CHUNK_BYTES,
 };
 
+use crate::command_worker::CommandCancelToken;
 use crate::platform_accounts::{
     chown_path, metadata_gid, metadata_mode, metadata_uid, NameIdResolution, PlatformAccounts,
 };
@@ -117,7 +118,9 @@ pub(crate) async fn execute_file_transfer_start(
     rate_limit_kbps: u32,
     existing_policy: FileExistingPolicy,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_start")?;
     validate_file_transfer_session(
         session_id,
         path,
@@ -167,6 +170,7 @@ pub(crate) async fn execute_file_transfer_start(
             anyhow::bail!("file transfer destination is a directory");
         }
         if existing_policy == FileExistingPolicy::Skip {
+            cancel_token.check("file_transfer_start")?;
             return transfer_status(
                 job_id,
                 "file_transfer_start",
@@ -183,6 +187,7 @@ pub(crate) async fn execute_file_transfer_start(
             );
         }
     }
+    cancel_token.check("file_transfer_start")?;
     tokio::fs::File::create(&paths.temp)
         .await
         .with_context(|| {
@@ -226,7 +231,9 @@ pub(crate) async fn execute_file_transfer_chunk(
     offset: u64,
     chunk: &FilePushChunk,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_chunk")?;
     validate_file_transfer_session_token(session_id, resume_token_hash)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if offset != chunk.offset {
@@ -242,10 +249,13 @@ pub(crate) async fn execute_file_transfer_chunk(
     }
     let current_offset = current_transfer_offset(&paths.temp, metadata.size_bytes).await?;
     let next_offset = if offset == current_offset {
+        cancel_token.check("file_transfer_chunk")?;
         write_transfer_chunk(&paths.temp, offset, &decoded).await?;
-        maybe_throttle(metadata.rate_limit_kbps, decoded.len()).await;
+        maybe_throttle_complete_on_cancel(metadata.rate_limit_kbps, decoded.len(), &cancel_token)
+            .await;
         offset + decoded.len() as u64
     } else if offset < current_offset && offset + decoded.len() as u64 <= current_offset {
+        cancel_token.check("file_transfer_chunk")?;
         verify_existing_chunk(&paths.temp, offset, &decoded).await?;
         current_offset
     } else {
@@ -270,7 +280,9 @@ pub(crate) async fn execute_file_transfer_commit(
     job_id: uuid::Uuid,
     session_id: Uuid,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_commit")?;
     validate_file_transfer_session_token(session_id, resume_token_hash)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let metadata = read_metadata_by_session(session_id).await?;
@@ -280,13 +292,15 @@ pub(crate) async fn execute_file_transfer_commit(
     if current_offset != metadata.size_bytes {
         anyhow::bail!("file transfer commit before all bytes are received");
     }
-    let actual_hash = hash_file(&paths.temp).await?;
+    let actual_hash = hash_file(&paths.temp, &cancel_token, "file_transfer_commit").await?;
     if actual_hash != metadata.sha256_hex {
         anyhow::bail!("file transfer final hash mismatch");
     }
+    cancel_token.check("file_transfer_commit")?;
     tokio::fs::set_permissions(&paths.temp, std::fs::Permissions::from_mode(metadata.mode))
         .await
         .with_context(|| format!("failed to set file mode on {}", paths.temp.display()))?;
+    cancel_token.check("file_transfer_commit")?;
     let move_result = match metadata.existing_policy {
         FileExistingPolicy::Replace => tokio::fs::rename(&paths.temp, &paths.destination).await,
         FileExistingPolicy::Skip => rename_no_replace(&paths.temp, &paths.destination).await,
@@ -321,7 +335,9 @@ pub(crate) async fn execute_file_transfer_abort(
     job_id: uuid::Uuid,
     session_id: Uuid,
     resume_token_hash: &str,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_transfer_abort")?;
     validate_file_transfer_session_token(session_id, resume_token_hash)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let metadata = read_metadata_by_session(session_id).await?;
@@ -868,13 +884,18 @@ async fn verify_existing_chunk(path: &Path, offset: u64, data: &[u8]) -> Result<
     Ok(())
 }
 
-async fn hash_file(path: &Path) -> Result<String> {
+async fn hash_file(
+    path: &Path,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("failed to open transfer temp file {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
     loop {
+        cancel_token.check(operation_type)?;
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
@@ -884,14 +905,21 @@ async fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-async fn maybe_throttle(rate_limit_kbps: u32, byte_count: usize) {
+async fn maybe_throttle_complete_on_cancel(
+    rate_limit_kbps: u32,
+    byte_count: usize,
+    cancel_token: &CommandCancelToken,
+) {
     if rate_limit_kbps == 0 || byte_count == 0 {
         return;
     }
     let bits = byte_count as u64 * 8;
     let millis = bits.saturating_mul(1000) / (rate_limit_kbps as u64 * 1000);
     if millis > 0 {
-        sleep(Duration::from_millis(millis)).await;
+        tokio::select! {
+            _ = cancel_token.cancelled() => {}
+            _ = sleep(Duration::from_millis(millis)) => {}
+        }
     }
 }
 

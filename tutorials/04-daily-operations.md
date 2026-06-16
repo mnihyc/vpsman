@@ -96,11 +96,14 @@ Timeout, cancel, terminal close, and process-stop status output includes a
 for the signal path, fallback use, and final running state during incident
 review.
 
-Operator cancellation is active, not just advisory, for shell/script/PTY jobs
-and the long-running backup, restore, network, and terminal workflows. The API
-marks running targets `canceled` only after the agent emits structured
-`command_canceled` output; a cancellation requested after host mutation starts
-can still require a normal rollback or compensating operation.
+Operator cancellation is active, not just advisory, for shell/script/PTY jobs,
+long-running backup, restore, network and terminal workflows, and resumable
+file-transfer steps. The API marks running targets `canceled` only after the
+agent emits structured `command_canceled` output. A cancellation requested after
+host mutation starts can still require a normal rollback or compensating
+operation; resumable uploads report completion once a chunk write or final move
+has crossed its completion boundary, while download chunks can cancel before
+stdout/status is emitted.
 
 Gateway command-output forwarding is RAM-first with disk spool overflow. Final
 output drives target terminal state, so production gateways should keep
@@ -227,6 +230,10 @@ cargo run -p vpsctl -- file-transfer-download \
   --clients edge-01 \
   --confirmed
 ```
+
+CLI/VTY transfers expose `--poll-interval-ms` and `--max-polls` for unusually
+slow links. The browser console uses the job `timeout_secs` plus control-plane
+grace for each transfer-step wait.
 
 Inspect sessions and materialize a completed download through server-side
 handoff:

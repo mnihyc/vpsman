@@ -223,6 +223,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 *rate_limit_kbps,
                 *existing_policy,
                 resume_token_hash,
+                cancel_token,
             ),
         )
         .await
@@ -234,7 +235,14 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             resume_token_hash,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            execute_file_transfer_chunk(job_id, *session_id, *offset, chunk, resume_token_hash),
+            execute_file_transfer_chunk(
+                job_id,
+                *session_id,
+                *offset,
+                chunk,
+                resume_token_hash,
+                cancel_token,
+            ),
         )
         .await
         .context("file transfer chunk timed out")?,
@@ -243,7 +251,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             resume_token_hash,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            execute_file_transfer_commit(job_id, *session_id, resume_token_hash),
+            execute_file_transfer_commit(job_id, *session_id, resume_token_hash, cancel_token),
         )
         .await
         .context("file transfer commit timed out")?,
@@ -252,7 +260,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             resume_token_hash,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            execute_file_transfer_abort(job_id, *session_id, resume_token_hash),
+            execute_file_transfer_abort(job_id, *session_id, resume_token_hash, cancel_token),
         )
         .await
         .context("file transfer abort timed out")?,
@@ -271,6 +279,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 *chunk_size_bytes,
                 *rate_limit_kbps,
                 resume_token_hash,
+                cancel_token,
             ),
         )
         .await
@@ -288,6 +297,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 *offset,
                 *max_bytes,
                 resume_token_hash,
+                cancel_token,
             ),
         )
         .await
