@@ -172,6 +172,7 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-user-mode".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),

@@ -15,16 +15,16 @@ use crate::{
 };
 
 #[derive(Clone)]
-// Tests construct the memory repository directly in many modules, and MemoryState
-// already stores clone-cheap Arc-backed collections. Boxing the variant would add
-// broad test churn without reducing runtime allocation pressure in production.
+// Unit tests construct this fixture repository directly in many modules, and
+// MemoryState already stores clone-cheap Arc-backed collections. Boxing the
+// variant would add broad test churn without reducing production allocation pressure.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Repository {
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "memory repository is retained for unit tests and is not runtime-selectable"
+            reason = "unit-test fixture repository is constructed only by tests"
         )
     )]
     Memory(MemoryState),

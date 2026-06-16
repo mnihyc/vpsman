@@ -101,6 +101,7 @@ CREATE TABLE job_targets (
     completed_at TIMESTAMPTZ,
     dispatch_attempts INTEGER NOT NULL DEFAULT 0,
     dispatch_lease_until TIMESTAMPTZ,
+    process_incarnation_id UUID,
     delivered_at TIMESTAMPTZ,
     acked_at TIMESTAMPTZ,
     deadline_at TIMESTAMPTZ,
@@ -118,6 +119,7 @@ CREATE TABLE job_targets (
         'skipped',
         'rejected',
         'failed',
+        'agent_lost',
         'agent_timeout',
         'control_timeout',
         'canceled'

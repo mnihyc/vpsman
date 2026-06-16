@@ -142,7 +142,7 @@ pub(crate) async fn test_auth_context_and_headers(state: &AppState) -> (AuthCont
     if let Repository::Memory(memory) = &state.repo {
         memory.operators.write().await.push(operator.clone());
     } else {
-        panic!("test_auth_context_and_headers currently supports the memory repository");
+        panic!("test_auth_context_and_headers currently supports the unit-test repository fixture");
     }
     let auth = state
         .repo
@@ -913,6 +913,8 @@ mod tests_network_telemetry;
 mod tests_network_telemetry_promotion;
 #[cfg(test)]
 mod tests_object_store;
+#[cfg(test)]
+mod tests_postgres_reliability;
 #[cfg(test)]
 mod tests_process;
 #[cfg(test)]

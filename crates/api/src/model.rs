@@ -65,6 +65,7 @@ pub(crate) struct AgentView {
     pub(crate) last_ip: Option<String>,
     pub(crate) last_seen_at: Option<String>,
     pub(crate) internal_build_number: u64,
+    pub(crate) process_incarnation_id: Option<Uuid>,
     pub(crate) stale_since: Option<String>,
     pub(crate) stale_reason: Option<String>,
     pub(crate) capabilities: AgentCapabilitySnapshot,
@@ -223,6 +224,7 @@ pub(crate) struct JobTargetView {
     pub(crate) exit_code: Option<i32>,
     pub(crate) started_at: Option<String>,
     pub(crate) completed_at: Option<String>,
+    pub(crate) process_incarnation_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -890,6 +892,7 @@ pub(crate) struct CreateJobTargetCounts {
     pub(crate) skipped: usize,
     pub(crate) rejected: usize,
     pub(crate) failed: usize,
+    pub(crate) agent_lost: usize,
     pub(crate) agent_timeout: usize,
     pub(crate) control_timeout: usize,
     pub(crate) canceled: usize,

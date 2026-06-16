@@ -104,31 +104,44 @@ async fn process_queued_deliveries(
     pool: &PgPool,
     config: AlertNotificationWorkerConfig,
 ) -> Result<(usize, usize, usize)> {
-    let mut tx = pool.begin().await?;
+    let lease_id = Uuid::new_v4();
+    let lease_secs = delivery_lease_secs(config.delivery_limit, config.webhook_timeout_secs);
     let rows = sqlx::query(
         r#"
-        SELECT
-            id,
-            channel_id,
-            channel_name,
-            alert_id,
-            alert_severity,
-            alert_category,
-            delivery_kind,
-            target,
-            dedupe_key,
-            payload,
-            attempt_count,
-            created_at::text AS created_at
-        FROM fleet_alert_notification_deliveries
-        WHERE status = 'queued'
-        ORDER BY created_at ASC, id ASC
-        LIMIT $1
-        FOR UPDATE SKIP LOCKED
+        WITH claim AS (
+            SELECT id
+            FROM fleet_alert_notification_deliveries
+            WHERE status = 'queued'
+               OR (status = 'in_progress' AND delivery_lease_until < now())
+            ORDER BY created_at ASC, id ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE fleet_alert_notification_deliveries delivery
+        SET status = 'in_progress',
+            delivery_lease_id = $2,
+            delivery_lease_until = now() + make_interval(secs => $3::integer)
+        FROM claim
+        WHERE delivery.id = claim.id
+        RETURNING
+            delivery.id,
+            delivery.channel_id,
+            delivery.channel_name,
+            delivery.alert_id,
+            delivery.alert_severity,
+            delivery.alert_category,
+            delivery.delivery_kind,
+            delivery.target,
+            delivery.dedupe_key,
+            delivery.payload,
+            delivery.attempt_count,
+            delivery.created_at::text AS created_at
         "#,
     )
     .bind(config.delivery_limit)
-    .fetch_all(&mut *tx)
+    .bind(lease_id)
+    .bind(lease_secs)
+    .fetch_all(pool)
     .await?;
 
     let client = webhook_client(config.webhook_timeout_secs)?;
@@ -143,44 +156,49 @@ async fn process_queued_deliveries(
                 Some(truncate_error(&error.to_string())),
             ),
         };
-        let next_attempt_count = delivery.attempt_count.saturating_add(1);
         let updated = sqlx::query(
             r#"
             UPDATE fleet_alert_notification_deliveries
             SET
                 status = $2,
                 error = $3,
-                attempt_count = $4,
+                attempt_count = attempt_count + 1,
                 last_attempt_at = now(),
-                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END
+                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+                delivery_lease_id = NULL,
+                delivery_lease_until = NULL
             WHERE id = $1
-              AND status = 'queued'
+              AND status = 'in_progress'
+              AND delivery_lease_id = $4
+            RETURNING attempt_count
             "#,
         )
         .bind(delivery.id)
         .bind(status)
         .bind(error.as_deref())
-        .bind(next_attempt_count)
-        .execute(&mut *tx)
+        .bind(lease_id)
+        .fetch_optional(pool)
         .await?;
-        if updated.rows_affected() == 0 {
+        let Some(updated) = updated else {
             continue;
-        }
+        };
+        let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
         outcomes.push(DeliveryOutcome {
             id: delivery.id,
             channel_id: delivery.channel_id,
             alert_id: delivery.alert_id,
             status: status.to_string(),
             delivery_kind: delivery.delivery_kind,
-            attempt_count: next_attempt_count,
+            attempt_count: recorded_attempt_count,
             error,
         });
     }
 
     if !outcomes.is_empty() {
+        let mut tx = pool.begin().await?;
         insert_process_audit(&mut tx, &outcomes).await?;
+        tx.commit().await?;
     }
-    tx.commit().await?;
 
     let delivered = outcomes
         .iter()
@@ -188,6 +206,15 @@ async fn process_queued_deliveries(
         .count();
     let failed = outcomes.len().saturating_sub(delivered);
     Ok((outcomes.len(), delivered, failed))
+}
+
+fn delivery_lease_secs(limit: i64, webhook_timeout_secs: u64) -> i32 {
+    let per_attempt = i64::try_from(webhook_timeout_secs).unwrap_or(i64::MAX);
+    limit
+        .clamp(1, 200)
+        .saturating_mul(per_attempt.clamp(1, 60))
+        .saturating_add(60)
+        .clamp(60, i32::MAX as i64) as i32
 }
 
 async fn deliver_notification(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {

@@ -99,11 +99,12 @@ pub const TARGET_STATUS_COMPLETED: &str = "completed";
 pub const TARGET_STATUS_SKIPPED: &str = "skipped";
 pub const TARGET_STATUS_REJECTED: &str = "rejected";
 pub const TARGET_STATUS_FAILED: &str = "failed";
+pub const TARGET_STATUS_AGENT_LOST: &str = "agent_lost";
 pub const TARGET_STATUS_AGENT_TIMEOUT: &str = "agent_timeout";
 pub const TARGET_STATUS_CONTROL_TIMEOUT: &str = "control_timeout";
 pub const TARGET_STATUS_CANCELED: &str = "canceled";
 
-pub const JOB_TARGET_STATUSES: [&str; 10] = [
+pub const JOB_TARGET_STATUSES: [&str; 11] = [
     TARGET_STATUS_QUEUED,
     TARGET_STATUS_DISPATCHING,
     TARGET_STATUS_RUNNING,
@@ -111,16 +112,18 @@ pub const JOB_TARGET_STATUSES: [&str; 10] = [
     TARGET_STATUS_SKIPPED,
     TARGET_STATUS_REJECTED,
     TARGET_STATUS_FAILED,
+    TARGET_STATUS_AGENT_LOST,
     TARGET_STATUS_AGENT_TIMEOUT,
     TARGET_STATUS_CONTROL_TIMEOUT,
     TARGET_STATUS_CANCELED,
 ];
 
-pub const JOB_TARGET_TERMINAL_STATUSES: [&str; 7] = [
+pub const JOB_TARGET_TERMINAL_STATUSES: [&str; 8] = [
     TARGET_STATUS_COMPLETED,
     TARGET_STATUS_SKIPPED,
     TARGET_STATUS_REJECTED,
     TARGET_STATUS_FAILED,
+    TARGET_STATUS_AGENT_LOST,
     TARGET_STATUS_AGENT_TIMEOUT,
     TARGET_STATUS_CONTROL_TIMEOUT,
     TARGET_STATUS_CANCELED,
@@ -151,7 +154,7 @@ pub const JOB_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
     (JOB_STATUS_CANCELED, JOB_STATUS_CLASS_UNSUCCESSFUL),
 ];
 
-pub const JOB_TARGET_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
+pub const JOB_TARGET_STATUS_CLASS_BY_STATUS: [(&str, &str); 11] = [
     (TARGET_STATUS_QUEUED, JOB_TARGET_STATUS_CLASS_IN_PROGRESS),
     (
         TARGET_STATUS_DISPATCHING,
@@ -162,6 +165,10 @@ pub const JOB_TARGET_STATUS_CLASS_BY_STATUS: [(&str, &str); 10] = [
     (TARGET_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASS_SKIPPED),
     (TARGET_STATUS_REJECTED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
     (TARGET_STATUS_FAILED, JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL),
+    (
+        TARGET_STATUS_AGENT_LOST,
+        JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
+    ),
     (
         TARGET_STATUS_AGENT_TIMEOUT,
         JOB_TARGET_STATUS_CLASS_UNSUCCESSFUL,
@@ -259,35 +266,40 @@ pub const SERVER_JOB_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("canceled", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("in_progress", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("matched_dry_run", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 3] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("in_progress", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
+pub const WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS: [(&str, &str); 6] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("in_progress", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("permanently_failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("matched_dry_run", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
+pub const WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("in_progress", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("permanently_failed", WORKFLOW_STATUS_CLASS_WARNING),
     ("delivered", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
 ];
 
-pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 3] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
+    ("in_progress", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
@@ -543,6 +555,7 @@ pub enum JobTargetStatus {
     Skipped,
     Rejected,
     Failed,
+    AgentLost,
     AgentTimeout,
     ControlTimeout,
     Canceled,
@@ -558,6 +571,7 @@ impl JobTargetStatus {
             Self::Skipped => TARGET_STATUS_SKIPPED,
             Self::Rejected => TARGET_STATUS_REJECTED,
             Self::Failed => TARGET_STATUS_FAILED,
+            Self::AgentLost => TARGET_STATUS_AGENT_LOST,
             Self::AgentTimeout => TARGET_STATUS_AGENT_TIMEOUT,
             Self::ControlTimeout => TARGET_STATUS_CONTROL_TIMEOUT,
             Self::Canceled => TARGET_STATUS_CANCELED,
@@ -573,6 +587,7 @@ impl JobTargetStatus {
             TARGET_STATUS_SKIPPED => Some(Self::Skipped),
             TARGET_STATUS_REJECTED => Some(Self::Rejected),
             TARGET_STATUS_FAILED => Some(Self::Failed),
+            TARGET_STATUS_AGENT_LOST => Some(Self::AgentLost),
             TARGET_STATUS_AGENT_TIMEOUT => Some(Self::AgentTimeout),
             TARGET_STATUS_CONTROL_TIMEOUT => Some(Self::ControlTimeout),
             TARGET_STATUS_CANCELED => Some(Self::Canceled),
@@ -587,6 +602,7 @@ impl JobTargetStatus {
             Self::Skipped => JobTargetStatusClass::Skipped,
             Self::Rejected
             | Self::Failed
+            | Self::AgentLost
             | Self::AgentTimeout
             | Self::ControlTimeout
             | Self::Canceled => JobTargetStatusClass::Unsuccessful,
@@ -889,6 +905,7 @@ fn default_agent_command_timeout_secs() -> u64 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentHello {
     pub client_id: String,
+    pub process_incarnation_id: Uuid,
     pub agent_version: String,
     #[serde(default = "default_internal_build_number")]
     pub internal_build_number: u64,
@@ -980,6 +997,8 @@ pub struct GatewaySessionLifecycleIngest {
 pub struct GatewayCommandDispatch {
     pub client_id: String,
     pub request: JobRequest,
+    pub expected_process_incarnation_id: Uuid,
+    pub payload_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1055,6 +1074,8 @@ pub struct GatewayForwardDropReasonCounters {
     pub expired: u64,
     #[serde(default)]
     pub coalesced: u64,
+    #[serde(default)]
+    pub protocol_conflict: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1755,27 +1776,32 @@ pub const SERVER_JOB_STATUSES: &[&str] = &[
 ];
 
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED: &str = "queued";
+pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS: &str = "in_progress";
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED: &str = "failed";
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED: &str = "delivered";
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN: &str = "matched_dry_run";
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES: &[&str] = &[
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN,
 ];
 pub const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES: &[&str] = &[
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
 ];
 
 pub const WEBHOOK_RULE_DELIVERY_STATUS_QUEUED: &str = "queued";
+pub const WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS: &str = "in_progress";
 pub const WEBHOOK_RULE_DELIVERY_STATUS_FAILED: &str = "failed";
 pub const WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED: &str = "permanently_failed";
 pub const WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED: &str = "delivered";
 pub const WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN: &str = "matched_dry_run";
 pub const WEBHOOK_RULE_DELIVERY_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
@@ -1783,12 +1809,14 @@ pub const WEBHOOK_RULE_DELIVERY_STATUSES: &[&str] = &[
 ];
 pub const WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
 ];
 pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
 ];
 

@@ -12,6 +12,7 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -84,6 +85,7 @@ async fn memory_tag_order_controls_registry_and_agent_tag_reads() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -139,6 +141,7 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
             remote_ip: Some("203.0.113.10".to_string()),
             hello: AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 internal_build_number: build,
                 os_release: "test".to_string(),
@@ -196,6 +199,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-delete".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -338,6 +342,7 @@ async fn rejected_job_records_frozen_target_results() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -405,6 +410,7 @@ async fn rejected_job_freezes_tag_targets() {
                 &memory.agents,
                 &AgentHello {
                     client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
                     agent_version: "test".to_string(),
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
@@ -1493,7 +1499,7 @@ async fn record_memory_dispatch_job(
     };
     if let Some(command_type) = command_type_override {
         let Repository::Memory(memory) = repo else {
-            unreachable!("test uses memory repository");
+            unreachable!("test uses the unit-test repository fixture");
         };
         let mut jobs = memory.jobs.write().await;
         let job = jobs

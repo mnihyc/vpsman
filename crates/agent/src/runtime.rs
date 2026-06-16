@@ -60,6 +60,7 @@ pub(crate) async fn run_agent(
         priority: 0,
     });
     let mut command_runtime = AgentCommandRuntime::default();
+    let process_incarnation_id = uuid::Uuid::new_v4();
     match reconcile_supervised_processes_on_start().await {
         Ok(report) => log_supervisor_startup_reconcile(&report),
         Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
@@ -82,6 +83,7 @@ pub(crate) async fn run_agent(
                 &config_path,
                 &endpoint.tcp_addr,
                 &mut command_runtime,
+                process_incarnation_id,
             )
             .await
             {
@@ -111,6 +113,7 @@ async fn connect_and_stream(
     config_path: &Path,
     endpoint: &str,
     command_runtime: &mut AgentCommandRuntime,
+    process_incarnation_id: uuid::Uuid,
 ) -> Result<()> {
     info!(%endpoint, "connecting to gateway");
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
@@ -118,6 +121,7 @@ async fn connect_and_stream(
 
     let hello = AgentHello {
         client_id: config.client_id.clone(),
+        process_incarnation_id,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
         internal_build_number: crate::build_info::agent_build_number(),
         os_release: config

@@ -7,8 +7,8 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools awk base64 chmod cmp curl docker grep jq openssl sed sha256sum stat
 smoke_build_binaries
-if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build -p vpsman-agent --release
+if [[ -z "${VPSMAN_AGENT_UPDATE_ARTIFACT_BIN:-}" ]]; then
+  cargo build -p vpsman-agent --release >/dev/null
 fi
 smoke_init_tmpdir "vpsman-live-agent-update"
 
@@ -58,15 +58,15 @@ mkdir -p "$artifact_dir"
 
 cp target/debug/vpsman-agent "$agent_bin"
 chmod 0755 "$agent_bin"
-release_agent_bin="${VPSMAN_AGENT_UPDATE_ARTIFACT_BIN:-target/release/vpsman-agent}"
-if [[ ! -x "$release_agent_bin" && -x target/x86_64-unknown-linux-musl/release/vpsman-agent ]]; then
-  release_agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
+artifact_agent_bin="${VPSMAN_AGENT_UPDATE_ARTIFACT_BIN:-target/release/vpsman-agent}"
+if [[ ! -x "$artifact_agent_bin" && -x target/x86_64-unknown-linux-musl/release/vpsman-agent ]]; then
+  artifact_agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
 fi
-if [[ ! -x "$release_agent_bin" ]]; then
-  echo "missing release agent artifact: $release_agent_bin" >&2
+if [[ ! -x "$artifact_agent_bin" ]]; then
+  echo "missing agent update artifact: $artifact_agent_bin" >&2
   exit 1
 fi
-cp "$release_agent_bin" "$artifact_file"
+cp "$artifact_agent_bin" "$artifact_file"
 printf '\n# vpsman direct update artifact %s\n' "$(date +%s%N)" >>"$artifact_file"
 chmod 0755 "$artifact_file"
 artifact_sha="$(sha256sum "$artifact_file" | awk '{print $1}')"
@@ -246,7 +246,7 @@ wait_job_terminal() {
     job_json="$(api_get "/api/v1/jobs/$job_id")"
     status="$(jq -r '.status' <<<"$job_json")"
     case "$status" in
-      completed|partial_success|partial_success|failed|agent_timeout|control_timeout|skipped|rejected|canceled)
+      completed|partial_success|partial_success|failed|agent_lost|agent_timeout|control_timeout|skipped|rejected|canceled)
         printf '%s' "$job_json"
         return
         ;;

@@ -215,11 +215,13 @@ CREATE TABLE fleet_alert_notification_deliveries (
     error TEXT,
     cooldown_until_unix BIGINT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    delivery_lease_id UUID,
+    delivery_lease_until TIMESTAMPTZ,
     last_attempt_at TIMESTAMPTZ,
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at TIMESTAMPTZ,
-    CHECK (status IN ('queued', 'failed', 'delivered', 'matched_dry_run')),
+    CHECK (status IN ('queued', 'in_progress', 'failed', 'delivered', 'matched_dry_run')),
     CHECK (alert_severity IN ('info', 'warning', 'critical')),
     CHECK (cooldown_until_unix >= 0)
 );
@@ -260,6 +262,14 @@ CREATE TABLE webhook_rules (
     CHECK (cooldown_secs >= 0 AND cooldown_secs <= 2592000),
     CHECK (notes IS NULL OR length(notes) <= 1024)
 );
+
+CREATE INDEX fleet_alert_notification_deliveries_lease_idx
+    ON fleet_alert_notification_deliveries (
+        status,
+        delivery_lease_until,
+        delivery_kind,
+        created_at ASC
+    );
 
 CREATE INDEX webhook_rules_enabled_idx
     ON webhook_rules (enabled, updated_at DESC, name);
@@ -305,12 +315,14 @@ CREATE TABLE webhook_rule_deliveries (
     error TEXT,
     cooldown_until_unix BIGINT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    delivery_lease_id UUID,
+    delivery_lease_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
     last_attempt_at TIMESTAMPTZ,
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at TIMESTAMPTZ,
-    CHECK (status IN ('queued', 'failed', 'permanently_failed', 'delivered', 'matched_dry_run')),
+    CHECK (status IN ('queued', 'in_progress', 'failed', 'permanently_failed', 'delivered', 'matched_dry_run')),
     CHECK (length(trim(event_kind)) BETWEEN 1 AND 128),
     CHECK (length(trim(event_id)) BETWEEN 1 AND 256),
     CHECK (length(trim(target)) BETWEEN 1 AND 512),
@@ -336,6 +348,14 @@ CREATE INDEX webhook_rule_deliveries_dedupe_idx
 
 CREATE INDEX webhook_rule_deliveries_attempt_idx
     ON webhook_rule_deliveries (status, next_attempt_at ASC, created_at ASC);
+
+CREATE INDEX webhook_rule_deliveries_lease_idx
+    ON webhook_rule_deliveries (
+        status,
+        delivery_lease_until,
+        next_attempt_at ASC,
+        created_at ASC
+    );
 
 CREATE TABLE webhook_rule_cursors (
     rule_id UUID NOT NULL REFERENCES webhook_rules(id) ON DELETE CASCADE,

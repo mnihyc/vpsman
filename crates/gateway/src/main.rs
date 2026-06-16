@@ -789,6 +789,7 @@ async fn handle_agent_frame(
                 hello.client_id.clone(),
                 GatewaySession {
                     session_id: context.session_id,
+                    process_incarnation_id: hello.process_incarnation_id,
                     sender: context.command_tx.clone(),
                 },
             );
@@ -1053,13 +1054,16 @@ mod tests {
             "client-a".to_string(),
             GatewaySession {
                 session_id: older_session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 sender: older_tx,
             },
         );
+        let newer_process_incarnation_id = uuid::Uuid::new_v4();
         state.sessions.write().await.insert(
             "client-a".to_string(),
             GatewaySession {
                 session_id: newer_session_id,
+                process_incarnation_id: newer_process_incarnation_id,
                 sender: newer_tx,
             },
         );

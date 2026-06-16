@@ -101,6 +101,7 @@ async fn seeded_migration_repo() -> Repository {
                 &memory.agents,
                 &AgentHello {
                     client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
                     agent_version: "test".to_string(),
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),

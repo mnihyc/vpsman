@@ -359,7 +359,7 @@ smoke_assert_job_create_queued() {
     and .target_counts.total == $expected_targets
     and (
       .target_counts
-      | (.queued + .dispatching + .running + .completed + .skipped + .rejected + .failed + .agent_timeout + .control_timeout + .canceled) == .total
+      | (.queued + .dispatching + .running + .completed + .skipped + .rejected + .failed + .agent_lost + .agent_timeout + .control_timeout + .canceled) == .total
     )
     and (
       .status == "queued"
@@ -367,6 +367,7 @@ smoke_assert_job_create_queued() {
       or .status == "completed"
       or .status == "partial_success"
       or .status == "failed"
+      or .status == "agent_lost"
       or .status == "agent_timeout"
       or .status == "control_timeout"
       or .status == "skipped"

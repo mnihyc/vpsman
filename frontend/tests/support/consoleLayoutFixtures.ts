@@ -1957,6 +1957,7 @@ export async function installConsoleApiMock(page: Page) {
       const originalFetch = window.fetch.bind(window);
       const targetCountsFromStatuses = (statuses: string[]) => {
         const counts = {
+          agent_lost: 0,
           agent_timeout: 0,
           canceled: 0,
           completed: 0,

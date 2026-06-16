@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::anyhow;
 use axum::{
     extract::{Path, State},
@@ -13,10 +15,10 @@ use vpsman_common::{
 };
 use vpsman_server_core::{
     CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_QUEUED, JOB_STATUS_REJECTED,
-    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
-    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
-    TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
-    TARGET_STATUS_SKIPPED,
+    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
+    TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
 };
 
 use crate::{
@@ -297,7 +299,17 @@ async fn create_job_inner(
         &resolved_agents,
         request.force_unprivileged,
     );
-    if !dispatch_targets.is_empty() && !state.gateway.configured() {
+    let busy_update_skips =
+        busy_update_skip_targets(state, job_id, &job_command, &dispatch_targets).await?;
+    let busy_update_skip_set = busy_update_skips
+        .iter()
+        .map(|skip| skip.client_id.as_str())
+        .collect::<HashSet<_>>();
+    let dispatch_targets_after_precomplete = dispatch_targets
+        .iter()
+        .filter(|client_id| !busy_update_skip_set.contains(client_id.as_str()))
+        .count();
+    if dispatch_targets_after_precomplete > 0 && !state.gateway.configured() {
         return reject_job(
             state,
             job_id,
@@ -339,6 +351,7 @@ async fn create_job_inner(
             .await?
     };
     precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
+    precomplete_busy_update_skips(state, job_id, &job_command, busy_update_skips).await?;
     let status = state
         .repo
         .refresh_job_status_from_targets(job_id)
@@ -355,6 +368,42 @@ async fn create_job_inner(
             target_counts,
         }),
     ))
+}
+
+#[derive(Clone, Debug)]
+struct BusyUpdateSkip {
+    client_id: String,
+}
+
+async fn busy_update_skip_targets(
+    state: &AppState,
+    job_id: Uuid,
+    job_command: &JobCommand,
+    dispatch_targets: &[String],
+) -> Result<Vec<BusyUpdateSkip>, ApiError> {
+    if !is_update_lifecycle_command(job_command) || dispatch_targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let active_clients = state
+        .repo
+        .active_job_target_client_ids(dispatch_targets, job_id)
+        .await?;
+    Ok(dispatch_targets
+        .iter()
+        .filter(|client_id| active_clients.contains(*client_id))
+        .cloned()
+        .map(|client_id| BusyUpdateSkip { client_id })
+        .collect())
+}
+
+fn is_update_lifecycle_command(command: &JobCommand) -> bool {
+    matches!(
+        command,
+        JobCommand::UpdateAgent { .. }
+            | JobCommand::AgentUpdateActivate { .. }
+            | JobCommand::AgentUpdateRollback { .. }
+            | JobCommand::AgentUpdateCheck { .. }
+    )
 }
 
 fn confirmation_error_code(command: &JobCommand) -> &'static str {
@@ -447,6 +496,7 @@ async fn create_job_target_counts(
         skipped: 0,
         rejected: 0,
         failed: 0,
+        agent_lost: 0,
         agent_timeout: 0,
         control_timeout: 0,
         canceled: 0,
@@ -460,6 +510,7 @@ async fn create_job_target_counts(
             TARGET_STATUS_SKIPPED => counts.skipped += 1,
             TARGET_STATUS_REJECTED => counts.rejected += 1,
             TARGET_STATUS_FAILED => counts.failed += 1,
+            TARGET_STATUS_AGENT_LOST => counts.agent_lost += 1,
             TARGET_STATUS_AGENT_TIMEOUT => counts.agent_timeout += 1,
             TARGET_STATUS_CONTROL_TIMEOUT => counts.control_timeout += 1,
             TARGET_STATUS_CANCELED => counts.canceled += 1,
@@ -500,7 +551,6 @@ async fn precomplete_capability_skips(
     let mut precompleted_statuses = Vec::new();
     for skip in capability_skips {
         let outcome = capability_degraded_outcome(job_id, &skip, job_command)?;
-        precompleted_statuses.push(outcome.status.clone());
         state
             .repo
             .record_job_outputs_with_config(
@@ -513,18 +563,57 @@ async fn precomplete_capability_skips(
                 },
             )
             .await?;
-        state
+        let target_terminalized = state
             .repo
             .update_job_target_result(job_id, &skip.client_id, &outcome)
             .await?;
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id,
-            client_id: skip.client_id,
-            seq: 0,
-            done: true,
-        });
+        if target_terminalized {
+            precompleted_statuses.push(outcome.status.clone());
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id,
+                client_id: skip.client_id,
+                seq: 0,
+                done: true,
+            });
+        }
     }
     Ok(precompleted_statuses)
+}
+
+async fn precomplete_busy_update_skips(
+    state: &AppState,
+    job_id: Uuid,
+    job_command: &JobCommand,
+    busy_skips: Vec<BusyUpdateSkip>,
+) -> Result<(), ApiError> {
+    for skip in busy_skips {
+        let outcome = busy_update_skip_outcome(job_id, &skip, job_command)?;
+        state
+            .repo
+            .record_job_outputs_with_config(
+                job_id,
+                &skip.client_id,
+                &outcome.outputs,
+                JobOutputPersistConfig {
+                    object_store: state.backup_object_store.as_ref(),
+                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
+                },
+            )
+            .await?;
+        let target_terminalized = state
+            .repo
+            .update_job_target_result(job_id, &skip.client_id, &outcome)
+            .await?;
+        if target_terminalized {
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id,
+                client_id: skip.client_id,
+                seq: 0,
+                done: true,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -649,6 +738,37 @@ fn capability_degraded_outcome(
         command_version: None,
         accepted: false,
         message: skip.failure.message.to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            exit_code: Some(0),
+            done: true,
+        }],
+    })
+}
+
+fn busy_update_skip_outcome(
+    job_id: Uuid,
+    skip: &BusyUpdateSkip,
+    command: &JobCommand,
+) -> Result<TargetDispatchOutcome, ApiError> {
+    let status = serde_json::json!({
+        "type": "busy_update_skipped",
+        "status": TARGET_STATUS_SKIPPED,
+        "client_id": skip.client_id,
+        "command_type": crate::job_request::job_command_type_label(command),
+        "reason": "target_has_another_active_job",
+        "hint": "update command was not dispatched because the client already has another active job target",
+    });
+    Ok(TargetDispatchOutcome {
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
+        command_version: None,
+        accepted: true,
+        message: "target has another active job; update skipped".to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

@@ -14,6 +14,7 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
                 &memory.agents,
                 &AgentHello {
                     client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
                     agent_version: "test".to_string(),
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
@@ -109,6 +110,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -263,6 +265,7 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
                 &memory.agents,
                 &AgentHello {
                     client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
                     agent_version: "test".to_string(),
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
@@ -422,6 +425,7 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
                 &memory.agents,
                 &AgentHello {
                     client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
                     agent_version: "test".to_string(),
                     os_release: "test".to_string(),
                     arch: "x86_64".to_string(),
@@ -495,6 +499,7 @@ async fn data_source_hot_config_renders_selected_presets() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -659,6 +664,7 @@ async fn data_source_hot_config_rejects_unsafe_migrated_preset_commands() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -720,6 +726,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -741,6 +748,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -961,6 +969,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -974,6 +983,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
             &memory.agents,
             &AgentHello {
                 client_id: "edge-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),

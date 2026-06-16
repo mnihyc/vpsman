@@ -92,10 +92,12 @@ operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.
 The API adds dispatch/event grace through `timeout.control_deadline_grace_secs`,
-and the gateway keeps command-output forwarding RAM-first with overflow and
+and the gateway keeps forwarder delivery RAM-first with overflow and
 graceful-shutdown spool settings under `[gateway]` in
-`deploy/config/vpsman.toml`. Spool replay reconciles command-output ACKs with
-the API before reposting saved events. Active operator cancellation interrupts
+`deploy/config/vpsman.toml`. Controlled shutdown defers pending forwarder
+events to the spool; hard crashes before RAM-resident events are spooled remain
+a residual loss boundary. Spool replay reconciles command-output ACKs with the
+API before reposting saved command-output events. Active operator cancellation interrupts
 agent shell/script/PTY children and long-running backup, restore, network, and
 terminal operations; canceled targets become terminal only after the agent sends
 structured `command_canceled` output. Resumable file-transfer steps use the
@@ -106,7 +108,7 @@ stdout/status. Command-output retry retention defaults to 24 hours and can be
 tuned with
 `[gateway].command_output_event_ttl_secs` or
 `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS`; this remains a best-effort
-gateway spool, not an end-to-end gateway-agent ACK protocol.
+gateway forwarder spool, not an end-to-end gateway-agent ACK protocol.
 
 The compose template publishes only Nginx on all host interfaces. API and
 gateway host ports are bound to `127.0.0.1` by default, and gateway control uses

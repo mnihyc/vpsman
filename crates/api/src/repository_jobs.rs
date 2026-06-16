@@ -1,19 +1,22 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use base64::Engine as _;
 use chrono::{Duration, Utc};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
-    job_command_safety, job_command_safety_by_operation_type, JobCommand, JobCommandSafety,
-    JOB_COMMAND_SAFETY_EXCLUSIVE,
+    job_command_safety, job_command_safety_by_operation_type, payload_hash, JobCommand,
+    JobCommandSafety, JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED,
-    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED,
-    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
-    TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
+    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
+    TARGET_STATUS_RUNNING,
 };
 
 pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
@@ -23,6 +26,7 @@ const EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS: i32 = 0x5650_534d;
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
+use crate::repository_job_outputs::append_lock_keys;
 use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
 use crate::{unix_now, TargetDispatchOutcome};
 
@@ -33,6 +37,7 @@ fn agent_update_activation_failure_status(status: &str) -> bool {
             | TARGET_STATUS_REJECTED
             | TARGET_STATUS_AGENT_TIMEOUT
             | TARGET_STATUS_CONTROL_TIMEOUT
+            | TARGET_STATUS_AGENT_LOST
             | TARGET_STATUS_CANCELED
     )
 }
@@ -60,6 +65,137 @@ mod tests {
         assert!(exclusive.contains(&"network_apply"));
         assert!(!exclusive.contains(&"network_status"));
     }
+}
+
+fn agent_lost_status_output_value(
+    job_id: Uuid,
+    client_id: &str,
+    message: &str,
+    expected_process_incarnation_id: Option<Uuid>,
+    current_process_incarnation_id: Option<Uuid>,
+    code: &str,
+) -> serde_json::Value {
+    json!({
+        "type": "agent_lost",
+        "status": TARGET_STATUS_AGENT_LOST,
+        "code": code,
+        "message": message,
+        "job_id": job_id,
+        "client_id": client_id,
+        "previous_process_incarnation_id": expected_process_incarnation_id,
+        "process_incarnation_id": current_process_incarnation_id,
+        "expected_process_incarnation_id": expected_process_incarnation_id,
+        "current_process_incarnation_id": current_process_incarnation_id,
+    })
+}
+
+pub(crate) async fn append_synthetic_status_output_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    value: serde_json::Value,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    let data = serde_json::to_vec(&value)?;
+    let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(lock_a)
+        .bind(lock_b)
+        .execute(&mut **tx)
+        .await?;
+
+    for _ in 0..8 {
+        let next_seq: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(max(seq) + 1, 0)
+            FROM job_outputs
+            WHERE job_id = $1 AND client_id = $2
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO job_outputs (
+                job_id,
+                client_id,
+                seq,
+                stream,
+                data,
+                storage,
+                data_sha256_hex,
+                data_size_bytes,
+                exit_code,
+                done,
+                received_at
+            )
+            VALUES ($1, $2, $3, 'status', $4, 'inline', $5, $6, $7, true, now())
+            ON CONFLICT (job_id, client_id, seq)
+            DO NOTHING
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(next_seq)
+        .bind(&data)
+        .bind(payload_hash(&data))
+        .bind(data.len() as i64)
+        .bind(exit_code)
+        .execute(&mut **tx)
+        .await?;
+        if inserted.rows_affected() > 0 {
+            return Ok(());
+        }
+    }
+    bail!("agent_lost_output_sequence_conflict:{job_id}:{client_id}")
+}
+
+pub(crate) async fn append_synthetic_agent_lost_output_with_code_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    message: &str,
+    expected_process_incarnation_id: Option<Uuid>,
+    current_process_incarnation_id: Option<Uuid>,
+    code: &str,
+) -> Result<()> {
+    append_synthetic_status_output_in_tx(
+        tx,
+        job_id,
+        client_id,
+        agent_lost_status_output_value(
+            job_id,
+            client_id,
+            message,
+            expected_process_incarnation_id,
+            current_process_incarnation_id,
+            code,
+        ),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn append_synthetic_agent_lost_output_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    message: &str,
+    expected_process_incarnation_id: Option<Uuid>,
+    current_process_incarnation_id: Option<Uuid>,
+) -> Result<()> {
+    append_synthetic_agent_lost_output_with_code_in_tx(
+        tx,
+        job_id,
+        client_id,
+        message,
+        expected_process_incarnation_id,
+        current_process_incarnation_id,
+        "agent_process_restarted",
+    )
+    .await
 }
 
 fn compare_text_or_number(left: &str, right: &str) -> Ordering {
@@ -219,6 +355,7 @@ pub(crate) struct ClaimedJobTarget {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) command_type: String,
     pub(crate) payload_hash: String,
+    pub(crate) process_incarnation_id: Uuid,
     pub(crate) operation: JobCommand,
     pub(crate) source_schedule_id: Option<Uuid>,
     pub(crate) timeout_secs: u64,
@@ -228,6 +365,7 @@ pub(crate) struct ClaimedJobTarget {
 pub(crate) struct DeadlineExpiredJobTarget {
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
+    pub(crate) status: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -532,7 +670,8 @@ impl Repository {
                         message,
                         exit_code,
                         started_at::text AS started_at,
-                        completed_at::text AS completed_at
+                        completed_at::text AS completed_at,
+                        process_incarnation_id
                     FROM job_targets
                     WHERE job_id = $1
                     ORDER BY client_id
@@ -551,8 +690,55 @@ impl Repository {
                             exit_code: row.try_get("exit_code")?,
                             started_at: row.try_get("started_at")?,
                             completed_at: row.try_get("completed_at")?,
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
                         })
                     })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn active_job_target_client_ids(
+        &self,
+        client_ids: &[String],
+        exclude_job_id: Uuid,
+    ) -> Result<HashSet<String>> {
+        if client_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .job_targets
+                .read()
+                .await
+                .iter()
+                .filter(|target| target.job_id != exclude_job_id)
+                .filter(|target| target.completed_at.is_none())
+                .filter(|target| target_status_is_active(&target.status))
+                .filter(|target| {
+                    client_ids
+                        .iter()
+                        .any(|client_id| client_id == &target.client_id)
+                })
+                .map(|target| target.client_id.clone())
+                .collect()),
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT DISTINCT client_id
+                    FROM job_targets
+                    WHERE client_id = ANY($1::text[])
+                      AND job_id <> $2
+                      AND completed_at IS NULL
+                      AND status IN ('queued', 'dispatching', 'running')
+                    "#,
+                )
+                .bind(client_ids)
+                .bind(exclude_job_id)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| row.try_get("client_id").map_err(Into::into))
                     .collect()
             }
         }
@@ -748,6 +934,7 @@ impl Repository {
                                 exit_code: None,
                                 started_at: None,
                                 completed_at: Some(created_at.clone()),
+                                process_incarnation_id: None,
                             }),
                     );
                 memory.audits.write().await.push(AuditLogView {
@@ -954,6 +1141,7 @@ impl Repository {
                                 exit_code: None,
                                 started_at: None,
                                 completed_at: None,
+                                process_incarnation_id: None,
                             }),
                     );
                 memory.audits.write().await.push(AuditLogView {
@@ -1106,6 +1294,7 @@ impl Repository {
                         actor_id: job.actor_id,
                         command_type: job.command_type.clone(),
                         payload_hash: job.payload_hash.clone(),
+                        process_incarnation_id: Uuid::nil(),
                         operation,
                         source_schedule_id: source_schedule_ids.get(&target.job_id).copied(),
                         timeout_secs,
@@ -1140,21 +1329,31 @@ impl Repository {
                             job.payload_hash,
                             job.operation,
                             job.source_schedule_id,
-                            job.timeout_secs
+                            job.timeout_secs,
+                            clients.process_incarnation_id AS client_process_incarnation_id
                         FROM job_targets target
                         JOIN jobs job ON job.id = target.job_id
+                        JOIN clients ON clients.id = target.client_id
 	                        WHERE target.completed_at IS NULL
                               AND target.cancel_requested_at IS NULL
 	                          AND target.status IN ('queued', 'dispatching')
 	                          AND job.completed_at IS NULL
 	                          AND job.status IN ('queued', 'running')
+                              AND clients.hidden_at IS NULL
+                              AND clients.process_incarnation_id IS NOT NULL
                               AND (
-                                target.status = 'queued'
-                                OR target.deadline_at IS NULL
-                                OR target.deadline_at > now()
+                                (
+                                  target.status = 'queued'
+                                  AND target.started_at IS NULL
+                                  AND target.process_incarnation_id IS NULL
+                                )
                                 OR (
-                                  target.started_at IS NOT NULL
-                                  AND target.started_at + make_interval(secs => (job.timeout_secs + $5)::integer) > now()
+                                  target.status = 'dispatching'
+                                  AND target.started_at IS NOT NULL
+                                  AND target.process_incarnation_id IS NOT NULL
+                                  AND target.process_incarnation_id = clients.process_incarnation_id
+                                  AND target.deadline_at IS NOT NULL
+                                  AND target.deadline_at > now()
                                 )
                               )
                               AND (
@@ -1173,6 +1372,8 @@ impl Repository {
                                     WHERE active_target.client_id = target.client_id
                                       AND active_target.completed_at IS NULL
                                       AND active_target.status IN ('dispatching', 'running')
+                                      AND active_target.started_at IS NOT NULL
+                                      AND active_target.process_incarnation_id IS NOT NULL
                                       AND active_job.completed_at IS NULL
                                       AND COALESCE(active_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
@@ -1193,12 +1394,18 @@ impl Repository {
                                       AND earlier_job.status IN ('queued', 'running')
                                       AND COALESCE(earlier_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
-                                        earlier_target.status = 'queued'
-                                        OR earlier_target.deadline_at IS NULL
-                                        OR earlier_target.deadline_at > now()
+                                        (
+                                          earlier_target.status = 'queued'
+                                          AND earlier_target.started_at IS NULL
+                                          AND earlier_target.process_incarnation_id IS NULL
+                                        )
                                         OR (
-                                          earlier_target.started_at IS NOT NULL
-                                          AND earlier_target.started_at + make_interval(secs => (earlier_job.timeout_secs + $5)::integer) > now()
+                                          earlier_target.status = 'dispatching'
+                                          AND earlier_target.started_at IS NOT NULL
+                                          AND earlier_target.process_incarnation_id IS NOT NULL
+                                          AND earlier_target.process_incarnation_id = clients.process_incarnation_id
+                                          AND earlier_target.deadline_at IS NOT NULL
+                                          AND earlier_target.deadline_at > now()
                                         )
                                       )
                                       AND (
@@ -1232,14 +1439,17 @@ impl Repository {
                         SET
                             status = 'dispatching',
                             started_at = COALESCE(target.started_at, now()),
+                            process_incarnation_id = COALESCE(
+                                target.process_incarnation_id,
+                                due.client_process_incarnation_id
+                            ),
                             dispatch_attempts = target.dispatch_attempts + 1,
                             dispatch_lease_until = now() + make_interval(secs => $2::integer),
-                            deadline_at = CASE
-                                WHEN target.deadline_at IS NULL
-                                  OR target.deadline_at < now() + make_interval(secs => (due.timeout_secs + $5)::integer)
-                                THEN now() + make_interval(secs => (due.timeout_secs + $5)::integer)
-                                ELSE target.deadline_at
-                            END,
+                            deadline_at = COALESCE(
+                                target.deadline_at,
+                                COALESCE(target.started_at, now())
+                                    + make_interval(secs => (due.timeout_secs + $5)::integer)
+                            ),
                             last_dispatch_error = NULL
                         FROM due
                         WHERE target.job_id = due.job_id
@@ -1250,6 +1460,10 @@ impl Repository {
                             due.actor_id,
                             due.command_type,
                             due.payload_hash,
+                            COALESCE(
+                                target.process_incarnation_id,
+                                due.client_process_incarnation_id
+                            ) AS process_incarnation_id,
                             due.operation,
                             due.source_schedule_id,
                             due.timeout_secs
@@ -1272,6 +1486,7 @@ impl Repository {
                         updated_targets.actor_id,
                         updated_targets.command_type,
                         updated_targets.payload_hash,
+                        updated_targets.process_incarnation_id,
                         updated_targets.operation,
                         updated_targets.source_schedule_id,
                         updated_targets.timeout_secs,
@@ -1297,6 +1512,7 @@ impl Repository {
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
                             payload_hash: row.try_get("payload_hash")?,
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
                             operation: operation.0,
                             source_schedule_id: row.try_get("source_schedule_id")?,
                             timeout_secs,
@@ -1383,6 +1599,7 @@ impl Repository {
                     WHERE job_id = $1
                       AND client_id = $2
                       AND completed_at IS NULL
+                      AND status IN ('queued', 'dispatching', 'running')
                     "#,
                 )
                 .bind(job_id)
@@ -1436,6 +1653,187 @@ impl Repository {
         Ok(())
     }
 
+    pub(crate) async fn record_agent_lost_target(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+        expected_process_incarnation_id: Option<Uuid>,
+        observed_process_incarnation_id: Option<Uuid>,
+    ) -> Result<Option<String>> {
+        let outcome = TargetDispatchOutcome {
+            status: TARGET_STATUS_AGENT_LOST.to_string(),
+            exit_code: None,
+            #[cfg(test)]
+            command_version: None,
+            accepted: false,
+            message: message.to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        };
+        match self {
+            Self::Memory(memory) => {
+                let completed_at = unix_now().to_string();
+                let output_data = serde_json::to_vec(&agent_lost_status_output_value(
+                    job_id,
+                    client_id,
+                    message,
+                    expected_process_incarnation_id,
+                    observed_process_incarnation_id,
+                    "agent_process_restarted",
+                ))?;
+                let mut targets = memory.job_targets.write().await;
+                let Some(target) = targets.iter_mut().find(|target| {
+                    target.job_id == job_id
+                        && target.client_id == client_id
+                        && target.completed_at.is_none()
+                        && target_status_is_active(&target.status)
+                }) else {
+                    return Ok(None);
+                };
+                target.status = TARGET_STATUS_AGENT_LOST.to_string();
+                target.message = Some(message.to_string());
+                target.completed_at = Some(completed_at.clone());
+                target
+                    .started_at
+                    .get_or_insert_with(|| completed_at.clone());
+                drop(targets);
+                let seq = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
+                    .map(|output| output.seq)
+                    .max()
+                    .unwrap_or(-1)
+                    .saturating_add(1);
+                memory.job_outputs.write().await.push(JobOutputView {
+                    job_id,
+                    client_id: client_id.to_string(),
+                    seq,
+                    stream: "status".to_string(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(output_data),
+                    storage: "inline".to_string(),
+                    artifact_object_key: None,
+                    artifact_sha256_hex: None,
+                    artifact_size_bytes: None,
+                    exit_code: None,
+                    done: true,
+                    received_at: Some(completed_at.clone()),
+                    created_at: completed_at.clone(),
+                });
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: None,
+                    action: "job.target_result".to_string(),
+                    target: format!("client:{client_id}"),
+                    command_hash: None,
+                    metadata: json!({
+                        "job_id": job_id,
+                        "status": TARGET_STATUS_AGENT_LOST,
+                        "message": message,
+                        "expected_process_incarnation_id": expected_process_incarnation_id,
+                        "current_process_incarnation_id": observed_process_incarnation_id,
+                    }),
+                    created_at: completed_at,
+                });
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let target_row = sqlx::query(
+                    r#"
+                    SELECT process_incarnation_id
+                    FROM job_targets
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                      AND status IN ('queued', 'dispatching', 'running')
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(target_row) = target_row else {
+                    tx.commit().await?;
+                    return Ok(None);
+                };
+                let current_process_incarnation_id: Option<Uuid> =
+                    target_row.try_get("process_incarnation_id")?;
+                let evidence_process_incarnation_id =
+                    observed_process_incarnation_id.or(current_process_incarnation_id);
+                if let Some(expected) = expected_process_incarnation_id {
+                    if current_process_incarnation_id != Some(expected) {
+                        tx.commit().await?;
+                        return Ok(None);
+                    }
+                }
+                append_synthetic_agent_lost_output_in_tx(
+                    &mut tx,
+                    job_id,
+                    client_id,
+                    message,
+                    expected_process_incarnation_id,
+                    evidence_process_incarnation_id,
+                )
+                .await?;
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'agent_lost',
+                        message = $3,
+                        completed_at = now(),
+                        result_received_at = now(),
+                        dispatch_lease_until = NULL,
+                        cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                        last_dispatch_error = $3
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                      AND status IN ('queued', 'dispatching', 'running')
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(message)
+                .execute(&mut *tx)
+                .await?;
+                if updated.rows_affected() == 0 {
+                    tx.rollback().await?;
+                    return Ok(None);
+                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind("job.target_result")
+                .bind(format!("client:{client_id}"))
+                .bind(json!({
+                    "job_id": job_id,
+                    "status": TARGET_STATUS_AGENT_LOST,
+                    "message": message,
+                    "expected_process_incarnation_id": expected_process_incarnation_id,
+                    "target_process_incarnation_id": current_process_incarnation_id,
+                    "current_process_incarnation_id": evidence_process_incarnation_id,
+                }))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        let status = self.refresh_job_status_from_targets(job_id).await?;
+        self.record_job_target_webhook_event(job_id, client_id, &outcome)
+            .await?;
+        Ok(status)
+    }
+
     pub(crate) async fn expire_control_timeout_targets(
         &self,
         limit: i64,
@@ -1446,7 +1844,9 @@ impl Repository {
                 let now = unix_now();
                 let completed_at = now.to_string();
                 let timeouts = memory.job_timeouts.read().await.clone();
+                let operations = memory.job_operations.read().await.clone();
                 let mut expired = Vec::new();
+                let mut synthetic_outputs = Vec::new();
                 let mut targets = memory.job_targets.write().await;
                 for target in targets
                     .iter_mut()
@@ -1475,58 +1875,246 @@ impl Repository {
                     if now.saturating_sub(started_at) < timeout_secs {
                         continue;
                     }
-                    target.status = TARGET_STATUS_CONTROL_TIMEOUT.to_string();
-                    target.message =
-                        Some("control deadline elapsed before final command output".to_string());
+                    let (status, message, output_value, exit_code) = if matches!(
+                        operations.get(&target.job_id),
+                        Some(JobCommand::AgentUpdateActivate {
+                            restart_agent: true,
+                            ..
+                        })
+                    ) {
+                        let message = "agent update activation restart did not reconnect with matching heartbeat before deadline".to_string();
+                        (
+                            TARGET_STATUS_AGENT_LOST,
+                            message.clone(),
+                            agent_lost_status_output_value(
+                                target.job_id,
+                                &target.client_id,
+                                &message,
+                                target.process_incarnation_id,
+                                None,
+                                "agent_update_restart_missing_heartbeat",
+                            ),
+                            None,
+                        )
+                    } else {
+                        let message =
+                            "control deadline elapsed before final command output".to_string();
+                        (
+                            TARGET_STATUS_CONTROL_TIMEOUT,
+                            message.clone(),
+                            json!({
+                                "type": "control_timeout",
+                                "status": TARGET_STATUS_CONTROL_TIMEOUT,
+                                "code": "control_deadline_elapsed",
+                                "message": message,
+                                "job_id": target.job_id,
+                                "client_id": &target.client_id,
+                                "process_incarnation_id": target.process_incarnation_id,
+                            }),
+                            None,
+                        )
+                    };
+                    target.status = status.to_string();
+                    target.message = Some(message.clone());
                     target.completed_at = Some(completed_at.clone());
+                    synthetic_outputs.push((
+                        target.job_id,
+                        target.client_id.clone(),
+                        output_value,
+                        exit_code,
+                    ));
                     expired.push(DeadlineExpiredJobTarget {
                         job_id: target.job_id,
                         client_id: target.client_id.clone(),
+                        status: status.to_string(),
                     });
+                }
+                drop(targets);
+                if !synthetic_outputs.is_empty() {
+                    let mut outputs = memory.job_outputs.write().await;
+                    for (job_id, client_id, output_value, exit_code) in synthetic_outputs {
+                        let data = serde_json::to_vec(&output_value)?;
+                        let seq = outputs
+                            .iter()
+                            .filter(|output| {
+                                output.job_id == job_id && output.client_id == client_id
+                            })
+                            .map(|output| output.seq)
+                            .max()
+                            .unwrap_or(-1)
+                            .saturating_add(1);
+                        outputs.push(JobOutputView {
+                            job_id,
+                            client_id,
+                            seq,
+                            stream: "status".to_string(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+                            storage: "inline".to_string(),
+                            artifact_object_key: None,
+                            artifact_sha256_hex: None,
+                            artifact_size_bytes: None,
+                            exit_code,
+                            done: true,
+                            received_at: Some(completed_at.clone()),
+                            created_at: completed_at.clone(),
+                        });
+                    }
                 }
                 Ok(expired)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let rows = sqlx::query(
                     r#"
-                    WITH expired AS (
-                        SELECT target.job_id, target.client_id
-                        FROM job_targets target
-                        JOIN jobs job ON job.id = target.job_id
-                        WHERE target.completed_at IS NULL
-                          AND target.status IN ('dispatching', 'running')
-                          AND target.deadline_at IS NOT NULL
-                          AND target.deadline_at <= now()
-                          AND target.started_at IS NOT NULL
-                          AND target.started_at + make_interval(secs => (job.timeout_secs + $2)::integer) <= now()
-                        ORDER BY target.deadline_at ASC, target.job_id, target.client_id
-                        LIMIT $1
-                        FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE job_targets target
-                    SET status = 'control_timeout',
-                        message = COALESCE(target.last_dispatch_error, 'control deadline elapsed before final command output'),
-                        completed_at = now(),
-                        dispatch_lease_until = NULL,
-                        cancel_requested_at = COALESCE(cancel_requested_at, now())
-                    FROM expired
-                    WHERE target.job_id = expired.job_id
-                      AND target.client_id = expired.client_id
-                    RETURNING target.job_id, target.client_id
+                    SELECT
+                        target.job_id,
+                        target.client_id,
+                        target.process_incarnation_id,
+                        target.last_dispatch_error,
+                        job.operation
+                    FROM job_targets target
+                    JOIN jobs job ON job.id = target.job_id
+                    WHERE target.completed_at IS NULL
+                      AND target.status IN ('dispatching', 'running')
+                      AND target.deadline_at IS NOT NULL
+                      AND target.deadline_at <= now()
+                      AND target.started_at IS NOT NULL
+                      AND target.started_at + make_interval(secs => (job.timeout_secs + $2)::integer) <= now()
+                    ORDER BY target.deadline_at ASC, target.job_id, target.client_id
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
                     "#,
                 )
                 .bind(limit.clamp(1, 500))
                 .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(DeadlineExpiredJobTarget {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                        })
-                    })
-                    .collect()
+                let mut expired = Vec::new();
+                for row in rows {
+                    let job_id: Uuid = row.try_get("job_id")?;
+                    let client_id: String = row.try_get("client_id")?;
+                    let process_incarnation_id: Option<Uuid> =
+                        row.try_get("process_incarnation_id")?;
+                    let last_dispatch_error: Option<String> = row.try_get("last_dispatch_error")?;
+                    let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                    let missing_update_heartbeat = matches!(
+                        operation.0,
+                        JobCommand::AgentUpdateActivate {
+                            restart_agent: true,
+                            ..
+                        }
+                    );
+                    let (status, message) = if missing_update_heartbeat {
+                        (
+                            TARGET_STATUS_AGENT_LOST,
+                            "agent update activation restart did not reconnect with matching heartbeat before deadline".to_string(),
+                        )
+                    } else {
+                        (
+                            TARGET_STATUS_CONTROL_TIMEOUT,
+                            last_dispatch_error.unwrap_or_else(|| {
+                                "control deadline elapsed before final command output".to_string()
+                            }),
+                        )
+                    };
+                    if missing_update_heartbeat {
+                        append_synthetic_agent_lost_output_with_code_in_tx(
+                            &mut tx,
+                            job_id,
+                            &client_id,
+                            &message,
+                            process_incarnation_id,
+                            None,
+                            "agent_update_restart_missing_heartbeat",
+                        )
+                        .await?;
+                    } else {
+                        append_synthetic_status_output_in_tx(
+                            &mut tx,
+                            job_id,
+                            &client_id,
+                            json!({
+                                "type": "control_timeout",
+                                "status": TARGET_STATUS_CONTROL_TIMEOUT,
+                                "code": "control_deadline_elapsed",
+                                "message": message,
+                                "job_id": job_id,
+                                "client_id": &client_id,
+                                "process_incarnation_id": process_incarnation_id,
+                            }),
+                            None,
+                        )
+                        .await?;
+                    }
+                    let updated = sqlx::query(
+                        r#"
+                        UPDATE job_targets target
+                        SET status = $3,
+                            message = $4,
+                            completed_at = now(),
+                            result_received_at = now(),
+                            dispatch_lease_until = NULL,
+                            cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                            last_dispatch_error = CASE WHEN $3 = 'control_timeout' OR $3 = 'agent_lost' THEN $4 ELSE NULL END
+                        FROM jobs job
+                        WHERE target.job_id = $1
+                          AND target.client_id = $2
+                          AND job.id = target.job_id
+                          AND target.completed_at IS NULL
+                          AND target.status IN ('dispatching', 'running')
+                          AND target.deadline_at IS NOT NULL
+                          AND target.deadline_at <= now()
+                          AND target.started_at IS NOT NULL
+                          AND target.started_at + make_interval(secs => (job.timeout_secs + $5)::integer) <= now()
+                          AND (
+                            ($6::uuid IS NULL AND target.process_incarnation_id IS NULL)
+                            OR target.process_incarnation_id = $6::uuid
+                          )
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(&client_id)
+                    .bind(status)
+                    .bind(&message)
+                    .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
+                    .bind(process_incarnation_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    if updated.rows_affected() == 0 {
+                        anyhow::bail!("deadline_terminal_cas_lost:{job_id}:{client_id}");
+                    }
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind("job.target_result")
+                    .bind(format!("client:{client_id}"))
+                    .bind(json!({
+                        "job_id": job_id,
+                        "status": status,
+                        "message": message,
+                        "reason": if missing_update_heartbeat {
+                            "agent_update_restart_missing_heartbeat"
+                        } else {
+                            "control_deadline_elapsed"
+                        },
+                        "process_incarnation_id": process_incarnation_id,
+                    }))
+                    .execute(&mut *tx)
+                    .await?;
+                    expired.push(DeadlineExpiredJobTarget {
+                        job_id,
+                        client_id,
+                        status: status.to_string(),
+                    });
+                }
+                tx.commit().await?;
+                Ok(expired)
             }
         }
     }
@@ -1747,7 +2335,7 @@ impl Repository {
         job_id: Uuid,
         client_id: &str,
         outcome: &TargetDispatchOutcome,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
@@ -1768,15 +2356,8 @@ impl Repository {
                         target.completed_at = Some(completed_at.clone());
                         updated = true;
                     }
-                    if !updated
-                        && !targets.iter().any(|target| {
-                            target.job_id == job_id
-                                && target.client_id == client_id
-                                && target.completed_at.is_some()
-                                && target.status == outcome.status
-                        })
-                    {
-                        return Ok(());
+                    if !updated {
+                        return Ok(false);
                     }
                 }
                 if updated {
@@ -1859,6 +2440,9 @@ impl Repository {
                         _ => {}
                     }
                 }
+                self.record_job_target_webhook_event(job_id, client_id, outcome)
+                    .await?;
+                Ok(true)
             }
             Self::Postgres(pool) => {
                 let updated = sqlx::query(
@@ -1871,10 +2455,11 @@ impl Repository {
                         completed_at = now(),
                         result_received_at = COALESCE($6::timestamptz, now()),
                         dispatch_lease_until = NULL,
-                        last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout') THEN $4 ELSE NULL END
+                        last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout', 'agent_lost') THEN $4 ELSE NULL END
                     WHERE job_id = $1
                       AND client_id = $2
                       AND completed_at IS NULL
+                      AND status IN ('queued', 'dispatching', 'running')
                     "#,
                 )
                 .bind(job_id)
@@ -1886,24 +2471,7 @@ impl Repository {
                 .execute(pool)
                 .await?;
                 if updated.rows_affected() == 0 {
-                    let terminal_matches: Option<i64> = sqlx::query_scalar(
-                        r#"
-                        SELECT 1
-                        FROM job_targets
-                        WHERE job_id = $1
-                          AND client_id = $2
-                          AND completed_at IS NOT NULL
-                          AND status = $3
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(client_id)
-                    .bind(&outcome.status)
-                    .fetch_optional(pool)
-                    .await?;
-                    if terminal_matches.is_none() {
-                        return Ok(());
-                    }
+                    return Ok(false);
                 } else {
                     sqlx::query(
                         r#"
@@ -2004,11 +2572,11 @@ impl Repository {
                         _ => {}
                     }
                 }
+                self.record_job_target_webhook_event(job_id, client_id, outcome)
+                    .await?;
+                Ok(true)
             }
         }
-        self.record_job_target_webhook_event(job_id, client_id, outcome)
-            .await?;
-        Ok(())
     }
 
     pub(crate) async fn finish_job(&self, job_id: Uuid, status: &str) -> Result<bool> {

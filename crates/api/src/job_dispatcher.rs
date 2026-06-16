@@ -13,15 +13,15 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED,
-    TARGET_STATUS_REJECTED,
+    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
 };
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
     repository_backups::BackupRequestSourceLink,
-    repository_job_outputs::JobOutputPersistConfig,
+    repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     repository_jobs::ClaimedJobTarget,
     state::AppState,
     TargetDispatchOutcome,
@@ -237,7 +237,16 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         timeout_secs: claimed.timeout_secs.clamp(1, 3600),
     };
     state.refresh_gateway_dispatch_timeouts();
-    let outcome = match state.gateway.dispatch(&claimed.client_id, request).await {
+    let outcome = match state
+        .gateway
+        .dispatch(
+            &claimed.client_id,
+            request,
+            claimed.process_incarnation_id,
+            claimed.payload_hash.clone(),
+        )
+        .await
+    {
         Ok(result) => crate::routes_jobs::target_outcome_from_gateway(result),
         Err(error) => {
             dispatcher_wake_state()
@@ -250,10 +259,31 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
                 error = %message,
                 "gateway command dispatch failed"
             );
-            state
-                .repo
-                .record_job_target_delivery_error(claimed.job_id, &claimed.client_id, &message)
-                .await?;
+            if message.contains("agent_incarnation_mismatch") {
+                let refreshed = state
+                    .repo
+                    .record_agent_lost_target(
+                        claimed.job_id,
+                        &claimed.client_id,
+                        &message,
+                        Some(claimed.process_incarnation_id),
+                        parse_agent_incarnation_mismatch_actual(&message),
+                    )
+                    .await?;
+                if let Some(status) = refreshed {
+                    if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
+                        state.publish(WsEvent::JobFinished {
+                            job_id: claimed.job_id,
+                            status,
+                        });
+                    }
+                }
+            } else {
+                state
+                    .repo
+                    .record_job_target_delivery_error(claimed.job_id, &claimed.client_id, &message)
+                    .await?;
+            }
             return Ok(());
         }
     };
@@ -268,6 +298,15 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
     Ok(())
 }
 
+fn parse_agent_incarnation_mismatch_actual(message: &str) -> Option<Uuid> {
+    let actual = message.split("actual=").nth(1)?;
+    let token = actual
+        .split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '-'))
+        .next()
+        .filter(|value| !value.is_empty())?;
+    Uuid::parse_str(token).ok()
+}
+
 async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
     let dispatcher_config = state.dispatcher_runtime_config();
     let expired = state
@@ -278,53 +317,55 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
         )
         .await?;
     for target in expired {
-        state
-            .repo
-            .record_job_target_cancel_sent(target.job_id, &target.client_id)
-            .await?;
-        match state
-            .gateway
-            .cancel(
-                &target.client_id,
-                vpsman_common::JobCancelRequest {
-                    job_id: target.job_id,
-                    reason: Some("control_deadline_elapsed".to_string()),
-                },
-            )
-            .await
-        {
-            Ok(cancel) => {
-                state
-                    .repo
-                    .record_job_target_cancel_result(
-                        target.job_id,
-                        &target.client_id,
-                        cancel.accepted,
-                        cancel.acked,
-                        cancel.applied,
-                        &cancel.message,
-                    )
-                    .await?;
-            }
-            Err(error) => {
-                let message = format!("deadline cancel delivery failed: {error}");
-                warn!(
-                    %error,
-                    job_id = %target.job_id,
-                    client_id = %target.client_id,
-                    "deadline cancel delivery failed"
-                );
-                state
-                    .repo
-                    .record_job_target_cancel_result(
-                        target.job_id,
-                        &target.client_id,
-                        false,
-                        false,
-                        false,
-                        &message,
-                    )
-                    .await?;
+        if target.status == TARGET_STATUS_CONTROL_TIMEOUT {
+            state
+                .repo
+                .record_job_target_cancel_sent(target.job_id, &target.client_id)
+                .await?;
+            match state
+                .gateway
+                .cancel(
+                    &target.client_id,
+                    vpsman_common::JobCancelRequest {
+                        job_id: target.job_id,
+                        reason: Some("control_deadline_elapsed".to_string()),
+                    },
+                )
+                .await
+            {
+                Ok(cancel) => {
+                    state
+                        .repo
+                        .record_job_target_cancel_result(
+                            target.job_id,
+                            &target.client_id,
+                            cancel.accepted,
+                            cancel.acked,
+                            cancel.applied,
+                            &cancel.message,
+                        )
+                        .await?;
+                }
+                Err(error) => {
+                    let message = format!("deadline cancel delivery failed: {error}");
+                    warn!(
+                        %error,
+                        job_id = %target.job_id,
+                        client_id = %target.client_id,
+                        "deadline cancel delivery failed"
+                    );
+                    state
+                        .repo
+                        .record_job_target_cancel_result(
+                            target.job_id,
+                            &target.client_id,
+                            false,
+                            false,
+                            false,
+                            &message,
+                        )
+                        .await?;
+                }
             }
         }
         if let Some(status) = state
@@ -348,9 +389,9 @@ async fn finish_claimed_target(
     claimed: &ClaimedJobTarget,
     outcome: TargetDispatchOutcome,
 ) -> Result<()> {
-    state
+    let write_results = state
         .repo
-        .record_job_outputs_with_config(
+        .record_job_outputs_checked_with_config(
             claimed.job_id,
             &claimed.client_id,
             &outcome.outputs,
@@ -360,7 +401,21 @@ async fn finish_claimed_target(
             },
         )
         .await?;
-    state
+    if write_results.contains(&JobOutputWriteResult::DuplicateConflict) {
+        // A conflicting duplicate sequence means the gateway/agent replay stream is corrupt.
+        // Retrying this event forever could terminalize from evidence we did not store, so keep
+        // the target active for normal lifecycle handling and record the protocol error.
+        state
+            .repo
+            .record_job_target_delivery_error(
+                claimed.job_id,
+                &claimed.client_id,
+                "job_output_sequence_conflict",
+            )
+            .await?;
+        return Ok(());
+    }
+    let target_terminalized = state
         .repo
         .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
         .await?;
@@ -372,7 +427,8 @@ async fn finish_claimed_target(
             done: output.done,
         });
     }
-    if matches!(&claimed.operation, JobCommand::Backup { .. })
+    if target_terminalized
+        && matches!(&claimed.operation, JobCommand::Backup { .. })
         && outcome.status == TARGET_STATUS_COMPLETED
     {
         if let Some(operator) = auth_context_for_claim(state, claimed).await? {
@@ -390,16 +446,18 @@ async fn finish_claimed_target(
             }
         }
     }
-    if let Some(status) = state
-        .repo
-        .refresh_job_status_from_targets(claimed.job_id)
-        .await?
-    {
-        if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-            state.publish(WsEvent::JobFinished {
-                job_id: claimed.job_id,
-                status,
-            });
+    if target_terminalized {
+        if let Some(status) = state
+            .repo
+            .refresh_job_status_from_targets(claimed.job_id)
+            .await?
+        {
+            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
+                state.publish(WsEvent::JobFinished {
+                    job_id: claimed.job_id,
+                    status,
+                });
+            }
         }
     }
     Ok(())

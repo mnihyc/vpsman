@@ -13,6 +13,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
         last_ip: None,
         last_seen_at: None,
         internal_build_number: 1,
+        process_incarnation_id: None,
         stale_since: None,
         stale_reason: None,
         capabilities: AgentCapabilitySnapshot::default(),
@@ -26,6 +27,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
         last_ip: None,
         last_seen_at: None,
         internal_build_number: 1,
+        process_incarnation_id: None,
         stale_since: None,
         stale_reason: None,
         capabilities: AgentCapabilitySnapshot {
@@ -120,6 +122,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             exit_code: None,
             started_at: Some("105".to_string()),
             completed_at: Some("110".to_string()),
+            process_incarnation_id: None,
         });
     }
 
@@ -178,6 +181,7 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
                 last_ip: None,
                 last_seen_at: None,
                 internal_build_number: 1,
+                process_incarnation_id: None,
                 stale_since: None,
                 stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
@@ -191,6 +195,7 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
                 last_ip: None,
                 last_seen_at: None,
                 internal_build_number: 1,
+                process_incarnation_id: None,
                 stale_since: None,
                 stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
@@ -307,6 +312,7 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
             last_ip: None,
             last_seen_at: None,
             internal_build_number: 1,
+            process_incarnation_id: None,
             stale_since: None,
             stale_reason: None,
             capabilities: AgentCapabilitySnapshot::default(),
@@ -438,6 +444,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 last_ip: None,
                 last_seen_at: None,
                 internal_build_number: 1,
+                process_incarnation_id: None,
                 stale_since: None,
                 stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),
@@ -451,6 +458,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 last_ip: None,
                 last_seen_at: None,
                 internal_build_number: 1,
+                process_incarnation_id: None,
                 stale_since: None,
                 stale_reason: None,
                 capabilities: AgentCapabilitySnapshot::default(),

@@ -15,6 +15,22 @@ jobs:
     name: Aggregate release gate
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vpsman
+          POSTGRES_USER: vpsman
+          POSTGRES_PASSWORD: vpsman
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vpsman -d vpsman"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      VPSMAN_TEST_POSTGRES_URL: postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
     steps:
       - name: Checkout
         uses: actions/checkout@v6

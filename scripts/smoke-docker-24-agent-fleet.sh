@@ -573,7 +573,7 @@ job_id="$(jq -r '.job_id' <<<"$job_json")"
 jq -e --argjson alpha_count "$provider_alpha_count" '
   .target_counts.total == $alpha_count and
   .target_counts.skipped == 0 and
-  (.target_counts.rejected + .target_counts.failed + .target_counts.agent_timeout + .target_counts.control_timeout + .target_counts.canceled) == 0
+  (.target_counts.rejected + .target_counts.failed + .target_counts.agent_lost + .target_counts.agent_timeout + .target_counts.control_timeout + .target_counts.canceled) == 0
 ' <<<"$job_json" >/dev/null
 smoke_assert_job_create_queued "$job_json" "$provider_alpha_count"
 

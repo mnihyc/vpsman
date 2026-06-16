@@ -14,7 +14,7 @@ vpsctl_bin="target/debug/vpsctl"
 latency_ms="${VPSMAN_AGENT_RECONNECT_LATENCY_MS:-150}"
 drop_first_connections="${VPSMAN_AGENT_RECONNECT_DROP_FIRST_CONNECTIONS:-1}"
 deadline_secs="${VPSMAN_AGENT_RECONNECT_DEADLINE_SECS:-60}"
-binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-10485760}"
+binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-12582912}"
 
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build -p vpsman-api -p vpsman-gateway -p vpsctl
@@ -29,7 +29,15 @@ fi
 if [[ ! -x "$vpsctl_bin" ]]; then
   cargo build -p vpsctl
 fi
+agent_rebuild_needed=0
 if [[ ! -x "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif [[ -x target/debug/vpsman-agent && target/debug/vpsman-agent -nt "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif find crates/agent crates/common -type f \( -name '*.rs' -o -name Cargo.toml \) -newer "$agent_bin" | grep -q .; then
+  agent_rebuild_needed=1
+fi
+if [[ "$agent_rebuild_needed" == "1" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 

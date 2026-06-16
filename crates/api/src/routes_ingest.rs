@@ -19,7 +19,7 @@ use crate::{
     model::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },
-    repository_job_outputs::JobOutputPersistConfig,
+    repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     state::AppState,
     TargetDispatchOutcome,
 };
@@ -149,9 +149,9 @@ pub(crate) async fn ingest_command_output(
         return Err(ApiError::not_found("job_target_not_found"));
     }
     let received_at = command_output_received_at(event.received_unix);
-    state
+    let write_result = state
         .repo
-        .record_job_output_chunk_with_config(
+        .record_job_output_chunk_checked_with_config(
             event.job_id,
             &event.client_id,
             event.seq,
@@ -163,6 +163,9 @@ pub(crate) async fn ingest_command_output(
             },
         )
         .await?;
+    if write_result == JobOutputWriteResult::DuplicateConflict {
+        return Err(ApiError::conflict("job_output_sequence_conflict"));
+    }
     state.publish(WsEvent::JobOutputRecorded {
         job_id: event.job_id,
         client_id: event.client_id.clone(),
@@ -171,30 +174,34 @@ pub(crate) async fn ingest_command_output(
     });
     if event.output.done {
         let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
-        state
+        let target_terminalized = state
             .repo
             .update_job_target_result(event.job_id, &event.client_id, &outcome)
             .await?;
-        if let Some(status) = state
-            .repo
-            .refresh_job_status_from_targets(event.job_id)
-            .await?
-        {
-            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                state.publish(WsEvent::JobFinished {
-                    job_id: event.job_id,
-                    status,
-                });
+        if target_terminalized {
+            if let Some(status) = state
+                .repo
+                .refresh_job_status_from_targets(event.job_id)
+                .await?
+            {
+                if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
+                    state.publish(WsEvent::JobFinished {
+                        job_id: event.job_id,
+                        status,
+                    });
+                }
             }
-        }
-        if outcome.status == TARGET_STATUS_COMPLETED {
-            if let Err(error) = try_auto_record_backup_artifact_from_ingest(&state, &event).await {
-                warn!(
-                    ?error,
-                    job_id = %event.job_id,
-                    client_id = %event.client_id,
-                    "backup artifact auto-record failed after command output ingest"
-                );
+            if outcome.status == TARGET_STATUS_COMPLETED {
+                if let Err(error) =
+                    try_auto_record_backup_artifact_from_ingest(&state, &event).await
+                {
+                    warn!(
+                        ?error,
+                        job_id = %event.job_id,
+                        client_id = %event.client_id,
+                        "backup artifact auto-record failed after command output ingest"
+                    );
+                }
             }
         }
     } else {

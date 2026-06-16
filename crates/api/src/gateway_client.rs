@@ -132,6 +132,8 @@ impl GatewayDispatchClient {
         &self,
         client_id: &str,
         request: JobRequest,
+        expected_process_incarnation_id: uuid::Uuid,
+        payload_hash: String,
     ) -> Result<GatewayCommandDispatchResult> {
         let control_url = self
             .control_url
@@ -142,6 +144,8 @@ impl GatewayDispatchClient {
             &GatewayCommandDispatch {
                 client_id: client_id.to_string(),
                 request,
+                expected_process_incarnation_id,
+                payload_hash,
             },
             self.internal_token.as_deref(),
             self.timeouts(),

@@ -192,6 +192,7 @@ vpsctl_json() {
 
 seed_agent() {
   local client_id="$1"
+  local process_incarnation_id="33333333-3333-4333-8333-333333333333"
   local optional_hello_fields=""
   local noise_public_key_json="null"
   if [[ $# -ge 2 && -n "$2" ]]; then
@@ -208,6 +209,7 @@ seed_agent() {
       \"noise_public_key_hex\": $noise_public_key_json,
       \"hello\": {
         \"client_id\": \"$client_id\",
+        \"process_incarnation_id\": \"$process_incarnation_id\",
         \"agent_version\": \"postgres-persistence-smoke\",
         \"os_release\": \"Debian smoke\",
         \"arch\": \"x86_64\"$optional_hello_fields
@@ -734,7 +736,7 @@ degraded_update_json="$(vpsctl_json agent-update \
   --clients pg-agent-b \
   --confirmed)"
 degraded_update_job_id="$(jq -r '.job_id' <<<"$degraded_update_json")"
-jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "partial_success"' \
+jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "skipped"' \
   <<<"$degraded_update_json" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
@@ -752,7 +754,7 @@ degraded_process_json="$(vpsctl_json process-start \
   --clients pg-agent-b \
   --confirmed)"
 degraded_process_job_id="$(jq -r '.job_id' <<<"$degraded_process_json")"
-jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "partial_success"' \
+jq -e '(has("accepted" + "_targets") | not) and .target_count == 1 and .target_counts.total == 1 and .target_counts.skipped == 1 and .status == "skipped"' \
   <<<"$degraded_process_json" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null

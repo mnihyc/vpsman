@@ -16,6 +16,7 @@ export type BulkFailureReason = {
 
 export type BulkJobProgress = {
   agent_timeout: number;
+  agent_lost: number;
   canceled: number;
   completed: number;
   control_timeout: number;
@@ -65,6 +66,7 @@ export function buildBulkJobProgress({
   const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
   const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
   let agent_timeout = 0;
+  let agent_lost = 0;
   let canceled = 0;
   let completed = 0;
   let control_timeout = 0;
@@ -113,6 +115,9 @@ export function buildBulkJobProgress({
       case "failed":
         failed += 1;
         break;
+      case "agent_lost":
+        agent_lost += 1;
+        break;
       case "agent_timeout":
         agent_timeout += 1;
         break;
@@ -143,10 +148,11 @@ export function buildBulkJobProgress({
   queued += Math.max(0, total - targetRecords.length);
   const in_progress = queued + dispatching + running;
   const successful = completed;
-  const unsuccessful = rejected + failed + agent_timeout + control_timeout + canceled;
+  const unsuccessful = rejected + failed + agent_lost + agent_timeout + control_timeout + canceled;
   const terminal = successful + skipped + unsuccessful;
   return {
     agent_timeout,
+    agent_lost,
     canceled,
     completed,
     control_timeout,
@@ -247,6 +253,7 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
     progress.unsuccessful > 0 ? `unsuccessful ${progress.unsuccessful}` : "",
     progress.rejected > 0 ? `rejected ${progress.rejected}` : "",
     progress.failed > 0 ? `failed ${progress.failed}` : "",
+    progress.agent_lost > 0 ? `agent_lost ${progress.agent_lost}` : "",
     progress.agent_timeout > 0 ? `agent_timeout ${progress.agent_timeout}` : "",
     progress.control_timeout > 0 ? `control_timeout ${progress.control_timeout}` : "",
     progress.canceled > 0 ? `canceled ${progress.canceled}` : "",

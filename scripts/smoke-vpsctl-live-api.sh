@@ -166,6 +166,7 @@ require_no_secret() {
 
 seed_agent() {
   local client_id="$1"
+  local process_incarnation_id="11111111-1111-4111-8111-111111111111"
   local optional_hello_fields=""
   if [[ $# -ge 2 && -n "$2" ]]; then
     optional_hello_fields=", \"capabilities\": $2"
@@ -178,6 +179,7 @@ seed_agent() {
       \"noise_public_key_hex\": null,
       \"hello\": {
         \"client_id\": \"$client_id\",
+        \"process_incarnation_id\": \"$process_incarnation_id\",
         \"agent_version\": \"vpsctl-live-api-smoke\",
         \"os_release\": \"Debian smoke\",
         \"arch\": \"x86_64\"$optional_hello_fields

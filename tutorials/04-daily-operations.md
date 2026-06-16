@@ -105,12 +105,15 @@ operation; resumable uploads report completion once a chunk write or final move
 has crossed its completion boundary, while download chunks can cancel before
 stdout/status is emitted.
 
-Gateway command-output forwarding is RAM-first with disk spool overflow. Final
+Gateway forwarder delivery is RAM-first with disk spool overflow. Final command
 output drives target terminal state, so production gateways should keep
 `[gateway].command_output_event_ttl_secs` high enough for expected API or
 database maintenance windows. The default is 24 hours, and the
 `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS` environment variable overrides
-the suite config for smoke tests and emergency tuning.
+the suite config for smoke tests and emergency tuning. Graceful gateway
+shutdown defers pending forwarder events to the spool for controlled restart
+replay; a hard process crash before a RAM-resident event is spooled remains a
+residual loss boundary.
 
 ## Use Record Tables In The Panel
 

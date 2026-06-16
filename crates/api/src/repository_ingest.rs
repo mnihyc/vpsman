@@ -7,9 +7,10 @@ use tokio::sync::RwLock;
 use tracing::debug;
 use uuid::Uuid;
 use vpsman_common::{
-    AgentHello, AgentMetrics, GatewayAgentHelloIngest, GatewayTelemetryIngest,
-    RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
+    AgentHello, AgentMetrics, AgentUpdateHeartbeat, GatewayAgentHelloIngest,
+    GatewayTelemetryIngest, JobCommand, RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
 };
+use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED};
 
 use crate::model::{
     AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
@@ -17,9 +18,215 @@ use crate::model::{
 };
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
+use crate::repository_jobs::{
+    append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
+};
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
+
+async fn mark_old_incarnation_targets_agent_lost_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    previous_process_incarnation_id: Uuid,
+    current_process_incarnation_id: Uuid,
+    gateway_id: &str,
+    update_heartbeat: Option<&AgentUpdateHeartbeat>,
+) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT target.job_id, target.client_id, job.operation
+        FROM job_targets target
+        JOIN jobs job ON job.id = target.job_id
+        WHERE target.client_id = $1
+          AND target.completed_at IS NULL
+          AND target.status IN ('dispatching', 'running')
+          AND target.process_incarnation_id = $2
+        ORDER BY target.job_id, target.client_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .bind(previous_process_incarnation_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut affected_job_ids = Vec::new();
+    for row in rows {
+        let job_id: Uuid = row.try_get("job_id")?;
+        let target_client_id: String = row.try_get("client_id")?;
+        let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+        if let (
+            JobCommand::AgentUpdateActivate {
+                staged_sha256_hex, ..
+            },
+            Some(heartbeat),
+        ) = (&operation.0, update_heartbeat)
+        {
+            if heartbeat.activation_job_id == job_id {
+                let message = "agent update activation heartbeat verified after restart";
+                append_synthetic_status_output_in_tx(
+                    tx,
+                    job_id,
+                    &target_client_id,
+                    serde_json::json!({
+                        "type": "agent_update_activation_heartbeat",
+                        "status": TARGET_STATUS_COMPLETED,
+                        "code": "agent_update_restart_heartbeat_verified",
+                        "message": message,
+                        "job_id": job_id,
+                        "client_id": &target_client_id,
+                        "activation_job_id": heartbeat.activation_job_id,
+                        "artifact_sha256_hex": heartbeat.sha256_hex.to_ascii_lowercase(),
+                        "staged_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                        "marker_unix": heartbeat.marker_unix,
+                        "observed_unix": heartbeat.observed_unix,
+                        "previous_process_incarnation_id": previous_process_incarnation_id,
+                        "process_incarnation_id": current_process_incarnation_id,
+                    }),
+                    Some(0),
+                )
+                .await?;
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'completed',
+                        message = $3,
+                        exit_code = 0,
+                        completed_at = now(),
+                        result_received_at = to_timestamp($5),
+                        dispatch_lease_until = NULL,
+                        last_dispatch_error = NULL
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                      AND status IN ('dispatching', 'running')
+                      AND process_incarnation_id = $4
+                    "#,
+                )
+                .bind(job_id)
+                .bind(&target_client_id)
+                .bind(message)
+                .bind(previous_process_incarnation_id)
+                .bind(heartbeat.observed_unix as f64)
+                .execute(&mut **tx)
+                .await?;
+                if updated.rows_affected() == 0 {
+                    anyhow::bail!("agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}");
+                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind("job.target_result")
+                .bind(format!("client:{target_client_id}"))
+                .bind(serde_json::json!({
+                    "job_id": job_id,
+                    "status": TARGET_STATUS_COMPLETED,
+                    "exit_code": 0,
+                    "accepted": true,
+                    "message": message,
+                    "client_id": &target_client_id,
+                    "reason": "agent_update_restart_heartbeat_verified",
+                    "previous_process_incarnation_id": previous_process_incarnation_id,
+                    "current_process_incarnation_id": current_process_incarnation_id,
+                }))
+                .execute(&mut **tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, NULL, $2, $3, NULL, $4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind("agent_update.activation_completed")
+                .bind(format!("client:{target_client_id}"))
+                .bind(serde_json::json!({
+                    "activation_job_id": job_id,
+                    "client_id": &target_client_id,
+                    "artifact_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                    "status": "activation_completed",
+                    "heartbeat": "verified_after_restart",
+                }))
+                .execute(&mut **tx)
+                .await?;
+                affected_job_ids.push(job_id);
+                continue;
+            }
+        }
+        let message = format!(
+            "agent process incarnation changed from {previous_process_incarnation_id} to {current_process_incarnation_id} before final command output"
+        );
+        append_synthetic_agent_lost_output_in_tx(
+            tx,
+            job_id,
+            &target_client_id,
+            &message,
+            Some(previous_process_incarnation_id),
+            Some(current_process_incarnation_id),
+        )
+        .await?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_targets
+            SET status = 'agent_lost',
+                message = $3,
+                completed_at = now(),
+                result_received_at = now(),
+                dispatch_lease_until = NULL,
+                cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                last_dispatch_error = $3
+            WHERE job_id = $1
+              AND client_id = $2
+              AND completed_at IS NULL
+              AND status IN ('dispatching', 'running')
+              AND process_incarnation_id = $4
+            "#,
+        )
+        .bind(job_id)
+        .bind(&target_client_id)
+        .bind(&message)
+        .bind(previous_process_incarnation_id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            continue;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, $2, $3, NULL, $4)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind("job.target_result")
+        .bind(format!("client:{target_client_id}"))
+        .bind(serde_json::json!({
+            "job_id": job_id,
+            "status": TARGET_STATUS_AGENT_LOST,
+            "message": message,
+            "reason": "agent_process_incarnation_changed",
+            "gateway_id": gateway_id,
+            "previous_process_incarnation_id": previous_process_incarnation_id,
+            "current_process_incarnation_id": current_process_incarnation_id,
+        }))
+        .execute(&mut **tx)
+        .await?;
+        affected_job_ids.push(job_id);
+    }
+    affected_job_ids.sort();
+    affected_job_ids.dedup();
+    Ok(affected_job_ids)
+}
 
 impl Repository {
     pub(crate) async fn validate_agent_public_key(
@@ -173,9 +380,14 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let prior = sqlx::query(
                     r#"
-                    SELECT status, internal_build_number, stale_build_number
+                    SELECT
+                        status,
+                        internal_build_number,
+                        stale_build_number,
+                        process_incarnation_id
                     FROM clients
                     WHERE id = $1 AND hidden_at IS NULL
+                    FOR UPDATE
                     "#,
                 )
                 .bind(&event.hello.client_id)
@@ -195,16 +407,26 @@ impl Repository {
                     .flatten()
                     .unwrap_or(prior_build)
                     .max(1);
+                let prior_process_incarnation_id = prior
+                    .as_ref()
+                    .and_then(|row| {
+                        row.try_get::<Option<Uuid>, _>("process_incarnation_id")
+                            .ok()
+                    })
+                    .flatten();
                 let clears_stale = prior_status.as_deref() == Some("stale")
                     && event.hello.internal_build_number as i64 != stale_build;
+                let process_incarnation_changed = prior_process_incarnation_id
+                    .is_some_and(|prior| prior != event.hello.process_incarnation_id);
                 let result = sqlx::query(
                     r#"
                     INSERT INTO clients (
                         id, display_name, public_key, status, agent_version,
-                        internal_build_number, os_release, arch, capabilities, registration_ip,
+                        internal_build_number, process_incarnation_id, os_release, arch,
+                        capabilities, registration_ip,
                         last_ip, last_seen_at
                     )
-                    VALUES ($1, $2, $3, 'online', $4, $5, $6, $7, $8, $9::inet, $9::inet, now())
+                    VALUES ($1, $2, $3, 'online', $4, $5, $6, $7, $8, $9, $10::inet, $10::inet, now())
                     ON CONFLICT (id) DO UPDATE SET
                         public_key = CASE
                             WHEN octet_length(EXCLUDED.public_key) > 0 THEN EXCLUDED.public_key
@@ -218,6 +440,7 @@ impl Repository {
                         END,
                         agent_version = EXCLUDED.agent_version,
                         internal_build_number = EXCLUDED.internal_build_number,
+                        process_incarnation_id = EXCLUDED.process_incarnation_id,
                         os_release = EXCLUDED.os_release,
                         arch = EXCLUDED.arch,
                         capabilities = EXCLUDED.capabilities,
@@ -250,6 +473,7 @@ impl Repository {
                 .bind(public_key)
                 .bind(&event.hello.agent_version)
                 .bind(event.hello.internal_build_number as i64)
+                .bind(event.hello.process_incarnation_id)
                 .bind(&event.hello.os_release)
                 .bind(&event.hello.arch)
                 .bind(sqlx::types::Json(&event.hello.capabilities))
@@ -257,6 +481,20 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 accepted_hello = result.rows_affected() > 0;
+                let mut agent_lost_job_ids = Vec::new();
+                if accepted_hello && process_incarnation_changed {
+                    if let Some(previous_process_incarnation_id) = prior_process_incarnation_id {
+                        agent_lost_job_ids = mark_old_incarnation_targets_agent_lost_in_tx(
+                            &mut tx,
+                            &event.hello.client_id,
+                            previous_process_incarnation_id,
+                            event.hello.process_incarnation_id,
+                            &event.gateway_id,
+                            update_heartbeat.as_ref(),
+                        )
+                        .await?;
+                    }
+                }
                 if accepted_hello && clears_stale {
                     record_client_status_transition_in_tx(
                         &mut tx,
@@ -288,6 +526,9 @@ impl Repository {
                 }
 
                 tx.commit().await?;
+                for job_id in agent_lost_job_ids {
+                    let _ = self.refresh_job_status_from_targets(job_id).await?;
+                }
             }
         }
         if accepted_hello {
@@ -318,6 +559,7 @@ impl Repository {
                 }
                 let hello = AgentHello {
                     client_id: event.telemetry.client_id.clone(),
+                    process_incarnation_id: Uuid::nil(),
                     agent_version: String::new(),
                     internal_build_number: 1,
                     os_release: String::new(),
@@ -1310,6 +1552,7 @@ pub(crate) async fn upsert_memory_agent_with_remote_ip(
         if !hello.agent_version.is_empty() {
             agent.internal_build_number = hello.internal_build_number.max(1);
         }
+        agent.process_incarnation_id = Some(hello.process_incarnation_id);
         agent.capabilities = hello.capabilities.clone();
         return;
     }
@@ -1322,6 +1565,7 @@ pub(crate) async fn upsert_memory_agent_with_remote_ip(
         last_ip: remote_ip.map(str::to_string),
         last_seen_at: Some(now),
         internal_build_number: hello.internal_build_number.max(1),
+        process_incarnation_id: Some(hello.process_incarnation_id),
         stale_since: None,
         stale_reason: None,
         capabilities: hello.capabilities.clone(),

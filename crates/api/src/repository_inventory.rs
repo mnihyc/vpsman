@@ -96,6 +96,7 @@ impl Repository {
                         c.last_ip::text AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.internal_build_number,
+                        c.process_incarnation_id,
                         c.stale_since::text AS stale_since,
                         c.stale_reason,
                         c.capabilities,
@@ -107,7 +108,7 @@ impl Repository {
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
                     WHERE c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -127,6 +128,7 @@ impl Repository {
                             internal_build_number: row
                                 .try_get::<i64, _>("internal_build_number")?
                                 .max(1) as u64,
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
                             stale_since: row.try_get("stale_since")?,
                             stale_reason: row.try_get("stale_reason")?,
                             capabilities: row
@@ -983,6 +985,7 @@ impl Repository {
                         c.last_ip::text AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.internal_build_number,
+                        c.process_incarnation_id,
                         c.stale_since::text AS stale_since,
                         c.stale_reason,
                         c.capabilities,
@@ -994,7 +997,7 @@ impl Repository {
                     LEFT JOIN client_tags ct ON ct.client_id = c.id
                     LEFT JOIN tags t ON t.id = ct.tag_id
                     WHERE c.id = $1 AND c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     "#,
                 )
                 .bind(client_id)
@@ -1010,6 +1013,7 @@ impl Repository {
                     last_seen_at: row.try_get("last_seen_at")?,
                     internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1)
                         as u64,
+                    process_incarnation_id: row.try_get("process_incarnation_id")?,
                     stale_since: row.try_get("stale_since")?,
                     stale_reason: row.try_get("stale_reason")?,
                     capabilities: row
@@ -1059,6 +1063,7 @@ impl Repository {
                         c.last_ip::text AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.internal_build_number,
+                        c.process_incarnation_id,
                         c.stale_since::text AS stale_since,
                         c.stale_reason,
                         c.capabilities,
@@ -1070,7 +1075,7 @@ impl Repository {
                     LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -1089,6 +1094,7 @@ impl Repository {
                             internal_build_number: row
                                 .try_get::<i64, _>("internal_build_number")?
                                 .max(1) as u64,
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
                             stale_since: row.try_get("stale_since")?,
                             stale_reason: row.try_get("stale_reason")?,
                             capabilities: row
@@ -1139,6 +1145,7 @@ impl Repository {
                         c.last_ip::text AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.internal_build_number,
+                        c.process_incarnation_id,
                         c.stale_since::text AS stale_since,
                         c.stale_reason,
                         c.capabilities,
@@ -1153,7 +1160,7 @@ impl Repository {
                     LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
                     WHERE matching_tag.name = $1
                       AND c.hidden_at IS NULL
-                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
+                    GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
                     ORDER BY c.display_name, c.id
                     "#,
                 )
@@ -1173,6 +1180,7 @@ impl Repository {
                             internal_build_number: row
                                 .try_get::<i64, _>("internal_build_number")?
                                 .max(1) as u64,
+                            process_incarnation_id: row.try_get("process_incarnation_id")?,
                             stale_since: row.try_get("stale_since")?,
                             stale_reason: row.try_get("stale_reason")?,
                             capabilities: row

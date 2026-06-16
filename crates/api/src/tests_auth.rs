@@ -646,6 +646,7 @@ async fn internal_command_output_acks_return_durable_sequences() {
             exit_code: None,
             started_at: Some("1".to_string()),
             completed_at: None,
+            process_incarnation_id: None,
         });
     }
     let partial_output = vpsman_common::CommandOutput {

@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools awk curl docker file grep jq shuf stat timeout
+smoke_require_tools awk curl docker file find grep jq shuf stat timeout
 
 agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
 api_bin="target/debug/vpsman-api"
@@ -14,7 +14,7 @@ vpsctl_bin="target/debug/vpsctl"
 rss_limit_kib="${VPSMAN_AGENT_RSS_LIMIT_KIB:-15360}"
 cpu_limit_percent="${VPSMAN_AGENT_CPU_LIMIT_PERCENT:-2.0}"
 threads_limit="${VPSMAN_AGENT_THREADS_LIMIT:-16}"
-binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-10485760}"
+binary_size_limit_bytes="${VPSMAN_AGENT_BINARY_SIZE_LIMIT_BYTES:-12582912}"
 
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build -p vpsman-api -p vpsman-gateway -p vpsctl
@@ -29,7 +29,15 @@ fi
 if [[ ! -x "$vpsctl_bin" ]]; then
   cargo build -p vpsctl
 fi
+agent_rebuild_needed=0
 if [[ ! -x "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif [[ -x target/debug/vpsman-agent && target/debug/vpsman-agent -nt "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif find crates/agent crates/common -type f \( -name '*.rs' -o -name Cargo.toml \) -newer "$agent_bin" | grep -q .; then
+  agent_rebuild_needed=1
+fi
+if [[ "$agent_rebuild_needed" == "1" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 

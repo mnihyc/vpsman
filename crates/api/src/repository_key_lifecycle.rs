@@ -122,6 +122,7 @@ impl Repository {
                             last_ip: None,
                             last_seen_at: None,
                             internal_build_number: 1,
+                            process_incarnation_id: None,
                             stale_since: None,
                             stale_reason: None,
                             capabilities: vpsman_common::AgentCapabilitySnapshot::default(),

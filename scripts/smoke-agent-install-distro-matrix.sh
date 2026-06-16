@@ -5,13 +5,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib-smoke.sh"
 
 smoke_enter_root
-smoke_require_tools base64 docker jq sha256sum
+smoke_require_tools base64 docker find grep jq sha256sum
 
 agent_bin="target/x86_64-unknown-linux-musl/release/vpsman-agent"
 if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
+agent_rebuild_needed=0
 if [[ ! -x "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif [[ -x target/debug/vpsman-agent && target/debug/vpsman-agent -nt "$agent_bin" ]]; then
+  agent_rebuild_needed=1
+elif find crates/agent crates/common -type f \( -name '*.rs' -o -name Cargo.toml \) -newer "$agent_bin" | grep -q .; then
+  agent_rebuild_needed=1
+fi
+if [[ "$agent_rebuild_needed" == "1" ]]; then
   cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 fi
 

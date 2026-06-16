@@ -22,6 +22,13 @@ pub(crate) struct JobOutputPersistConfig<'a> {
     pub(crate) artifact_min_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JobOutputWriteResult {
+    Inserted,
+    DuplicateIdentical,
+    DuplicateConflict,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct JobOutputArtifactRef {
     pub(crate) object_key: String,
@@ -338,8 +345,10 @@ impl Repository {
         if outputs.is_empty() {
             return Ok(());
         }
-        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
-            .await
+        let _ = self
+            .record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn record_job_output_chunk_with_config(
@@ -351,15 +360,50 @@ impl Repository {
         received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
     ) -> Result<()> {
-        self.record_job_outputs_starting_at(
-            job_id,
-            client_id,
-            seq,
-            std::slice::from_ref(output),
-            received_at,
-            config,
-        )
-        .await
+        let _ = self
+            .record_job_outputs_starting_at(
+                job_id,
+                client_id,
+                seq,
+                std::slice::from_ref(output),
+                received_at,
+                config,
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_job_output_chunk_checked_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        received_at: Option<String>,
+        config: JobOutputPersistConfig<'_>,
+    ) -> Result<JobOutputWriteResult> {
+        let mut results = self
+            .record_job_outputs_starting_at(
+                job_id,
+                client_id,
+                seq,
+                std::slice::from_ref(output),
+                received_at,
+                config,
+            )
+            .await?;
+        Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
+    }
+
+    pub(crate) async fn record_job_outputs_checked_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        outputs: &[CommandOutput],
+        config: JobOutputPersistConfig<'_>,
+    ) -> Result<Vec<JobOutputWriteResult>> {
+        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
+            .await
     }
 
     pub(crate) async fn append_job_output_chunk_with_config(
@@ -516,9 +560,9 @@ impl Repository {
         outputs: &[CommandOutput],
         received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
-    ) -> Result<()> {
+    ) -> Result<Vec<JobOutputWriteResult>> {
         if outputs.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let persisted =
             materialize_job_outputs(job_id, client_id, start_seq, outputs, received_at, config)
@@ -530,15 +574,17 @@ impl Repository {
         let mut orphaned_object_keys = Vec::new();
         let mut accepted_persisted = Vec::new();
         let mut conflict_audits = Vec::new();
+        let write_results: Vec<JobOutputWriteResult>;
         let result = match self {
             Self::Memory(memory) => {
                 let mut stored = memory.job_outputs.write().await;
+                let mut planned_results = Vec::with_capacity(persisted.len());
+                let mut has_conflict = false;
                 for output in &persisted {
-                    let view = output.clone().into_view();
-                    if let Some(existing) = stored.iter_mut().find(|existing| {
-                        existing.job_id == view.job_id
-                            && existing.client_id == view.client_id
-                            && existing.seq == view.seq
+                    if let Some(existing) = stored.iter().find(|existing| {
+                        existing.job_id == output.job_id
+                            && existing.client_id == output.client_id
+                            && existing.seq == output.seq
                     }) {
                         if !job_output_view_matches_stored(existing, output) {
                             conflict_audits.push(job_output_conflict_audit(
@@ -546,26 +592,53 @@ impl Repository {
                                 &output.client_id,
                                 output.seq,
                             ));
+                            planned_results.push(JobOutputWriteResult::DuplicateConflict);
+                            has_conflict = true;
+                        } else {
+                            planned_results.push(JobOutputWriteResult::DuplicateIdentical);
                         }
                         if let Some(object_key) = output.created_artifact_object_key.clone() {
                             orphaned_object_keys.push(object_key);
                         }
                     } else {
-                        stored.push(view);
-                        accepted_persisted.push(output.clone());
+                        planned_results.push(JobOutputWriteResult::Inserted);
                     }
                 }
+                if has_conflict {
+                    for (output, result) in persisted.iter().zip(planned_results.iter_mut()) {
+                        if *result == JobOutputWriteResult::Inserted {
+                            *result = JobOutputWriteResult::DuplicateConflict;
+                        }
+                        if let Some(object_key) = output.created_artifact_object_key.clone() {
+                            orphaned_object_keys.push(object_key);
+                        }
+                    }
+                } else {
+                    for (output, result) in persisted.iter().zip(planned_results.iter()) {
+                        if *result == JobOutputWriteResult::Inserted {
+                            stored.push(output.clone().into_view());
+                            accepted_persisted.push(output.clone());
+                        }
+                    }
+                }
+                write_results = planned_results;
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
+                sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+                    .bind(lock_a)
+                    .bind(lock_b)
+                    .execute(&mut *tx)
+                    .await?;
+                let mut planned_results = Vec::with_capacity(persisted.len());
+                let mut has_conflict = false;
+                let mut conflict_outputs = Vec::new();
                 for output in &persisted {
-                    let inserted = sqlx::query(
+                    let existing = sqlx::query(
                         r#"
-                        INSERT INTO job_outputs (
-                            job_id,
-                            client_id,
-                            seq,
+                        SELECT
                             stream,
                             data,
                             storage,
@@ -573,38 +646,59 @@ impl Repository {
                             data_sha256_hex,
                             data_size_bytes,
                             exit_code,
-                            done,
-                            received_at
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
-                        ON CONFLICT (job_id, client_id, seq)
-                        DO NOTHING
+                            done
+                        FROM job_outputs
+                        WHERE job_id = $1 AND client_id = $2 AND seq = $3
                         "#,
                     )
                     .bind(output.job_id)
                     .bind(&output.client_id)
                     .bind(output.seq)
-                    .bind(&output.stream)
-                    .bind(&output.data)
-                    .bind(&output.storage)
-                    .bind(&output.artifact_object_key)
-                    .bind(&output.artifact_sha256_hex)
-                    .bind(output.artifact_size_bytes)
-                    .bind(output.exit_code)
-                    .bind(output.done)
-                    .bind(&output.received_at)
-                    .execute(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await?;
-                    if inserted.rows_affected() > 0 {
-                        accepted_persisted.push(output.clone());
+                    match existing {
+                        Some(row) if job_output_row_matches_stored(&row, output) => {
+                            planned_results.push(JobOutputWriteResult::DuplicateIdentical);
+                            if let Some(object_key) = output.created_artifact_object_key.clone() {
+                                orphaned_object_keys.push(object_key);
+                            }
+                        }
+                        Some(_) => {
+                            planned_results.push(JobOutputWriteResult::DuplicateConflict);
+                            conflict_outputs.push(output.clone());
+                            has_conflict = true;
+                            if let Some(object_key) = output.created_artifact_object_key.clone() {
+                                orphaned_object_keys.push(object_key);
+                            }
+                        }
+                        None => {
+                            planned_results.push(JobOutputWriteResult::Inserted);
+                        }
                     }
-                    if inserted.rows_affected() == 0 {
+                }
+                if has_conflict {
+                    for (output, result) in persisted.iter().zip(planned_results.iter_mut()) {
+                        if *result == JobOutputWriteResult::Inserted {
+                            *result = JobOutputWriteResult::DuplicateConflict;
+                        }
                         if let Some(object_key) = output.created_artifact_object_key.clone() {
                             orphaned_object_keys.push(object_key);
                         }
-                        let existing = sqlx::query(
+                    }
+                    for output in &conflict_outputs {
+                        insert_job_output_conflict_audit(&mut tx, output).await?;
+                    }
+                } else {
+                    for (output, result) in persisted.iter().zip(planned_results.iter()) {
+                        if *result != JobOutputWriteResult::Inserted {
+                            continue;
+                        }
+                        let inserted = sqlx::query(
                             r#"
-                            SELECT
+                            INSERT INTO job_outputs (
+                                job_id,
+                                client_id,
+                                seq,
                                 stream,
                                 data,
                                 storage,
@@ -612,24 +706,40 @@ impl Repository {
                                 data_sha256_hex,
                                 data_size_bytes,
                                 exit_code,
-                                done
-                            FROM job_outputs
-                            WHERE job_id = $1 AND client_id = $2 AND seq = $3
+                                done,
+                                received_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
+                            ON CONFLICT (job_id, client_id, seq)
+                            DO NOTHING
                             "#,
                         )
                         .bind(output.job_id)
                         .bind(&output.client_id)
                         .bind(output.seq)
-                        .fetch_optional(&mut *tx)
+                        .bind(&output.stream)
+                        .bind(&output.data)
+                        .bind(&output.storage)
+                        .bind(&output.artifact_object_key)
+                        .bind(&output.artifact_sha256_hex)
+                        .bind(output.artifact_size_bytes)
+                        .bind(output.exit_code)
+                        .bind(output.done)
+                        .bind(&output.received_at)
+                        .execute(&mut *tx)
                         .await?;
-                        if existing
-                            .as_ref()
-                            .is_some_and(|row| !job_output_row_matches_stored(row, output))
-                        {
-                            insert_job_output_conflict_audit(&mut tx, output).await?;
+                        if inserted.rows_affected() == 0 {
+                            anyhow::bail!(
+                                "job_output_sequence_conflict_after_preflight:{}:{}:{}",
+                                output.job_id,
+                                output.client_id,
+                                output.seq
+                            );
                         }
+                        accepted_persisted.push(output.clone());
                     }
                 }
+                write_results = planned_results;
                 tx.commit().await
             }
         };
@@ -651,14 +761,28 @@ impl Repository {
                 store.delete_best_effort(&object_key).await;
             }
         }
-        self.record_network_observations_starting_at(job_id, client_id, start_seq, outputs)
+        for (index, (output, write_result)) in outputs.iter().zip(write_results.iter()).enumerate()
+        {
+            if *write_result != JobOutputWriteResult::Inserted {
+                continue;
+            }
+            let seq = start_seq
+                .checked_add(i32::try_from(index)?)
+                .ok_or_else(|| anyhow::anyhow!("job output sequence overflow"))?;
+            self.record_network_observations_starting_at(
+                job_id,
+                client_id,
+                seq,
+                std::slice::from_ref(output),
+            )
             .await?;
+        }
         self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
             .await?;
         self.refresh_file_transfer_sessions_for_client(client_id)
             .await?;
         self.refresh_terminal_sessions_for_client(client_id).await?;
-        Ok(())
+        Ok(write_results)
     }
 
     async fn register_persisted_job_output_artifacts(
@@ -931,7 +1055,7 @@ fn job_output_object_key(
     format!("{JOB_OUTPUT_ARTIFACT_PREFIX}/{job_id}/{client_hex}/{seq}-{stream}-{sha256_hex}.bin")
 }
 
-fn append_lock_keys(job_id: Uuid, client_id: &str) -> (i32, i32) {
+pub(crate) fn append_lock_keys(job_id: Uuid, client_id: &str) -> (i32, i32) {
     let mut left = 0x811c_9dc5_u32;
     let mut right = 0x0100_0193_u32;
     for byte in job_id.as_bytes().iter().chain(client_id.as_bytes()) {
@@ -1084,7 +1208,8 @@ fn is_process_supervisor_command(command_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_process_supervisor_inventory, JobOutputPersistConfig, SupervisorInventoryOutput,
+        build_process_supervisor_inventory, JobOutputPersistConfig, JobOutputWriteResult,
+        SupervisorInventoryOutput,
     };
     use crate::{object_store::BackupObjectStore, repository::MemoryState, Repository};
     use base64::Engine as _;
@@ -1224,6 +1349,141 @@ mod tests {
         assert_eq!(outputs[0].seq, 0);
         assert_eq!(outputs[1].seq, 1);
         assert!(outputs[1].done);
+    }
+
+    #[tokio::test]
+    async fn duplicate_conflicting_sequence_reports_conflict_without_replacing_output() {
+        let repo = Repository::Memory(MemoryState::default());
+        let job_id = Uuid::new_v4();
+        let first = CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"first".to_vec(),
+            exit_code: None,
+            done: false,
+        };
+        let final_conflict = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: br#"{"type":"completed"}"#.to_vec(),
+            exit_code: Some(0),
+            done: true,
+        };
+
+        let inserted = repo
+            .record_job_output_chunk_checked_with_config(
+                job_id,
+                "client-a",
+                0,
+                &first,
+                None,
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        let duplicate = repo
+            .record_job_output_chunk_checked_with_config(
+                job_id,
+                "client-a",
+                0,
+                &first,
+                None,
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+        let conflict = repo
+            .record_job_output_chunk_checked_with_config(
+                job_id,
+                "client-a",
+                0,
+                &final_conflict,
+                None,
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(inserted, JobOutputWriteResult::Inserted);
+        assert_eq!(duplicate, JobOutputWriteResult::DuplicateIdentical);
+        assert_eq!(conflict, JobOutputWriteResult::DuplicateConflict);
+        let outputs = repo.list_job_outputs(job_id).await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert!(!outputs[0].done);
+        assert_eq!(outputs[0].data_base64, super::BASE64.encode(b"first"));
+        let audits = repo.list_audit_logs(10).await.unwrap();
+        assert!(audits
+            .iter()
+            .any(|audit| audit.action == "job.output_conflict_ignored"));
+    }
+
+    #[tokio::test]
+    async fn batch_conflict_poisons_later_final_output_insert() {
+        let repo = Repository::Memory(MemoryState::default());
+        let job_id = Uuid::new_v4();
+        let first = CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: b"first".to_vec(),
+            exit_code: None,
+            done: false,
+        };
+        repo.record_job_output_chunk_with_config(
+            job_id,
+            "client-a",
+            0,
+            &first,
+            None,
+            JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+        )
+        .await
+        .unwrap();
+
+        let conflicting_replay = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: br#"{"type":"different"}"#.to_vec(),
+            exit_code: Some(1),
+            done: false,
+        };
+        let later_final = CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: br#"{"type":"completed"}"#.to_vec(),
+            exit_code: Some(0),
+            done: true,
+        };
+        let results = repo
+            .record_job_outputs_checked_with_config(
+                job_id,
+                "client-a",
+                &[conflicting_replay, later_final],
+                JobOutputPersistConfig {
+                    object_store: None,
+                    artifact_min_bytes: usize::MAX,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(results.contains(&JobOutputWriteResult::DuplicateConflict));
+        let outputs = repo.list_job_outputs(job_id).await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].seq, 0);
+        assert!(!outputs[0].done);
+        assert_eq!(outputs[0].data_base64, super::BASE64.encode(b"first"));
     }
 
     #[tokio::test]

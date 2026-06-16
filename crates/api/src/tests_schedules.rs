@@ -76,6 +76,7 @@ async fn seed_unprivileged_agent(repo: &crate::repository::Repository, client_id
         &memory.agents,
         &AgentHello {
             client_id: client_id.to_string(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
             agent_version: "test".to_string(),
             internal_build_number: 1,
             os_release: "test".to_string(),

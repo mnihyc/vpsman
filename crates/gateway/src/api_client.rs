@@ -18,13 +18,15 @@ use tokio::{
 };
 use tracing::warn;
 use vpsman_common::{
-    GatewayCommandOutputAckRequest, GatewayCommandOutputAckResponse, GatewayCommandOutputIngest,
-    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
-    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot,
+    payload_hash, GatewayCommandOutputAckRequest, GatewayCommandOutputAckResponse,
+    GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
+    GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
+    GatewayForwardMetricsSnapshot,
 };
 
 type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
-const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V1\n";
+const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
+const SPOOL_SCHEMA_VERSION: u16 = 1;
 const COMMAND_OUTPUT_PATH: &str = "/internal/v1/gateway/command-output";
 const COMMAND_OUTPUT_ACKS_PATH: &str = "/internal/v1/gateway/command-output/acks";
 const DEFAULT_SPOOL_RAM_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -296,6 +298,7 @@ struct GatewayForwardDropReasonAtomicCounters {
     target_queue_full: AtomicU64,
     expired: AtomicU64,
     coalesced: AtomicU64,
+    protocol_conflict: AtomicU64,
 }
 
 #[derive(Default)]
@@ -377,11 +380,13 @@ enum GatewayForwardOutcome {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SpooledGatewayForwardHeader {
+    schema_version: u16,
     api_url: String,
     path: String,
     internal_token: Option<String>,
     kind: GatewayForwardEventKind,
     created_unix: u64,
+    body_sha256_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command_output: Option<CommandOutputReplayRef>,
 }
@@ -392,6 +397,7 @@ enum GatewayForwardDropReason {
     TargetQueueFull,
     Expired,
     Coalesced,
+    ProtocolConflict,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -923,11 +929,13 @@ impl GatewayForwardSpool {
                 )
             })?;
         let header = SpooledGatewayForwardHeader {
+            schema_version: SPOOL_SCHEMA_VERSION,
             api_url: event.api_url.clone(),
             path: event.path.clone(),
             internal_token: event.internal_token.clone(),
             kind: event.kind,
             created_unix: event.created_unix,
+            body_sha256_hex: payload_hash(&event.body),
             command_output: event
                 .command_output
                 .clone()
@@ -950,12 +958,33 @@ impl GatewayForwardSpool {
         let final_path =
             pending_dir.join(format!("{}-{target_hex}-{uuid}.spool", event.created_unix));
         let temp_path = pending_dir.join(format!(".{uuid}.tmp"));
-        if let Err(error) = tokio::fs::write(&temp_path, &bytes).await {
+        let mut temp_file = match tokio::fs::File::create(&temp_path).await {
+            Ok(file) => file,
+            Err(error) => {
+                self.release_disk(disk_bytes);
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create gateway spool temp {}",
+                        temp_path.display()
+                    )
+                });
+            }
+        };
+        if let Err(error) = temp_file.write_all(&bytes).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
             self.release_disk(disk_bytes);
             return Err(error).with_context(|| {
                 format!("failed to write gateway spool temp {}", temp_path.display())
             });
         }
+        if let Err(error) = temp_file.sync_all().await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            self.release_disk(disk_bytes);
+            return Err(error).with_context(|| {
+                format!("failed to fsync gateway spool temp {}", temp_path.display())
+            });
+        }
+        drop(temp_file);
         if let Err(error) = tokio::fs::rename(&temp_path, &final_path).await {
             let _ = tokio::fs::remove_file(&temp_path).await;
             self.release_disk(disk_bytes);
@@ -966,6 +995,7 @@ impl GatewayForwardSpool {
                 )
             });
         }
+        fsync_dir_best_effort(&pending_dir, "gateway spool pending dir").await;
         Ok(GatewayForwardQueueItem::Spooled {
             path: final_path,
             created_unix: event.created_unix,
@@ -993,6 +1023,18 @@ impl GatewayForwardSpool {
                 continue;
             };
             let disk_bytes = metadata.len();
+            let kind = match self.load_spooled_event(&path).await {
+                Ok(event) => event.kind,
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %path.display(),
+                        "quarantining corrupt gateway spool file"
+                    );
+                    self.quarantine_spooled_file(&path).await;
+                    continue;
+                }
+            };
             if self.try_reserve_disk(disk_bytes).is_err() {
                 warn!(
                     path = %path.display(),
@@ -1007,7 +1049,7 @@ impl GatewayForwardSpool {
                     path,
                     created_unix,
                     disk_bytes,
-                    kind: GatewayForwardEventKind::CommandOutput,
+                    kind,
                 },
             ));
         }
@@ -1072,8 +1114,10 @@ impl GatewayForwardSpool {
         file.read_exact(&mut header)
             .await
             .with_context(|| format!("failed to read gateway spool header {}", path.display()))?;
-        serde_json::from_slice(&header)
-            .with_context(|| format!("failed to decode gateway spool header {}", path.display()))
+        let header: SpooledGatewayForwardHeader = serde_json::from_slice(&header)
+            .with_context(|| format!("failed to decode gateway spool header {}", path.display()))?;
+        validate_spooled_header(path, &header)?;
+        Ok(header)
     }
 
     async fn remove_spooled_file(&self, path: &Path, disk_bytes: u64) {
@@ -1093,6 +1137,35 @@ impl GatewayForwardSpool {
 
     fn pending_dir(&self) -> PathBuf {
         self.config.dir.join("pending")
+    }
+
+    async fn quarantine_spooled_file(&self, path: &Path) {
+        let quarantine_dir = self.config.dir.join("corrupt");
+        if let Err(error) = tokio::fs::create_dir_all(&quarantine_dir).await {
+            warn!(
+                %error,
+                path = %path.display(),
+                "failed to create gateway spool quarantine dir"
+            );
+            return;
+        }
+        let Some(file_name) = path.file_name() else {
+            return;
+        };
+        let quarantine_path = quarantine_dir.join(file_name);
+        if let Err(error) = tokio::fs::rename(path, &quarantine_path).await {
+            warn!(
+                %error,
+                path = %path.display(),
+                quarantine_path = %quarantine_path.display(),
+                "failed to quarantine corrupt gateway spool file"
+            );
+            return;
+        }
+        fsync_dir_best_effort(&quarantine_dir, "gateway spool corrupt dir").await;
+        if let Some(parent) = path.parent() {
+            fsync_dir_best_effort(parent, "gateway spool pending dir").await;
+        }
     }
 
     fn try_reserve_disk(&self, bytes: u64) -> Result<()> {
@@ -1213,6 +1286,7 @@ impl GatewayForwardDropReasonAtomicCounters {
             GatewayForwardDropReason::TargetQueueFull => &self.target_queue_full,
             GatewayForwardDropReason::Expired => &self.expired,
             GatewayForwardDropReason::Coalesced => &self.coalesced,
+            GatewayForwardDropReason::ProtocolConflict => &self.protocol_conflict,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -1223,6 +1297,7 @@ impl GatewayForwardDropReasonAtomicCounters {
             target_queue_full: self.target_queue_full.load(Ordering::Relaxed),
             expired: self.expired.load(Ordering::Relaxed),
             coalesced: self.coalesced.load(Ordering::Relaxed),
+            protocol_conflict: self.protocol_conflict.load(Ordering::Relaxed),
         }
     }
 }
@@ -1234,6 +1309,7 @@ impl GatewayForwardCriticalFailureAtomicCounters {
             GatewayForwardDropReason::TargetQueueFull => &self.target_queue_full,
             GatewayForwardDropReason::Expired => &self.expired,
             GatewayForwardDropReason::Coalesced => return,
+            GatewayForwardDropReason::ProtocolConflict => return,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -1452,7 +1528,7 @@ async fn post_json_retry_until_expired(
 ) -> GatewayForwardOutcome {
     let mut attempt = 1_u64;
     loop {
-        if event.kind == GatewayForwardEventKind::CommandOutput && spool.shutdown_requested() {
+        if spool.shutdown_requested() {
             return GatewayForwardOutcome::DeferredForShutdown;
         }
         if telemetry_superseded(event, target_key, telemetry_pending).await {
@@ -1478,9 +1554,21 @@ async fn post_json_retry_until_expired(
             Ok(_) => return GatewayForwardOutcome::Delivered,
             Err(error) => {
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
+                let error_message = error.to_string();
                 if event.kind == GatewayForwardEventKind::CommandOutput
-                    && spool.shutdown_requested()
+                    && command_output_conflict_is_non_retryable(&error_message)
                 {
+                    metrics.record_drop(event.kind, GatewayForwardDropReason::ProtocolConflict);
+                    warn!(
+                        error = %error_message,
+                        path = %event.path,
+                        target_key,
+                        attempt,
+                        "dropping non-retryable conflicting command output"
+                    );
+                    return GatewayForwardOutcome::NotDelivered;
+                }
+                if spool.shutdown_requested() {
                     return GatewayForwardOutcome::DeferredForShutdown;
                 }
                 if event.expired(runtime_config) {
@@ -1494,7 +1582,7 @@ async fn post_json_retry_until_expired(
                         );
                     }
                     warn!(
-                        %error,
+                        error = %error_message,
                         path = %event.path,
                         kind = ?event.kind,
                         target_key,
@@ -1504,7 +1592,7 @@ async fn post_json_retry_until_expired(
                     return GatewayForwardOutcome::NotDelivered;
                 }
                 warn!(
-                    %error,
+                    error = %error_message,
                     path = %event.path,
                     target_key,
                     attempt,
@@ -1529,6 +1617,10 @@ fn notify_critical_failure(
             handler(target_key.to_string(), reason.as_str());
         }
     }
+}
+
+fn command_output_conflict_is_non_retryable(error_message: &str) -> bool {
+    error_message.contains("409 Conflict") && error_message.contains("job_output_sequence_conflict")
 }
 
 async fn post_json<T: serde::Serialize>(
@@ -1602,7 +1694,7 @@ async fn post_json_bytes_inner(
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid API response missing HTTP body"))?;
     if !status.contains(" 2") {
-        return Err(anyhow!("API returned {status}"));
+        return Err(anyhow!("API returned {status}: {}", body.trim()));
     }
     Ok(body.trim().to_string())
 }
@@ -1699,6 +1791,13 @@ fn decode_spooled_event(path: &Path, bytes: &[u8]) -> Result<GatewayForwardEvent
     let header: SpooledGatewayForwardHeader =
         serde_json::from_slice(&body[header_start..header_end])
             .with_context(|| format!("failed to decode gateway spool header {}", path.display()))?;
+    validate_spooled_header(path, &header)?;
+    let event_body = &body[header_end..];
+    anyhow::ensure!(
+        payload_hash(event_body) == header.body_sha256_hex,
+        "gateway spool file {} checksum mismatch",
+        path.display()
+    );
     let age_secs = unix_now().saturating_sub(header.created_unix);
     let now = time::Instant::now();
     let created_at = now
@@ -1707,13 +1806,45 @@ fn decode_spooled_event(path: &Path, bytes: &[u8]) -> Result<GatewayForwardEvent
     Ok(GatewayForwardEvent {
         api_url: header.api_url,
         path: header.path,
-        body: body[header_end..].to_vec(),
+        body: event_body.to_vec(),
         internal_token: header.internal_token,
         kind: header.kind,
         command_output: header.command_output,
         created_at,
         created_unix: header.created_unix,
     })
+}
+
+fn validate_spooled_header(path: &Path, header: &SpooledGatewayForwardHeader) -> Result<()> {
+    anyhow::ensure!(
+        header.schema_version == SPOOL_SCHEMA_VERSION,
+        "gateway spool file {} has unsupported schema version {}",
+        path.display(),
+        header.schema_version
+    );
+    anyhow::ensure!(
+        header.body_sha256_hex.len() == 64
+            && header
+                .body_sha256_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "gateway spool file {} has invalid body checksum",
+        path.display()
+    );
+    Ok(())
+}
+
+async fn fsync_dir_best_effort(path: &Path, label: &'static str) {
+    let path = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        std::fs::File::open(&path).and_then(|file| file.sync_all())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, label, "failed to fsync directory"),
+        Err(error) => warn!(%error, label, "failed to join directory fsync task"),
+    }
 }
 
 async fn spooled_command_output_already_acked(
@@ -1766,6 +1897,7 @@ impl GatewayForwardDropReason {
             Self::TargetQueueFull => "target_queue_full",
             Self::Expired => "expired",
             Self::Coalesced => "coalesced",
+            Self::ProtocolConflict => "protocol_conflict",
         }
     }
 }
@@ -1813,6 +1945,33 @@ mod tests {
             created_at: time::Instant::now(),
             created_unix: unix_now(),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_defers_non_command_events_to_spool() {
+        let event = test_event("/internal/v1/gateway/session-started", br#"{}"#);
+        let metrics = GatewayForwardMetrics::default();
+        let critical_failure_handler = StdRwLock::new(None);
+        let telemetry_pending = Mutex::new(HashMap::new());
+        let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
+        let runtime_config = GatewayForwardRuntimeConfig::default();
+        let timeouts = StdRwLock::new(GatewayHttpTimeouts::default());
+        spool.request_shutdown();
+
+        let outcome = post_json_retry_until_expired(
+            &event,
+            "client-a",
+            &metrics,
+            &critical_failure_handler,
+            &telemetry_pending,
+            &spool,
+            &runtime_config,
+            &timeouts,
+        )
+        .await;
+
+        assert_eq!(outcome, GatewayForwardOutcome::DeferredForShutdown);
+        assert_eq!(metrics.retry_attempts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -2099,6 +2258,36 @@ mod tests {
             }
         ));
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_spool_items_quarantine_corrupt_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-corrupt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let forwarder = GatewayEventForwarder::with_spool_config(GatewaySpoolConfig::enabled(
+            dir.clone(),
+            1024 * 1024,
+            8 * 1024 * 1024,
+            30,
+        ));
+        let pending_dir = dir.join("pending");
+        std::fs::create_dir_all(&pending_dir).unwrap();
+        let target_hex = hex::encode("client-a".as_bytes());
+        let corrupt_path = pending_dir.join(format!(
+            "{}-{target_hex}-{}.spool",
+            unix_now(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&corrupt_path, b"not-a-valid-spool-file").unwrap();
+
+        let replay = forwarder.spool.pending_items().await;
+
+        assert!(replay.is_empty());
+        assert!(!corrupt_path.exists());
+        assert!(dir.join("corrupt").read_dir().unwrap().next().is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

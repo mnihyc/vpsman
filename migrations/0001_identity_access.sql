@@ -33,6 +33,7 @@ CREATE TABLE clients (
     status TEXT NOT NULL DEFAULT 'offline',
     agent_version TEXT,
     internal_build_number BIGINT NOT NULL DEFAULT 1,
+    process_incarnation_id UUID,
     os_release TEXT,
     arch TEXT,
     capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,

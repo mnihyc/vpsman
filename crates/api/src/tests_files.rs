@@ -1148,6 +1148,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             exit_code: Some(0),
             started_at: Some("1700000000".to_string()),
             completed_at: Some("1700000001".to_string()),
+            process_incarnation_id: None,
         },
         JobTargetView {
             job_id,
@@ -1157,6 +1158,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             exit_code: Some(2),
             started_at: Some("1700000002".to_string()),
             completed_at: Some("1700000003".to_string()),
+            process_incarnation_id: None,
         },
     ]);
 
@@ -1210,7 +1212,8 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
                 "message": "ok",
                 "exit_code": 0,
                 "started_at": "1700000000",
-                "completed_at": "1700000001"
+                "completed_at": "1700000001",
+                "process_incarnation_id": null
             },
             {
                 "job_id": job_id,
@@ -1219,7 +1222,8 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
                 "message": "exit 2",
                 "exit_code": 2,
                 "started_at": "1700000002",
-                "completed_at": "1700000003"
+                "completed_at": "1700000003",
+                "process_incarnation_id": null
             }
         ])
     );
@@ -1240,7 +1244,8 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             "message": "ok",
             "exit_code": 0,
             "started_at": "1700000000",
-            "completed_at": "1700000001"
+            "completed_at": "1700000001",
+            "process_incarnation_id": null
         })
     );
     let _ = tokio::fs::remove_dir_all(store_root).await;

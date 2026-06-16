@@ -426,6 +426,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -777,6 +778,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1214,6 +1216,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
             completed_at: Some(unix_now().to_string()),
+            process_incarnation_id: None,
         });
         memory.job_outputs.write().await.push(JobOutputView {
             job_id: source_job_id,
@@ -1315,6 +1318,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
             completed_at: Some(unix_now().to_string()),
+            process_incarnation_id: None,
         });
         memory.job_outputs.write().await.push(JobOutputView {
             job_id: source_job_id,
@@ -1418,6 +1422,7 @@ async fn backup_request_requires_privilege_gateway_verification() {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1488,6 +1493,7 @@ async fn seed_backup_agent(repo: &crate::repository::Repository) {
             &memory.agents,
             &AgentHello {
                 client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),

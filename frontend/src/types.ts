@@ -185,6 +185,7 @@ export type GatewayForwardDropReasonCounters = {
   target_queue_full: number;
   expired: number;
   coalesced: number;
+  protocol_conflict: number;
 };
 
 export type GatewayForwardCriticalFailureCounters = {
@@ -694,6 +695,7 @@ export type AgentView = {
   last_ip?: string | null;
   last_seen_at?: string | null;
   internal_build_number?: number;
+  process_incarnation_id?: string | null;
   stale_since?: string | null;
   stale_reason?: string | null;
   capabilities: AgentCapabilitySnapshot;
@@ -1291,6 +1293,7 @@ export type JobTargetRecord = {
   exit_code: number | null;
   started_at: string | null;
   completed_at: string | null;
+  process_incarnation_id?: string | null;
 };
 
 export type JobOutputRecord = {
@@ -1869,6 +1872,7 @@ export type CreateJobResponse = {
     skipped: number;
     rejected: number;
     failed: number;
+    agent_lost: number;
     agent_timeout: number;
     control_timeout: number;
     canceled: number;

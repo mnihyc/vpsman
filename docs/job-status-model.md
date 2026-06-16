@@ -31,6 +31,8 @@ Target statuses are:
 - `skipped`: backend capability policy intentionally did not dispatch this target.
 - `rejected`: gateway or agent rejected the target before command execution.
 - `failed`: final output completed with non-zero exit code or dispatch preparation failed.
+- `agent_lost`: backend has positive evidence that the executing agent process
+  restarted or was otherwise lost before final output.
 - `agent_timeout`: final output reported agent-side timeout.
 - `control_timeout`: backend control deadline expired before final output.
 - `canceled`: operator cancellation completed before target completion.
@@ -44,10 +46,18 @@ Target statuses are:
   queued parent job.
 - `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets aggregate to `partial_success`; all-skipped jobs aggregate to `skipped`.
 - Availability is contextual display only. Offline fixed targets remain target records until backend deadline, then become `control_timeout`.
+- `agent_lost` is a target-level terminal unsuccessful status. Parent jobs
+  aggregate it through the existing unsuccessful job statuses; there is no
+  separate job-level `agent_lost` status.
 - `timeout_secs` is the agent execution budget. The API control deadline adds
   dispatch/ACK, internal HTTP/event-post, and `control_deadline_grace_secs`
   grace time so healthy long-running commands near their own timeout are not
   mislabeled as `control_timeout` because of gateway/API latency.
+- `agent_lost` and `control_timeout` are deliberately separate. `agent_lost`
+  requires positive restart/loss evidence such as a changed agent process
+  incarnation or a missing expected update activation heartbeat. `control_timeout`
+  means the immutable control deadline elapsed without proof that the process
+  restarted.
 - `control_timeout` is a terminal control-plane decision. Late final agent
   output may be persisted as diagnostic evidence, but it must not rewrite the
   target or parent job terminal state.
@@ -71,20 +81,24 @@ Target statuses are:
   target state are durable. Backup artifact auto-recording from async gateway
   ingest is best-effort after target/job finalization; failure to stage or store
   the artifact must not prevent the parent job from reaching a terminal state.
-- Gateway command-output forwarding is RAM-first. Command-output events remain
-  in memory up to the configured RAM cap, spill to gateway disk spool when that
-  cap is exceeded, replay pending spool files after restart, and best-effort
-  spill/defer command output during graceful shutdown. Startup replay checks
-  `/internal/v1/gateway/command-output/acks` before reposting spooled command
-  outputs. Non-final chunks are ACKed when the output row is durable; final
-  chunks are ACKed only after both the output row and terminal target state are
-  durable. Command-output retry retention defaults to 24 hours and can be
-  adjusted with `[gateway].command_output_event_ttl_secs` or the
+- Gateway forwarder delivery is RAM-first. Forwarder events remain in memory up
+  to the configured RAM cap, spill to gateway disk spool when required, replay
+  pending spool files after restart, and defer pending events to the spool
+  during bounded graceful shutdown. Spool files are promoted with a temp-file
+  write, best-effort fsync, atomic rename, schema version, and body checksum;
+  corrupt startup entries are quarantined and do not block gateway start.
+  Startup replay checks `/internal/v1/gateway/command-output/acks` before
+  reposting spooled command outputs. Non-final chunks are ACKed when the output
+  row is durable; final chunks are ACKed only after both the output row and
+  terminal target state are durable. Command-output retry retention defaults
+  to 24 hours and can be adjusted with
+  `[gateway].command_output_event_ttl_secs` or the
   `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS` override. Queue pressure must
-  not delete already spooled command-output files; they remain on disk for later
-  replay. Accepted residual loss boundaries are spool disabled, disk cap or disk
-  write failure, hard gateway process crash before a RAM-resident event is
-  spooled, and sustained overload beyond configured retention.
+  not delete already spooled forwarder files; they remain on disk for later
+  replay. This is controlled-restart safety, not hard-crash durability for every
+  RAM-resident event. Accepted residual loss boundaries are spool disabled, disk
+  cap or disk write failure, hard gateway process crash before a RAM-resident
+  event is spooled, and sustained overload beyond configured retention.
 - Job finalization is idempotent and repairable. The first process that
   transitions a job from non-terminal to terminal emits terminal side effects,
   and later refresh/replay paths may re-materialize deterministic terminal

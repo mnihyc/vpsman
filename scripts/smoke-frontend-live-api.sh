@@ -69,6 +69,7 @@ start_api
 
 seed_agent() {
   local client_id="$1"
+  local process_incarnation_id="22222222-2222-4222-8222-222222222222"
   curl -fsS \
     -H "Authorization: Bearer $internal_token" \
     -H "Content-Type: application/json" \
@@ -77,6 +78,7 @@ seed_agent() {
       \"noise_public_key_hex\": null,
       \"hello\": {
         \"client_id\": \"$client_id\",
+        \"process_incarnation_id\": \"$process_incarnation_id\",
         \"agent_version\": \"frontend-live-smoke\",
         \"os_release\": \"Debian smoke\",
         \"arch\": \"x86_64\"

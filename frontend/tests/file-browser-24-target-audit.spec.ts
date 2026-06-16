@@ -121,6 +121,7 @@ async function installTwentyFourTargetFileMock(page: Page) {
     const bytesToBase64 = (text: string) => btoa(text);
     const targetCountsFromStatuses = (statuses: string[]) => {
       const counts = {
+        agent_lost: 0,
         agent_timeout: 0,
         canceled: 0,
         completed: 0,

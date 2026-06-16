@@ -148,6 +148,7 @@ async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
             &memory.agents,
             &AgentHello {
                 client_id: "right-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -632,6 +633,7 @@ async fn seed_completed_network_job(memory: &MemoryState, job_id: Uuid, operatio
         exit_code: Some(0),
         started_at: Some(completed_at.clone()),
         completed_at: Some(completed_at),
+        process_incarnation_id: None,
     });
 }
 
@@ -979,6 +981,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
             &memory.agents,
             &AgentHello {
                 client_id: "right-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1031,6 +1034,7 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
             &memory.agents,
             &AgentHello {
                 client_id: "left-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1092,6 +1096,7 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
             &memory.agents,
             &AgentHello {
                 client_id: "right-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1138,6 +1143,7 @@ async fn network_status_create_job_rejects_wrong_side_target() {
             &memory.agents,
             &AgentHello {
                 client_id: "right-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1184,6 +1190,7 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
             &memory.agents,
             &AgentHello {
                 client_id: "right-b".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -1232,6 +1239,7 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
             &memory.agents,
             &AgentHello {
                 client_id: "left-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),

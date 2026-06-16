@@ -62,6 +62,7 @@ impl GatewayState {
 #[derive(Clone)]
 pub(crate) struct GatewaySession {
     pub(crate) session_id: uuid::Uuid,
+    pub(crate) process_incarnation_id: uuid::Uuid,
     pub(crate) sender: mpsc::Sender<GatewaySessionMessage>,
 }
 

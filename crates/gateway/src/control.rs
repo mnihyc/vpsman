@@ -250,15 +250,24 @@ async fn dispatch_gateway_command(
         .map(|disconnected| *disconnected + Duration::from_secs(state.reconnect_grace_secs()));
 
     loop {
-        if let Some(sender) = state
+        if let Some(session) = state
             .sessions
             .read()
             .await
             .get(&dispatch.client_id)
-            .map(|session| session.sender.clone())
+            .cloned()
         {
+            if session.process_incarnation_id != dispatch.expected_process_incarnation_id {
+                return Err(anyhow!(
+                    "agent_incarnation_mismatch:{}:expected={}:actual={}",
+                    dispatch.client_id,
+                    dispatch.expected_process_incarnation_id,
+                    session.process_incarnation_id
+                ));
+            }
             let (response_tx, response_rx) = oneshot::channel();
-            sender
+            session
+                .sender
                 .try_send(GatewaySessionMessage::Command(GatewayCommand {
                     request: dispatch.request.clone(),
                     response: response_tx,
@@ -517,6 +526,7 @@ mod tests {
             "client-a".to_string(),
             GatewaySession {
                 session_id: uuid::Uuid::new_v4(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
                 sender,
             },
         );
@@ -526,6 +536,14 @@ mod tests {
             GatewayCommandDispatch {
                 client_id: "client-a".to_string(),
                 request: test_job_request(),
+                expected_process_incarnation_id: state
+                    .sessions
+                    .read()
+                    .await
+                    .get("client-a")
+                    .unwrap()
+                    .process_incarnation_id,
+                payload_hash: "test-payload-hash".to_string(),
             },
         )
         .await
