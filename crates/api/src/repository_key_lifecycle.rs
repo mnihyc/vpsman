@@ -14,6 +14,8 @@ use crate::{
     util::unix_now,
 };
 
+const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
+
 impl Repository {
     pub(crate) async fn upsert_agent_identity(
         &self,
@@ -87,7 +89,6 @@ impl Repository {
                             known_tags.push(tag.clone());
                         }
                     }
-                    known_tags.sort();
                 }
                 let view = {
                     let mut agents = memory.agents.write().await;
@@ -103,7 +104,6 @@ impl Repository {
                                 agent.tags.push(tag.clone());
                             }
                         }
-                        agent.tags.sort();
                         AgentIdentityView {
                             client_id: agent.id.clone(),
                             display_name: agent.display_name.clone(),
@@ -112,8 +112,7 @@ impl Repository {
                             tags: agent.tags.clone(),
                         }
                     } else {
-                        let mut agent_tags = tags.clone();
-                        agent_tags.sort();
+                        let agent_tags = tags.clone();
                         agents.push(AgentView {
                             id: client_id.to_string(),
                             display_name: display_name.clone(),
@@ -786,7 +785,7 @@ async fn fetch_postgres_agent_identity(
             c.display_name,
             c.status,
             c.public_key,
-            COALESCE(array_remove(array_agg(t.name ORDER BY t.name), NULL), ARRAY[]::TEXT[]) AS tags
+            COALESCE(array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL), ARRAY[]::TEXT[]) AS tags
         FROM clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
@@ -813,14 +812,15 @@ async fn upsert_postgres_tag(
 ) -> Result<Uuid> {
     let row = sqlx::query(
         r#"
-        INSERT INTO tags (id, name)
-        VALUES ($1, $2)
+        INSERT INTO tags (id, name, display_order)
+        VALUES ($1, $2, (SELECT COALESCE(MAX(display_order), 0) + $3 FROM tags))
         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
         RETURNING id
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(tag)
+    .bind(TAG_DISPLAY_ORDER_STEP)
     .fetch_one(&mut **tx)
     .await?;
     Ok(row.try_get("id")?)
@@ -887,13 +887,14 @@ fn decode_public_key_hex(value: &str) -> Result<Vec<u8>> {
 }
 
 fn normalize_tags(tags: &[String]) -> Vec<String> {
-    let mut normalized = tags
-        .iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() || normalized.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
     normalized
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   AssignDataSourcePresetRequest,
   AssignDataSourcePresetResponse,
@@ -83,6 +83,17 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     [apiToken, loadTagInventory],
   );
 
+  const updateTagOrder = useCallback(
+    async (orderedTags: string[]) => {
+      const response = await apiPut<TagView[]>("/api/v1/tags/order", apiToken, {
+        ordered_tags: orderedTags,
+      });
+      setTags(response);
+      return response;
+    },
+    [apiToken],
+  );
+
   const assignTag = useCallback(
     async (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => {
       const response = await apiPost<TagMutationResponse>(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, {
@@ -109,7 +120,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const deleteTag = useCallback(
     async (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => {
-      const response = await apiPost<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
+      const response = await apiDelete<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
         confirmed,
         privilege_assertion: privilegeAssertion,
       });
@@ -260,6 +271,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     tags,
     tagsError,
     tagsLoading,
+    updateTagOrder,
     updateDataSourcePreset,
     upsertHotConfigRuleTemplate,
   };

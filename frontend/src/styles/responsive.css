@@ -83,6 +83,7 @@
   }
 
   .preferenceResetRow,
+  .preferenceTagVisibilityToolbar,
   .tagCreateForm .formRow {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -388,8 +389,43 @@
   .sourceArtifactControls,
   .preferenceGroup,
   .preferenceInlineControls,
-  .preferenceResetRow {
+  .preferenceResetRow,
+  .preferenceTagVisibilityToolbar {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tagOrderRow,
+  .preferenceControls label.tagVisibilityLine {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .preferenceControls label.tagVisibilityLine {
+    align-items: start;
+    min-height: 58px;
+    row-gap: 6px;
+  }
+
+  .preferenceControls label.tagVisibilityLine input[type="checkbox"] {
+    grid-row: 1 / span 2;
+    margin-top: 3px;
+  }
+
+  .tagOrderIndex,
+  .tagOrderRow .tags,
+  .tagOrderClients {
+    grid-column: 2;
+  }
+
+  .preferenceControls label.tagVisibilityLine .tags {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .preferenceControls label.tagVisibilityLine small {
+    grid-column: 2;
+    grid-row: 2;
+    line-height: 1.25;
+    white-space: normal;
   }
 
   .preferenceHint,

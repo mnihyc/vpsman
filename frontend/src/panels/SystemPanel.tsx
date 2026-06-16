@@ -29,6 +29,7 @@ import type {
   SuiteConfigValidateResponse,
   SystemDashboardRecord,
   SystemMetricSeriesRecord,
+  TagView,
 } from "../types";
 import type { SystemDashboardPointDensity, SystemDashboardWindow } from "../hooks/useSystemData";
 import { PreferencesPanel } from "./PreferencesPanel";
@@ -55,6 +56,7 @@ type SystemPanelProps = {
   suiteConfig: SuiteConfigResponse | null;
   suiteConfigError: string | null;
   suiteConfigLoading: boolean;
+  tags: TagView[];
 };
 
 const chartColors = ["#1a73e8", "#188038", "#f29900", "#9334e6", "#d93025", "#129eaf", "#5f6368", "#b06000"];
@@ -91,6 +93,7 @@ export function SystemPanel({
   suiteConfig,
   suiteConfigError,
   suiteConfigLoading,
+  tags,
 }: SystemPanelProps) {
   if (activeSubpage === "config") {
     return (
@@ -107,7 +110,7 @@ export function SystemPanel({
     );
   }
   if (activeSubpage === "operator") {
-    return <PreferencesPanel operator={operator} />;
+    return <PreferencesPanel operator={operator} tags={tags} />;
   }
   return (
     <SystemDashboardPanel

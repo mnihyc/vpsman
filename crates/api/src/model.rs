@@ -197,6 +197,7 @@ pub(crate) struct TelemetryTunnelView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TagView {
     pub(crate) name: String,
+    pub(crate) display_order: i64,
     pub(crate) clients: Vec<AgentView>,
 }
 
@@ -750,6 +751,12 @@ pub(crate) struct DeleteTagRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateTagOrderRequest {
+    pub(crate) ordered_tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

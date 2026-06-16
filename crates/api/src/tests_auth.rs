@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeMap;
+
 use axum::http::StatusCode;
 
 #[test]
@@ -211,6 +213,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         sidebar_subpanel_default: "all".to_string(),
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
+        fleet_tag_visibility_overrides: BTreeMap::from([("provider:alpha".to_string(), true)]),
         gateway_server_public_key_hex: Some("11".repeat(32)),
         gateway_endpoints: "primary=gw.example.com:9443=10".to_string(),
         ..OperatorPreferences::default()
@@ -231,6 +234,13 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         updated.preferences.gateway_endpoints,
         "primary=gw.example.com:9443=10"
     );
+    assert_eq!(
+        updated
+            .preferences
+            .fleet_tag_visibility_overrides
+            .get("provider:alpha"),
+        Some(&true)
+    );
 
     let context = repo
         .authenticate_access_token(&auth.access_token)
@@ -246,6 +256,14 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     assert_eq!(
         context.operator.preferences.bulk_output_compare_mode,
         "binary"
+    );
+    assert_eq!(
+        context
+            .operator
+            .preferences
+            .fleet_tag_visibility_overrides
+            .get("provider:alpha"),
+        Some(&true)
     );
 }
 
@@ -308,6 +326,13 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "invalid_gateway_endpoints",
+        ),
+        (
+            OperatorPreferences {
+                fleet_tag_visibility_overrides: BTreeMap::from([("bad tag".to_string(), true)]),
+                ..OperatorPreferences::default()
+            },
+            "invalid_fleet_tag_visibility_tag",
         ),
     ];
 

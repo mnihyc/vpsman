@@ -1010,6 +1010,108 @@
   min-width: max(100%, 920px);
 }
 
+.tagOrderPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 18px 18px;
+  border-top: 1px solid #eef1f6;
+}
+
+.tagOrderHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tagOrderHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tagOrderHeader strong {
+  color: #202124;
+  font-size: 14px;
+}
+
+.tagOrderHeader span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.tagOrderList {
+  display: grid;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.tagOrderRow {
+  display: grid;
+  grid-template-columns: 34px 38px minmax(150px, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 46px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #eef1f6;
+  background: #fff;
+}
+
+.tagOrderRow:last-child {
+  border-bottom: 0;
+}
+
+.tagOrderRow.dragging {
+  position: relative;
+  z-index: 1;
+  background: #edf4ff;
+  box-shadow: 0 8px 20px rgb(60 64 67 / 18%);
+}
+
+.tagOrderHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #5f6368;
+  cursor: grab;
+}
+
+.tagOrderHandle:active {
+  cursor: grabbing;
+}
+
+.tagOrderHandle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tagOrderIndex,
+.tagOrderClients {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tagOrderClients {
+  white-space: nowrap;
+}
+
+.compactEmptyState {
+  min-height: 100px;
+}
+
 .configRuleWorkspace,
 .configApplyGrid {
   display: grid;
@@ -1073,6 +1175,12 @@
 .configTomlEditor,
 .tagCreateForm {
   min-width: 0;
+}
+
+.tagCreateForm {
+  gap: 12px;
+  padding: 14px 18px 16px;
+  border-bottom: 1px solid #eef1f6;
 }
 
 .ruleCardGrid,

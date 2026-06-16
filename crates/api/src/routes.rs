@@ -53,7 +53,7 @@ use crate::{
         list_gateway_sessions, list_hot_config_rule_templates, list_tags,
         list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
         render_data_source_hot_config, render_hot_config_rule_template, resolve_bulk_targets,
-        test_data_source_preset, update_agent_alias, update_data_source_preset,
+        test_data_source_preset, update_agent_alias, update_data_source_preset, update_tag_order,
         upsert_hot_config_rule_template,
     },
     routes_job_history::{
@@ -222,6 +222,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/history/export", get(export_history))
         .route("/api/v1/tags", get(list_tags).post(create_tag))
         .route("/api/v1/tags/bulk", post(bulk_mutate_tags))
+        .route("/api/v1/tags/order", put(update_tag_order))
         .route("/api/v1/tags/{tag}", delete(delete_tag))
         .route(
             "/api/v1/data-source-presets",

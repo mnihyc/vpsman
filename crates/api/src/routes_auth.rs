@@ -203,6 +203,18 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     ) {
         return Err(ApiError::bad_request("invalid_bulk_output_compare_mode"));
     }
+    if preferences.fleet_tag_visibility_overrides.len() > 500 {
+        return Err(ApiError::bad_request(
+            "too_many_fleet_tag_visibility_overrides",
+        ));
+    }
+    if preferences
+        .fleet_tag_visibility_overrides
+        .keys()
+        .any(|tag| !validate_preference_tag_name(tag))
+    {
+        return Err(ApiError::bad_request("invalid_fleet_tag_visibility_tag"));
+    }
     if let Some(key) = preferences.gateway_server_public_key_hex.as_deref() {
         if key.len() != 64 || !key.as_bytes().iter().all(u8::is_ascii_hexdigit) {
             return Err(ApiError::bad_request(
@@ -216,6 +228,16 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
         return Err(ApiError::bad_request("invalid_gateway_endpoints"));
     }
     Ok(())
+}
+
+fn validate_preference_tag_name(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 128
+        && !tag.starts_with("id:")
+        && !tag.starts_with("name:")
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn validate_gateway_endpoints_format(value: &str) -> bool {

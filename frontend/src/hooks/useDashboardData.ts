@@ -159,6 +159,7 @@ export function useDashboardData(activeView: ActiveView) {
       void inventory.loadTagInventory();
     } else if (activeView === "System") {
       void access.loadCurrentOperatorProfile();
+      void inventory.loadTagInventory();
       void system.loadSystemDashboard();
       void system.loadSuiteConfig();
     }
@@ -379,6 +380,7 @@ export function useDashboardData(activeView: ActiveView) {
     applyScheduleNow: schedules.applyScheduleNow,
     deleteSchedule: schedules.deleteSchedule,
     createTag: inventory.createTag,
+    updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
     promoteTelemetryTunnel: topology.promoteTelemetryTunnel,

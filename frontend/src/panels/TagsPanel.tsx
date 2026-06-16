@@ -1,5 +1,22 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
@@ -30,6 +47,7 @@ export function TagsPanel({
   onOpenSchedules,
   onRefresh,
   onResolveBulk,
+  onUpdateTagOrder,
   privilegeMaterial,
   tags,
 }: {
@@ -45,6 +63,7 @@ export function TagsPanel({
   onOpenSchedules?: () => void;
   onRefresh: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
   privilegeMaterial: PrivilegeMaterial | null;
   tags: TagView[];
 }) {
@@ -80,6 +99,7 @@ export function TagsPanel({
             onDeleteTag={onDeleteTag}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onOpenSchedules={onOpenSchedules}
+            onUpdateTagOrder={onUpdateTagOrder}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
@@ -125,6 +145,7 @@ function TagRegistry({
   onDeleteTag,
   onOpenPrivilegeUnlock,
   onOpenSchedules,
+  onUpdateTagOrder,
   pending,
   privilegeMaterial,
   runAction,
@@ -135,6 +156,7 @@ function TagRegistry({
   onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onOpenSchedules?: () => void;
+  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -245,6 +267,11 @@ function TagRegistry({
           </div>
         )}
       </CrudPager>
+      <TagOrderManager
+        disabled={pending}
+        onUpdateTagOrder={onUpdateTagOrder}
+        tags={tags}
+      />
       <ConfirmationPrompt
         confirmLabel="Delete tag"
         detail="Delete this tag and all assignments."
@@ -263,6 +290,144 @@ function TagRegistry({
         title="Confirm tag delete"
       />
     </>
+  );
+}
+
+function TagOrderManager({
+  disabled,
+  onUpdateTagOrder,
+  tags,
+}: {
+  disabled: boolean;
+  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
+  tags: TagView[];
+}) {
+  const [orderedNames, setOrderedNames] = useState(() => tags.map((tag) => tag.name));
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const tagByName = useMemo(() => new Map(tags.map((tag) => [tag.name, tag])), [tags]);
+  const orderedTags = useMemo(
+    () => orderedNames.map((name) => tagByName.get(name)).filter((tag): tag is TagView => Boolean(tag)),
+    [orderedNames, tagByName],
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  useEffect(() => {
+    setOrderedNames(tags.map((tag) => tag.name));
+  }, [tags]);
+
+  async function handleDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : null;
+    if (!overId || activeId === overId || saving || disabled) {
+      return;
+    }
+    const oldIndex = orderedNames.indexOf(activeId);
+    const newIndex = orderedNames.indexOf(overId);
+    if (oldIndex < 0 || newIndex < 0) {
+      return;
+    }
+    const nextOrder = arrayMove(orderedNames, oldIndex, newIndex);
+    setOrderedNames(nextOrder);
+    setSaving(true);
+    setStatus("Saving order");
+    try {
+      const updated = await onUpdateTagOrder(nextOrder);
+      setOrderedNames(updated.map((tag) => tag.name));
+      setStatus("Order saved");
+    } catch (error) {
+      setOrderedNames(tags.map((tag) => tag.name));
+      setStatus(error instanceof Error ? error.message : "Order save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="tagOrderPanel">
+      <div className="tagOrderHeader">
+        <div>
+          <strong>Fleet tag order</strong>
+          <span>{tags.length} tags</span>
+        </div>
+        {status && (
+          <span className={`consoleStatusBadge ${saving || status !== "Order saved" ? "warning" : "ok"}`}>
+            {status}
+          </span>
+        )}
+      </div>
+      {orderedTags.length === 0 ? (
+        <div className="emptyState compactEmptyState">
+          <ShieldCheck size={20} />
+          <strong>No tags</strong>
+          <span>Create tags before setting Fleet display order.</span>
+        </div>
+      ) : (
+        <DndContext collisionDetection={closestCenter} onDragEnd={(event) => void handleDragEnd(event)} sensors={sensors}>
+          <SortableContext items={orderedTags.map((tag) => tag.name)} strategy={verticalListSortingStrategy}>
+            <div className="tagOrderList" role="list">
+              {orderedTags.map((tag, index) => (
+                <SortableTagOrderRow
+                  disabled={disabled || saving}
+                  index={index}
+                  key={tag.name}
+                  tag={tag}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      )}
+    </section>
+  );
+}
+
+function SortableTagOrderRow({
+  disabled,
+  index,
+  tag,
+}: {
+  disabled: boolean;
+  index: number;
+  tag: TagView;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ disabled, id: tag.name });
+  return (
+    <div
+      className={`tagOrderRow${isDragging ? " dragging" : ""}`}
+      ref={setNodeRef}
+      role="listitem"
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+    >
+      <button
+        aria-label={`Reorder ${tag.name}`}
+        className="tagOrderHandle"
+        disabled={disabled}
+        type="button"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical size={15} />
+      </button>
+      <span className="tagOrderIndex">{index + 1}</span>
+      <span className="tags">
+        <em>{tag.name}</em>
+      </span>
+      <span className="tagOrderClients">{tag.clients.length} VPS{tag.clients.length === 1 ? "" : "s"}</span>
+    </div>
   );
 }
 
@@ -289,7 +454,7 @@ function TagAssignments({
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [tagByAgent, setTagByAgent] = useState<Record<string, string>>({});
-  const tagNames = useMemo(() => tags.map((tag) => tag.name).sort(), [tags]);
+  const tagNames = useMemo(() => tags.map((tag) => tag.name), [tags]);
 
   async function addTag(agent: AgentView) {
     const tag = tagByAgent[agent.id]?.trim();

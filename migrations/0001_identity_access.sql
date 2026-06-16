@@ -80,6 +80,7 @@ CREATE INDEX client_status_history_client_created_idx
 CREATE TABLE tags (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    display_order BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

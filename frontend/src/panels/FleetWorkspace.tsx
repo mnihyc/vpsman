@@ -72,6 +72,15 @@ import {
   trafficStatusLabel,
 } from "../topologyRuntime";
 import {
+  buildTagDisplayOrder,
+  compareTagsByDisplayOrder,
+  displayFleetTags as displayTags,
+  isCountryTag,
+  isProviderTag,
+  sortTagsByDisplayOrder,
+  type TagDisplayOrder,
+} from "../tagDisplay";
+import {
   buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
   canonicalDbPrivilegeIntent,
@@ -309,6 +318,7 @@ export function FleetWorkspace({
     () => latestTelemetryTunnelsByClient(telemetryTunnels),
     [telemetryTunnels],
   );
+  const tagDisplayOrder = useMemo(() => buildTagDisplayOrder(tags), [tags]);
   const fleetSubpage = [
     "instances",
     "alerts",
@@ -360,10 +370,19 @@ export function FleetWorkspace({
         header: "Tags",
         size: 260,
         minSize: 170,
-        sortValue: (agent) => displayTags(agent.tags).join(" "),
+        sortValue: (agent) =>
+          displayTags(
+            agent.tags,
+            tagDisplayOrder,
+            preferences.fleet_tag_visibility_overrides,
+          ).join(" "),
         searchValue: (agent) => agent.tags.join(" "),
         cell: (agent) => {
-          const agentTags = displayTags(agent.tags);
+          const agentTags = displayTags(
+            agent.tags,
+            tagDisplayOrder,
+            preferences.fleet_tag_visibility_overrides,
+          );
           return (
             <span className="tags">
               {agentTags.length === 0 ? (
@@ -427,7 +446,12 @@ export function FleetWorkspace({
         ),
       },
     ],
-    [preferences.show_country_flags, vpsNameDisplayMode],
+    [
+      preferences.fleet_tag_visibility_overrides,
+      preferences.show_country_flags,
+      tagDisplayOrder,
+      vpsNameDisplayMode,
+    ],
   );
 
   async function mutateTagsForAgents(
@@ -616,7 +640,9 @@ export function FleetWorkspace({
                 onSelect: (rows) =>
                   void copyText(
                     Array.from(new Set(rows.flatMap((agent) => agent.tags)))
-                      .sort()
+                      .sort((left, right) =>
+                        compareTagsByDisplayOrder(left, right, tagDisplayOrder),
+                      )
                       .map((tag) => `tag:${tag}`)
                       .join(" "),
                   ),
@@ -678,6 +704,10 @@ export function FleetWorkspace({
                 privilegeMaterial={privilegeMaterial}
                 showCountryFlags={preferences.show_country_flags}
                 summary={summary}
+                tagDisplayOrder={tagDisplayOrder}
+                tagVisibilityOverrides={
+                  preferences.fleet_tag_visibility_overrides
+                }
                 telemetryNetworkRates={telemetryNetworkRates.filter(
                   (rate) => rate.client_id === agent.id,
                 )}
@@ -699,6 +729,10 @@ export function FleetWorkspace({
                 onOpenSelectorWorkflow={openSelectorWorkflow}
                 selectionStatsMode={selectionStatsMode}
                 setSelectionStatsMode={setSelectionStatsMode}
+                tagDisplayOrder={tagDisplayOrder}
+                tagVisibilityOverrides={
+                  preferences.fleet_tag_visibility_overrides
+                }
                 vpsNameDisplayMode={vpsNameDisplayMode}
               />
             )}
@@ -833,6 +867,8 @@ function FleetInstanceDetail({
   privilegeMaterial,
   showCountryFlags,
   summary,
+  tagDisplayOrder,
+  tagVisibilityOverrides,
   telemetryNetworkRates,
   telemetryRollups,
   vpsNameDisplayMode,
@@ -865,6 +901,8 @@ function FleetInstanceDetail({
   privilegeMaterial: PrivilegeMaterial | null;
   showCountryFlags: boolean;
   summary: FleetSummary;
+  tagDisplayOrder: TagDisplayOrder;
+  tagVisibilityOverrides: Record<string, boolean>;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   vpsNameDisplayMode: VpsNameDisplayMode;
@@ -895,7 +933,11 @@ function FleetInstanceDetail({
     useState<DataSourceHotConfigResponse | null>(null);
   const country = countryFromTags(agent.tags);
   const provider = providerFromTags(agent.tags);
-  const displayOnlyTags = displayTags(agent.tags);
+  const displayOnlyTags = displayTags(
+    agent.tags,
+    tagDisplayOrder,
+    tagVisibilityOverrides,
+  );
   const isNetworkManaged = agent.tags.some((tag) =>
     ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()),
   );
@@ -1075,9 +1117,7 @@ function FleetInstanceDetail({
         {agent.tags.length === 0 ? (
           <span className="mutedText">No tags assigned</span>
         ) : (
-          agent.tags
-            .slice()
-            .sort()
+          sortTagsByDisplayOrder(agent.tags, tagDisplayOrder)
             .map((tag) => (
               <button
                 className="tagEditChip"
@@ -1569,6 +1609,8 @@ function FleetSelectionPanel({
   onOpenSelectorWorkflow,
   selectionStatsMode,
   setSelectionStatsMode,
+  tagDisplayOrder,
+  tagVisibilityOverrides,
   vpsNameDisplayMode,
 }: {
   agents: AgentView[];
@@ -1589,6 +1631,8 @@ function FleetSelectionPanel({
   ) => void;
   selectionStatsMode: FleetSelectionStatsMode;
   setSelectionStatsMode: (mode: FleetSelectionStatsMode) => void;
+  tagDisplayOrder: TagDisplayOrder;
+  tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
 }) {
   const [tagToAdd, setTagToAdd] = useState("");
@@ -1600,7 +1644,7 @@ function FleetSelectionPanel({
     agents.map((agent) => agent.id),
   );
   const tagNames = useMemo(
-    () => allTags.map((tag) => tag.name).sort(),
+    () => allTags.map((tag) => tag.name),
     [allTags],
   );
   async function submitTag(action: "add" | "remove", tag: string) {
@@ -1765,6 +1809,8 @@ function FleetSelectionPanel({
         latestNetworkRates={latestNetworkRates}
         latestRollups={latestRollups}
         mode={selectionStatsMode}
+        tagDisplayOrder={tagDisplayOrder}
+        tagVisibilityOverrides={tagVisibilityOverrides}
         vpsNameDisplayMode={vpsNameDisplayMode}
       />
     </div>
@@ -1776,12 +1822,16 @@ function FleetSelectionStatsTable({
   latestNetworkRates,
   latestRollups,
   mode,
+  tagDisplayOrder,
+  tagVisibilityOverrides,
   vpsNameDisplayMode,
 }: {
   agents: AgentView[];
   latestNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
   latestRollups: Map<string, TelemetryRollupRecord>;
   mode: FleetSelectionStatsMode;
+  tagDisplayOrder: TagDisplayOrder;
+  tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
 }) {
   const rows = agents
@@ -1849,7 +1899,13 @@ function FleetSelectionStatsTable({
             <span>{countryFromTags(agent.tags) ?? "unset"}</span>
             <span>{providerFromTags(agent.tags) ?? "unset"}</span>
             <span>{formatLastSeen(agent.last_seen_at)}</span>
-            <span>{displayTags(agent.tags).join(", ") || "untagged"}</span>
+            <span>
+              {displayTags(
+                agent.tags,
+                tagDisplayOrder,
+                tagVisibilityOverrides,
+              ).join(", ") || "untagged"}
+            </span>
           </div>
         ))}
       </div>
@@ -2253,9 +2309,7 @@ function agentNamesById(
 }
 
 function countryFromTags(tags: string[]): string | null {
-  const countryTag = tags.find((tag) =>
-    /^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag),
-  );
+  const countryTag = tags.find(isCountryTag);
   if (!countryTag) {
     return null;
   }
@@ -2264,21 +2318,12 @@ function countryFromTags(tags: string[]): string | null {
 }
 
 function providerFromTags(tags: string[]): string | null {
-  const providerTag = tags.find((tag) =>
-    /^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag),
-  );
+  const providerTag = tags.find(isProviderTag);
   if (!providerTag) {
     return null;
   }
   const [, provider] = providerTag.split(/[:=_-]/, 2);
   return provider || null;
-}
-
-function displayTags(tags: string[]): string[] {
-  return tags
-    .filter((tag) => !/^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag))
-    .filter((tag) => !/^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag))
-    .sort((left, right) => left.localeCompare(right));
 }
 
 function formatLastSeen(value: string | null | undefined): string {

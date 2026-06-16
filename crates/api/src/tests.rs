@@ -77,6 +77,60 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 }
 
 #[tokio::test]
+async fn memory_tag_order_controls_registry_and_agent_tag_reads() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+
+    for tag in ["provider:alpha", "role:edge", "country:US", "app:web"] {
+        repo.assign_agent_tag("client-a", tag).await.unwrap();
+    }
+
+    assert_eq!(
+        repo.list_tags()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect::<Vec<_>>(),
+        vec!["provider:alpha", "role:edge", "country:US", "app:web"]
+    );
+
+    repo.update_tag_order(&UpdateTagOrderRequest {
+        ordered_tags: vec!["app:web".to_string(), "role:edge".to_string()],
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.list_tags()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect::<Vec<_>>(),
+        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+    );
+    assert_eq!(
+        repo.agent_by_id("client-a").await.unwrap().tags,
+        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+    );
+}
+
+#[tokio::test]
 async fn stale_agent_clears_only_after_changed_internal_build_hello() {
     fn hello(build: u64) -> GatewayAgentHelloIngest {
         GatewayAgentHelloIngest {

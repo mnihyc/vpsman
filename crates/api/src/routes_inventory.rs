@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -20,7 +22,8 @@ use crate::{
         TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
         TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
         TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
-        UpdateDataSourcePresetResponse, UpsertHotConfigRuleTemplateRequest, WsEvent,
+        UpdateDataSourcePresetResponse, UpdateTagOrderRequest, UpsertHotConfigRuleTemplateRequest,
+        WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     selector_expression::parse_selector_expression,
@@ -173,6 +176,24 @@ pub(crate) async fn list_tags(
 ) -> Result<Json<Vec<TagView>>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
     Ok(Json(state.repo.list_tags().await?))
+}
+
+pub(crate) async fn update_tag_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateTagOrderRequest>,
+) -> Result<Json<Vec<TagView>>, ApiError> {
+    let _operator = state
+        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .await?;
+    validate_tag_order_request(&request, &state.repo.list_tags().await?)?;
+    Ok(Json(
+        state
+            .repo
+            .update_tag_order(&request)
+            .await
+            .map_err(tag_order_error)?,
+    ))
 }
 
 pub(crate) async fn list_data_source_presets(
@@ -806,6 +827,38 @@ fn validate_persisted_tag_name(tag: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("invalid_tag_name"));
     }
     Ok(())
+}
+
+fn validate_tag_order_request(
+    request: &UpdateTagOrderRequest,
+    current: &[TagView],
+) -> Result<(), ApiError> {
+    if request.ordered_tags.len() > 1000 {
+        return Err(ApiError::bad_request("too_many_ordered_tags"));
+    }
+    let current_names = current
+        .iter()
+        .map(|tag| tag.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    for tag in &request.ordered_tags {
+        validate_persisted_tag_name(tag)?;
+        if !current_names.contains(tag.as_str()) {
+            return Err(ApiError::bad_request("unknown_tag"));
+        }
+        if !seen.insert(tag.as_str()) {
+            return Err(ApiError::bad_request("duplicate_tag"));
+        }
+    }
+    Ok(())
+}
+
+fn tag_order_error(error: anyhow::Error) -> ApiError {
+    match error.to_string().as_str() {
+        "unknown_tag" => ApiError::bad_request("unknown_tag"),
+        "duplicate_tag" => ApiError::bad_request("duplicate_tag"),
+        _ => error.into(),
+    }
 }
 
 fn validate_agent_alias(display_name: &str) -> Result<(), ApiError> {

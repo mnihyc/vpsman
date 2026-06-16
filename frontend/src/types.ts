@@ -891,6 +891,7 @@ export type OperatorPreferences = {
   timezone: string | null;
   language: "en";
   show_country_flags: boolean;
+  fleet_tag_visibility_overrides: Record<string, boolean>;
   sidebar_subpanel_default: "active" | "all";
   dashboard_curve_exclusions: string[];
   dashboard_resource_top_limit: number;
@@ -2215,6 +2216,7 @@ export type HistoryExportRecord = {
 
 export type TagView = {
   name: string;
+  display_order: number;
   clients: AgentView[];
 };
 

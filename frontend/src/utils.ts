@@ -106,6 +106,7 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_resource_top_limit: 8,
   gateway_endpoints: "",
   gateway_server_public_key_hex: null,
+  fleet_tag_visibility_overrides: {},
   language: "en",
   show_country_flags: true,
   sidebar_subpanel_default: "active",

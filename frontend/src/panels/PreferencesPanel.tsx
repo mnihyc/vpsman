@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Save,
   ServerCog,
+  Tags,
   TimerReset,
   Trash2,
   Wifi,
@@ -21,10 +22,15 @@ import {
 import { clearLocalStorageSelections } from "../localStorageSelections";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import type { OperatorPreferences, OperatorView } from "../types";
+import {
+  defaultFleetTagVisible,
+  fleetTagVisible,
+} from "../tagDisplay";
+import type { OperatorPreferences, OperatorView, TagView } from "../types";
 
 type PreferencesPanelProps = {
   operator: OperatorView | null;
+  tags: TagView[];
 };
 
 const COMMON_TIMEZONES = [
@@ -39,7 +45,7 @@ const COMMON_TIMEZONES = [
 
 const DASHBOARD_TOP_LIMIT_OPTIONS = [3, 5, 8, 12, 16];
 
-export function PreferencesPanel({ operator }: PreferencesPanelProps) {
+export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
   const {
     preferences,
     preferencesError,
@@ -51,6 +57,7 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
   const [localSelectionMessage, setLocalSelectionMessage] = useState<
     string | null
   >(null);
+  const [tagVisibilityFilter, setTagVisibilityFilter] = useState("");
   const browserTimezone = useMemo(
     () =>
       Intl.DateTimeFormat().resolvedOptions().timeZone || "local browser time",
@@ -59,6 +66,19 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
   const timezonePreview = useMemo(
     () => previewTimezone(draft.timezone || browserTimezone),
     [browserTimezone, draft.timezone],
+  );
+  const filteredVisibilityTags = useMemo(() => {
+    const filter = tagVisibilityFilter.trim().toLowerCase();
+    return filter
+      ? tags.filter((tag) => tag.name.toLowerCase().includes(filter))
+      : tags;
+  }, [tagVisibilityFilter, tags]);
+  const visibleFleetTagCount = useMemo(
+    () =>
+      tags.filter((tag) =>
+        fleetTagVisible(tag.name, draft.fleet_tag_visibility_overrides),
+      ).length,
+    [draft.fleet_tag_visibility_overrides, tags],
   );
   const dirty = JSON.stringify(draft) !== JSON.stringify(preferences);
 
@@ -73,12 +93,16 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
     const dashboardCurveExclusions = normalizeCurveExclusions(
       draft.dashboard_curve_exclusions,
     );
+    const fleetTagVisibilityOverrides = normalizeFleetTagVisibilityOverrides(
+      draft.fleet_tag_visibility_overrides,
+    );
     const validationError =
       validateTimezone(timezone) ??
       validateDashboardLimits(
         draft.dashboard_resource_top_limit,
         draft.dashboard_network_top_limit,
-      );
+      ) ??
+      validateFleetTagVisibilityOverrides(fleetTagVisibilityOverrides);
     if (validationError) {
       setLocalError(validationError);
       return;
@@ -87,6 +111,7 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
       await updatePreferences({
         ...draft,
         dashboard_curve_exclusions: dashboardCurveExclusions,
+        fleet_tag_visibility_overrides: fleetTagVisibilityOverrides,
         timezone,
       });
     } catch {
@@ -109,6 +134,28 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
     if (cleared > 0) {
       window.setTimeout(() => window.location.reload(), 250);
     }
+  }
+
+  function setFleetTagVisibility(tag: string, visible: boolean) {
+    setDraft((current) => {
+      const nextOverrides = { ...current.fleet_tag_visibility_overrides };
+      if (visible === defaultFleetTagVisible(tag)) {
+        delete nextOverrides[tag];
+      } else {
+        nextOverrides[tag] = visible;
+      }
+      return {
+        ...current,
+        fleet_tag_visibility_overrides: nextOverrides,
+      };
+    });
+  }
+
+  function resetFleetTagVisibility() {
+    setDraft((current) => ({
+      ...current,
+      fleet_tag_visibility_overrides: {},
+    }));
   }
 
   return (
@@ -177,6 +224,77 @@ export function PreferencesPanel({ operator }: PreferencesPanelProps) {
               />
               <span>Show flag next to country code</span>
             </label>
+          </PreferenceGroup>
+
+          <PreferenceGroup
+            description="Controls which registry tags render inside the Fleet Tags column."
+            icon={<Tags size={18} />}
+            title="Fleet tag visibility"
+          >
+            <div className="preferenceTagVisibilityToolbar">
+              <input
+                aria-label="Filter Fleet tag visibility"
+                onChange={(event) => setTagVisibilityFilter(event.target.value)}
+                placeholder="Filter tags"
+                value={tagVisibilityFilter}
+              />
+              <button
+                className="secondaryAction compactAction"
+                disabled={
+                  Object.keys(draft.fleet_tag_visibility_overrides).length === 0
+                }
+                onClick={resetFleetTagVisibility}
+                type="button"
+              >
+                <RotateCcw size={14} />
+                <span>Reset</span>
+              </button>
+            </div>
+            <div className="preferenceHint">
+              <strong>{visibleFleetTagCount} shown</strong>
+              <span>{tags.length - visibleFleetTagCount} hidden</span>
+            </div>
+            {tags.length === 0 ? (
+              <div className="preferenceHint">
+                <strong>No registry tags</strong>
+                <span>Create tags before setting Fleet column visibility.</span>
+              </div>
+            ) : (
+              <div className="preferenceTagVisibilityList">
+                {filteredVisibilityTags.map((tag) => {
+                  const checked = fleetTagVisible(
+                    tag.name,
+                    draft.fleet_tag_visibility_overrides,
+                  );
+                  const defaultVisible = defaultFleetTagVisible(tag.name);
+                  return (
+                    <label className="tagVisibilityLine" key={tag.name}>
+                      <input
+                        checked={checked}
+                        onChange={(event) =>
+                          setFleetTagVisibility(tag.name, event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <span className="tags">
+                        <em>{tag.name}</em>
+                      </span>
+                      <small>
+                        {tag.clients.length} VPS
+                        {tag.clients.length === 1 ? "" : "s"} / default{" "}
+                        {defaultVisible ? "shown" : "hidden"}
+                      </small>
+                    </label>
+                  );
+                })}
+                {filteredVisibilityTags.length === 0 && (
+                  <div className="preferenceHint">
+                    <strong>No matching tags</strong>
+                    <span>{tagVisibilityFilter.trim()}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </PreferenceGroup>
 
           <PreferenceGroup
@@ -513,6 +631,46 @@ function normalizeCurveExclusions(values: string[]): string[] {
     normalized.push(trimmed);
   }
   return normalized;
+}
+
+function normalizeFleetTagVisibilityOverrides(
+  values: Record<string, boolean>,
+): Record<string, boolean> {
+  const normalized: Record<string, boolean> = {};
+  for (const [tag, visible] of Object.entries(values)) {
+    const trimmed = tag.trim();
+    if (
+      !isValidPreferenceTagName(trimmed) ||
+      Object.keys(normalized).length >= 500
+    ) {
+      continue;
+    }
+    normalized[trimmed] = visible;
+  }
+  return normalized;
+}
+
+function validateFleetTagVisibilityOverrides(
+  values: Record<string, boolean>,
+): string | null {
+  const entries = Object.keys(values);
+  if (entries.length > 500) {
+    return "Fleet tag visibility has too many overrides.";
+  }
+  if (entries.some((tag) => !isValidPreferenceTagName(tag))) {
+    return "Fleet tag visibility contains an invalid tag.";
+  }
+  return null;
+}
+
+function isValidPreferenceTagName(tag: string): boolean {
+  return (
+    tag.length > 0 &&
+    tag.length <= 128 &&
+    !tag.startsWith("id:") &&
+    !tag.startsWith("name:") &&
+    /^[A-Za-z0-9_.:-]+$/.test(tag)
+  );
 }
 
 function validateDashboardLimits(

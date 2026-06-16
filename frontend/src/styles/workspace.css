@@ -1265,6 +1265,68 @@
   min-width: 0;
 }
 
+.preferenceTagVisibilityToolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.preferenceTagVisibilityList {
+  display: grid;
+  max-height: 280px;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: auto;
+}
+
+.preferenceControls label.tagVisibilityLine {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) max-content;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.preferenceControls label.tagVisibilityLine:last-child {
+  border-bottom: 0;
+}
+
+.preferenceControls label.tagVisibilityLine input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+.preferenceControls label.tagVisibilityLine .tags {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-transform: none;
+}
+
+.preferenceControls label.tagVisibilityLine .tags em {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-transform: none;
+}
+
+.preferenceControls label.tagVisibilityLine small {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .preferencesNotice {
   margin: 0;
   color: #174ea6;

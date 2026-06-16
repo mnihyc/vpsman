@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -62,6 +64,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) language: String,
     #[serde(default = "default_show_country_flags")]
     pub(crate) show_country_flags: bool,
+    #[serde(default)]
+    pub(crate) fleet_tag_visibility_overrides: BTreeMap<String, bool>,
     #[serde(default = "default_sidebar_subpanel_default")]
     pub(crate) sidebar_subpanel_default: String,
     #[serde(default)]
@@ -85,6 +89,7 @@ impl Default for OperatorPreferences {
             timezone: None,
             language: default_operator_language(),
             show_country_flags: default_show_country_flags(),
+            fleet_tag_visibility_overrides: BTreeMap::new(),
             sidebar_subpanel_default: default_sidebar_subpanel_default(),
             dashboard_curve_exclusions: Vec::new(),
             dashboard_resource_top_limit: default_dashboard_top_limit(),
@@ -107,6 +112,9 @@ impl OperatorPreferences {
             timezone: self.timezone.and_then(normalize_operator_timezone),
             language: normalize_choice(self.language, "en", &["en"]),
             show_country_flags: self.show_country_flags,
+            fleet_tag_visibility_overrides: normalize_fleet_tag_visibility_overrides(
+                self.fleet_tag_visibility_overrides,
+            ),
             sidebar_subpanel_default: normalize_choice(
                 self.sidebar_subpanel_default,
                 "active",
@@ -147,6 +155,20 @@ pub(crate) fn normalize_operator_timezone(value: String) -> Option<String> {
 pub(crate) fn is_valid_operator_timezone(timezone: &str) -> bool {
     let timezone = timezone.trim();
     !timezone.is_empty() && timezone.len() <= 64 && timezone.parse::<chrono_tz::Tz>().is_ok()
+}
+
+fn normalize_fleet_tag_visibility_overrides(
+    values: BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    let mut normalized = BTreeMap::new();
+    for (tag, visible) in values {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.len() > 128 || normalized.len() >= 500 {
+            continue;
+        }
+        normalized.insert(tag.to_string(), visible);
+    }
+    normalized
 }
 
 fn normalize_choice(value: String, fallback: &str, allowed: &[&str]) -> String {

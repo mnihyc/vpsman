@@ -77,10 +77,13 @@ export function App() {
     useState<PrivilegeMaterial | null>(null);
   const dashboard = useDashboardData(activeView);
   const fleetViews = useFleetViews(dashboard.agents);
-  const operatorPreferences = {
-    ...DEFAULT_OPERATOR_PREFERENCES,
-    ...(dashboard.operator?.preferences ?? {}),
-  };
+  const operatorPreferences = useMemo(
+    () => ({
+      ...DEFAULT_OPERATOR_PREFERENCES,
+      ...(dashboard.operator?.preferences ?? {}),
+    }),
+    [dashboard.operator?.preferences],
+  );
   const visibleAgents = fleetViews.filteredAgents;
   const selectedAgent = useMemo(
     () =>
@@ -354,6 +357,7 @@ export function App() {
                 onOpenSchedules={() => selectView("Schedules")}
                 onRefresh={dashboard.loadTagInventory}
                 onResolveBulk={dashboard.resolveBulkPreview}
+                onUpdateTagOrder={dashboard.updateTagOrder}
                 privilegeMaterial={privilegeMaterial}
                 tags={dashboard.tags}
               />
@@ -572,6 +576,7 @@ export function App() {
                 suiteConfig={dashboard.suiteConfig}
                 suiteConfigError={dashboard.suiteConfigError}
                 suiteConfigLoading={dashboard.suiteConfigLoading}
+                tags={dashboard.tags}
               />
             )}
           </>
