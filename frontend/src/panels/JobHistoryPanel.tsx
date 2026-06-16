@@ -644,6 +644,7 @@ export function JobHistoryPanel({
           loading={loading}
           onCreateJob={onCreateJob}
           onLoadOutputs={onLoadOutputs}
+          onLoadTargets={onLoadTargets}
           onOpenMultiFiles={(path) => {
             setMultiFileInitialPath(path);
             onSelectSubpage?.("multi_files");

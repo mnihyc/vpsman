@@ -805,6 +805,9 @@ export function JobDispatchPanel({
         timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });
       setLastDispatchProgress(result.progress);
+      if (result.timedOut) {
+        throw new Error("Timed out waiting for job targets");
+      }
     } finally {
       setDispatchProgress(null);
     }

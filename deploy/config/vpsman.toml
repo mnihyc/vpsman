@@ -19,6 +19,10 @@ control_bind = "unix:/var/lib/vpsman/gateway-control.sock"
 api_url = "http://api:8080"
 gateway_id = "compose-gateway"
 reconnect_grace_secs = 60
+spool_dir = "/var/lib/vpsman/gateway-spool"
+spool_ram_max_bytes = 1073741824
+spool_disk_max_bytes = 4294967296
+spool_shutdown_flush_secs = 30
 
 [worker]
 tick_secs = 30
@@ -68,6 +72,7 @@ internal_http_write_secs = 10
 internal_http_read_secs = 15
 dispatch_ack_secs = 30
 event_post_secs = 15
+control_deadline_grace_secs = 30
 
 [secrets]
 internal_token_file = "/run/secrets/vpsman_internal_token"

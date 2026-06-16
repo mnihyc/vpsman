@@ -1,18 +1,20 @@
 use std::{
     ffi::{CString, OsStr, OsString},
+    io::{Read, Write},
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::time::{self, Duration};
 use vpsman_common::{
-    decode_inline_file_payload, payload_hash, validate_absolute_file_path, validate_file_mode,
-    CommandOutput, FileActionPolicy, FileOwnershipPolicy, OutputStream,
+    decode_inline_file_payload, job_command_type_label, payload_hash, validate_absolute_file_path,
+    validate_file_mode, CommandOutput, FileActionPolicy, FileOwnershipPolicy, OutputStream,
 };
 
 use crate::{
+    command_worker::CommandCancelToken,
     file_pull::chunked_output,
     platform_accounts::{
         chown_path as platform_chown_path, metadata_gid, metadata_mode, metadata_mtime_unix,
@@ -28,19 +30,31 @@ pub(crate) async fn execute_file_browser_command(
     job_id: uuid::Uuid,
     command: &vpsman_common::JobCommand,
     timeout_secs: u64,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
-        execute_file_browser_command_inner(job_id, command),
+    let operation_type = job_command_type_label(command);
+    let timeout_secs = timeout_secs.max(1);
+    match time::timeout(
+        Duration::from_secs(timeout_secs),
+        execute_file_browser_command_inner(job_id, command, cancel_token.clone(), operation_type),
     )
     .await
-    .context("file browser command timed out")?
+    {
+        Ok(result) => result,
+        Err(_) => {
+            cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            Err(anyhow!("file browser command timed out"))
+        }
+    }
 }
 
 async fn execute_file_browser_command_inner(
     job_id: uuid::Uuid,
     command: &vpsman_common::JobCommand,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     match command {
         vpsman_common::JobCommand::FileStat { path } => execute_file_stat(job_id, path).await,
         vpsman_common::JobCommand::FileListDir {
@@ -91,13 +105,34 @@ async fn execute_file_browser_command_inner(
             path,
             recursive,
             policy,
-        } => execute_file_delete(job_id, path, *recursive, *policy).await,
+        } => {
+            execute_file_delete(
+                job_id,
+                path,
+                *recursive,
+                *policy,
+                cancel_token,
+                operation_type,
+            )
+            .await
+        }
         vpsman_common::JobCommand::FileChmod {
             path,
             mode,
             recursive,
             policy,
-        } => execute_file_chmod(job_id, path, *mode, *recursive, *policy).await,
+        } => {
+            execute_file_chmod(
+                job_id,
+                path,
+                *mode,
+                *recursive,
+                *policy,
+                cancel_token,
+                operation_type,
+            )
+            .await
+        }
         vpsman_common::JobCommand::FileChown {
             path,
             owner,
@@ -118,6 +153,8 @@ async fn execute_file_browser_command_inner(
                 *recursive,
                 *ownership_policy,
                 *policy,
+                cancel_token,
+                operation_type,
             )
             .await
         }
@@ -127,9 +164,21 @@ async fn execute_file_browser_command_inner(
             overwrite,
             recursive,
             policy,
-        } => execute_file_copy(job_id, path, new_path, *overwrite, *recursive, *policy).await,
+        } => {
+            execute_file_copy(
+                job_id,
+                path,
+                new_path,
+                *overwrite,
+                *recursive,
+                *policy,
+                cancel_token,
+                operation_type,
+            )
+            .await
+        }
         vpsman_common::JobCommand::FileArchiveTar { path, max_bytes } => {
-            execute_file_archive_tar(job_id, path, *max_bytes).await
+            execute_file_archive_tar(job_id, path, *max_bytes, cancel_token, operation_type).await
         }
         _ => anyhow::bail!("unsupported file browser command"),
     }
@@ -454,7 +503,10 @@ async fn execute_file_delete(
     path: &str,
     recursive: bool,
     policy: FileActionPolicy,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     validate_mutable_path(path)?;
     let target = Path::new(path);
     if tokio::fs::symlink_metadata(target).await.is_err() {
@@ -466,7 +518,9 @@ async fn execute_file_delete(
         }
         anyhow::bail!("delete target does not exist");
     }
-    remove_path(target, recursive).await?;
+    cancel_token.check(operation_type)?;
+    remove_path(target, recursive, cancel_token.clone(), operation_type).await?;
+    cancel_token.check(operation_type)?;
     status_output(
         job_id,
         json!({"type": "file_delete", "path": path, "status": "deleted", "recursive": recursive}),
@@ -479,7 +533,10 @@ async fn execute_file_chmod(
     mode: u32,
     recursive: bool,
     policy: FileActionPolicy,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     validate_mutable_path(path)?;
     validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let target = PathBuf::from(path);
@@ -492,9 +549,13 @@ async fn execute_file_chmod(
         }
         anyhow::bail!("chmod target does not exist");
     }
-    tokio::task::spawn_blocking(move || chmod_path(&target, mode, recursive))
-        .await
-        .context("chmod worker failed")??;
+    let worker_token = cancel_token.clone();
+    tokio::task::spawn_blocking(move || {
+        chmod_path(&target, mode, recursive, &worker_token, operation_type)
+    })
+    .await
+    .context("chmod worker failed")??;
+    cancel_token.check(operation_type)?;
     status_output(
         job_id,
         json!({"type": "file_chmod", "path": path, "status": "changed", "mode": mode, "recursive": recursive}),
@@ -511,7 +572,10 @@ async fn execute_file_chown(
     recursive: bool,
     ownership_policy: FileOwnershipPolicy,
     policy: FileActionPolicy,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     validate_mutable_path(path)?;
     let target = PathBuf::from(path);
     if tokio::fs::symlink_metadata(&target).await.is_err() {
@@ -545,9 +609,13 @@ async fn execute_file_chown(
     }
     let uid = ownership.uid;
     let gid = ownership.gid;
-    tokio::task::spawn_blocking(move || chown_path_recursive(&target, uid, gid, recursive))
-        .await
-        .context("chown worker failed")??;
+    let worker_token = cancel_token.clone();
+    tokio::task::spawn_blocking(move || {
+        chown_path_recursive(&target, uid, gid, recursive, &worker_token, operation_type)
+    })
+    .await
+    .context("chown worker failed")??;
+    cancel_token.check(operation_type)?;
     status_output(
         job_id,
         json!({
@@ -571,7 +639,10 @@ async fn execute_file_copy(
     overwrite: bool,
     recursive: bool,
     policy: FileActionPolicy,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     validate_mutable_path(path)?;
     validate_mutable_path(new_path)?;
     let source = PathBuf::from(path);
@@ -617,11 +688,20 @@ async fn execute_file_copy(
         anyhow::bail!("copy destination already exists");
     }
     let status_path = effective_destination.to_string_lossy().to_string();
+    let worker_token = cancel_token.clone();
     tokio::task::spawn_blocking(move || {
-        copy_path(&source, &effective_destination, recursive, overwrite)
+        copy_path(
+            &source,
+            &effective_destination,
+            recursive,
+            overwrite,
+            &worker_token,
+            operation_type,
+        )
     })
     .await
     .context("copy worker failed")??;
+    cancel_token.check(operation_type)?;
     status_output(
         job_id,
         json!({"type": "file_copy", "path": path, "new_path": new_path, "effective_path": status_path, "status": "copied", "overwrite": overwrite, "recursive": recursive}),
@@ -632,13 +712,20 @@ async fn execute_file_archive_tar(
     job_id: uuid::Uuid,
     path: &str,
     max_bytes: u64,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(operation_type)?;
     validate_browser_path(path)?;
     let max_bytes = max_bytes.clamp(1, MAX_FILE_ARCHIVE_BYTES);
     let source = PathBuf::from(path);
-    let archive = tokio::task::spawn_blocking(move || build_tar_archive(&source, max_bytes))
-        .await
-        .context("archive worker failed")??;
+    let worker_token = cancel_token.clone();
+    let archive = tokio::task::spawn_blocking(move || {
+        build_tar_archive(&source, max_bytes, &worker_token, operation_type)
+    })
+    .await
+    .context("archive worker failed")??;
+    cancel_token.check(operation_type)?;
     let size_bytes = archive.len();
     let sha256_hex = payload_hash(&archive);
     let mut outputs = chunked_output(job_id, OutputStream::Stdout, &archive);
@@ -775,29 +862,82 @@ fn rename_no_replace_blocking(source: &Path, destination: &Path) -> std::io::Res
     Ok(())
 }
 
-async fn remove_path(path: &Path, recursive: bool) -> Result<()> {
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
+async fn remove_path(
+    path: &Path,
+    recursive: bool,
+    cancel_token: CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        remove_path_blocking(&path, recursive, &cancel_token, operation_type)
+    })
+    .await
+    .context("delete worker failed")??;
+    Ok(())
+}
+
+fn remove_path_blocking(
+    path: &Path,
+    recursive: bool,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
+    let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("failed to stat {}", path.display()))?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         if recursive {
-            tokio::fs::remove_dir_all(path)
-                .await
-                .with_context(|| format!("failed to remove directory {}", path.display()))?;
-        } else {
-            tokio::fs::remove_dir(path)
-                .await
-                .with_context(|| format!("failed to remove empty directory {}", path.display()))?;
+            remove_dir_contents_checked(path, cancel_token, operation_type)?;
         }
+        std::fs::remove_dir(path)
+            .with_context(|| format!("failed to remove directory {}", path.display()))?;
     } else {
-        tokio::fs::remove_file(path)
-            .await
+        std::fs::remove_file(path)
             .with_context(|| format!("failed to remove file {}", path.display()))?;
+    }
+    cancel_token.check(operation_type)?;
+    Ok(())
+}
+
+fn remove_dir_contents_checked(
+    path: &Path,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .with_context(|| format!("failed to read directory {}", path.display()))?
+    {
+        let entry = entry?;
+        entries.push((entry.file_name(), entry.path()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, entry_path) in entries {
+        cancel_token.check(operation_type)?;
+        let metadata = std::fs::symlink_metadata(&entry_path)
+            .with_context(|| format!("failed to stat {}", entry_path.display()))?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            remove_dir_contents_checked(&entry_path, cancel_token, operation_type)?;
+            std::fs::remove_dir(&entry_path)
+                .with_context(|| format!("failed to remove directory {}", entry_path.display()))?;
+        } else {
+            std::fs::remove_file(&entry_path)
+                .with_context(|| format!("failed to remove file {}", entry_path.display()))?;
+        }
     }
     Ok(())
 }
 
-fn chmod_path(path: &Path, mode: u32, recursive: bool) -> Result<()> {
+fn chmod_path(
+    path: &Path,
+    mode: u32,
+    recursive: bool,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("failed to chmod {}", path.display()))?;
     if recursive && path.is_dir() {
@@ -809,7 +949,7 @@ fn chmod_path(path: &Path, mode: u32, recursive: bool) -> Result<()> {
             if metadata.file_type().is_symlink() {
                 continue;
             }
-            chmod_path(&entry.path(), mode, true)?;
+            chmod_path(&entry.path(), mode, true, cancel_token, operation_type)?;
         }
     }
     Ok(())
@@ -925,7 +1065,10 @@ fn chown_path_recursive(
     uid: Option<u32>,
     gid: Option<u32>,
     recursive: bool,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
 ) -> Result<()> {
+    cancel_token.check(operation_type)?;
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("failed to stat {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -937,7 +1080,7 @@ fn chown_path_recursive(
             .with_context(|| format!("failed to read directory {}", path.display()))?
         {
             let entry = entry?;
-            chown_path_recursive(&entry.path(), uid, gid, true)?;
+            chown_path_recursive(&entry.path(), uid, gid, true, cancel_token, operation_type)?;
         }
     }
     Ok(())
@@ -977,7 +1120,15 @@ fn normalize_path_lexical(path: &Path) -> PathBuf {
     normalized
 }
 
-fn copy_path(source: &Path, destination: &Path, recursive: bool, overwrite: bool) -> Result<()> {
+fn copy_path(
+    source: &Path,
+    destination: &Path,
+    recursive: bool,
+    overwrite: bool,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
     let metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("failed to stat copy source {}", source.display()))?;
     if metadata.file_type().is_symlink() {
@@ -992,13 +1143,7 @@ fn copy_path(source: &Path, destination: &Path, recursive: bool, overwrite: bool
                 anyhow::bail!("copy destination already exists");
             }
         }
-        std::fs::copy(source, destination).with_context(|| {
-            format!(
-                "failed to copy {} to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
+        copy_file_contents_checked(source, destination, cancel_token, operation_type)?;
         std::fs::set_permissions(
             destination,
             std::fs::Permissions::from_mode(metadata_mode(&metadata).unwrap_or(0o644) & 0o777),
@@ -1035,11 +1180,46 @@ fn copy_path(source: &Path, destination: &Path, recursive: bool, overwrite: bool
                 &destination.join(entry.file_name()),
                 true,
                 overwrite,
+                cancel_token,
+                operation_type,
             )?;
         }
         return Ok(());
     }
     anyhow::bail!("copy source is not a regular file or directory");
+}
+
+fn copy_file_contents_checked(
+    source: &Path,
+    destination: &Path,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    let mut reader = std::fs::File::open(source)
+        .with_context(|| format!("failed to open copy source {}", source.display()))?;
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(destination)
+        .with_context(|| format!("failed to open copy destination {}", destination.display()))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        cancel_token.check(operation_type)?;
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read copy source {}", source.display()))?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read]).with_context(|| {
+            format!("failed to write copy destination {}", destination.display())
+        })?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush copy destination {}", destination.display()))?;
+    Ok(())
 }
 
 fn paths_have_same_content(source: &Path, destination: &Path) -> Result<bool> {
@@ -1099,10 +1279,17 @@ fn sorted_directory_entries(path: &Path) -> Result<Vec<(OsString, PathBuf)>> {
     Ok(entries)
 }
 
-fn build_tar_archive(source: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+fn build_tar_archive(
+    source: &Path,
+    max_bytes: u64,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<Vec<u8>> {
+    cancel_token.check(operation_type)?;
     let metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("failed to stat archive source {}", source.display()))?;
-    let estimated_size = estimate_archive_input_bytes(source, &metadata)?;
+    let estimated_size =
+        estimate_archive_input_bytes(source, &metadata, cancel_token, operation_type)?;
     if estimated_size > max_bytes {
         anyhow::bail!("archive source exceeds limit: {estimated_size} > {max_bytes}");
     }
@@ -1113,15 +1300,15 @@ fn build_tar_archive(source: &Path, max_bytes: u64) -> Result<Vec<u8>> {
             .file_name()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| OsStr::new("root"));
-        if metadata.is_dir() {
-            builder
-                .append_dir_all(name, source)
-                .with_context(|| format!("failed to archive directory {}", source.display()))?;
-        } else {
-            builder
-                .append_path_with_name(source, name)
-                .with_context(|| format!("failed to archive file {}", source.display()))?;
-        }
+        let archive_name = PathBuf::from(Path::new(name));
+        append_tar_path_checked(
+            &mut builder,
+            &archive_name,
+            source,
+            &metadata,
+            cancel_token,
+            operation_type,
+        )?;
         builder.finish().context("failed to finish tar archive")?;
     }
     if archive.len() as u64 > max_bytes {
@@ -1130,7 +1317,56 @@ fn build_tar_archive(source: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     Ok(archive)
 }
 
-fn estimate_archive_input_bytes(path: &Path, metadata: &std::fs::Metadata) -> Result<u64> {
+fn append_tar_path_checked<W: Write>(
+    builder: &mut tar::Builder<W>,
+    archive_path: &Path,
+    fs_path: &Path,
+    metadata: &std::fs::Metadata,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<()> {
+    cancel_token.check(operation_type)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        builder
+            .append_dir(archive_path, fs_path)
+            .with_context(|| format!("failed to archive directory {}", fs_path.display()))?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(fs_path)
+            .with_context(|| format!("failed to read {}", fs_path.display()))?
+        {
+            let entry = entry?;
+            entries.push((entry.file_name(), entry.path()));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        for (file_name, entry_path) in entries {
+            cancel_token.check(operation_type)?;
+            let entry_metadata = std::fs::symlink_metadata(&entry_path)
+                .with_context(|| format!("failed to stat {}", entry_path.display()))?;
+            let child_archive_path = archive_path.join(Path::new(&file_name));
+            append_tar_path_checked(
+                builder,
+                &child_archive_path,
+                &entry_path,
+                &entry_metadata,
+                cancel_token,
+                operation_type,
+            )?;
+        }
+        return Ok(());
+    }
+    builder
+        .append_path_with_name(fs_path, archive_path)
+        .with_context(|| format!("failed to archive file {}", fs_path.display()))?;
+    Ok(())
+}
+
+fn estimate_archive_input_bytes(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    cancel_token: &CommandCancelToken,
+    operation_type: &'static str,
+) -> Result<u64> {
+    cancel_token.check(operation_type)?;
     if metadata.is_file() {
         return Ok(metadata.len());
     }
@@ -1146,6 +1382,8 @@ fn estimate_archive_input_bytes(path: &Path, metadata: &std::fs::Metadata) -> Re
         total = total.saturating_add(estimate_archive_input_bytes(
             &entry.path(),
             &entry_metadata,
+            cancel_token,
+            operation_type,
         )?);
     }
     Ok(total)
@@ -1323,6 +1561,8 @@ mod tests {
             true,
             true,
             FileActionPolicy::Fail,
+            CommandCancelToken::default(),
+            "file_copy",
         )
         .await
         .unwrap();
@@ -1359,6 +1599,8 @@ mod tests {
             false,
             true,
             FileActionPolicy::Ensure,
+            CommandCancelToken::default(),
+            "file_copy",
         )
         .await
         .unwrap();
@@ -1390,6 +1632,43 @@ mod tests {
             "keep"
         );
         assert_eq!(fs::read_to_string(&source).unwrap(), "source");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn recursive_delete_observes_cancel_before_removing_tree() {
+        let root = test_root("delete-cancel");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("keep.txt"), "keep").unwrap();
+        let cancel_token = CommandCancelToken::default();
+        cancel_token.cancel("operator canceled".to_string());
+
+        let result = remove_path(&root, true, cancel_token, "file_delete").await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tar_archive_observes_cancel_before_walking_tree() {
+        let root = test_root("archive-cancel");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("keep.txt"), "keep").unwrap();
+        let cancel_token = CommandCancelToken::default();
+        cancel_token.cancel("operator canceled".to_string());
+
+        let result = build_tar_archive(
+            &root,
+            MAX_FILE_ARCHIVE_BYTES,
+            &cancel_token,
+            "file_archive_tar",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");
         let _ = fs::remove_dir_all(&root);
     }
 

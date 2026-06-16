@@ -28,7 +28,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    api_client::{GatewayControlClient, GatewayHttpTimeouts},
+    api_client::{GatewayControlClient, GatewayHttpTimeouts, GatewaySpoolConfig},
     control::run_control_listener,
     state::{
         cancel_ack_result, finish_pending_command_response, GatewaySession, GatewaySessionMessage,
@@ -83,6 +83,30 @@ pub(crate) struct Args {
     event_post_secs: u64,
     #[arg(long, env = "VPSMAN_DISPATCH_ACK_SECS", default_value_t = 30)]
     dispatch_ack_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_SPOOL_DIR",
+        default_value = "./runtime/gateway-spool"
+    )]
+    spool_dir: PathBuf,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_SPOOL_RAM_MAX_BYTES",
+        default_value_t = 1024 * 1024 * 1024
+    )]
+    spool_ram_max_bytes: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_SPOOL_DISK_MAX_BYTES",
+        default_value_t = 4 * 1024 * 1024 * 1024
+    )]
+    spool_disk_max_bytes: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
+        default_value_t = 30
+    )]
+    spool_shutdown_flush_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,10 +149,11 @@ async fn main() -> Result<()> {
     args.internal_token = Some(required_internal_token(args.internal_token.as_deref())?);
     validate_gateway_runtime_mode(&args)?;
     let runtime_config = GatewayRuntimeConfig::from_args(&args);
-    let api_client = GatewayControlClient::new(
+    let api_client = GatewayControlClient::new_with_spool(
         args.api_url.clone(),
         args.internal_token.clone(),
         runtime_config.http_timeouts,
+        args.gateway_spool_config(),
     );
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
@@ -156,11 +181,18 @@ async fn main() -> Result<()> {
     let agent_api_client = api_client.clone();
     let control_args = args.clone();
     let control_state = state.clone();
+    let shutdown_state = state.clone();
+    let shutdown_api_client = api_client.clone();
+    let shutdown_flush = args.gateway_spool_config().shutdown_flush;
 
-    tokio::try_join!(
-        run_agent_listener(agent_args, agent_state, agent_api_client),
-        run_control_listener(control_args, control_state),
-    )?;
+    tokio::select! {
+        result = run_agent_listener(agent_args, agent_state, agent_api_client) => result?,
+        result = run_control_listener(control_args, control_state) => result?,
+        _ = shutdown_signal() => {
+            request_all_agent_disconnects(&shutdown_state, "gateway_shutdown").await;
+            shutdown_api_client.shutdown_flush(shutdown_flush).await;
+        }
+    }
     Ok(())
 }
 
@@ -244,6 +276,26 @@ impl Args {
             "VPSMAN_DISPATCH_ACK_SECS",
             config.timeout.dispatch_ack_secs,
         );
+        apply_path_default(
+            &mut self.spool_dir,
+            "VPSMAN_GATEWAY_SPOOL_DIR",
+            config.gateway.spool_dir.as_deref(),
+        );
+        apply_u64_default(
+            &mut self.spool_ram_max_bytes,
+            "VPSMAN_GATEWAY_SPOOL_RAM_MAX_BYTES",
+            config.gateway.spool_ram_max_bytes,
+        );
+        apply_u64_default(
+            &mut self.spool_disk_max_bytes,
+            "VPSMAN_GATEWAY_SPOOL_DISK_MAX_BYTES",
+            config.gateway.spool_disk_max_bytes,
+        );
+        apply_u64_default(
+            &mut self.spool_shutdown_flush_secs,
+            "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
+            config.gateway.spool_shutdown_flush_secs,
+        );
     }
 
     fn gateway_http_timeouts(&self) -> GatewayHttpTimeouts {
@@ -253,6 +305,15 @@ impl Args {
             read: Duration::from_secs(self.internal_http_read_secs.clamp(1, 3600)),
             event_post: Duration::from_secs(self.event_post_secs.clamp(1, 3600)),
         }
+    }
+
+    fn gateway_spool_config(&self) -> GatewaySpoolConfig {
+        GatewaySpoolConfig::enabled(
+            self.spool_dir.clone(),
+            self.spool_ram_max_bytes,
+            self.spool_disk_max_bytes,
+            self.spool_shutdown_flush_secs,
+        )
     }
 }
 
@@ -315,6 +376,14 @@ fn apply_string_default(target: &mut String, env_name: &str, value: Option<&str>
     if env_absent(env_name) {
         if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
             *target = value.to_string();
+        }
+    }
+}
+
+fn apply_path_default(target: &mut PathBuf, env_name: &str, value: Option<&str>) {
+    if env_absent(env_name) {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            *target = PathBuf::from(value);
         }
     }
 }
@@ -598,6 +667,19 @@ async fn request_agent_disconnect(state: &GatewayState, client_id: &str, reason:
     }
 }
 
+async fn request_all_agent_disconnects(state: &GatewayState, reason: &str) {
+    let client_ids = state
+        .sessions
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for client_id in client_ids {
+        request_agent_disconnect(state, &client_id, reason).await;
+    }
+}
+
 async fn unregister_session_if_current(
     state: &GatewayState,
     client_id: &str,
@@ -609,6 +691,28 @@ async fn unregister_session_if_current(
         .is_some_and(|session| session.session_id == session_id)
     {
         sessions.remove(client_id);
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = async {
+                if let Some(signal) = terminate.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -786,11 +890,7 @@ async fn handle_agent_frame(
                 };
                 context
                     .control
-                    .post(
-                        &pending.client_id,
-                        "/internal/v1/gateway/command-output",
-                        &ingest,
-                    )
+                    .post_command_output(&pending.client_id, &ingest)
                     .await?;
                 let truncated = pending.retain_output_if_response_waiting(output);
                 if truncated > 0 {
@@ -1079,6 +1179,10 @@ mod tests {
             internal_http_read_secs: 15,
             event_post_secs: 15,
             dispatch_ack_secs: 30,
+            spool_dir: std::path::PathBuf::from("./runtime/gateway-spool"),
+            spool_ram_max_bytes: 1024 * 1024 * 1024,
+            spool_disk_max_bytes: 4 * 1024 * 1024 * 1024,
+            spool_shutdown_flush_secs: 30,
         }
     }
 
@@ -1089,6 +1193,10 @@ mod tests {
         "VPSMAN_INTERNAL_HTTP_READ_SECS",
         "VPSMAN_EVENT_POST_SECS",
         "VPSMAN_DISPATCH_ACK_SECS",
+        "VPSMAN_GATEWAY_SPOOL_DIR",
+        "VPSMAN_GATEWAY_SPOOL_RAM_MAX_BYTES",
+        "VPSMAN_GATEWAY_SPOOL_DISK_MAX_BYTES",
+        "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
     ];
 
     static GATEWAY_SUITE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -7,6 +7,7 @@ import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import {
   buildBulkJobProgress,
+  bulkProgressTimeoutMs,
   createJobTargetCount,
   waitForBulkJobTargets,
   type BulkJobProgress,
@@ -523,7 +524,11 @@ function BulkConfigApply({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: preview.targets,
+        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
       });
+      if (waited.timedOut) {
+        throw new Error("Timed out waiting for bulk config apply targets");
+      }
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
@@ -700,7 +705,11 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [singleTarget],
+        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
       });
+      if (waited.timedOut) {
+        throw new Error("Timed out waiting for config read target");
+      }
       const outputs = await onLoadJobOutputs(response.job_id);
       setProgress(
         buildBulkJobProgress({
@@ -757,7 +766,11 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [singleTarget],
+        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
       });
+      if (waited.timedOut) {
+        throw new Error("Timed out waiting for config apply target");
+      }
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({

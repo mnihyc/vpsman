@@ -4,8 +4,9 @@ use tokio::{
     time::{self, Duration},
 };
 use vpsman_common::{
-    AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
-    AgentExecutionPtyPolicy, CommandOutput, JobCommand, OutputStream, MAX_SHELL_SCRIPT_BYTES,
+    job_command_type_label, AgentConfig, AgentExecutionEnvironmentPolicy,
+    AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy, CommandOutput, JobCommand,
+    OutputStream, MAX_SHELL_SCRIPT_BYTES,
 };
 
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
         run_pty_with_bounded_output, run_pty_with_streaming_output, ChildCleanupPolicy,
         ChildOutputSink, ChildRunOutput, ChildRunResult,
     },
+    command_worker::CommandCancelToken,
     file_browser::execute_file_browser_command,
     file_download::{
         execute_file_download, execute_file_transfer_download_chunk,
@@ -74,6 +76,7 @@ pub(crate) async fn execute_job_command_with_output_sink(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn execute_job_command_with_config_and_output_sink(
     config: &AgentConfig,
     job_id: uuid::Uuid,
@@ -81,6 +84,26 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
     timeout_secs: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
+    execute_job_command_with_config_cancel_and_output_sink(
+        config,
+        job_id,
+        command,
+        timeout_secs,
+        CommandCancelToken::default(),
+        output_tx,
+    )
+    .await
+}
+
+pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
+    config: &AgentConfig,
+    job_id: uuid::Uuid,
+    command: &JobCommand,
+    timeout_secs: u64,
+    cancel_token: CommandCancelToken,
+    output_tx: Option<mpsc::Sender<CommandOutput>>,
+) -> Result<Vec<CommandOutput>> {
+    cancel_token.check(job_command_type_label(command))?;
     match command {
         JobCommand::Shell { argv, pty } => {
             execute_shell_command(config, job_id, argv, *pty, timeout_secs, output_tx).await
@@ -263,14 +286,24 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
         | JobCommand::FileChown { .. }
         | JobCommand::FileCopy { .. }
         | JobCommand::FileArchiveTar { .. } => {
-            execute_file_browser_command(job_id, command, timeout_secs).await
+            execute_file_browser_command(job_id, command, timeout_secs, cancel_token).await
         }
-        JobCommand::FileDownload { path, max_bytes } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
-            execute_file_download(job_id, path, *max_bytes, output_tx),
-        )
-        .await
-        .context("file download timed out")?,
+        JobCommand::FileDownload { path, max_bytes } => {
+            let timeout_secs = timeout_secs.max(1);
+            let timeout_cancel_token = cancel_token.clone();
+            match time::timeout(
+                Duration::from_secs(timeout_secs),
+                execute_file_download(job_id, path, *max_bytes, output_tx, cancel_token),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+                    Err(anyhow::anyhow!("file download timed out"))
+                }
+            }
+        }
         JobCommand::UserSessions => execute_user_sessions(config, job_id, timeout_secs).await,
         JobCommand::ProcessList { limit } => {
             execute_process_list(config, job_id, *limit, timeout_secs).await
@@ -304,6 +337,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
                 artifact_signing_key_hex: artifact_signing_key_hex.as_deref(),
                 trusted_artifact_signing_key_hex: None,
                 timeout_secs,
+                cancel_token,
             })
             .await
         }
@@ -316,6 +350,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
                 staged_sha256_hex: staged_sha256_hex.clone(),
                 restart_agent: *restart_agent,
                 timeout_secs,
+                cancel_token,
             })
             .await
         }
@@ -326,6 +361,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
                 job_id,
                 rollback_sha256_hex: rollback_sha256_hex.clone(),
                 timeout_secs,
+                cancel_token,
             })
             .await
         }
@@ -347,6 +383,7 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
                     .trusted_artifact_signing_key_hex
                     .as_deref(),
                 timeout_secs,
+                cancel_token,
             })
             .await
         }

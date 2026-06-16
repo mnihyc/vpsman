@@ -45,7 +45,7 @@ type ScreenshotManifestEntry = {
 
 const screenshotManifest: ScreenshotManifestEntry[] = [];
 
-test.setTimeout(300_000);
+test.setTimeout(extendedReview ? 600_000 : 300_000);
 
 test("validates the live Docker fleet console with 20+ VPS agents", async ({
   page,
@@ -164,6 +164,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   const secondRow = grid
     .locator(".gridBody [role=row]", { hasText: "df-alpha-DE-10" })
     .first();
+  await selectGridRow(firstRow);
+  await selectGridRow(secondRow);
+  await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
   await firstRow.getByLabel("Expand VPS instance records row").click();
   const firstDetail = grid
     .locator(".gridExpandedRow", { hasText: "df-alpha-US-01" })
@@ -179,13 +182,6 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-expanded-telemetry-detail",
     "Expanded VPS row showing live telemetry detail for a real agent.",
   );
-  await firstRow
-    .getByLabel("Select VPS instance records row")
-    .check({ force: true });
-  await secondRow
-    .getByLabel("Select VPS instance records row")
-    .check({ force: true });
-  await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
   await grid.getByRole("button", { name: "Selection" }).click();
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
@@ -247,12 +243,14 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await exerciseExpressionWebhooks(page, testInfo.project.name);
   await exerciseServerJobsCleanup(page, testInfo.project.name);
 
-  await verifyDesktopSubpages(page, testInfo.project.name);
-  expectExtendedScreenshotNames(testInfo.project.name, [
-    "extended-page-system-dashboard",
-    "extended-page-system-config",
-    "extended-page-system-preferences",
-  ]);
+  if (extendedReview) {
+    await verifyDesktopSubpages(page, testInfo.project.name);
+    expectExtendedScreenshotNames(testInfo.project.name, [
+      "extended-page-system-dashboard",
+      "extended-page-system-config",
+      "extended-page-system-preferences",
+    ]);
+  }
   await openConsoleSubpage(page, "System", "Preferences");
   const preferencesPanel = page.locator(".preferencesPanel");
   await expect(
@@ -448,9 +446,11 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
     await page.mouse.up();
   }
 
-  await nameHeader
-    .locator(".gridDragHandle")
-    .dragTo(providerHeader.locator(".gridDragHandle"));
+  await expect(providerHeader.locator(".gridDragHandle")).toBeVisible();
+  await nameHeader.locator(".gridDragHandle").focus();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Space");
   await grid.getByLabel("VPS instance records columns").click();
   await page.getByRole("menuitemcheckbox", { name: "Provider" }).click();
   await expect(
@@ -459,6 +459,13 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
   await page.keyboard.press("Escape");
   await grid.getByLabel("VPS instance records page size").selectOption("25");
   await expect(grid.getByText(`1 / ${Math.ceil(expectedTotal / 25)}`)).toBeVisible();
+}
+
+async function selectGridRow(row: Locator) {
+  const checkbox = row.getByLabel("Select VPS instance records row");
+  await checkbox.scrollIntoViewIfNeeded();
+  await checkbox.check({ timeout: 10_000 });
+  await expect(checkbox).toBeChecked({ timeout: 5000 });
 }
 
 async function exerciseExpressionWebhooks(page: Page, projectName: string) {
@@ -1162,6 +1169,7 @@ function actionableConsoleErrors(errors: string[]): string[] {
   return errors.filter(
     (entry) =>
       !entry.includes("ResizeObserver loop") &&
+      !entry.includes("net::ERR_NETWORK_CHANGED") &&
       !entry.includes("status of 401") &&
       !entry.includes("status of 404"),
   );

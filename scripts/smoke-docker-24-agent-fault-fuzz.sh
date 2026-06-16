@@ -414,6 +414,7 @@ docker run -d \
   -e VPSMAN_GATEWAY_ID=docker-fault-fuzz-gateway \
   -e VPSMAN_GATEWAY_RECONNECT_GRACE_SECS=2 \
   -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
+  -e VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
   -e RUST_LOG=vpsman_gateway=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \

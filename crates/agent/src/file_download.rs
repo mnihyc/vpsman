@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -20,6 +20,7 @@ use vpsman_common::{
     FILE_TRANSFER_CHUNK_BYTES, MAX_DIRECT_FILE_DOWNLOAD_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
 
+use crate::command_worker::CommandCancelToken;
 use crate::file_pull::{
     chunked_output, stream_buffered_payload_output, COMMAND_OUTPUT_CHUNK_BYTES,
 };
@@ -84,7 +85,9 @@ pub(crate) async fn execute_file_download(
     path: &str,
     max_bytes: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_download")?;
     validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let max_bytes = max_bytes.clamp(1, MAX_DIRECT_FILE_DOWNLOAD_BYTES);
     let metadata = tokio::fs::symlink_metadata(path)
@@ -94,11 +97,18 @@ pub(crate) async fn execute_file_download(
         anyhow::bail!("file download source is a symlink");
     }
     if metadata.is_file() {
-        return execute_regular_file_download(job_id, path, metadata.len(), max_bytes, output_tx)
-            .await;
+        return execute_regular_file_download(
+            job_id,
+            path,
+            metadata.len(),
+            max_bytes,
+            output_tx,
+            cancel_token,
+        )
+        .await;
     }
     if metadata.is_dir() {
-        return execute_directory_download(job_id, path, max_bytes, output_tx).await;
+        return execute_directory_download(job_id, path, max_bytes, output_tx, cancel_token).await;
     }
     anyhow::bail!("file download source is not a regular file or directory");
 }
@@ -109,13 +119,15 @@ async fn execute_regular_file_download(
     size_bytes: u64,
     max_bytes: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_download")?;
     if size_bytes > max_bytes {
         anyhow::bail!("file download source exceeds limit: {size_bytes} > {max_bytes} bytes");
     }
     let filename = download_filename(path, false);
     if let Some(sender) = output_tx {
-        let summary = stream_file_payload(job_id, path, sender).await?;
+        let summary = stream_file_payload(job_id, path, sender, cancel_token).await?;
         return file_download_status(
             job_id,
             path,
@@ -130,9 +142,11 @@ async fn execute_regular_file_download(
         );
     }
 
+    cancel_token.check("file_download")?;
     let data = tokio::fs::read(path)
         .await
         .with_context(|| format!("failed to read download source {path}"))?;
+    cancel_token.check("file_download")?;
     let mut outputs = chunked_output(job_id, OutputStream::Stdout, &data);
     outputs.push(file_download_status_output(
         job_id,
@@ -154,12 +168,17 @@ async fn execute_directory_download(
     path: &str,
     max_bytes: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    cancel_token.check("file_download")?;
     let source = PathBuf::from(path);
-    let artifact =
-        tokio::task::spawn_blocking(move || build_directory_download_artifact(&source, max_bytes))
-            .await
-            .context("file download archive worker failed")??;
+    let worker_token = cancel_token.clone();
+    let artifact = tokio::task::spawn_blocking(move || {
+        build_directory_download_artifact(&source, max_bytes, &worker_token)
+    })
+    .await
+    .context("file download archive worker failed")??;
+    cancel_token.check("file_download")?;
     let DirectoryDownloadArtifact { archive, manifest } = artifact;
     let filename = download_filename(path, true);
     if let Some(sender) = output_tx {
@@ -205,6 +224,7 @@ async fn stream_file_payload(
     job_id: uuid::Uuid,
     path: &str,
     output_tx: mpsc::Sender<CommandOutput>,
+    cancel_token: CommandCancelToken,
 ) -> Result<crate::file_pull::StreamedPayloadSummary> {
     let mut file = tokio::fs::File::open(path)
         .await
@@ -214,6 +234,7 @@ async fn stream_file_payload(
     let mut size_bytes = 0_u64;
     let mut chunk_count = 0_u64;
     loop {
+        cancel_token.check("file_download")?;
         let read = file
             .read(&mut buffer)
             .await
@@ -324,23 +345,25 @@ fn file_download_status_output(
 fn build_directory_download_artifact(
     source: &Path,
     max_bytes: u64,
+    cancel_token: &CommandCancelToken,
 ) -> Result<DirectoryDownloadArtifact> {
+    cancel_token.check("file_download")?;
     let metadata = std::fs::symlink_metadata(source)
         .with_context(|| format!("failed to stat download source {}", source.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         anyhow::bail!("file download archive source is not a directory");
     }
-    let manifest = build_directory_manifest(source, max_bytes)?;
+    let manifest = build_directory_manifest(source, max_bytes, cancel_token)?;
     let mut archive = Vec::new();
     {
+        cancel_token.check("file_download")?;
         let mut builder = tar::Builder::new(&mut archive);
         let name = source
             .file_name()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| OsStr::new("root"));
-        builder
-            .append_dir_all(name, source)
-            .with_context(|| format!("failed to archive directory {}", source.display()))?;
+        let archive_name = PathBuf::from(Path::new(name));
+        append_tar_path_checked(&mut builder, &archive_name, source, &metadata, cancel_token)?;
         builder.finish().context("failed to finish tar archive")?;
     }
     if archive.len() as u64 > max_bytes {
@@ -349,9 +372,46 @@ fn build_directory_download_artifact(
     Ok(DirectoryDownloadArtifact { archive, manifest })
 }
 
-fn build_directory_manifest(source: &Path, max_bytes: u64) -> Result<FileDownloadManifestSummary> {
+fn append_tar_path_checked<W: Write>(
+    builder: &mut tar::Builder<W>,
+    archive_path: &Path,
+    fs_path: &Path,
+    metadata: &std::fs::Metadata,
+    cancel_token: &CommandCancelToken,
+) -> Result<()> {
+    cancel_token.check("file_download")?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        builder
+            .append_dir(archive_path, fs_path)
+            .with_context(|| format!("failed to archive directory {}", fs_path.display()))?;
+        let mut entries = std::fs::read_dir(fs_path)
+            .with_context(|| format!("failed to read {}", fs_path.display()))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            cancel_token.check("file_download")?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("failed to stat {}", path.display()))?;
+            let file_name = entry.file_name();
+            let child_archive_path = archive_path.join(Path::new(&file_name));
+            append_tar_path_checked(builder, &child_archive_path, &path, &metadata, cancel_token)?;
+        }
+        return Ok(());
+    }
+    builder
+        .append_path_with_name(fs_path, archive_path)
+        .with_context(|| format!("failed to archive file {}", fs_path.display()))?;
+    Ok(())
+}
+
+fn build_directory_manifest(
+    source: &Path,
+    max_bytes: u64,
+    cancel_token: &CommandCancelToken,
+) -> Result<FileDownloadManifestSummary> {
     let mut builder = FileDownloadManifestBuilder::new();
-    collect_manifest_entries(source, source, max_bytes, &mut builder)?;
+    collect_manifest_entries(source, source, max_bytes, &mut builder, cancel_token)?;
     Ok(builder.finish())
 }
 
@@ -400,12 +460,15 @@ fn collect_manifest_entries(
     current: &Path,
     max_bytes: u64,
     builder: &mut FileDownloadManifestBuilder,
+    cancel_token: &CommandCancelToken,
 ) -> Result<()> {
+    cancel_token.check("file_download")?;
     let mut entries = std::fs::read_dir(current)
         .with_context(|| format!("failed to read {}", current.display()))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        cancel_token.check("file_download")?;
         let path = entry.path();
         let metadata = std::fs::symlink_metadata(&path)
             .with_context(|| format!("failed to stat {}", path.display()))?;
@@ -433,7 +496,7 @@ fn collect_manifest_entries(
                 sha256_hex: None,
                 symlink_target: None,
             });
-            collect_manifest_entries(root, &path, max_bytes, builder)?;
+            collect_manifest_entries(root, &path, max_bytes, builder, cancel_token)?;
             continue;
         }
         if metadata.is_file() {
@@ -792,4 +855,29 @@ fn download_status_output(
         exit_code: Some(0),
         done: true,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn directory_download_archive_observes_cancel_before_walking_tree() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-file-download-cancel-{}", Uuid::new_v4()));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("keep.txt"), "keep").unwrap();
+        let cancel_token = CommandCancelToken::default();
+        cancel_token.cancel("operator canceled".to_string());
+
+        let result =
+            build_directory_download_artifact(&root, MAX_DIRECT_FILE_DOWNLOAD_BYTES, &cancel_token);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");
+        let _ = fs::remove_dir_all(root);
+    }
 }

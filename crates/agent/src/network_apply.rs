@@ -58,37 +58,29 @@ pub(crate) struct NetworkOspfCostUpdateInput<'a> {
 pub(crate) async fn execute_network_apply_command(
     input: NetworkApplyInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        apply_network_plan(input),
-    )
-    .await
-    .context("network apply timed out")?
+    let deadline = network_operation_deadline(input.timeout_secs);
+    apply_network_plan(input, deadline).await
 }
 
 pub(crate) async fn execute_network_rollback_command(
     input: NetworkRollbackInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        rollback_network_plan(input),
-    )
-    .await
-    .context("network rollback timed out")?
+    let deadline = network_operation_deadline(input.timeout_secs);
+    rollback_network_plan(input, deadline).await
 }
 
 pub(crate) async fn execute_network_ospf_cost_update_command(
     input: NetworkOspfCostUpdateInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        update_network_ospf_cost(input),
-    )
-    .await
-    .context("network OSPF cost update timed out")?
+    let deadline = network_operation_deadline(input.timeout_secs);
+    update_network_ospf_cost(input, deadline).await
 }
 
-async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandOutput>> {
+async fn apply_network_plan(
+    input: NetworkApplyInput<'_>,
+    deadline: time::Instant,
+) -> Result<Vec<CommandOutput>> {
+    ensure_network_deadline(deadline, "network apply")?;
     if !input.config.network.apply_enabled {
         anyhow::bail!("network apply is disabled in agent config");
     }
@@ -149,6 +141,7 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
         if report["status"].as_str() == Some("failed") {
             anyhow::bail!("runtime tunnel reconcile failed before managed-file apply");
         }
+        ensure_network_deadline(deadline, "network apply")?;
         Some(report)
     } else {
         None
@@ -160,8 +153,10 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
     let bird2_path = managed_destination(root, MANAGED_BIRD2_FILE)?;
     let mut planned = Vec::new();
     for file in &backend_config.files {
+        ensure_network_deadline(deadline, "network apply")?;
         planned.push(prepare_backend_file_update(root, input.plan, &endpoint, file).await?);
     }
+    ensure_network_deadline(deadline, "network apply")?;
     planned.push(
         prepare_file_update(
             &bird2_path,
@@ -176,13 +171,17 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
         .await?,
     );
 
-    let applied = apply_updates_with_rollback(&planned).await?;
+    let applied = apply_updates_with_rollback(&planned, deadline, "network apply").await?;
 
     let hook_context = NetworkHookContext {
         plan: input.plan,
         endpoint: &endpoint,
     };
     let validation_specs = validation_hook_specs(&input.config.network, hook_context);
+    if let Err(error) = ensure_network_deadline(deadline, "network apply") {
+        rollback_updates(&applied).await;
+        return Err(error);
+    }
     let validation =
         match run_network_hooks(&validation_specs, input.config.network.hook_timeout_secs).await {
             Ok(reports) => reports,
@@ -196,6 +195,10 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
         endpoint: &endpoint,
     };
     let reload_specs = reload_hook_specs(&input.config.network, hook_context);
+    if let Err(error) = ensure_network_deadline(deadline, "network apply") {
+        rollback_updates(&applied).await;
+        return Err(error);
+    }
     let reload =
         match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
             Ok(reports) => reports,
@@ -246,7 +249,9 @@ async fn apply_network_plan(input: NetworkApplyInput<'_>) -> Result<Vec<CommandO
 
 async fn update_network_ospf_cost(
     input: NetworkOspfCostUpdateInput<'_>,
+    deadline: time::Instant,
 ) -> Result<Vec<CommandOutput>> {
+    ensure_network_deadline(deadline, "network OSPF cost update")?;
     if !input.config.network.apply_enabled {
         anyhow::bail!("network OSPF cost update is disabled in agent config");
     }
@@ -273,6 +278,7 @@ async fn update_network_ospf_cost(
         "bird2",
     )?;
     let routing_gate = runtime_routing_gate_from_sysfs(&input.config.network, input.plan).await?;
+    ensure_network_deadline(deadline, "network OSPF cost update")?;
 
     let mut previous_plan = input.plan.clone();
     previous_plan.recommended_ospf_cost = input.current_ospf_cost;
@@ -300,13 +306,22 @@ async fn update_network_ospf_cost(
         input.current_ospf_cost,
     )
     .await?;
-    let applied = apply_updates_with_rollback(std::slice::from_ref(&planned)).await?;
+    let applied = apply_updates_with_rollback(
+        std::slice::from_ref(&planned),
+        deadline,
+        "network OSPF cost update",
+    )
+    .await?;
 
     let hook_context = NetworkHookContext {
         plan: input.plan,
         endpoint: &endpoint,
     };
     let validation_specs = bird2_validation_hook_specs(&input.config.network, hook_context);
+    if let Err(error) = ensure_network_deadline(deadline, "network OSPF cost update") {
+        rollback_updates(&applied).await;
+        return Err(error);
+    }
     let validation =
         match run_network_hooks(&validation_specs, input.config.network.hook_timeout_secs).await {
             Ok(reports) => reports,
@@ -320,6 +335,10 @@ async fn update_network_ospf_cost(
         endpoint: &endpoint,
     };
     let reload_specs = bird2_reload_hook_specs(&input.config.network, hook_context);
+    if let Err(error) = ensure_network_deadline(deadline, "network OSPF cost update") {
+        rollback_updates(&applied).await;
+        return Err(error);
+    }
     let reload =
         match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
             Ok(reports) => reports,
@@ -447,7 +466,11 @@ async fn runtime_link_exists_for_routing(root: &Path, interface_name: &str) -> b
         .is_ok_and(|metadata| metadata.is_dir())
 }
 
-async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<CommandOutput>> {
+async fn rollback_network_plan(
+    input: NetworkRollbackInput<'_>,
+    deadline: time::Instant,
+) -> Result<Vec<CommandOutput>> {
+    ensure_network_deadline(deadline, "network rollback")?;
     if !input.config.network.apply_enabled {
         anyhow::bail!("network rollback is disabled in agent config");
     }
@@ -475,6 +498,7 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
         if report["status"].as_str() == Some("failed") {
             anyhow::bail!("runtime tunnel remove failed before managed-file rollback");
         }
+        ensure_network_deadline(deadline, "network rollback")?;
         Some(report)
     } else {
         None
@@ -485,8 +509,10 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
             .map_err(|error| anyhow::anyhow!("invalid backend tunnel config: {error}"))?;
     let mut planned = Vec::new();
     for file in &backend_config.files {
+        ensure_network_deadline(deadline, "network rollback")?;
         planned.push(prepare_backend_file_removal(root, input.plan, &endpoint, file).await?);
     }
+    ensure_network_deadline(deadline, "network rollback")?;
     planned.push(
         prepare_file_removal(
             &bird2_path,
@@ -507,11 +533,15 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
             endpoint: &endpoint,
         };
         let pre_rollback_specs = pre_rollback_hook_specs(&input.config.network, hook_context);
-        run_network_hooks(&pre_rollback_specs, input.config.network.hook_timeout_secs).await?
+        ensure_network_deadline(deadline, "network rollback")?;
+        let reports =
+            run_network_hooks(&pre_rollback_specs, input.config.network.hook_timeout_secs).await?;
+        ensure_network_deadline(deadline, "network rollback")?;
+        reports
     } else {
         Vec::new()
     };
-    let applied = apply_updates_with_rollback(&planned).await?;
+    let applied = apply_updates_with_rollback(&planned, deadline, "network rollback").await?;
 
     let (validation, reload) = if changed {
         let hook_context = NetworkHookContext {
@@ -519,6 +549,10 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
             endpoint: &endpoint,
         };
         let validation_specs = validation_hook_specs(&input.config.network, hook_context);
+        if let Err(error) = ensure_network_deadline(deadline, "network rollback") {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
         let validation = match run_network_hooks(
             &validation_specs,
             input.config.network.hook_timeout_secs,
@@ -536,6 +570,10 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
             endpoint: &endpoint,
         };
         let reload_specs = reload_hook_specs(&input.config.network, hook_context);
+        if let Err(error) = ensure_network_deadline(deadline, "network rollback") {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
         let reload =
             match run_network_hooks(&reload_specs, input.config.network.hook_timeout_secs).await {
                 Ok(reports) => reports,
@@ -590,9 +628,15 @@ async fn rollback_network_plan(input: NetworkRollbackInput<'_>) -> Result<Vec<Co
 
 async fn apply_updates_with_rollback(
     planned: &[PlannedFileUpdate],
+    deadline: time::Instant,
+    operation: &'static str,
 ) -> Result<Vec<PlannedFileUpdate>> {
     let mut applied = Vec::new();
     for update in planned {
+        if let Err(error) = ensure_network_deadline(deadline, operation) {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
         if update.changed {
             if let Err(error) = write_file_atomic(&update.path, &update.next_contents).await {
                 rollback_updates(&applied).await;
@@ -600,8 +644,23 @@ async fn apply_updates_with_rollback(
             }
         }
         applied.push(update.clone());
+        if let Err(error) = ensure_network_deadline(deadline, operation) {
+            rollback_updates(&applied).await;
+            return Err(error);
+        }
     }
     Ok(applied)
+}
+
+fn network_operation_deadline(timeout_secs: u64) -> time::Instant {
+    time::Instant::now() + Duration::from_secs(timeout_secs.max(1))
+}
+
+fn ensure_network_deadline(deadline: time::Instant, operation: &str) -> Result<()> {
+    if time::Instant::now() >= deadline {
+        anyhow::bail!("{operation} timed out");
+    }
+    Ok(())
 }
 
 fn verify_expected_hash(

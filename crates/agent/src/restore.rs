@@ -91,25 +91,22 @@ pub(crate) struct RestoreCommandInput<'a> {
 pub(crate) async fn execute_restore_command(
     input: RestoreCommandInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        restore_archive(
-            input.job_id,
-            input.source_backup_request_id,
-            input.paths,
-            input.include_config,
-            input.destination_root,
-            input.archive_path,
-            input.archive_base64,
-            input.archive_size_bytes,
-            input.archive_sha256_hex,
-            input.dry_run,
-            input.post_restore_argv,
-            input.timeout_secs,
-        ),
+    let deadline = time::Instant::now() + Duration::from_secs(input.timeout_secs.max(1));
+    restore_archive(
+        input.job_id,
+        input.source_backup_request_id,
+        input.paths,
+        input.include_config,
+        input.destination_root,
+        input.archive_path,
+        input.archive_base64,
+        input.archive_size_bytes,
+        input.archive_sha256_hex,
+        input.dry_run,
+        input.post_restore_argv,
+        deadline,
     )
     .await
-    .context("restore timed out")?
 }
 
 async fn restore_archive(
@@ -124,10 +121,11 @@ async fn restore_archive(
     archive_sha256_hex: Option<&str>,
     dry_run: bool,
     post_restore_argv: &[String],
-    timeout_secs: u64,
+    deadline: time::Instant,
 ) -> Result<Vec<CommandOutput>> {
     validate_restore_scope(paths, include_config, destination_root)?;
     validate_post_restore_argv(post_restore_argv)?;
+    ensure_restore_deadline(deadline)?;
     let archive_bytes = archive_bytes_from_source(
         archive_path,
         archive_base64,
@@ -140,6 +138,7 @@ async fn restore_archive(
     let mut restored = Vec::new();
     let mut matched_count = 0_usize;
     for entry in archive.files {
+        ensure_restore_deadline(deadline)?;
         if !entry_requested(&entry.entry, paths, include_config) {
             continue;
         }
@@ -149,7 +148,25 @@ async fn restore_archive(
             continue;
         }
         match restore_entry(job_id, &entry, destination_root).await {
-            Ok(applied) => restored.push(applied),
+            Ok(applied) => {
+                restored.push(applied);
+                if let Err(error) = ensure_restore_deadline(deadline) {
+                    if let Err(rollback_error) = rollback_applied_restores(&restored).await {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "restore timed out after {} files and automatic rollback failed: {rollback_error}",
+                                restored.len()
+                            )
+                        });
+                    }
+                    return Err(error).with_context(|| {
+                        format!(
+                            "restore timed out after {} files; applied files were rolled back",
+                            restored.len()
+                        )
+                    });
+                }
+            }
             Err(error) => {
                 if let Err(rollback_error) = rollback_applied_restores(&restored).await {
                     return Err(error).with_context(|| {
@@ -200,7 +217,12 @@ async fn restore_archive(
         .into_iter()
         .map(|applied| applied.status)
         .collect::<Vec<_>>();
-    let post_restore = run_post_restore_argv(post_restore_argv, timeout_secs).await?;
+    ensure_restore_deadline(deadline)?;
+    let post_restore_timeout_secs = deadline
+        .saturating_duration_since(time::Instant::now())
+        .as_secs()
+        .max(1);
+    let post_restore = run_post_restore_argv(post_restore_argv, post_restore_timeout_secs).await?;
 
     let status = serde_json::json!({
         "type": "restore",
@@ -226,6 +248,13 @@ async fn restore_archive(
         exit_code: Some(0),
         done: true,
     }])
+}
+
+fn ensure_restore_deadline(deadline: time::Instant) -> Result<()> {
+    if time::Instant::now() >= deadline {
+        anyhow::bail!("restore command timed out");
+    }
+    Ok(())
 }
 
 async fn archive_bytes_from_source(

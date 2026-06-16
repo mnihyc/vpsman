@@ -44,9 +44,30 @@ Target statuses are:
   queued parent job.
 - `skipped` is neither success nor failure at target level. Jobs with completed plus skipped targets aggregate to `partial_success`; all-skipped jobs aggregate to `skipped`.
 - Availability is contextual display only. Offline fixed targets remain target records until backend deadline, then become `control_timeout`.
+- `timeout_secs` is the agent execution budget. The API control deadline adds
+  dispatch/ACK, internal HTTP/event-post, and `control_deadline_grace_secs`
+  grace time so healthy long-running commands near their own timeout are not
+  mislabeled as `control_timeout` because of gateway/API latency.
 - `control_timeout` is a terminal control-plane decision. Late final agent
   output may be persisted as diagnostic evidence, but it must not rewrite the
   target or parent job terminal state.
+- Agent-side timeouts are reported as structured `command_timeout` status
+  output and map to `agent_timeout`. Operator cancellation is cooperative:
+  cancel requests are acknowledged as accepted while the worker is still
+  finalizing, and the terminal target state becomes `canceled` only after the
+  agent emits structured `command_canceled` output.
+- Final output must be durably recorded before a target is marked terminal.
+  Job-finished side effects are published only after both output and terminal
+  target state are durable.
+- Gateway command-output forwarding is RAM-first. Command-output events remain
+  in memory up to the configured RAM cap, spill to gateway disk spool when that
+  cap is exceeded, replay pending spool files after restart, and best-effort
+  spill/defer command output during graceful shutdown. Startup replay checks
+  `/internal/v1/gateway/command-output/acks` before reposting spooled command
+  outputs. Non-final chunks are ACKed when the output row is durable; final
+  chunks are ACKed only after both the output row and terminal target state are
+  durable. Hard process crashes can still lose command-output events that were
+  only in RAM.
 - Job finalization is idempotent. Only the first process that transitions a job
   from non-terminal to terminal may emit terminal side effects such as schedule
   outcome accounting, webhook events, tunnel execution recording, and job-finish

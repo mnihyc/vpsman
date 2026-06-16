@@ -198,6 +198,7 @@ docker run -d \
   -e VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
   -e VPSMAN_GATEWAY_ID=docker-fleet-gateway \
   -e VPSMAN_SUITE_CONFIG="$VPSMAN_SUITE_CONFIG" \
+  -e VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
   -e RUST_LOG=vpsman_gateway=warn \
   -v "$ROOT_DIR:$ROOT_DIR" \
   -w "$ROOT_DIR" \
@@ -697,7 +698,7 @@ cleanup_worker_log="$SMOKE_TMPDIR/artifact-cleanup-worker.log"
 if ! env \
   VPSMAN_POSTGRES_URL="$postgres_url" \
   VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
-  VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR="$object_store_dir" \
+  VPSMAN_BACKUP_OBJECT_STORE_DIR="$object_store_dir" \
   target/debug/vpsman-worker --once --worker-id docker-fleet-artifact-cleanup --worker-lease-secs 60 \
   >"$cleanup_worker_log" 2>&1; then
   echo "artifact cleanup worker failed" >&2

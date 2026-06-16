@@ -19,6 +19,7 @@ use vpsman_common::{verify_update_artifact_signature, CommandOutput, OutputStrea
 
 use crate::{
     agent_binary_path::{current_agent_binary_path, rollback_path, staged_path},
+    command_worker::CommandCancelToken,
     update_activation::{execute_update_activate, AgentUpdateActivateInput},
 };
 
@@ -26,7 +27,7 @@ const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_ROOT_CERT_PEM_ENV: &str = "VPSMAN_UPDATE_ROOT_CERT_PEM";
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct AgentUpdateInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) artifact_url: &'a str,
@@ -35,9 +36,10 @@ pub(crate) struct AgentUpdateInput<'a> {
     pub(crate) artifact_signing_key_hex: Option<&'a str>,
     pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct AgentUpdateCheckInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) version_url: &'a str,
@@ -45,6 +47,7 @@ pub(crate) struct AgentUpdateCheckInput<'a> {
     pub(crate) restart_agent: bool,
     pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_update_agent(
@@ -52,6 +55,7 @@ pub(crate) async fn execute_update_agent(
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
     let timeout = Duration::from_secs(input.timeout_secs.max(1));
+    input.cancel_token.check("agent_update")?;
     let artifact_url = input.artifact_url.to_string();
     let sha256_hex = normalize_sha256(input.sha256_hex)?;
     let artifact_signature_hex =
@@ -67,9 +71,11 @@ pub(crate) async fn execute_update_agent(
         "trusted_artifact_signing_key_hex",
     )?;
     let job_id = input.job_id;
-    let output = time::timeout(
+    let cancel_token = input.cancel_token.clone();
+    let output = match time::timeout(
         timeout,
         task::spawn_blocking(move || {
+            cancel_token.check("agent_update")?;
             stage_update_artifact(UpdateStageInput {
                 job_id,
                 artifact_url: &artifact_url,
@@ -78,12 +84,20 @@ pub(crate) async fn execute_update_agent(
                 artifact_signing_key_hex: artifact_signing_key_hex.as_deref(),
                 trusted_artifact_signing_key_hex: trusted_artifact_signing_key_hex.as_deref(),
                 current_exe: &current_exe,
+                cancel_token: &cancel_token,
             })
         }),
     )
     .await
-    .context("agent update staging timed out")?
-    .context("agent update staging task failed")??;
+    {
+        Ok(result) => result.context("agent update staging task failed")??,
+        Err(_) => {
+            input
+                .cancel_token
+                .cancel(format!("timeout after {}s", input.timeout_secs.max(1)));
+            return Err(anyhow!("agent update staging timed out"));
+        }
+    };
     Ok(vec![output])
 }
 
@@ -92,6 +106,7 @@ pub(crate) async fn execute_update_check(
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
     let timeout = Duration::from_secs(input.timeout_secs.max(1));
+    input.cancel_token.check("agent_update_check")?;
     let job_id = input.job_id;
     let version_url = input.version_url.trim().to_string();
     let trusted_artifact_signing_key_hex = normalize_optional_hex(
@@ -99,20 +114,30 @@ pub(crate) async fn execute_update_check(
         32,
         "trusted_artifact_signing_key_hex",
     )?;
-    let check = time::timeout(
+    let cancel_token = input.cancel_token.clone();
+    let check = match time::timeout(
         timeout,
         task::spawn_blocking(move || {
+            cancel_token.check("agent_update_check")?;
             check_and_stage_update(CheckStageInput {
                 job_id,
                 version_url: &version_url,
                 trusted_artifact_signing_key_hex: trusted_artifact_signing_key_hex.as_deref(),
                 current_exe: &current_exe,
+                cancel_token: &cancel_token,
             })
         }),
     )
     .await
-    .context("agent update check timed out")?
-    .context("agent update check task failed")??;
+    {
+        Ok(result) => result.context("agent update check task failed")??,
+        Err(_) => {
+            input
+                .cancel_token
+                .cancel(format!("timeout after {}s", input.timeout_secs.max(1)));
+            return Err(anyhow!("agent update check timed out"));
+        }
+    };
 
     let mut outputs = check.outputs;
     if let Some(staged_sha256_hex) = check.staged_sha256_hex {
@@ -127,6 +152,7 @@ pub(crate) async fn execute_update_check(
                     staged_sha256_hex,
                     restart_agent: input.restart_agent,
                     timeout_secs: input.timeout_secs,
+                    cancel_token: input.cancel_token.clone(),
                 })
                 .await?,
             );
@@ -143,6 +169,7 @@ struct UpdateStageInput<'a> {
     artifact_signing_key_hex: Option<&'a str>,
     trusted_artifact_signing_key_hex: Option<&'a str>,
     current_exe: &'a Path,
+    cancel_token: &'a CommandCancelToken,
 }
 
 struct CheckStageInput<'a> {
@@ -150,6 +177,7 @@ struct CheckStageInput<'a> {
     version_url: &'a str,
     trusted_artifact_signing_key_hex: Option<&'a str>,
     current_exe: &'a Path,
+    cancel_token: &'a CommandCancelToken,
 }
 
 struct CheckStageResult {
@@ -169,7 +197,9 @@ struct VersionManifest {
 }
 
 fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
+    input.cancel_token.check("agent_update")?;
     let artifact = fetch_update_artifact(input.artifact_url)?;
+    input.cancel_token.check("agent_update")?;
     let observed_sha256_hex = sha256_hex(&artifact);
     if observed_sha256_hex != input.expected_sha256_hex {
         anyhow::bail!(
@@ -185,6 +215,7 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
     })?;
     let staged_path = staged_path(input.current_exe)?;
     let rollback_path = rollback_path(input.current_exe)?;
+    input.cancel_token.check("agent_update")?;
     persist_staged_artifact(input.current_exe, &staged_path, &rollback_path, &artifact)?;
     let status = serde_json::json!({
         "type": "agent_update",
@@ -206,8 +237,10 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
 }
 
 fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult> {
+    input.cancel_token.check("agent_update_check")?;
     let manifest_bytes = fetch_update_artifact(input.version_url)
         .with_context(|| format!("failed to fetch update manifest {}", input.version_url))?;
+    input.cancel_token.check("agent_update_check")?;
     let manifest: VersionManifest =
         serde_json::from_slice(&manifest_bytes).context("failed to parse update manifest")?;
     if manifest.schema_version != 1 {
@@ -275,6 +308,7 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
             .with_context(|| format!("failed to fetch update checksum manifest {sums_url}"))?,
     )
     .context("update checksum manifest is not UTF-8")?;
+    input.cancel_token.check("agent_update_check")?;
     let expected_sha256_hex = checksum_for_asset(&sums, asset_name)?;
     let check_status = serde_json::json!({
         "type": "agent_update_check",
@@ -297,6 +331,7 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
         artifact_signing_key_hex: None,
         trusted_artifact_signing_key_hex: input.trusted_artifact_signing_key_hex,
         current_exe: input.current_exe,
+        cancel_token: input.cancel_token,
     })?;
     outputs.push(staged);
     Ok(CheckStageResult {
@@ -862,6 +897,7 @@ mod tests {
             artifact_signing_key_hex: None,
             trusted_artifact_signing_key_hex: None,
             current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
         .unwrap();
 
@@ -902,6 +938,7 @@ mod tests {
             artifact_signing_key_hex: None,
             trusted_artifact_signing_key_hex: None,
             current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
         .is_err());
         assert!(!dir.join("vpsman-agent.next").exists());
@@ -930,6 +967,7 @@ mod tests {
             artifact_signing_key_hex: Some(&public_key_hex),
             trusted_artifact_signing_key_hex: Some(&public_key_hex),
             current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
         .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&output.data).unwrap();
@@ -943,6 +981,7 @@ mod tests {
             artifact_signing_key_hex: Some(&public_key_hex),
             trusted_artifact_signing_key_hex: Some(&"00".repeat(32)),
             current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
         .is_err());
 

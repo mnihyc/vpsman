@@ -93,20 +93,21 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         let path = temp_suite_config_path("api-hot-reload");
         std::fs::write(
             &path,
-            suite_runtime_toml(
-                17,
-                9,
-                11,
-                12,
-                13,
-                4096,
-                96 * 1024 * 1024,
-                true,
-                0.30,
-                0.20,
-                3.0,
-                5.0,
-            ),
+            suite_runtime_toml(SuiteRuntimeToml {
+                batch: 17,
+                in_flight: 9,
+                dispatch_ack_secs: 11,
+                event_post_secs: 12,
+                internal_http_read_secs: 13,
+                control_deadline_grace_secs: 14,
+                artifact_min_bytes: 4096,
+                artifact_max_bytes: 96 * 1024 * 1024,
+                require_registered_agent_updates: true,
+                memory_warning: 0.30,
+                memory_critical: 0.20,
+                cpu_warning: 3.0,
+                cpu_critical: 5.0,
+            }),
         )
         .unwrap();
         let mut state = test_state(Repository::Memory(MemoryState::default()));
@@ -118,6 +119,8 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(dispatcher.dispatch_ack_secs, 11);
         assert_eq!(dispatcher.event_post_secs, 12);
         assert_eq!(dispatcher.internal_http_read_secs, 13);
+        assert_eq!(dispatcher.control_deadline_grace_secs, 14);
+        assert_eq!(dispatcher.control_deadline_extra_secs(), 39);
         assert_eq!(state.job_output_artifact_min_bytes(), 4096);
         assert_eq!(state.artifact_max_bytes(), 96 * 1024 * 1024);
         assert!(state.require_registered_agent_updates());
@@ -131,20 +134,21 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
 
         std::fs::write(
             &path,
-            suite_runtime_toml(
-                23,
-                7,
-                29,
-                8,
-                19,
-                8192,
-                160 * 1024 * 1024,
-                false,
-                0.40,
-                0.15,
-                4.0,
-                6.0,
-            ),
+            suite_runtime_toml(SuiteRuntimeToml {
+                batch: 23,
+                in_flight: 7,
+                dispatch_ack_secs: 29,
+                event_post_secs: 8,
+                internal_http_read_secs: 19,
+                control_deadline_grace_secs: 17,
+                artifact_min_bytes: 8192,
+                artifact_max_bytes: 160 * 1024 * 1024,
+                require_registered_agent_updates: false,
+                memory_warning: 0.40,
+                memory_critical: 0.15,
+                cpu_warning: 4.0,
+                cpu_critical: 6.0,
+            }),
         )
         .unwrap();
 
@@ -154,6 +158,8 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(dispatcher.dispatch_ack_secs, 29);
         assert_eq!(dispatcher.event_post_secs, 8);
         assert_eq!(dispatcher.internal_http_read_secs, 19);
+        assert_eq!(dispatcher.control_deadline_grace_secs, 17);
+        assert_eq!(dispatcher.control_deadline_extra_secs(), 54);
         assert_eq!(state.job_output_artifact_min_bytes(), 8192);
         assert_eq!(state.artifact_max_bytes(), 160 * 1024 * 1024);
         assert!(!state.require_registered_agent_updates());
@@ -384,12 +390,13 @@ fn temp_suite_config_path(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("vpsman-{label}-{}.toml", uuid::Uuid::new_v4()))
 }
 
-fn suite_runtime_toml(
+struct SuiteRuntimeToml {
     batch: i64,
     in_flight: usize,
     dispatch_ack_secs: u64,
     event_post_secs: u64,
     internal_http_read_secs: u64,
+    control_deadline_grace_secs: u64,
     artifact_min_bytes: usize,
     artifact_max_bytes: usize,
     require_registered_agent_updates: bool,
@@ -397,7 +404,24 @@ fn suite_runtime_toml(
     memory_critical: f64,
     cpu_warning: f64,
     cpu_critical: f64,
-) -> String {
+}
+
+fn suite_runtime_toml(input: SuiteRuntimeToml) -> String {
+    let SuiteRuntimeToml {
+        batch,
+        in_flight,
+        dispatch_ack_secs,
+        event_post_secs,
+        internal_http_read_secs,
+        control_deadline_grace_secs,
+        artifact_min_bytes,
+        artifact_max_bytes,
+        require_registered_agent_updates,
+        memory_warning,
+        memory_critical,
+        cpu_warning,
+        cpu_critical,
+    } = input;
     format!(
         r#"version = 1
 
@@ -409,6 +433,7 @@ dispatcher_in_flight = {in_flight}
 dispatch_ack_secs = {dispatch_ack_secs}
 event_post_secs = {event_post_secs}
 internal_http_read_secs = {internal_http_read_secs}
+control_deadline_grace_secs = {control_deadline_grace_secs}
 
 [api]
 job_output_artifact_min_bytes = {artifact_min_bytes}

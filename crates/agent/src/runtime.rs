@@ -13,19 +13,23 @@ use tracing::{debug, info, warn};
 use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
-    job_command_protocol_version, job_command_safety, maybe_compress_payload, payload_hash,
-    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, CommandOutput,
-    CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety,
-    JobRequest, MessageKind, NoiseFrameStream, OutputStream, SequencedCommandOutput,
-    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    job_command_protocol_version, job_command_safety, job_command_type_label,
+    maybe_compress_payload, payload_hash, AgentCapabilitySnapshot, AgentConfig, AgentHello,
+    AgentPrivilegeMode, CommandOutput, CommandResume, Frame, JobAck, JobCancelAck,
+    JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream,
+    OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello, TelemetryEnvelope,
+    TerminalStreamOutput,
 };
 
 use crate::{
     backup::{execute_backup_command, BackupCommandInput},
+    command_worker::{
+        command_canceled_output, command_timeout_output, CommandCancelToken, CommandCanceled,
+    },
     config_update::{
         apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
     },
-    executor::execute_job_command_with_config_and_output_sink,
+    executor::execute_job_command_with_config_cancel_and_output_sink,
     network_apply::{
         execute_network_apply_command, execute_network_ospf_cost_update_command,
         execute_network_rollback_command, NetworkApplyInput, NetworkOspfCostUpdateInput,
@@ -298,6 +302,7 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
         restart_agent: config.update.unmanaged_restart_agent,
         trusted_artifact_signing_key_hex: config.update.trusted_artifact_signing_key_hex.as_deref(),
         timeout_secs: config.auth.command_timeout_secs.max(300),
+        cancel_token: CommandCancelToken::default(),
     })
     .await
     {
@@ -605,6 +610,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
 
 struct ActiveCommand {
     payload_hash: String,
+    cancel_token: CommandCancelToken,
     command_version: u16,
     safety: JobCommandSafety,
     stream_id: u32,
@@ -615,11 +621,13 @@ struct ActiveCommand {
     pending_outputs: VecDeque<SequencedCommandOutput>,
     next_output_seq: i32,
     finished: bool,
-    task: tokio::task::JoinHandle<()>,
+    _task: tokio::task::JoinHandle<()>,
 }
 
 struct CommandExecutionResult {
     job_id: uuid::Uuid,
+    operation_type: &'static str,
+    timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
 }
 
@@ -814,18 +822,41 @@ fn output_stream_name(stream: OutputStream) -> &'static str {
 
 fn command_result_outputs(
     job_id: uuid::Uuid,
+    operation_type: &str,
+    timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
 ) -> Vec<CommandOutput> {
     match result {
         Ok(outputs) => outputs,
-        Err(error) => vec![CommandOutput {
-            job_id,
-            stream: OutputStream::Status,
-            data: format!("command failed: {error}").into_bytes(),
-            exit_code: Some(127),
-            done: true,
-        }],
+        Err(error) => {
+            if let Some(canceled) = error.downcast_ref::<CommandCanceled>() {
+                return command_canceled_output(
+                    job_id,
+                    canceled.operation_type(),
+                    canceled.reason(),
+                )
+                .map(|output| vec![output])
+                .unwrap_or_else(|_| fallback_failed_output(job_id, &error));
+            }
+            let message = error.to_string();
+            if message.contains("timed out") || message.contains("elapsed") {
+                return command_timeout_output(job_id, operation_type, timeout_secs)
+                    .map(|output| vec![output])
+                    .unwrap_or_else(|_| fallback_failed_output(job_id, &error));
+            }
+            fallback_failed_output(job_id, &error)
+        }
     }
+}
+
+fn fallback_failed_output(job_id: uuid::Uuid, error: &anyhow::Error) -> Vec<CommandOutput> {
+    vec![CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: format!("command failed: {error}").into_bytes(),
+        exit_code: Some(127),
+        done: true,
+    }]
 }
 
 fn remember_recent_command_outputs(
@@ -1041,7 +1072,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
 
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);
-        let outputs = command_result_outputs(request.job_id, result);
+        let outputs = command_result_outputs(request.job_id, "config_read", timeout_secs, result);
         remember_recent_command_outputs(
             &mut command_runtime.recent_commands,
             request.job_id,
@@ -1074,7 +1105,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 }
                 outputs
             }
-            Err(error) => command_result_outputs(request.job_id, Err(error)),
+            Err(error) => {
+                command_result_outputs(request.job_id, "hot_config", timeout_secs, Err(error))
+            }
         };
         remember_recent_command_outputs(
             &mut command_runtime.recent_commands,
@@ -1101,7 +1134,12 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 }
                 outputs
             }
-            Err(error) => command_result_outputs(request.job_id, Err(error)),
+            Err(error) => command_result_outputs(
+                request.job_id,
+                "data_source_config_patch",
+                timeout_secs,
+                Err(error),
+            ),
         };
         remember_recent_command_outputs(
             &mut command_runtime.recent_commands,
@@ -1114,10 +1152,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     }
     let job_id = request.job_id;
     let command_version = request.command_version;
+    let operation_type = job_command_type_label(&request.command);
+    let cancel_token = CommandCancelToken::default();
     let task_config = config.clone();
     let task_config_path = config_path.to_path_buf();
     let event_tx = command_runtime.command_event_tx.clone();
     let terminal_stream_tx = command_runtime.terminal_stream_tx.clone();
+    let task_cancel_token = cancel_token.clone();
     let task = tokio::spawn(async move {
         let (output_tx, mut output_rx) = mpsc::channel::<CommandOutput>(16);
         let output_event_tx = event_tx.clone();
@@ -1139,12 +1180,15 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             timeout_secs,
             output_tx,
             terminal_stream_tx,
+            task_cancel_token,
         )
         .await;
         let _ = output_forwarder.await;
         let _ = event_tx
             .send(CommandExecutionEvent::Finished(CommandExecutionResult {
                 job_id,
+                operation_type,
+                timeout_secs,
                 result,
             }))
             .await;
@@ -1153,6 +1197,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         job_id,
         ActiveCommand {
             payload_hash: request_payload_hash,
+            cancel_token,
             command_version,
             safety,
             stream_id: frame.stream_id,
@@ -1163,7 +1208,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             pending_outputs: VecDeque::new(),
             next_output_seq: 0,
             finished: false,
-            task,
+            _task: task,
         },
     );
     Ok(false)
@@ -1175,14 +1220,19 @@ async fn handle_command_cancel_frame(
     active_commands: &mut HashMap<uuid::Uuid, ActiveCommand>,
     request: JobCancelRequest,
 ) -> Result<()> {
-    let (accepted, applied, message) = match active_commands.remove(&request.job_id) {
+    let (accepted, applied, message) = match active_commands.get_mut(&request.job_id) {
         Some(active) => {
-            active.task.abort();
-            (
-                true,
-                true,
-                request.reason.unwrap_or_else(|| "canceled".to_string()),
-            )
+            let reason = request.reason.unwrap_or_else(|| "canceled".to_string());
+            active.cancel_token.cancel(reason.clone());
+            if active.finished && active.pending_outputs.is_empty() {
+                (true, true, reason)
+            } else {
+                (
+                    true,
+                    false,
+                    format!("{reason}; cancel requested, command worker still finalizing"),
+                )
+            }
         }
         None => (true, false, "command_not_active".to_string()),
     };
@@ -1253,7 +1303,10 @@ async fn execute_authorized_command(
     timeout_secs: u64,
     streamed_output_tx: mpsc::Sender<CommandOutput>,
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
+    cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
+    let operation_type = job_command_type_label(&request.command);
+    cancel_token.check(operation_type)?;
     match &request.command {
         JobCommand::ConfigRead
         | JobCommand::HotConfig { .. }
@@ -1434,6 +1487,7 @@ async fn execute_authorized_command(
                     .trusted_artifact_signing_key_hex
                     .as_deref(),
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1455,6 +1509,7 @@ async fn execute_authorized_command(
                     .trusted_artifact_signing_key_hex
                     .as_deref(),
                 timeout_secs,
+                cancel_token: cancel_token.clone(),
             })
             .await
         }
@@ -1473,11 +1528,12 @@ async fn execute_authorized_command(
             .await
         }
         command => {
-            execute_job_command_with_config_and_output_sink(
+            execute_job_command_with_config_cancel_and_output_sink(
                 &config,
                 request.job_id,
                 command,
                 timeout_secs,
+                cancel_token,
                 Some(streamed_output_tx),
             )
             .await
@@ -1680,7 +1736,12 @@ async fn finish_active_command(
     let Some(active) = active_commands.get_mut(&result.job_id) else {
         return Ok(());
     };
-    let final_outputs = command_result_outputs(result.job_id, result.result);
+    let final_outputs = command_result_outputs(
+        result.job_id,
+        result.operation_type,
+        result.timeout_secs,
+        result.result,
+    );
     for output in final_outputs {
         enqueue_active_command_output(active, output);
     }
@@ -1827,6 +1888,7 @@ mod tests {
     fn test_active_command(job_id: uuid::Uuid) -> ActiveCommand {
         ActiveCommand {
             payload_hash: "payload-hash".to_string(),
+            cancel_token: CommandCancelToken::default(),
             command_version: CURRENT_COMMAND_PROTOCOL_VERSION,
             safety: JobCommandSafety::ReadOnly,
             stream_id: 1,
@@ -1837,7 +1899,7 @@ mod tests {
             pending_outputs: VecDeque::new(),
             next_output_seq: 0,
             finished: false,
-            task: tokio::spawn(async move {
+            _task: tokio::spawn(async move {
                 let _ = job_id;
             }),
         }

@@ -419,6 +419,45 @@ async fn rolls_back_files_when_validation_hook_fails() {
 }
 
 #[tokio::test]
+async fn managed_file_apply_deadline_leaves_existing_file_unchanged() {
+    let job_id = uuid::Uuid::new_v4();
+    let root = std::env::temp_dir().join(format!("vpsman-network-deadline-{job_id}"));
+    let bird_path = root.join("etc/bird/vpsman-ospf.conf");
+    tokio::fs::create_dir_all(bird_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&bird_path, "existing bird\n")
+        .await
+        .unwrap();
+
+    let planned = prepare_file_update(
+        &bird_path,
+        MANAGED_BIRD2_FILE,
+        "# vpsman-managed bird2 begin left-a right-b left-right tunlr\nnext\n# vpsman-managed bird2 end left-a right-b left-right tunlr\n",
+    )
+    .await
+    .unwrap();
+    let error = match apply_updates_with_rollback(
+        &[planned],
+        time::Instant::now() - Duration::from_millis(1),
+        "network apply",
+    )
+    .await
+    {
+        Ok(_) => panic!("expired network deadline unexpectedly applied updates"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("network apply timed out"));
+    assert_eq!(
+        tokio::fs::read_to_string(&bird_path).await.unwrap(),
+        "existing bird\n"
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn updates_only_bird2_managed_block_for_ospf_cost_change() {
     let job_id = uuid::Uuid::new_v4();
     let root = std::env::temp_dir().join(format!("vpsman-network-ospf-update-{job_id}"));

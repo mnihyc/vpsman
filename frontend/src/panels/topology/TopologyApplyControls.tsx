@@ -251,6 +251,9 @@ export function TopologyApplyControls({
         timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
       });
       setLastJobProgress(result.progress);
+      if (result.timedOut) {
+        throw new Error("Timed out waiting for network apply targets");
+      }
     } finally {
       setJobProgress(null);
     }

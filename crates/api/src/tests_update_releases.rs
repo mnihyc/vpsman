@@ -676,6 +676,7 @@ fn test_args() -> Args {
         internal_http_read_secs: 15,
         dispatch_ack_secs: 30,
         event_post_secs: 15,
+        control_deadline_grace_secs: 30,
         dispatcher_batch: 128,
         dispatcher_in_flight: 64,
         backup_object_store_dir: None,

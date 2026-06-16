@@ -830,11 +830,15 @@ async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
         .await
         .unwrap();
 
-    let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    let first_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
     assert_eq!(first_claim.len(), 1);
     assert_eq!(first_claim[0].job_id, first_job_id);
     assert_eq!(first_claim[0].client_id, "client-a");
-    assert!(repo.claim_due_job_targets(10, 30).await.unwrap().is_empty());
+    assert!(repo
+        .claim_due_job_targets(10, 30, 0)
+        .await
+        .unwrap()
+        .is_empty());
 
     repo.update_job_target_result(
         first_job_id,
@@ -852,7 +856,7 @@ async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
     .await
     .unwrap();
 
-    let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    let second_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
     assert_eq!(second_claim.len(), 1);
     assert_eq!(second_claim[0].job_id, second_job_id);
     assert_eq!(second_claim[0].client_id, "client-a");
@@ -879,7 +883,7 @@ async fn memory_dispatch_claim_preserves_source_schedule_id() {
         .await
         .unwrap();
 
-    let claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    let claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
     assert_eq!(claim.len(), 1);
     assert_eq!(claim[0].job_id, job_id);
     assert_eq!(claim[0].source_schedule_id, Some(schedule_id));
@@ -908,7 +912,7 @@ async fn memory_dispatch_claim_promotes_parent_job_to_running() {
         repo.get_job(job_id).await.unwrap().unwrap().status,
         "queued"
     );
-    let claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+    let claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
     assert_eq!(claim.len(), 1);
 
     let job = repo.get_job(job_id).await.unwrap().unwrap();
@@ -935,7 +939,10 @@ async fn late_final_output_does_not_rewrite_control_timeout_target() {
         )
         .await
         .unwrap();
-    assert_eq!(repo.claim_due_job_targets(10, 30).await.unwrap().len(), 1);
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
     let Repository::Memory(memory) = &repo else {
         unreachable!();
     };
@@ -947,7 +954,7 @@ async fn late_final_output_does_not_rewrite_control_timeout_target() {
             .unwrap();
         target.started_at = Some("0".to_string());
     }
-    let expired = repo.expire_control_timeout_targets(10).await.unwrap();
+    let expired = repo.expire_control_timeout_targets(10, 0).await.unwrap();
     assert_eq!(expired.len(), 1);
     assert_eq!(
         repo.refresh_job_status_from_targets(job_id).await.unwrap(),
@@ -998,17 +1005,20 @@ async fn memory_dispatch_exclusivity_uses_operation_for_scheduled_labels() {
         )
         .await;
 
-        let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        let first_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
         assert_eq!(first_claim.len(), 1, "{case}: scheduled claim");
         assert_eq!(first_claim[0].job_id, scheduled_job_id, "{case}");
         assert_eq!(first_claim[0].command_type, scheduled_label, "{case}");
         assert!(
-            repo.claim_due_job_targets(10, 30).await.unwrap().is_empty(),
+            repo.claim_due_job_targets(10, 30, 0)
+                .await
+                .unwrap()
+                .is_empty(),
             "{case}: direct job must wait behind scheduled exclusive operation"
         );
 
         complete_memory_target(&repo, scheduled_job_id).await;
-        let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        let second_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
         assert_eq!(second_claim.len(), 1, "{case}: direct claim");
         assert_eq!(second_claim[0].job_id, direct_job_id, "{case}");
         assert_eq!(
@@ -1041,7 +1051,7 @@ async fn memory_dispatch_direct_exclusive_blocks_scheduled_operation() {
         )
         .await;
 
-        let first_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        let first_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
         assert_eq!(first_claim.len(), 1, "{case}: direct claim");
         assert_eq!(first_claim[0].job_id, direct_job_id, "{case}");
         assert_eq!(
@@ -1050,12 +1060,15 @@ async fn memory_dispatch_direct_exclusive_blocks_scheduled_operation() {
             "{case}"
         );
         assert!(
-            repo.claim_due_job_targets(10, 30).await.unwrap().is_empty(),
+            repo.claim_due_job_targets(10, 30, 0)
+                .await
+                .unwrap()
+                .is_empty(),
             "{case}: scheduled job must wait behind direct exclusive operation"
         );
 
         complete_memory_target(&repo, direct_job_id).await;
-        let second_claim = repo.claim_due_job_targets(10, 30).await.unwrap();
+        let second_claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
         assert_eq!(second_claim.len(), 1, "{case}: scheduled claim");
         assert_eq!(second_claim[0].job_id, scheduled_job_id, "{case}");
         assert_eq!(second_claim[0].command_type, scheduled_label, "{case}");

@@ -90,6 +90,13 @@ Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml` and mounts
 compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you want a specific
 operator config file.
 
+Long-running job control uses `timeout_secs` as the agent execution budget.
+The API adds dispatch/event grace through `timeout.control_deadline_grace_secs`,
+and the gateway keeps command-output forwarding RAM-first with overflow and
+graceful-shutdown spool settings under `[gateway]` in
+`deploy/config/vpsman.toml`. Spool replay reconciles command-output ACKs with
+the API before reposting saved events.
+
 The compose template publishes only Nginx on all host interfaces. API and
 gateway host ports are bound to `127.0.0.1` by default, and gateway control uses
 a shared Unix socket under `deploy/runtime/data`; expose agent TCP through your

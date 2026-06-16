@@ -50,6 +50,7 @@ pub(crate) struct DispatcherRuntimeConfig {
     pub(crate) dispatch_ack_secs: u64,
     pub(crate) event_post_secs: u64,
     pub(crate) internal_http_read_secs: u64,
+    pub(crate) control_deadline_grace_secs: u64,
 }
 
 impl Default for DispatcherRuntimeConfig {
@@ -60,7 +61,17 @@ impl Default for DispatcherRuntimeConfig {
             dispatch_ack_secs: 30,
             event_post_secs: 15,
             internal_http_read_secs: 15,
+            control_deadline_grace_secs: 30,
         }
+    }
+}
+
+impl DispatcherRuntimeConfig {
+    pub(crate) fn control_deadline_extra_secs(&self) -> u64 {
+        self.dispatch_ack_secs
+            .max(self.internal_http_read_secs)
+            .saturating_add(self.event_post_secs)
+            .saturating_add(self.control_deadline_grace_secs)
     }
 }
 
@@ -97,12 +108,18 @@ impl AppState {
                     config.internal_http_read_secs = value;
                 }
             }
+            if env_absent("VPSMAN_CONTROL_DEADLINE_GRACE_SECS") {
+                if let Some(value) = suite.timeout.control_deadline_grace_secs {
+                    config.control_deadline_grace_secs = value;
+                }
+            }
         }
         config.batch_limit = config.batch_limit.clamp(1, 500);
         config.in_flight = config.in_flight.clamp(1, 512);
         config.dispatch_ack_secs = config.dispatch_ack_secs.clamp(1, 3600);
         config.event_post_secs = config.event_post_secs.clamp(1, 3600);
         config.internal_http_read_secs = config.internal_http_read_secs.clamp(1, 3600);
+        config.control_deadline_grace_secs = config.control_deadline_grace_secs.clamp(0, 3600);
         config
     }
 

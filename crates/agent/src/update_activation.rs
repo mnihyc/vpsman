@@ -13,6 +13,7 @@ use crate::{
     agent_binary_path::{
         activation_marker_path, current_agent_binary_path, rollback_path, staged_path,
     },
+    command_worker::CommandCancelToken,
     telemetry::unix_now,
 };
 
@@ -29,6 +30,7 @@ pub(crate) struct AgentUpdateActivateInput {
     pub(crate) staged_sha256_hex: String,
     pub(crate) restart_agent: bool,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 #[derive(Clone)]
@@ -36,19 +38,32 @@ pub(crate) struct AgentUpdateRollbackInput {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) rollback_sha256_hex: Option<String>,
     pub(crate) timeout_secs: u64,
+    pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_update_activate(
     input: AgentUpdateActivateInput,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let output = time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        task::spawn_blocking(move || activate_staged_update(&current_exe, input)),
+    let timeout_secs = input.timeout_secs.max(1);
+    input.cancel_token.check("agent_update_activate")?;
+    let timeout_cancel_token = input.cancel_token.clone();
+    let worker_cancel_token = input.cancel_token.clone();
+    let output = match time::timeout(
+        Duration::from_secs(timeout_secs),
+        task::spawn_blocking(move || {
+            worker_cancel_token.check("agent_update_activate")?;
+            activate_staged_update(&current_exe, input)
+        }),
     )
     .await
-    .context("agent update activation timed out")?
-    .context("agent update activation task failed")??;
+    {
+        Ok(result) => result.context("agent update activation task failed")??,
+        Err(_) => {
+            timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            return Err(anyhow::anyhow!("agent update activation timed out"));
+        }
+    };
     Ok(vec![output])
 }
 
@@ -56,13 +71,25 @@ pub(crate) async fn execute_update_rollback(
     input: AgentUpdateRollbackInput,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let output = time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
-        task::spawn_blocking(move || rollback_update(&current_exe, input)),
+    let timeout_secs = input.timeout_secs.max(1);
+    input.cancel_token.check("agent_update_rollback")?;
+    let timeout_cancel_token = input.cancel_token.clone();
+    let worker_cancel_token = input.cancel_token.clone();
+    let output = match time::timeout(
+        Duration::from_secs(timeout_secs),
+        task::spawn_blocking(move || {
+            worker_cancel_token.check("agent_update_rollback")?;
+            rollback_update(&current_exe, input)
+        }),
     )
     .await
-    .context("agent update rollback timed out")?
-    .context("agent update rollback task failed")??;
+    {
+        Ok(result) => result.context("agent update rollback task failed")??,
+        Err(_) => {
+            timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            return Err(anyhow::anyhow!("agent update rollback timed out"));
+        }
+    };
     Ok(vec![output])
 }
 
@@ -70,6 +97,7 @@ fn activate_staged_update(
     current_exe: &Path,
     input: AgentUpdateActivateInput,
 ) -> Result<CommandOutput> {
+    input.cancel_token.check("agent_update_activate")?;
     let expected_sha256_hex = normalize_sha256(&input.staged_sha256_hex)?;
     let staged_path = staged_path(current_exe)?;
     let rollback_path = rollback_path(current_exe)?;
@@ -97,6 +125,7 @@ fn activate_staged_update(
             },
         )?;
     }
+    input.cancel_token.check("agent_update_activate")?;
     replace_active_binary(current_exe, &staged)?;
     write_activation_marker(current_exe, input.job_id, &observed_sha256_hex)?;
     let _ = fs::remove_file(&staged_path);
@@ -143,6 +172,7 @@ fn request_supervised_restart(current_exe: &Path) -> Result<()> {
 }
 
 fn rollback_update(current_exe: &Path, input: AgentUpdateRollbackInput) -> Result<CommandOutput> {
+    input.cancel_token.check("agent_update_rollback")?;
     let rollback_path = rollback_path(current_exe)?;
     let rollback = fs::read(&rollback_path)
         .with_context(|| format!("failed to read update rollback {}", rollback_path.display()))?;
@@ -155,6 +185,7 @@ fn rollback_update(current_exe: &Path, input: AgentUpdateRollbackInput) -> Resul
             );
         }
     }
+    input.cancel_token.check("agent_update_rollback")?;
     replace_active_binary(current_exe, &rollback)?;
     let _ = fs::remove_file(activation_marker_path(current_exe)?);
     let status = serde_json::json!({
@@ -311,6 +342,7 @@ mod tests {
                 staged_sha256_hex: sha256_hex(b"new-agent"),
                 restart_agent: false,
                 timeout_secs: 5,
+                cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )
         .unwrap();
@@ -350,6 +382,7 @@ mod tests {
                 job_id: uuid::Uuid::new_v4(),
                 rollback_sha256_hex: Some(sha256_hex(b"old-agent")),
                 timeout_secs: 5,
+                cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )
         .unwrap();
@@ -382,6 +415,7 @@ mod tests {
                 staged_sha256_hex: "00".repeat(32),
                 restart_agent: false,
                 timeout_secs: 5,
+                cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )
         .is_err());

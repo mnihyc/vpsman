@@ -238,6 +238,7 @@ export type SystemDashboardCapacityRecord = {
   dispatch_ack_secs: number | null;
   event_post_secs: number | null;
   internal_http_read_secs: number | null;
+  control_deadline_grace_secs: number | null;
   worker_schedule_command_secs: number | null;
   agent_offline_secs: number | null;
 };

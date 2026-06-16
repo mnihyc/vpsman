@@ -43,7 +43,7 @@ use crate::{
     routes_ingest::{
         ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended,
         ingest_gateway_session_started, ingest_telemetry, ingest_terminal_output,
-        validate_agent_identity,
+        reconcile_command_output_acks, validate_agent_identity,
     },
     routes_inventory::{
         assign_agent_tag, assign_data_source_preset, bulk_mutate_tags, clone_data_source_preset,
@@ -513,6 +513,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/internal/v1/gateway/command-output",
             post(ingest_command_output),
+        )
+        .route(
+            "/internal/v1/gateway/command-output/acks",
+            post(reconcile_command_output_acks),
         )
         .route(
             "/internal/v1/gateway/terminal-output",

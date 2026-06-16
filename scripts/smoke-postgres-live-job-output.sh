@@ -512,8 +512,8 @@ assert_live_streaming_job_output() {
 assert_large_output_artifact() {
   local outputs_json artifact_json seq object_key object_path expected_hash downloaded_hash object_hash size_bytes
   outputs_json="$(api_get "/api/v1/jobs/$large_output_job_id/outputs")"
-  artifact_json="$(jq -c '
-    .[] | select(.stream == "stdout" and .storage == "object_store")
+  artifact_json="$(jq -c --arg client "$client_id" '
+    .[] | select(.client_id == $client and .stream == "stdout" and .storage == "object_store")
     | select(.artifact_object_key != null and .artifact_sha256_hex != null and .artifact_size_bytes >= 4096)
   ' <<<"$outputs_json" | head -n 1)"
   if [[ -z "$artifact_json" ]]; then
@@ -535,12 +535,19 @@ assert_large_output_artifact() {
   [[ "$object_hash" == "$expected_hash" ]]
 
   rm -f "$large_output_file"
-  VPSMAN_API_TOKEN="$access_token" \
-    target/debug/vpsctl --api-url "$api_url" job-output-download \
-      --job-id "$large_output_job_id" \
-      --client-id "$client_id" \
-      --seq "$seq" \
-      --output-file "$large_output_file" >/dev/null
+  local download_status
+  download_status="$(
+    curl -sS \
+      -H "Authorization: Bearer $access_token" \
+      -o "$large_output_file" \
+      -w "%{http_code}" \
+      "$api_url/api/v1/jobs/$large_output_job_id/outputs/$client_id/download?stream=stdout"
+  )"
+  if [[ "$download_status" != "200" ]]; then
+    echo "large job stdout stream download returned HTTP $download_status" >&2
+    jq . <<<"$outputs_json" >&2 || true
+    exit 1
+  fi
   [[ "$(stat -c '%s' "$large_output_file")" == "$large_output_size" ]]
   downloaded_hash="$(sha256sum "$large_output_file" | awk '{print $1}')"
   [[ "$downloaded_hash" == "$expected_hash" ]]

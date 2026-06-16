@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import {
   buildBulkJobProgress,
+  bulkProgressTimeoutMs,
   bulkOutcomeSummary,
   createJobTargetCount,
   waitForBulkJobTargets,
@@ -984,9 +985,13 @@ function FleetInstanceDetail({
           onProgress: setInterfaceProgress,
           targetCount,
           targets: [agent],
+          timeoutMs: bulkProgressTimeoutMs(30),
         },
       );
       setInterfaceProgress(progress.progress);
+      if (progress.timedOut) {
+        throw new Error("Timed out waiting for network interface snapshot target");
+      }
       const outputs = await onLoadJobOutputs(job.job_id);
       const snapshot = parseNetworkInterfacesSnapshot(outputs);
       if (!snapshot) {

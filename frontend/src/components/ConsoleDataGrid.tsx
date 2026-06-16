@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -146,6 +146,15 @@ export function ConsoleDataGrid<T>({
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
+  const expandedRowsRef = useRef(expandedRows);
+  const onExpandedRowChangeRef = useRef(onExpandedRowChange);
+  const renderExpandedRowRef = useRef(renderExpandedRow);
+  const singleExpandedRowRef = useRef(singleExpandedRow);
+  expandedRowsRef.current = expandedRows;
+  onExpandedRowChangeRef.current = onExpandedRowChange;
+  renderExpandedRowRef.current = renderExpandedRow;
+  singleExpandedRowRef.current = singleExpandedRow;
+  const hasExpandedRows = Boolean(renderExpandedRow);
   const searchValuesForRow = (row: T) =>
     columns.map((column) =>
       column.searchValue?.(row) ?? column.sortValue?.(row),
@@ -199,7 +208,7 @@ export function ConsoleDataGrid<T>({
           />
         ),
       },
-      ...(renderExpandedRow
+      ...(hasExpandedRows
         ? [
             {
               id: "__expand",
@@ -209,7 +218,7 @@ export function ConsoleDataGrid<T>({
               enableHiding: false,
               header: "",
               cell: ({ row }: { row: Row<T> }) => {
-                const open = Boolean(expandedRows[row.id]);
+                const open = Boolean(expandedRowsRef.current[row.id]);
                 return (
                   <button
                     aria-expanded={open}
@@ -257,9 +266,7 @@ export function ConsoleDataGrid<T>({
     ],
     [
       columns,
-      expandedRows,
-      renderExpandedRow,
-      singleExpandedRow,
+      hasExpandedRows,
       title,
     ],
   );
@@ -347,13 +354,13 @@ export function ConsoleDataGrid<T>({
   }, [onSelectionChange, selectedRowSignature]);
 
   function toggleExpandedRow(rowId: string, row?: T) {
-    if (!renderExpandedRow) {
+    if (!renderExpandedRowRef.current) {
       return;
     }
     setExpandedRows((current) => {
       const nextOpen = !current[rowId];
-      onExpandedRowChange?.(nextOpen ? (row ?? null) : null);
-      if (singleExpandedRow) {
+      onExpandedRowChangeRef.current?.(nextOpen ? (row ?? null) : null);
+      if (singleExpandedRowRef.current) {
         return nextOpen ? { [rowId]: true } : {};
       }
       return {
@@ -364,13 +371,13 @@ export function ConsoleDataGrid<T>({
   }
 
   function openExpandedRow(row: T) {
-    if (!renderExpandedRow) {
+    if (!renderExpandedRowRef.current) {
       return;
     }
     const rowId = getRowId(row);
-    onExpandedRowChange?.(row);
+    onExpandedRowChangeRef.current?.(row);
     setExpandedRows((current) => {
-      if (singleExpandedRow) {
+      if (singleExpandedRowRef.current) {
         return { [rowId]: true };
       }
       return {

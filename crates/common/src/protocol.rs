@@ -947,6 +947,18 @@ pub struct GatewayCommandOutputIngest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayCommandOutputAckRequest {
+    pub client_id: String,
+    pub job_id: Uuid,
+    pub seqs: Vec<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayCommandOutputAckResponse {
+    pub acked: Vec<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayTerminalOutputIngest {
     pub gateway_id: String,
     pub client_id: String,

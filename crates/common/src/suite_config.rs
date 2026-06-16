@@ -42,6 +42,10 @@ pub struct SuiteGatewayConfig {
     pub gateway_id: Option<String>,
     pub reconnect_grace_secs: Option<u64>,
     pub expect_client_public_key_hex: Option<String>,
+    pub spool_dir: Option<String>,
+    pub spool_ram_max_bytes: Option<u64>,
+    pub spool_disk_max_bytes: Option<u64>,
+    pub spool_shutdown_flush_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -114,6 +118,7 @@ pub struct SuiteTimeoutConfig {
     pub internal_http_read_secs: Option<u64>,
     pub dispatch_ack_secs: Option<u64>,
     pub event_post_secs: Option<u64>,
+    pub control_deadline_grace_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -241,6 +246,30 @@ impl SuiteConfig {
             3600,
             "timeout.event_post_secs",
         )?;
+        validate_optional_u64(
+            self.timeout.control_deadline_grace_secs,
+            0,
+            3600,
+            "timeout.control_deadline_grace_secs",
+        )?;
+        validate_optional_u64(
+            self.gateway.spool_ram_max_bytes,
+            1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            "gateway.spool_ram_max_bytes",
+        )?;
+        validate_optional_u64(
+            self.gateway.spool_disk_max_bytes,
+            1024 * 1024,
+            1024 * 1024 * 1024 * 1024,
+            "gateway.spool_disk_max_bytes",
+        )?;
+        validate_optional_u64(
+            self.gateway.spool_shutdown_flush_secs,
+            1,
+            3600,
+            "gateway.spool_shutdown_flush_secs",
+        )?;
         validate_optional_usize(
             self.api.artifact_max_bytes,
             1024 * 1024,
@@ -263,6 +292,10 @@ impl SuiteConfig {
                 "gateway.api_url".to_string(),
                 "gateway.gateway_id".to_string(),
                 "gateway.expect_client_public_key_hex".to_string(),
+                "gateway.spool_dir".to_string(),
+                "gateway.spool_ram_max_bytes".to_string(),
+                "gateway.spool_disk_max_bytes".to_string(),
+                "gateway.spool_shutdown_flush_secs".to_string(),
                 "database.postgres_url".to_string(),
                 "database.migrations_dir".to_string(),
                 "secrets.*".to_string(),
@@ -290,6 +323,7 @@ impl SuiteConfig {
                 "timeout.dispatch_ack_secs".to_string(),
                 "timeout.event_post_secs".to_string(),
                 "timeout.internal_http_read_secs".to_string(),
+                "timeout.control_deadline_grace_secs".to_string(),
                 "gateway.reconnect_grace_secs".to_string(),
                 "timeout.gateway_reconnect_grace_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),

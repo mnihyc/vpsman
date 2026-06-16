@@ -6,6 +6,7 @@ import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
   buildBulkJobProgress,
+  bulkProgressTimeoutMs,
   createJobTargetCount,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -278,8 +279,12 @@ export function MultiFileActionsPanel({
             finalProgress = progress;
             setBulkProgress(progress);
           },
+          timeoutMs: bulkProgressTimeoutMs(BULK_JOB_TIMEOUT_SECS),
         });
         targets = result.targets;
+        if (result.timedOut) {
+          throw new Error("Timed out waiting for bulk file action targets");
+        }
         outputs = await loadOutputsForSummary(job.job_id, onLoadOutputs, targets);
         finalProgress = buildBulkJobProgress({
           jobId: job.job_id,

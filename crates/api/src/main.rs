@@ -221,6 +221,8 @@ struct Args {
     dispatch_ack_secs: u64,
     #[arg(long, env = "VPSMAN_EVENT_POST_SECS", default_value_t = 15)]
     event_post_secs: u64,
+    #[arg(long, env = "VPSMAN_CONTROL_DEADLINE_GRACE_SECS", default_value_t = 30)]
+    control_deadline_grace_secs: u64,
     #[arg(long, env = "VPSMAN_DISPATCHER_BATCH", default_value_t = 128)]
     dispatcher_batch: i64,
     #[arg(long, env = "VPSMAN_DISPATCHER_IN_FLIGHT", default_value_t = 64)]
@@ -370,6 +372,11 @@ impl Args {
             &mut self.event_post_secs,
             "VPSMAN_EVENT_POST_SECS",
             config.timeout.event_post_secs,
+        );
+        apply_u64_default(
+            &mut self.control_deadline_grace_secs,
+            "VPSMAN_CONTROL_DEADLINE_GRACE_SECS",
+            config.timeout.control_deadline_grace_secs,
         );
         apply_i64_default(
             &mut self.dispatcher_batch,
@@ -676,6 +683,7 @@ async fn main() -> Result<()> {
             dispatch_ack_secs: args.dispatch_ack_secs.clamp(1, 3600),
             event_post_secs: args.event_post_secs.clamp(1, 3600),
             internal_http_read_secs: args.internal_http_read_secs.clamp(1, 3600),
+            control_deadline_grace_secs: args.control_deadline_grace_secs.clamp(0, 3600),
         },
     };
     state

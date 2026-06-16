@@ -4,9 +4,9 @@ use axum::{extract::State, http::HeaderMap, Json};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use vpsman_common::{
-    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
-    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
-    OutputStream,
+    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputAckRequest,
+    GatewayCommandOutputAckResponse, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
+    GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand, OutputStream,
 };
 use vpsman_server_core::{
     JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING,
@@ -117,6 +117,20 @@ pub(crate) async fn ingest_telemetry(
         accepted: true,
         message: "telemetry recorded".to_string(),
     }))
+}
+
+pub(crate) async fn reconcile_command_output_acks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<GatewayCommandOutputAckRequest>,
+) -> Result<Json<GatewayCommandOutputAckResponse>, ApiError> {
+    state.require_internal_gateway(&headers)?;
+    validate_command_output_ack_request(&request)?;
+    let acked = state
+        .repo
+        .list_existing_job_output_seqs(request.job_id, &request.client_id, &request.seqs)
+        .await?;
+    Ok(Json(GatewayCommandOutputAckResponse { acked }))
 }
 
 pub(crate) async fn ingest_command_output(
@@ -381,6 +395,20 @@ fn validate_command_output_event(event: &GatewayCommandOutputIngest) -> Result<(
         || event.output.job_id != event.job_id
     {
         return Err(ApiError::bad_request("invalid_command_output_event"));
+    }
+    Ok(())
+}
+
+fn validate_command_output_ack_request(
+    request: &GatewayCommandOutputAckRequest,
+) -> Result<(), ApiError> {
+    if request.client_id.is_empty()
+        || request.client_id.len() > 128
+        || request.seqs.is_empty()
+        || request.seqs.len() > 4096
+        || request.seqs.iter().any(|seq| *seq < 0)
+    {
+        return Err(ApiError::bad_request("invalid_command_output_ack_request"));
     }
     Ok(())
 }

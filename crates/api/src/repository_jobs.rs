@@ -1044,6 +1044,7 @@ impl Repository {
         &self,
         limit: i64,
         lease_secs: i64,
+        control_deadline_extra_secs: u64,
     ) -> Result<Vec<ClaimedJobTarget>> {
         match self {
             Self::Memory(memory) => {
@@ -1089,6 +1090,11 @@ impl Repository {
                     }
                     let is_exclusive =
                         job_command_safety(&operation) == JobCommandSafety::Exclusive;
+                    let timeout_secs = timeouts
+                        .get(&target.job_id)
+                        .copied()
+                        .unwrap_or(30)
+                        .clamp(1, 3600);
                     target.status = TARGET_STATUS_DISPATCHING.to_string();
                     target.started_at.get_or_insert_with(|| now.clone());
                     if is_exclusive {
@@ -1102,11 +1108,7 @@ impl Repository {
                         payload_hash: job.payload_hash.clone(),
                         operation,
                         source_schedule_id: source_schedule_ids.get(&target.job_id).copied(),
-                        timeout_secs: timeouts
-                            .get(&target.job_id)
-                            .copied()
-                            .unwrap_or(30)
-                            .clamp(1, 3600),
+                        timeout_secs,
                     });
                 }
                 let claimed_job_ids = claimed
@@ -1147,8 +1149,13 @@ impl Repository {
 	                          AND job.completed_at IS NULL
 	                          AND job.status IN ('queued', 'running')
                               AND (
-                                target.deadline_at IS NULL
+                                target.status = 'queued'
+                                OR target.deadline_at IS NULL
                                 OR target.deadline_at > now()
+                                OR (
+                                  target.started_at IS NOT NULL
+                                  AND target.started_at + make_interval(secs => (job.timeout_secs + $5)::integer) > now()
+                                )
                               )
                               AND (
                                 COALESCE(job.operation ->> 'type', '') <> ALL($3::text[])
@@ -1186,8 +1193,13 @@ impl Repository {
                                       AND earlier_job.status IN ('queued', 'running')
                                       AND COALESCE(earlier_job.operation ->> 'type', '') = ANY($3::text[])
                                       AND (
-                                        earlier_target.deadline_at IS NULL
+                                        earlier_target.status = 'queued'
+                                        OR earlier_target.deadline_at IS NULL
                                         OR earlier_target.deadline_at > now()
+                                        OR (
+                                          earlier_target.started_at IS NOT NULL
+                                          AND earlier_target.started_at + make_interval(secs => (earlier_job.timeout_secs + $5)::integer) > now()
+                                        )
                                       )
                                       AND (
                                         earlier_target.status = 'queued'
@@ -1222,7 +1234,12 @@ impl Repository {
                             started_at = COALESCE(target.started_at, now()),
                             dispatch_attempts = target.dispatch_attempts + 1,
                             dispatch_lease_until = now() + make_interval(secs => $2::integer),
-                            deadline_at = COALESCE(target.deadline_at, now() + make_interval(secs => due.timeout_secs::integer)),
+                            deadline_at = CASE
+                                WHEN target.deadline_at IS NULL
+                                  OR target.deadline_at < now() + make_interval(secs => (due.timeout_secs + $5)::integer)
+                                THEN now() + make_interval(secs => (due.timeout_secs + $5)::integer)
+                                ELSE target.deadline_at
+                            END,
                             last_dispatch_error = NULL
                         FROM due
                         WHERE target.job_id = due.job_id
@@ -1266,6 +1283,7 @@ impl Repository {
                 .bind(lease_secs.clamp(1, 3600) as i32)
                 .bind(exclusive_operation_types())
                 .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
+                .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -1417,6 +1435,7 @@ impl Repository {
     pub(crate) async fn expire_control_timeout_targets(
         &self,
         limit: i64,
+        control_deadline_extra_secs: u64,
     ) -> Result<Vec<DeadlineExpiredJobTarget>> {
         match self {
             Self::Memory(memory) => {
@@ -1447,7 +1466,8 @@ impl Repository {
                         .get(&target.job_id)
                         .copied()
                         .unwrap_or(30)
-                        .clamp(1, 3600);
+                        .clamp(1, 3600)
+                        .saturating_add(control_deadline_extra_secs);
                     if now.saturating_sub(started_at) < timeout_secs {
                         continue;
                     }
@@ -1466,13 +1486,16 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     WITH expired AS (
-                        SELECT job_id, client_id
-                        FROM job_targets
-                        WHERE completed_at IS NULL
-                          AND status IN ('dispatching', 'running')
-                          AND deadline_at IS NOT NULL
-                          AND deadline_at <= now()
-                        ORDER BY deadline_at ASC, job_id, client_id
+                        SELECT target.job_id, target.client_id
+                        FROM job_targets target
+                        JOIN jobs job ON job.id = target.job_id
+                        WHERE target.completed_at IS NULL
+                          AND target.status IN ('dispatching', 'running')
+                          AND target.deadline_at IS NOT NULL
+                          AND target.deadline_at <= now()
+                          AND target.started_at IS NOT NULL
+                          AND target.started_at + make_interval(secs => (job.timeout_secs + $2)::integer) <= now()
+                        ORDER BY target.deadline_at ASC, target.job_id, target.client_id
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
                     )
@@ -1489,6 +1512,7 @@ impl Repository {
                     "#,
                 )
                 .bind(limit.clamp(1, 500))
+                .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -1837,10 +1861,6 @@ impl Repository {
                         last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout') THEN $4 ELSE NULL END
                     WHERE job_id = $1
                       AND client_id = $2
-                      AND (
-                        cancel_acked_at IS NULL
-                        OR COALESCE($6::timestamptz, now()) < cancel_acked_at
-                      )
                       AND completed_at IS NULL
                     "#,
                 )

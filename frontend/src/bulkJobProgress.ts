@@ -205,7 +205,7 @@ export async function waitForBulkJobTargets(
     targets: AgentView[];
     timeoutMs?: number;
   },
-): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[] }> {
+): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[]; timedOut: boolean }> {
   let lastTargets: JobTargetRecord[] = [];
   let progress = buildBulkJobProgress({
     jobId,
@@ -229,11 +229,11 @@ export async function waitForBulkJobTargets(
     });
     options.onProgress?.(progress);
     if (progress.total === 0 || progress.terminal >= progress.total) {
-      return { progress, targets: lastTargets };
+      return { progress, targets: lastTargets, timedOut: false };
     }
     await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
   }
-  return { progress, targets: lastTargets };
+  return { progress, targets: lastTargets, timedOut: true };
 }
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {

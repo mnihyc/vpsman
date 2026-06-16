@@ -48,6 +48,7 @@ import {
 import { base64ToBytes, parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
+import { bulkProgressTimeoutMs, targetRecordTerminal } from "../../bulkJobProgress";
 import type {
   AgentView,
   CreateJobRequest,
@@ -56,6 +57,7 @@ import type {
   FileOwnershipPolicy,
   JobOperation,
   JobOutputRecord,
+  JobTargetRecord,
 } from "../../types";
 import { formatTime, runPanelAction, shortId } from "../../utils";
 
@@ -87,6 +89,7 @@ export function FileBrowserPanel({
   loading,
   onCreateJob,
   onLoadOutputs,
+  onLoadTargets,
   onOpenMultiFiles,
   onOpenPrivilegeUnlock,
   privilegeMaterial,
@@ -96,6 +99,7 @@ export function FileBrowserPanel({
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenMultiFiles?: (path: string) => void;
   onOpenPrivilegeUnlock: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -212,7 +216,7 @@ export function FileBrowserPanel({
       privileged: true,
       privilege_assertion: built.privilegeAssertion,
     });
-    const outputs = await waitForOutputs(job.job_id, onLoadOutputs, options.expectedType);
+    const outputs = await waitForOutputs(job.job_id, onLoadOutputs, onLoadTargets, timeoutSecs, options.expectedType);
     return { job, outputs };
   }
 
@@ -1160,18 +1164,37 @@ function languageExtension(path: string): Extension {
 async function waitForOutputs(
   jobId: string,
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
+  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
+  timeoutSecs: number,
   expectedType?: string,
 ): Promise<JobOutputRecord[]> {
   let last: JobOutputRecord[] = [];
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    last = await onLoadOutputs(jobId);
-    const hasCompletedStatus = last.some((output) => output.stream === "status" && output.done);
-    if ((expectedType && parseLatestFileStatus(last, expectedType)) || hasCompletedStatus || (!expectedType && last.some((output) => output.done))) {
+  const deadline = Date.now() + bulkProgressTimeoutMs(timeoutSecs);
+  while (Date.now() <= deadline) {
+    let terminal = false;
+    try {
+      const targets = await onLoadTargets(jobId);
+      terminal = targets.some((target) => targetRecordTerminal(target.status));
+    } catch {
+      // Keep polling. Target history can race job creation for a short period.
+    }
+    if (terminal) {
+      last = await onLoadOutputs(jobId);
+      if (!expectedType || parseLatestFileStatus(last, expectedType) || last.some((output) => output.done)) {
+        return last;
+      }
+      await delay(500);
+      last = await onLoadOutputs(jobId);
       return last;
     }
     await delay(500);
   }
-  return last;
+  try {
+    last = await onLoadOutputs(jobId);
+  } catch {
+    // Preserve the timeout error below.
+  }
+  throw new Error("Timed out waiting for file operation target");
 }
 
 function concatenateStdout(outputs: JobOutputRecord[]): Uint8Array {

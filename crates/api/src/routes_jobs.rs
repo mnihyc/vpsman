@@ -503,10 +503,6 @@ async fn precomplete_capability_skips(
         precompleted_statuses.push(outcome.status.clone());
         state
             .repo
-            .update_job_target_result(job_id, &skip.client_id, &outcome)
-            .await?;
-        state
-            .repo
             .record_job_outputs_with_config(
                 job_id,
                 &skip.client_id,
@@ -516,6 +512,10 @@ async fn precomplete_capability_skips(
                     artifact_min_bytes: state.job_output_artifact_min_bytes(),
                 },
             )
+            .await?;
+        state
+            .repo
+            .update_job_target_result(job_id, &skip.client_id, &outcome)
             .await?;
         state.publish(WsEvent::JobOutputRecorded {
             job_id,
@@ -845,6 +845,8 @@ pub(crate) fn target_status_from_final_output(
         (TARGET_STATUS_REJECTED, exit_code)
     } else if output_indicates_timeout(final_output) {
         (TARGET_STATUS_AGENT_TIMEOUT, exit_code)
+    } else if output_indicates_canceled(final_output) {
+        (TARGET_STATUS_CANCELED, exit_code)
     } else {
         match exit_code {
             Some(0) => (TARGET_STATUS_COMPLETED, exit_code),
@@ -902,6 +904,21 @@ pub(crate) fn output_indicates_timeout(output: &CommandOutput) -> bool {
                 .map(str::to_string)
         })
         .is_some_and(|kind| kind == "command_timeout")
+}
+
+pub(crate) fn output_indicates_canceled(output: &CommandOutput) -> bool {
+    if output.stream != OutputStream::Status {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.data)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|kind| kind == "command_canceled")
 }
 
 pub(crate) fn output_indicates_rejected(output: &CommandOutput) -> bool {

@@ -178,7 +178,11 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
     let dispatcher_config = state.dispatcher_runtime_config();
     let claimed = state
         .repo
-        .claim_due_job_targets(dispatcher_config.batch_limit, DISPATCH_LEASE_SECS)
+        .claim_due_job_targets(
+            dispatcher_config.batch_limit,
+            DISPATCH_LEASE_SECS,
+            dispatcher_config.control_deadline_extra_secs(),
+        )
         .await?;
     let claimed_count = claimed.len();
     if claimed_count == 0 {
@@ -265,9 +269,13 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
 }
 
 async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
+    let dispatcher_config = state.dispatcher_runtime_config();
     let expired = state
         .repo
-        .expire_control_timeout_targets(DEADLINE_EXPIRE_LIMIT)
+        .expire_control_timeout_targets(
+            DEADLINE_EXPIRE_LIMIT,
+            dispatcher_config.control_deadline_extra_secs(),
+        )
         .await?;
     for target in expired {
         state
@@ -342,10 +350,6 @@ async fn finish_claimed_target(
 ) -> Result<()> {
     state
         .repo
-        .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
-        .await?;
-    state
-        .repo
         .record_job_outputs_with_config(
             claimed.job_id,
             &claimed.client_id,
@@ -355,6 +359,10 @@ async fn finish_claimed_target(
                 artifact_min_bytes: state.job_output_artifact_min_bytes(),
             },
         )
+        .await?;
+    state
+        .repo
+        .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
         .await?;
     if let Some((seq, output)) = outcome.outputs.iter().enumerate().next_back() {
         state.publish(WsEvent::JobOutputRecorded {

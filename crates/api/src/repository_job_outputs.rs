@@ -89,6 +89,82 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn list_existing_job_output_seqs(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seqs: &[i32],
+    ) -> Result<Vec<i32>> {
+        let requested = seqs
+            .iter()
+            .copied()
+            .filter(|seq| *seq >= 0)
+            .collect::<BTreeSet<_>>();
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let terminal_targets = memory
+                    .job_targets
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|target| {
+                        target.job_id == job_id
+                            && target.client_id == client_id
+                            && target.completed_at.is_some()
+                    })
+                    .map(|target| (target.job_id, target.client_id.clone()))
+                    .collect::<BTreeSet<_>>();
+                let existing = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
+                    .filter(|output| {
+                        !output.done
+                            || terminal_targets.contains(&(job_id, output.client_id.clone()))
+                    })
+                    .map(|output| output.seq)
+                    .collect::<BTreeSet<_>>();
+                Ok(requested
+                    .into_iter()
+                    .filter(|seq| existing.contains(seq))
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let requested = requested.into_iter().collect::<Vec<_>>();
+                let rows = sqlx::query(
+                    r#"
+                    SELECT output.seq
+                    FROM job_outputs output
+                    LEFT JOIN job_targets target
+                      ON target.job_id = output.job_id
+                     AND target.client_id = output.client_id
+                    WHERE output.job_id = $1
+                      AND output.client_id = $2
+                      AND output.seq = ANY($3::int4[])
+                      AND (
+                        output.done = FALSE
+                        OR target.completed_at IS NOT NULL
+                      )
+                    ORDER BY output.seq
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(&requested)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| row.try_get("seq").map_err(Into::into))
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn get_job_output_artifact_ref(
         &self,
         job_id: Uuid,
