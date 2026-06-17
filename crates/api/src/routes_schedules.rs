@@ -21,7 +21,7 @@ use crate::{
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository_schedules::next_cron_runs,
     routes_jobs::create_job_from_saved_schedule,
-    security::operator_has_scope,
+    security::{operator_has_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
 };
@@ -32,7 +32,9 @@ pub(crate) async fn list_schedules(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<ScheduleView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_SCHEDULES_READ)
+        .await?;
     Ok(Json(state.repo.query_schedules(&query).await?))
 }
 

@@ -15,7 +15,11 @@ use tokio::{
     time::{self, Duration},
 };
 
-use crate::{model::WsEvent, state::AppState};
+use crate::{
+    model::WsEvent,
+    security::{operator_has_scope, SCOPE_FLEET_READ},
+    state::AppState,
+};
 
 #[derive(Debug, Deserialize)]
 struct WsClientAuth {
@@ -91,13 +95,14 @@ async fn authenticate_socket(receiver: &mut SplitStream<WebSocket>, state: &AppS
     if auth.r#type != "auth" || auth.access_token.trim().is_empty() {
         return false;
     }
-    matches!(
-        state
-            .repo
-            .authenticate_access_token(&auth.access_token)
-            .await,
-        Ok(Some(_))
-    )
+    authenticate_socket_token(state, &auth.access_token).await
+}
+
+pub(crate) async fn authenticate_socket_token(state: &AppState, access_token: &str) -> bool {
+    match state.repo.authenticate_access_token(access_token).await {
+        Ok(Some(context)) => operator_has_scope(&context.operator.scopes, SCOPE_FLEET_READ),
+        _ => false,
+    }
 }
 
 async fn send_ws_event(sender: &mut SplitSink<WebSocket, Message>, event: &WsEvent) -> bool {

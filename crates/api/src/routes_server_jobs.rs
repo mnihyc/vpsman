@@ -12,6 +12,7 @@ use crate::{
         ArtifactCleanupCreateRequest, ArtifactCleanupPreviewRequest, ArtifactCleanupPreviewView,
         ServerJobView,
     },
+    security::SCOPE_JOBS_READ,
     state::AppState,
     util::limit_or_default,
 };
@@ -63,7 +64,7 @@ pub(crate) async fn list_server_jobs(
     Query(query): Query<ServerJobListQuery>,
 ) -> Result<Json<Vec<ServerJobView>>, ApiError> {
     state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:read")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_JOBS_READ)
         .await?;
     Ok(Json(
         state

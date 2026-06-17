@@ -32,7 +32,11 @@ pub(crate) struct OperatorCreateCommand {
     pub(crate) username: String,
     #[arg(long)]
     pub(crate) role: String,
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Comma-separated scopes, for example fleet:read,jobs:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write"
+    )]
     pub(crate) scopes: Vec<String>,
     #[arg(long, default_value = "VPSMAN_NEW_OPERATOR_PASSWORD")]
     pub(crate) password_env: String,

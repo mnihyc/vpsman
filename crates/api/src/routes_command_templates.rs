@@ -10,6 +10,7 @@ use crate::{
         CommandTemplateQuery, CommandTemplateView, UpsertCommandTemplateRequest,
     },
     repository_command_templates::validate_command_template_request,
+    security::SCOPE_TEMPLATES_READ,
     state::AppState,
     util::limit_or_default,
 };
@@ -19,7 +20,9 @@ pub(crate) async fn list_command_templates(
     headers: HeaderMap,
     Query(query): Query<CommandTemplateQuery>,
 ) -> Result<Json<Vec<CommandTemplateView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_TEMPLATES_READ)
+        .await?;
     validate_template_query(&query)?;
     Ok(Json(
         state

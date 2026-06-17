@@ -30,6 +30,10 @@ confirmation and CLI preview resolve selectors to concrete VPS IDs, submit those
 IDs to the API, and keep selector text only as audit context for deliberate
 manual Target update.
 
+Operator access scopes are documented in
+[operator access scopes](docs/operator-access-scopes.md). `fleet:read` is for
+metadata/status views; payloads, terminal replay, integrations, templates,
+schedules, rendered config, and full network plans require narrower read scopes.
 
 ## Operator Tutorials
 

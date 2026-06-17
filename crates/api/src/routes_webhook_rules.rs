@@ -13,6 +13,7 @@ use crate::{
         WebhookRuleQuery, WebhookRuleView,
     },
     repository_webhook_rules::validate_webhook_rule_target,
+    security::SCOPE_INTEGRATIONS_READ,
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -27,7 +28,9 @@ pub(crate) async fn list_webhook_rules(
     headers: HeaderMap,
     Query(query): Query<WebhookRuleQuery>,
 ) -> Result<Json<Vec<WebhookRuleView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
+        .await?;
     validate_webhook_rule_query(&query)?;
     Ok(Json(
         state
@@ -68,7 +71,9 @@ pub(crate) async fn dry_run_webhook_rule(
     headers: HeaderMap,
     Json(request): Json<WebhookRuleDryRunRequest>,
 ) -> Result<Json<WebhookRuleDryRunView>, ApiError> {
-    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
+        .await?;
     validate_webhook_rule_dry_run_request(&request)?;
     Ok(Json(state.dry_run_webhook_rule(&request, &operator).await?))
 }
@@ -106,7 +111,9 @@ pub(crate) async fn list_webhook_rule_deliveries(
     headers: HeaderMap,
     Query(query): Query<WebhookRuleDeliveryQuery>,
 ) -> Result<Json<Vec<WebhookRuleDeliveryView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
+        .await?;
     validate_webhook_rule_delivery_query(&query)?;
     Ok(Json(
         state

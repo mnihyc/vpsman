@@ -24,6 +24,7 @@ use crate::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
+    security::{SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ},
     state::AppState,
     unix_now,
     util::limit_or_default,
@@ -34,7 +35,9 @@ pub(crate) async fn list_fleet_alerts(
     headers: HeaderMap,
     Query(query): Query<FleetAlertQuery>,
 ) -> Result<Json<Vec<FleetAlertView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_alert_query(&query)?;
     Ok(Json(state.list_fleet_alerts(query).await?))
 }
@@ -44,7 +47,9 @@ pub(crate) async fn export_fleet_alerts(
     headers: HeaderMap,
     Query(query): Query<FleetAlertQuery>,
 ) -> Result<Json<FleetAlertExportView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_alert_query(&query)?;
     let query_summary = serde_json::json!({
         "limit": query.limit,
@@ -67,7 +72,9 @@ pub(crate) async fn list_fleet_alert_states(
     headers: HeaderMap,
     Query(query): Query<FleetAlertStateQuery>,
 ) -> Result<Json<Vec<FleetAlertStateView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_alert_state_query(&query)?;
     Ok(Json(
         state
@@ -102,7 +109,9 @@ pub(crate) async fn list_fleet_alert_policies(
     headers: HeaderMap,
     Query(query): Query<FleetAlertPolicyQuery>,
 ) -> Result<Json<Vec<FleetAlertPolicyOverrideView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_alert_policy_query(&query)?;
     Ok(Json(
         state
@@ -154,7 +163,9 @@ pub(crate) async fn list_fleet_alert_notification_channels(
     headers: HeaderMap,
     Query(query): Query<FleetAlertNotificationChannelQuery>,
 ) -> Result<Json<Vec<FleetAlertNotificationChannelView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
+        .await?;
     validate_alert_notification_channel_query(&query)?;
     Ok(Json(
         state
@@ -207,7 +218,9 @@ pub(crate) async fn list_fleet_alert_notifications(
     headers: HeaderMap,
     Query(query): Query<FleetAlertNotificationDeliveryQuery>,
 ) -> Result<Json<Vec<FleetAlertNotificationDeliveryView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
+        .await?;
     validate_alert_notification_delivery_query(&query)?;
     Ok(Json(
         state

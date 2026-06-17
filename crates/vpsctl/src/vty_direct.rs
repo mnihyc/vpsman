@@ -156,7 +156,7 @@ fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> 
     let parts = command.split_whitespace().collect::<Vec<_>>();
     if !(4..=5).contains(&parts.len()) {
         return Ok(
-            "usage: operator-create <username> <role> <password_env> [scope,scope]".to_string(),
+            "usage: operator-create <username> <role> <password_env> [fleet:read,jobs:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write]".to_string(),
         );
     }
     let password = match std::env::var(parts[3]) {

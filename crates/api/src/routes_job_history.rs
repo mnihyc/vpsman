@@ -24,6 +24,7 @@ use crate::{
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
+    security::{SCOPE_FLEET_READ, SCOPE_JOBS_READ},
     state::AppState,
     util::limit_or_default,
 };
@@ -65,7 +66,9 @@ pub(crate) async fn list_jobs(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<JobHistoryView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.query_jobs(&query).await?))
 }
 
@@ -74,7 +77,9 @@ pub(crate) async fn get_job(
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<JobHistoryView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     let job = state
         .repo
         .get_job(job_id)
@@ -88,7 +93,9 @@ pub(crate) async fn list_job_targets(
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<Vec<JobTargetView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.list_job_targets(job_id).await?))
 }
 
@@ -97,7 +104,9 @@ pub(crate) async fn download_job_target_statuses(
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     let mut targets = state.repo.list_job_targets(job_id).await?;
     targets.sort_by(|left, right| left.client_id.cmp(&right.client_id));
 
@@ -140,7 +149,9 @@ pub(crate) async fn list_job_outputs(
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<Vec<JobOutputView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     Ok(Json(state.repo.list_job_outputs(job_id).await?))
 }
 
@@ -150,7 +161,9 @@ pub(crate) async fn download_file_download_bundle(
     Path(job_id): Path<Uuid>,
     Query(query): Query<FileDownloadBundleQuery>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let requested_clients = parse_client_filter(query.clients.as_deref());
     let outputs = state.repo.list_job_outputs(job_id).await?;
     let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
@@ -225,7 +238,9 @@ pub(crate) async fn download_job_output_archive(
     Path(job_id): Path<Uuid>,
     Query(query): Query<FileDownloadBundleQuery>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let requested_clients = parse_client_filter(query.clients.as_deref());
     let outputs = state.repo.list_job_outputs(job_id).await?;
     let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
@@ -289,7 +304,9 @@ pub(crate) async fn download_file_download_for_client(
     headers: HeaderMap,
     Path((job_id, client_id)): Path<(Uuid, String)>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let mut outputs = state
         .repo
         .list_job_outputs(job_id)
@@ -325,7 +342,9 @@ pub(crate) async fn download_job_output_stream(
     Path((job_id, client_id)): Path<(Uuid, String)>,
     Query(query): Query<JobOutputDownloadQuery>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let stream = match query.stream.as_str() {
         "stdout" => JobOutputStreamSelection::Single("stdout"),
         "stderr" => JobOutputStreamSelection::Single("stderr"),
@@ -841,7 +860,9 @@ pub(crate) async fn compare_job_outputs(
     Path(job_id): Path<Uuid>,
     Query(query): Query<JobOutputComparisonQuery>,
 ) -> Result<Json<JobOutputComparisonView>, ApiError> {
-    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let mode = query
         .mode
         .as_deref()
@@ -863,7 +884,9 @@ pub(crate) async fn download_job_output_chunk(
     headers: HeaderMap,
     Path((job_id, client_id, seq)): Path<(Uuid, String, i32)>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let output = state
         .repo
         .list_job_outputs(job_id)
@@ -972,7 +995,9 @@ pub(crate) async fn list_process_supervisor_inventory(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<ProcessSupervisorInventoryView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -986,7 +1011,9 @@ pub(crate) async fn list_audit_logs(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AuditLogView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.query_audit_logs(&query).await?))
 }
 
@@ -995,7 +1022,9 @@ pub(crate) async fn list_network_observations(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkObservationView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -1009,7 +1038,9 @@ pub(crate) async fn list_network_observation_trends(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkObservationTrendView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo

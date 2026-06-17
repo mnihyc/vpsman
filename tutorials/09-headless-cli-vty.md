@@ -142,6 +142,11 @@ agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 5. Recover: inspect job outputs, then run an explicit compensating operation such as
    `restore-rollback`, `agent-update-rollback`, or `tunnel-rollback` as appropriate.
 
+Custom headless operator tokens need the read scopes for the data they inspect.
+`fleet:read` covers metadata/status only. Add `jobs:read`, `terminal:read`,
+`integrations:read`, `templates:read`, `schedules:read`, `config:read`, and
+`network:read` when scripts read those sensitive surfaces.
+
 Agent update staging, activation, and rollback use the same direct job model as
 other privileged commands. Activation and rollback need privilege unlock through
 `enable` or explicit CLI unlock environment, and operators observe progress

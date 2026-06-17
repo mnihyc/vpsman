@@ -54,6 +54,12 @@ locally to build request-bound privilege assertions. The API forwards those
 assertions to the private gateway for verification and never receives the
 plaintext super password.
 
+Access scopes separate fleet metadata from sensitive payloads. `fleet:read`
+can inspect status and inventory, while job outputs, terminal replay,
+integration payloads, saved templates, schedules, rendered config, and full
+tunnel plans require the read scopes listed in
+[`docs/operator-access-scopes.md`](../docs/operator-access-scopes.md).
+
 ## 3. Install One VPS
 
 Register a direct gateway agent identity:

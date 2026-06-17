@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError, model_terminal::TerminalReplayView, model_terminal::TerminalSessionView,
-    state::AppState, util::limit_or_default,
+    security::SCOPE_TERMINAL_READ, state::AppState, util::limit_or_default,
 };
 
 const DEFAULT_TERMINAL_REPLAY_LIMIT: i64 = 100;
@@ -36,7 +36,9 @@ pub(crate) async fn list_terminal_sessions(
     headers: HeaderMap,
     Query(query): Query<TerminalSessionQuery>,
 ) -> Result<Json<Vec<TerminalSessionView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_TERMINAL_READ)
+        .await?;
     let client_id = query
         .client_id
         .as_deref()
@@ -61,7 +63,9 @@ pub(crate) async fn terminal_session_replay(
     Path((client_id, session_id)): Path<(String, Uuid)>,
     Query(query): Query<TerminalReplayQuery>,
 ) -> Result<Json<TerminalReplayView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_TERMINAL_READ)
+        .await?;
     validate_terminal_replay_client_id(&client_id)?;
     let mut replay = state
         .repo

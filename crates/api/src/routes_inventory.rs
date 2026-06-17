@@ -26,6 +26,7 @@ use crate::{
         WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -43,7 +44,9 @@ pub(crate) async fn fleet_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<FleetSummary>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.fleet_summary().await?))
 }
 
@@ -51,7 +54,9 @@ pub(crate) async fn list_agents(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AgentView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.list_agents().await?))
 }
 
@@ -103,7 +108,9 @@ pub(crate) async fn list_gateway_sessions(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<GatewaySessionView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -117,7 +124,9 @@ pub(crate) async fn list_telemetry_rollups(
     headers: HeaderMap,
     Query(query): Query<TelemetryRollupQuery>,
 ) -> Result<Json<Vec<TelemetryRollupView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_telemetry_rollup_query(&query)?;
     Ok(Json(
         state
@@ -136,7 +145,9 @@ pub(crate) async fn list_telemetry_network_rates(
     headers: HeaderMap,
     Query(query): Query<TelemetryNetworkRateQuery>,
 ) -> Result<Json<Vec<TelemetryNetworkRateView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_telemetry_network_rate_query(&query)?;
     Ok(Json(
         state
@@ -156,7 +167,9 @@ pub(crate) async fn list_telemetry_tunnels(
     headers: HeaderMap,
     Query(query): Query<TelemetryTunnelQuery>,
 ) -> Result<Json<Vec<TelemetryTunnelView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_telemetry_tunnel_query(&query)?;
     Ok(Json(
         state
@@ -174,7 +187,9 @@ pub(crate) async fn list_tags(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TagView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.list_tags().await?))
 }
 
@@ -201,7 +216,9 @@ pub(crate) async fn list_data_source_presets(
     headers: HeaderMap,
     Query(query): Query<DataSourcePresetQuery>,
 ) -> Result<Json<Vec<DataSourcePresetView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     validate_optional_domain(query.domain.as_deref())?;
     Ok(Json(
         state
@@ -215,7 +232,9 @@ pub(crate) async fn list_hot_config_rule_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<HotConfigRuleTemplateView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     Ok(Json(state.repo.list_hot_config_rule_templates().await?))
 }
 
@@ -243,7 +262,9 @@ pub(crate) async fn render_hot_config_rule_template(
     Path(template_id): Path<uuid::Uuid>,
     Json(request): Json<RenderHotConfigRuleTemplateRequest>,
 ) -> Result<Json<HotConfigRuleTemplateRenderView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -311,7 +332,9 @@ pub(crate) async fn diff_data_source_preset(
     Path(preset_id): Path<uuid::Uuid>,
     Json(request): Json<DataSourcePresetDiffRequest>,
 ) -> Result<Json<DataSourcePresetDiffView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     validate_data_source_preset_candidate(&request.description, &request.definition)?;
     Ok(Json(
         state
@@ -328,7 +351,9 @@ pub(crate) async fn test_data_source_preset(
     Path(preset_id): Path<uuid::Uuid>,
     Json(request): Json<TestDataSourcePresetRequest>,
 ) -> Result<Json<DataSourcePresetTestView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     validate_preset_definition(&request.definition)?;
     Ok(Json(
         state
@@ -363,7 +388,9 @@ pub(crate) async fn list_data_source_assignments(
     headers: HeaderMap,
     Query(query): Query<DataSourcePresetAssignmentQuery>,
 ) -> Result<Json<Vec<DataSourcePresetAssignmentView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     validate_optional_domain(query.domain.as_deref())?;
     if query
         .client_id
@@ -385,7 +412,9 @@ pub(crate) async fn list_data_source_status(
     headers: HeaderMap,
     Query(query): Query<DataSourceStatusQuery>,
 ) -> Result<Json<Vec<DataSourceStatusView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_optional_domain(query.domain.as_deref())?;
     if let Some(client_id) = query.client_id.as_deref() {
         validate_client_id(client_id)?;
@@ -402,7 +431,9 @@ pub(crate) async fn render_data_source_hot_config(
     headers: HeaderMap,
     Query(query): Query<DataSourceHotConfigQuery>,
 ) -> Result<Json<DataSourceHotConfigView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
     validate_client_id(&query.client_id)?;
     Ok(Json(
         state
@@ -782,7 +813,9 @@ pub(crate) async fn resolve_bulk_targets(
     headers: HeaderMap,
     Json(request): Json<BulkResolveRequest>,
 ) -> Result<Json<BulkResolveResponse>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     validate_bulk_selector_expression(&request.selector_expression)?;
     Ok(Json(state.repo.resolve_bulk_targets(&request).await?))
 }

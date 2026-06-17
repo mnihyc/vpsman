@@ -667,17 +667,19 @@ scoped_alert_notification_channels_response="$(curl -sS -w '\n%{http_code}' \
   "$api_url/api/v1/fleet-alert-notification-channels?limit=5")"
 scoped_alert_notification_channels_status="${scoped_alert_notification_channels_response##*$'\n'}"
 scoped_alert_notification_channels_body="${scoped_alert_notification_channels_response%$'\n'*}"
-if [[ "$scoped_alert_notification_channels_status" != "200" ]]; then
+if [[ "$scoped_alert_notification_channels_status" != "403" ]]; then
   fail "fleet:read scoped fleet-alert-notification-channels returned HTTP $scoped_alert_notification_channels_status: $scoped_alert_notification_channels_body"
 fi
+jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notification_channels_body" >/dev/null
 scoped_alert_notifications_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   "$api_url/api/v1/fleet-alert-notifications?limit=5")"
 scoped_alert_notifications_status="${scoped_alert_notifications_response##*$'\n'}"
 scoped_alert_notifications_body="${scoped_alert_notifications_response%$'\n'*}"
-if [[ "$scoped_alert_notifications_status" != "200" ]]; then
+if [[ "$scoped_alert_notifications_status" != "403" ]]; then
   fail "fleet:read scoped fleet-alert-notifications returned HTTP $scoped_alert_notifications_status: $scoped_alert_notifications_body"
 fi
+jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notifications_body" >/dev/null
 scoped_alert_notification_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \

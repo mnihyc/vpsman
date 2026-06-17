@@ -20,6 +20,7 @@ use crate::{
         TunnelPlanView,
     },
     model_topology::TopologyGraphView,
+    security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
     state::AppState,
     util::limit_or_default,
 };
@@ -28,7 +29,9 @@ pub(crate) async fn list_tunnel_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TunnelPlanView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_NETWORK_READ)
+        .await?;
     Ok(Json(state.repo.list_tunnel_plans().await?))
 }
 
@@ -357,7 +360,9 @@ pub(crate) async fn list_network_ospf_recommendations(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkOspfRecommendationView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -371,7 +376,9 @@ pub(crate) async fn list_network_ospf_update_plans(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkOspfUpdatePlanView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo
@@ -385,7 +392,9 @@ pub(crate) async fn get_topology_graph(
     headers: HeaderMap,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<TopologyGraphView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(
         state
             .repo

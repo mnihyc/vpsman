@@ -1034,7 +1034,7 @@ export function AccessPanel({
               aria-label="New operator scopes"
               disabled={!canManageOperators || operatorActionPending}
               onChange={(event) => setNewOperatorScopes(event.target.value)}
-              placeholder="inventory:write, jobs:run"
+              placeholder="fleet:read, jobs:read, jobs:write"
               value={newOperatorScopes}
             />
           </label>

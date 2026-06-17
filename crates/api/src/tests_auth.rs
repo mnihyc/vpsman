@@ -1,7 +1,14 @@
 use super::*;
 use std::collections::BTreeMap;
 
-use axum::http::StatusCode;
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+
+use crate::model_command_templates::{CommandTemplateQuery, JobOutputComparisonQuery};
+use crate::security::{
+    default_operator_scopes, SCOPE_CONFIG_READ, SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ,
+    SCOPE_JOBS_READ, SCOPE_NETWORK_READ, SCOPE_SCHEDULES_READ, SCOPE_TEMPLATES_READ,
+    SCOPE_TERMINAL_READ,
+};
 
 #[test]
 fn operator_password_hash_verifies_without_plaintext_storage() {
@@ -153,6 +160,358 @@ fn operator_roles_are_ranked_for_authorization() {
     assert_eq!(
         validate_operator_role("root").unwrap_err().code,
         "invalid_operator_role"
+    );
+}
+
+#[test]
+fn default_operator_scopes_keep_viewers_out_of_sensitive_reads() {
+    let operator_scopes = default_operator_scopes("operator");
+    for expected in [
+        SCOPE_FLEET_READ,
+        SCOPE_JOBS_READ,
+        SCOPE_TERMINAL_READ,
+        SCOPE_INTEGRATIONS_READ,
+        SCOPE_TEMPLATES_READ,
+        SCOPE_SCHEDULES_READ,
+        SCOPE_CONFIG_READ,
+        SCOPE_NETWORK_READ,
+        "jobs:write",
+        "inventory:write",
+        "schedules:write",
+        "backups:write",
+        "network:write",
+    ] {
+        assert!(
+            operator_scopes.iter().any(|scope| scope == expected),
+            "operator default scopes missing {expected}"
+        );
+    }
+
+    assert_eq!(
+        default_operator_scopes("viewer"),
+        vec![SCOPE_FLEET_READ.to_string()]
+    );
+    assert_eq!(default_operator_scopes("admin"), vec!["*".to_string()]);
+}
+
+#[tokio::test]
+async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
+    let state = memory_test_state();
+    let (no_fleet_token, _) =
+        issue_test_operator_headers(&state, "viewer", &[SCOPE_JOBS_READ]).await;
+    let (_, viewer_headers) =
+        issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
+    let job_id = Uuid::new_v4();
+    let terminal_id = Uuid::new_v4();
+
+    assert!(!routes_ws::authenticate_socket_token(&state, &no_fleet_token).await);
+    assert_scope_forbidden(
+        routes_job_history::list_job_outputs(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(job_id),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::download_file_download_bundle(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(job_id),
+            axum::extract::Query(routes_job_history::FileDownloadBundleQuery { clients: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::download_job_output_archive(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(job_id),
+            axum::extract::Query(routes_job_history::FileDownloadBundleQuery { clients: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::download_file_download_for_client(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path((job_id, "client-a".to_string())),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::download_job_output_stream(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path((job_id, "client-a".to_string())),
+            axum::extract::Query(routes_job_history::JobOutputDownloadQuery {
+                stream: "stdout".to_string(),
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::download_job_output_chunk(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path((job_id, "client-a".to_string(), 0)),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::compare_job_outputs(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(job_id),
+            axum::extract::Query(JobOutputComparisonQuery { mode: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_terminal_sessions::list_terminal_sessions(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(routes_terminal_sessions::TerminalSessionQuery {
+                limit: None,
+                client_id: None,
+                session_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_terminal_sessions::terminal_session_replay(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(("client-a".to_string(), terminal_id)),
+            axum::extract::Query(routes_terminal_sessions::TerminalReplayQuery {
+                from_seq: None,
+                limit: None,
+                max_bytes: None,
+                include_data: Some(false),
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_webhook_rules::list_webhook_rules(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_webhook_rules::WebhookRuleQuery {
+                limit: None,
+                enabled: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_webhook_rules::dry_run_webhook_rule(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::Json(crate::model_webhook_rules::WebhookRuleDryRunRequest {
+                name: None,
+                enabled: Some(true),
+                expression: "status = online".to_string(),
+                target: Some("https://hooks.example/vpsman".to_string()),
+                event_kind: "manual.dry_run".to_string(),
+                event_id: None,
+                body_template: String::new(),
+                cooldown_secs: None,
+                notes: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_webhook_rules::list_webhook_rule_deliveries(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_webhook_rules::WebhookRuleDeliveryQuery {
+                limit: None,
+                rule_id: None,
+                event_kind: None,
+                status: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_alerts::list_fleet_alert_notification_channels(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(FleetAlertNotificationChannelQuery {
+                limit: None,
+                enabled: None,
+                scope_kind: None,
+                scope_value: None,
+                delivery_kind: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_alerts::list_fleet_alert_notifications(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(FleetAlertNotificationDeliveryQuery {
+                limit: None,
+                channel_id: None,
+                alert_id: None,
+                status: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_command_templates::list_command_templates(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(CommandTemplateQuery {
+                limit: None,
+                scope_kind: None,
+                scope_value: None,
+                command_type: None,
+                display_group: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_schedules::list_schedules(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_inventory::list_data_source_presets(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(DataSourcePresetQuery { domain: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_inventory::list_hot_config_rule_templates(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_inventory::render_data_source_hot_config(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(DataSourceHotConfigQuery {
+                client_id: "client-a".to_string(),
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_network::list_tunnel_plans(axum::extract::State(state.clone()), viewer_headers)
+            .await,
+    );
+}
+
+#[tokio::test]
+async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
+    let state = memory_test_state();
+    let (fleet_token, _) = issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
+    let (_, jobs_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_JOBS_READ]).await;
+    let (_, terminal_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_TERMINAL_READ]).await;
+    let (_, integrations_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_INTEGRATIONS_READ]).await;
+    let (_, templates_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_TEMPLATES_READ]).await;
+    let (_, schedules_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_SCHEDULES_READ]).await;
+    let (_, config_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_CONFIG_READ]).await;
+    let (_, network_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_NETWORK_READ]).await;
+
+    assert!(routes_ws::authenticate_socket_token(&state, &fleet_token).await);
+    assert_not_scope_forbidden(
+        routes_job_history::list_job_outputs(
+            axum::extract::State(state.clone()),
+            jobs_headers,
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_terminal_sessions::list_terminal_sessions(
+            axum::extract::State(state.clone()),
+            terminal_headers,
+            axum::extract::Query(routes_terminal_sessions::TerminalSessionQuery {
+                limit: None,
+                client_id: None,
+                session_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_webhook_rules::list_webhook_rules(
+            axum::extract::State(state.clone()),
+            integrations_headers.clone(),
+            axum::extract::Query(crate::model_webhook_rules::WebhookRuleQuery {
+                limit: None,
+                enabled: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_alerts::list_fleet_alert_notification_channels(
+            axum::extract::State(state.clone()),
+            integrations_headers,
+            axum::extract::Query(FleetAlertNotificationChannelQuery {
+                limit: None,
+                enabled: None,
+                scope_kind: None,
+                scope_value: None,
+                delivery_kind: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_command_templates::list_command_templates(
+            axum::extract::State(state.clone()),
+            templates_headers,
+            axum::extract::Query(CommandTemplateQuery {
+                limit: None,
+                scope_kind: None,
+                scope_value: None,
+                command_type: None,
+                display_group: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_schedules::list_schedules(
+            axum::extract::State(state.clone()),
+            schedules_headers,
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_inventory::list_data_source_presets(
+            axum::extract::State(state.clone()),
+            config_headers,
+            axum::extract::Query(DataSourcePresetQuery { domain: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_network::list_tunnel_plans(axum::extract::State(state), network_headers).await,
     );
 }
 
@@ -810,5 +1169,58 @@ fn memory_test_state() -> AppState {
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
+    }
+}
+
+async fn issue_test_operator_headers(
+    state: &AppState,
+    role: &str,
+    scopes: &[&str],
+) -> (String, HeaderMap) {
+    let operator = OperatorRecord {
+        id: Uuid::new_v4(),
+        username: format!("test-{role}-{}", Uuid::new_v4()),
+        password_hash: "test-only-session-issued-directly".to_string(),
+        role: role.to_string(),
+        scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+        preferences: OperatorPreferences::default(),
+        totp_enabled: false,
+        totp_secret_ciphertext_hex: None,
+        totp_secret_nonce_hex: None,
+        totp_secret_salt_hex: None,
+    };
+    if let Repository::Memory(memory) = &state.repo {
+        memory.operators.write().await.push(operator.clone());
+    } else {
+        panic!("issue_test_operator_headers supports only memory repository tests");
+    }
+    let auth = state
+        .repo
+        .issue_session(operator.view())
+        .await
+        .expect("test operator session");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {}", auth.access_token)
+            .parse()
+            .expect("test bearer header"),
+    );
+    (auth.access_token, headers)
+}
+
+fn assert_scope_forbidden<T>(result: Result<T, ApiError>) {
+    match result {
+        Err(error) => {
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+            assert_eq!(error.code, "operator_scope_insufficient");
+        }
+        Ok(_) => panic!("expected operator_scope_insufficient"),
+    }
+}
+
+fn assert_not_scope_forbidden<T>(result: Result<T, ApiError>) {
+    if let Err(error) = result {
+        assert_ne!(error.code, "operator_scope_insufficient");
     }
 }

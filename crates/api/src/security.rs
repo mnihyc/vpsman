@@ -8,6 +8,14 @@ use crate::error::ApiError;
 
 pub(crate) const ACCESS_TOKEN_TTL_SECS: u64 = 15 * 60;
 pub(crate) const REFRESH_TOKEN_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+pub(crate) const SCOPE_FLEET_READ: &str = "fleet:read";
+pub(crate) const SCOPE_JOBS_READ: &str = "jobs:read";
+pub(crate) const SCOPE_TERMINAL_READ: &str = "terminal:read";
+pub(crate) const SCOPE_INTEGRATIONS_READ: &str = "integrations:read";
+pub(crate) const SCOPE_TEMPLATES_READ: &str = "templates:read";
+pub(crate) const SCOPE_SCHEDULES_READ: &str = "schedules:read";
+pub(crate) const SCOPE_CONFIG_READ: &str = "config:read";
+pub(crate) const SCOPE_NETWORK_READ: &str = "network:read";
 const ARGON2_MEMORY_KIB: u32 = 19_456;
 const ARGON2_TIME_COST: u32 = 2;
 const ARGON2_PARALLELISM: u32 = 1;
@@ -45,14 +53,21 @@ pub(crate) fn default_operator_scopes(role: &str) -> Vec<String> {
     match role.trim() {
         "admin" => vec!["*".to_string()],
         "operator" => vec![
-            "fleet:read".to_string(),
+            SCOPE_FLEET_READ.to_string(),
+            SCOPE_JOBS_READ.to_string(),
+            SCOPE_TERMINAL_READ.to_string(),
+            SCOPE_INTEGRATIONS_READ.to_string(),
+            SCOPE_TEMPLATES_READ.to_string(),
+            SCOPE_SCHEDULES_READ.to_string(),
+            SCOPE_CONFIG_READ.to_string(),
+            SCOPE_NETWORK_READ.to_string(),
             "jobs:write".to_string(),
             "inventory:write".to_string(),
             "schedules:write".to_string(),
             "backups:write".to_string(),
             "network:write".to_string(),
         ],
-        "viewer" => vec!["fleet:read".to_string()],
+        "viewer" => vec![SCOPE_FLEET_READ.to_string()],
         _ => Vec::new(),
     }
 }
