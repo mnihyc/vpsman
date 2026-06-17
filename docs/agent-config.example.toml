@@ -1,32 +1,43 @@
-client_id = "lax-edge-01"
-# Local-only placeholder value for agent-side scripts; panel alias is owned by
-# server inventory or explicit operator edits.
-display_name = "lax-edge-01"
+# This mirrors the direct-gateway one-line installer output, plus optional
+# sections that can be added later through config management.
+client_id = "agent-nrt-04"
+display_name = "edge-nrt-04"
 telemetry_light_secs = 15
 telemetry_full_secs = 60
-tags = ["bgp", "edge"]
+tags = []
 
 [noise]
-# Agents use enrolled IK with locally provisioned client private keys and pinned
-# gateway public keys.
+# Generated before install with `vpsctl noise-keygen`; register the matching
+# public key with `vpsctl agent-identity-upsert` before or after installation.
 mode = "enrolled_ik"
 client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
 command_timeout_secs = 30
+gateway_retry_secs = 60
+gateway_connect_timeout_secs = 10
 
 [backup]
+# Optional. The one-line installer does not write this section; omitted values
+# use safe defaults until backup workflows are configured.
 # X25519 public key for the panel/object-storage backup recipient. Generate a
 # keypair with `vpsctl noise-keygen` and keep the private key outside agents.
 recipient_public_key_hex = "5555555555555555555555555555555555555555555555555555555555555555"
 max_plaintext_bytes = 1048576
 
 [update]
-# Optional Ed25519 public key for signed agent update artifacts. When set, the
-# agent requires `agent_update` commands to include a matching artifact
-# signature and signing key before staging a replacement binary.
-trusted_artifact_signing_key_hex = "6666666666666666666666666666666666666666666666666666666666666666"
+# The autonomous updater is configured with production defaults but is disabled
+# unless the installer or a later incremental config patch explicitly enables
+# it. Agents use the official GitHub release manifest's tag-pinned asset URL,
+# verify SHA256SUMS, stage newer musl agent artifacts, activate them, and
+# restart themselves when enabled.
+unmanaged_enabled = false
+unmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+unmanaged_interval_secs = 86400
+unmanaged_jitter_secs = 86400
+unmanaged_activate = true
+unmanaged_restart_agent = true
 
 [execution]
 # Privileged command execution defaults are selectable. Shell scripts append

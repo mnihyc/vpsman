@@ -12,6 +12,10 @@ alert_disk_available_warning_ratio = 0.20
 alert_disk_available_critical_ratio = 0.10
 alert_cpu_load_warning = 2.0
 alert_cpu_load_critical = 4.0
+operator_auth_username_failed_attempt_limit = 8
+operator_auth_ip_failed_attempt_limit = 8
+operator_auth_failed_attempt_window_secs = 86400
+operator_auth_lockout_secs = 86400
 
 [gateway]
 bind = "0.0.0.0:9443"
@@ -53,11 +57,8 @@ migrations_dir = "/opt/vpsman/migrations"
 
 [storage]
 backup_object_store_dir = "/var/lib/vpsman/objects/backups"
-update_object_store_dir = "/var/lib/vpsman/objects/updates"
 object_region = "us-east-1"
 object_create_bucket = false
-update_object_region = "us-east-1"
-update_object_create_bucket = false
 
 [capacity]
 api_db_pool = 32

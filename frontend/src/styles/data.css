@@ -910,8 +910,8 @@
       120px,
       0.6fr
     )
-    minmax(120px, 0.6fr) minmax(220px, 1fr) minmax(160px, 0.7fr);
-  min-width: max(100%, 1060px);
+    minmax(140px, 0.7fr) minmax(160px, 0.7fr);
+  min-width: max(100%, 860px);
 }
 
 .supervisorInventoryGrid {

@@ -42,7 +42,7 @@ impl Repository {
 
         let sections = Value::Object(renderer.sections);
         let toml = toml::to_string_pretty(&sections)
-            .context("failed to serialize data-source hot-config TOML")?;
+            .context("failed to serialize data-source config patch TOML")?;
         Ok(DataSourceHotConfigView {
             client_id: client_id.to_string(),
             sections,

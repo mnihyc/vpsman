@@ -54,8 +54,9 @@ GitHub Actions publishes separated runtime assets:
 - `SHA256SUMS`
 
 The root `version-template.json` is the canonical release metadata template.
-The release workflow stamps it with the exact tag, commit, and generated asset
-list before uploading it to GitHub Releases as `version.json`.
+The release workflow stamps it with the exact tag, commit, generated asset
+list, and tag-pinned per-asset download URLs before uploading it to GitHub
+Releases as `version.json`.
 
 The frontend artifact is a static Vite build intended for Nginx, Apache2, or an
 equivalent static server.

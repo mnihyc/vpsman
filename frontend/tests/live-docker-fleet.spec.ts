@@ -831,7 +831,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Config",
       subpage: "Bulk apply",
-      marker: "Bulk hot config",
+      marker: "Bulk config patches",
       screenshot: "page-config-bulk-apply",
     },
     {

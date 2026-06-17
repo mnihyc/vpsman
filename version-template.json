@@ -1,14 +1,36 @@
 {
   "assets": [
-    "vpsctl-linux-aarch64-musl",
-    "vpsctl-linux-x86_64-musl",
-    "vpsman-agent-linux-aarch64-musl",
-    "vpsman-agent-linux-x86_64-musl",
-    "vpsman-frontend-dist.tar.gz",
-    "vpsman-server-linux-x86_64.zip"
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsctl-linux-aarch64-musl",
+      "name": "vpsctl-linux-aarch64-musl"
+    },
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsctl-linux-x86_64-musl",
+      "name": "vpsctl-linux-x86_64-musl"
+    },
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-aarch64-musl",
+      "name": "vpsman-agent-linux-aarch64-musl"
+    },
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl",
+      "name": "vpsman-agent-linux-x86_64-musl"
+    },
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-frontend-dist.tar.gz",
+      "name": "vpsman-frontend-dist.tar.gz"
+    },
+    {
+      "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-server-linux-x86_64.zip",
+      "name": "vpsman-server-linux-x86_64.zip"
+    }
   ],
+  "checksum_manifest": {
+    "download_url": "https://github.com/mnihyc/vpsman/releases/download/v0.1.0/SHA256SUMS",
+    "name": "SHA256SUMS"
+  },
   "project": "vpsman",
-  "schema_version": 1,
+  "schema_version": 2,
   "tag": "v0.1.0",
   "version": "0.1.0"
 }

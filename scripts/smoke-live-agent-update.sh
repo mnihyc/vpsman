@@ -70,14 +70,6 @@ cp "$artifact_agent_bin" "$artifact_file"
 printf '\n# vpsman direct update artifact %s\n' "$(date +%s%N)" >>"$artifact_file"
 chmod 0755 "$artifact_file"
 artifact_sha="$(sha256sum "$artifact_file" | awk '{print $1}')"
-update_signing_seed_hex="7777777777777777777777777777777777777777777777777777777777777777"
-update_signature_json="$(target/debug/vpsctl agent-update-signature \
-  --artifact-file "$artifact_file" \
-  --signing-seed-hex "$update_signing_seed_hex")"
-artifact_signature_hex="$(jq -r '.artifact_signature_hex' <<<"$update_signature_json")"
-artifact_signing_key_hex="$(jq -r '.artifact_signing_key_hex' <<<"$update_signature_json")"
-jq -e --arg sha "$artifact_sha" '.artifact_sha256_hex == $sha' \
-  <<<"$update_signature_json" >/dev/null
 
 cleanup_live_agent_update_smoke() {
   local kept_tmpdir="${SMOKE_TMPDIR:-}"
@@ -340,17 +332,6 @@ smoke_create_direct_agent_config \
   "agent-update-smoke" \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
-if grep -q '^trusted_artifact_signing_key_hex = ' "$agent_config"; then
-  sed -i "s/^trusted_artifact_signing_key_hex = .*/trusted_artifact_signing_key_hex = \"$artifact_signing_key_hex\"/" "$agent_config"
-elif grep -q '^\[update\]' "$agent_config"; then
-  sed -i "/^\[update\]/a trusted_artifact_signing_key_hex = \"$artifact_signing_key_hex\"" "$agent_config"
-else
-  cat >>"$agent_config" <<TOML
-
-[update]
-trusted_artifact_signing_key_hex = "$artifact_signing_key_hex"
-TOML
-fi
 
 start_agent "initial"
 wait_agent_online
@@ -394,8 +375,6 @@ VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" agent-update \
     --artifact-url "$artifact_url" \
     --sha256-hex "$artifact_sha" \
-    --artifact-signature-hex "$artifact_signature_hex" \
-    --artifact-signing-key-hex "$artifact_signing_key_hex" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
@@ -408,7 +387,6 @@ jq -e --arg sha "$artifact_sha" '
   .type == "agent_update"
   and .status == "staged"
   and .sha256_hex == $sha
-  and (.signature == "verified" or .signature.status == "verified")
   and .activation == "manual_restart_required"
   and (.staged_path | endswith(".next"))
   and (.rollback_path | endswith(".rollback"))
@@ -527,7 +505,6 @@ jq -n \
     api_restart: "verified",
     no_privilege_unlock_rejected: true,
     https_artifact: "trusted_private_root",
-    signed_artifact: "verified_ed25519",
     direct_agent_update_job_flow: "stage_activate_restart_rollback",
     heartbeat: "verified_after_restart",
     rollback: "rolled_back_recorded",

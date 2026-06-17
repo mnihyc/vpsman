@@ -5,7 +5,8 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 use vpsman_common::{
-    validate_data_source_config_patch_section, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
+    validate_incremental_config_patch_section, JobCommand,
+    DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
 use crate::commands_schedules::selector_expression_from_targets;
@@ -769,11 +770,11 @@ pub(crate) fn data_source_hot_config(
         "json" => println!("{body}"),
         "toml" => {
             let value: serde_json::Value =
-                serde_json::from_str(&body).context("invalid data-source hot-config response")?;
+                serde_json::from_str(&body).context("invalid data-source config response")?;
             let toml = value
                 .get("toml")
                 .and_then(serde_json::Value::as_str)
-                .context("data-source hot-config response missing toml")?;
+                .context("data-source config response missing toml")?;
             print!("{toml}");
         }
         _ => anyhow::bail!("--format must be toml or json"),
@@ -794,7 +795,7 @@ pub(crate) fn data_source_hot_config_apply(
 ) -> Result<()> {
     anyhow::ensure!(
         confirmed,
-        "data-source-hot-config-apply requires --confirmed because it persists agent configuration"
+        "data-source-hot-config-apply requires --confirmed because it applies an incremental config patch"
     );
     anyhow::ensure!(
         !client_id.is_empty() && client_id.len() <= 128,
@@ -802,9 +803,10 @@ pub(crate) fn data_source_hot_config_apply(
     );
     let body = http_get(api_url, &data_source_hot_config_path(&client_id), token)?;
     let rendered: DataSourceHotConfigResponse =
-        serde_json::from_str(&body).context("invalid data-source hot-config response")?;
+        serde_json::from_str(&body).context("invalid data-source config response")?;
     validate_data_source_config_patch(&rendered.toml)?;
     let operation = JobCommand::DataSourceConfigPatch {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: rendered.toml,
     };
     println!(
@@ -1326,7 +1328,7 @@ fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
         "rendered data-source config patch has no sections"
     );
     for section in table.keys() {
-        validate_data_source_config_patch_section(section)
+        validate_incremental_config_patch_section(section)
             .map_err(|message| anyhow::anyhow!(message))?;
     }
     Ok(())

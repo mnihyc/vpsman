@@ -5,16 +5,20 @@ use tokio::sync::broadcast;
 use crate::{
     gateway_client::GatewayDispatchClient,
     job_request::validate_job_command,
-    model::CreateJobRequest,
+    model::{
+        AuthContext, CreateJobRequest, OperatorPreferences, OperatorView,
+        RenderHotConfigRuleTemplateRequest, UpsertHotConfigRuleTemplateRequest,
+    },
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
     routes_jobs::create_job,
     state::AppState,
 };
-use ed25519_dalek::SigningKey;
+use uuid::Uuid;
 use vpsman_common::{
-    sign_update_artifact_hash, AgentCapabilitySnapshot, AgentConfig, AgentHello,
-    AgentPrivilegeMode, JobCommand,
+    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentUpdateConfig,
+    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
+    HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
 };
 
 async fn wait_for_job_status(
@@ -35,6 +39,20 @@ async fn wait_for_job_status(
     panic!("job {job_id} did not reach status {expected}");
 }
 
+fn memory_admin() -> AuthContext {
+    AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "test-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    }
+}
+
 #[test]
 fn validates_hot_config_job_document() {
     let config = AgentConfig {
@@ -43,6 +61,7 @@ fn validates_hot_config_job_document() {
         ..AgentConfig::default()
     };
     let command = JobCommand::HotConfig {
+        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
         toml: toml::to_string_pretty(&config).unwrap(),
         preserve_redacted: None,
         base_config_sha256_hex: None,
@@ -54,6 +73,7 @@ fn validates_hot_config_job_document() {
 #[test]
 fn rejects_invalid_hot_config_job_document() {
     let command = JobCommand::HotConfig {
+        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
         toml: "client_id = ''".to_string(),
         preserve_redacted: None,
         base_config_sha256_hex: None,
@@ -63,26 +83,125 @@ fn rejects_invalid_hot_config_job_document() {
 }
 
 #[test]
-fn validates_data_source_config_patch_job_document() {
-    let command = JobCommand::DataSourceConfigPatch {
-        toml: "[telemetry]\nproc_root = \"/tmp/vpsman-proc\"\n".to_string(),
-    };
+fn autonomous_updater_defaults_disabled_with_official_manifest_defaults() {
+    let update = AgentUpdateConfig::default();
 
-    validate_job_command(&command).unwrap();
+    assert!(!update.unmanaged_enabled);
+    assert_eq!(
+        update.unmanaged_version_url,
+        "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+    );
+    assert_eq!(update.unmanaged_interval_secs, 86_400);
+    assert_eq!(update.unmanaged_jitter_secs, 86_400);
+    assert!(update.unmanaged_activate);
+    assert!(update.unmanaged_restart_agent);
+}
+
+#[tokio::test]
+async fn hot_config_rule_templates_include_editable_autonomous_updater_rules() {
+    let repo = Repository::Memory(MemoryState::default());
+    let templates = repo.list_hot_config_rule_templates().await.unwrap();
+    let enable = templates
+        .iter()
+        .find(|template| template.name == "Autonomous updater enabled")
+        .expect("missing autonomous updater enable template");
+    let disable = templates
+        .iter()
+        .find(|template| template.name == "Autonomous updater disabled")
+        .expect("missing autonomous updater disable template");
+    assert!(enable.built_in);
+    assert!(disable.built_in);
+
+    let rendered = repo
+        .render_hot_config_rule_template(
+            enable.id,
+            &RenderHotConfigRuleTemplateRequest {
+                values: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(rendered.toml.contains("unmanaged_enabled = true"));
+    assert!(rendered
+        .toml
+        .contains("https://github.com/mnihyc/vpsman/releases/latest/download/version.json"));
+
+    let operator = memory_admin();
+    let edited = repo
+        .upsert_hot_config_rule_template(
+            &UpsertHotConfigRuleTemplateRequest {
+                id: Some(enable.id),
+                name: "Autonomous updater enabled edited".to_string(),
+                category: "update".to_string(),
+                domain: "agent_update".to_string(),
+                description: "operator-edited predefined updater rule".to_string(),
+                field_schema: enable.field_schema.clone(),
+                raw_generator_body: enable.raw_generator_body.clone(),
+                docs_metadata: enable.docs_metadata.clone(),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.name, "Autonomous updater enabled edited");
+    assert!(edited.built_in);
+
+    repo.delete_hot_config_rule_template(disable.id)
+        .await
+        .unwrap();
+    let after_delete = repo.list_hot_config_rule_templates().await.unwrap();
+    assert!(!after_delete
+        .iter()
+        .any(|template| template.id == disable.id));
+}
+
+#[test]
+fn validates_data_source_config_patch_job_document() {
+    for toml in [
+        "[telemetry]\nproc_root = \"/tmp/vpsman-proc\"\n",
+        "[update]\nunmanaged_enabled = true\n",
+    ] {
+        let command = JobCommand::DataSourceConfigPatch {
+            apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+            toml: toml.to_string(),
+        };
+
+        validate_job_command(&command).unwrap();
+    }
 }
 
 #[test]
 fn rejects_invalid_data_source_config_patch_job_document() {
     assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: String::new(),
     })
     .is_err());
     assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: "client_id = \"other\"".to_string(),
     })
     .is_err());
     assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: "[auth]\ncommand_timeout_secs = 10".to_string(),
+    })
+    .is_err());
+}
+
+#[test]
+fn rejects_ambiguous_config_apply_modes() {
+    let config = AgentConfig::default();
+    assert!(validate_job_command(&JobCommand::HotConfig {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+        toml: toml::to_string_pretty(&config).unwrap(),
+        preserve_redacted: None,
+        base_config_sha256_hex: None,
+    })
+    .is_err());
+    assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
+        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
+        toml: "[update]\nunmanaged_enabled = true\n".to_string(),
     })
     .is_err());
 }
@@ -219,22 +338,6 @@ fn validates_agent_update_job_document() {
     let command = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-    };
-
-    validate_job_command(&command).unwrap();
-
-    let signing_key = SigningKey::from_bytes(&[31_u8; 32]);
-    let sha256_hex = "cd".repeat(32);
-    let command = JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: sha256_hex.clone(),
-        artifact_signature_hex: Some(hex::encode(sign_update_artifact_hash(
-            &signing_key,
-            &sha256_hex,
-        ))),
-        artifact_signing_key_hex: Some(hex::encode(signing_key.verifying_key().to_bytes())),
     };
     validate_job_command(&command).unwrap();
 
@@ -258,29 +361,11 @@ fn rejects_invalid_agent_update_job_document() {
     assert!(validate_job_command(&JobCommand::UpdateAgent {
         artifact_url: "http://updates.example/vpsman-agent".to_string(),
         sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
     })
     .is_err());
     assert!(validate_job_command(&JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: "not-a-hash".to_string(),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-    })
-    .is_err());
-    assert!(validate_job_command(&JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: Some("00".repeat(64)),
-        artifact_signing_key_hex: None,
-    })
-    .is_err());
-    assert!(validate_job_command(&JobCommand::UpdateAgent {
-        artifact_url: "https://updates.example/vpsman-agent".to_string(),
-        sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: Some("00".repeat(64)),
-        artifact_signing_key_hex: Some("11".repeat(32)),
     })
     .is_err());
     assert!(validate_job_command(&JobCommand::AgentUpdateActivate {
@@ -322,8 +407,6 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
     let operation = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
     };
     let request = CreateJobRequest {
         job_id: None,
@@ -368,7 +451,6 @@ fn test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

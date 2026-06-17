@@ -65,6 +65,18 @@ download_asset() {
     "$base_url/$name"
 }
 
+download_url() {
+  local url="$1"
+  local output="$2"
+  local headers=()
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
+  curl -fL --retry 3 --connect-timeout 10 "${headers[@]}" \
+    -o "$output" \
+    "$url"
+}
+
 release_base_url() {
   local requested="$1"
   if [[ "$requested" == "latest" ]]; then
@@ -72,6 +84,11 @@ release_base_url() {
   else
     printf 'https://github.com/%s/releases/download/%s\n' "$REPO" "$requested"
   fi
+}
+
+release_pinned_base_url() {
+  local tag="$1"
+  printf 'https://github.com/%s/releases/download/%s\n' "$REPO" "$tag"
 }
 
 extract_tag() {
@@ -153,9 +170,15 @@ trap cleanup EXIT
 
 base_url="$(release_base_url "$target")"
 download_asset "$base_url" "version.json" "$staging_dir/version.json"
-download_asset "$base_url" "SHA256SUMS" "$staging_dir/SHA256SUMS"
-download_asset "$base_url" "$SERVER_ASSET" "$staging_dir/$SERVER_ASSET"
-download_asset "$base_url" "$FRONTEND_ASSET" "$staging_dir/$FRONTEND_ASSET"
+resolved_tag="$(extract_tag "$staging_dir/version.json")"
+if [[ -z "$resolved_tag" ]]; then
+  echo "release manifest does not contain a tag" >&2
+  exit 1
+fi
+pinned_base_url="$(release_pinned_base_url "$resolved_tag")"
+download_url "$pinned_base_url/SHA256SUMS" "$staging_dir/SHA256SUMS"
+download_url "$pinned_base_url/$SERVER_ASSET" "$staging_dir/$SERVER_ASSET"
+download_url "$pinned_base_url/$FRONTEND_ASSET" "$staging_dir/$FRONTEND_ASSET"
 
 grep -E "  (${SERVER_ASSET}|${FRONTEND_ASSET})$" "$staging_dir/SHA256SUMS" > "$staging_dir/SHA256SUMS.selected"
 if [[ "$(wc -l < "$staging_dir/SHA256SUMS.selected" | tr -d ' ')" != "2" ]]; then
@@ -163,11 +186,6 @@ if [[ "$(wc -l < "$staging_dir/SHA256SUMS.selected" | tr -d ' ')" != "2" ]]; the
   exit 1
 fi
 (cd "$staging_dir" && sha256sum -c SHA256SUMS.selected)
-
-resolved_tag="$(extract_tag "$staging_dir/version.json")"
-if [[ -z "$resolved_tag" ]]; then
-  resolved_tag="$target"
-fi
 
 server_staged="$runtime_dir/server/staged-$resolved_tag"
 frontend_staged="$runtime_dir/frontend/staged-$resolved_tag"

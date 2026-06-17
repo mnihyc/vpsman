@@ -95,7 +95,6 @@ start_api() {
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
     VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
-    VPSMAN_UPDATE_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"
@@ -388,8 +387,8 @@ update_source_status_json="$(vpsctl_auth data-source-status --domain update_arti
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "update_artifact_source" and .preset_name == "builtin:local_filesystem_or_https" and .status == "ready") and
-  all($live[]; .evidence.server_object_store_configured == true and .evidence.server_object_store_kind == "filesystem" and .evidence.release_count == 0)
+  all($live[]; .domain == "update_artifact_source" and .preset_name == "builtin:external_https_sha256" and .status == "selected_no_artifacts") and
+  all($live[]; .evidence.external_release_count == .evidence.release_count)
 ' <<<"$update_source_status_json" >/dev/null
 workflow_source_status_json="$(vpsctl_auth data-source-status)"
 jq -e '

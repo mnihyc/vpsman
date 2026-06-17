@@ -86,10 +86,7 @@ use crate::{
     routes_system::system_dashboard,
     routes_terminal_sessions::{list_terminal_sessions, terminal_session_replay},
     routes_update_releases::{
-        create_agent_update_release, create_hosted_agent_update_release,
-        download_agent_update_artifact, latest_agent_update_release, list_agent_update_releases,
-        stream_agent_update_artifact, upload_agent_update_artifact,
-        MAX_RELEASE_ARTIFACT_UPLOAD_BODY_BYTES,
+        create_agent_update_release, latest_agent_update_release, list_agent_update_releases,
     },
     routes_webhook_rules::{
         delete_webhook_rule, dispatch_webhook_rules, dry_run_webhook_rule,
@@ -293,24 +290,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/agent-update-releases/latest",
             get(latest_agent_update_release),
-        )
-        .route(
-            "/api/v1/agent-update-releases/upload",
-            post(upload_agent_update_artifact).layer(DefaultBodyLimit::max(
-                MAX_RELEASE_ARTIFACT_UPLOAD_BODY_BYTES,
-            )),
-        )
-        .route(
-            "/api/v1/agent-update-releases/hosted",
-            post(create_hosted_agent_update_release),
-        )
-        .route(
-            "/api/v1/agent-update-artifacts/stream",
-            post(stream_agent_update_artifact).layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/v1/agent-update-artifacts/{artifact_sha256_hex}",
-            get(download_agent_update_artifact),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))

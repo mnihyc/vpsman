@@ -366,16 +366,11 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         JobCommand::UpdateAgent {
             artifact_url,
             sha256_hex,
-            artifact_signature_hex,
-            artifact_signing_key_hex,
         } => {
             execute_update_agent(AgentUpdateInput {
                 job_id,
                 artifact_url,
                 sha256_hex,
-                artifact_signature_hex: artifact_signature_hex.as_deref(),
-                artifact_signing_key_hex: artifact_signing_key_hex.as_deref(),
-                trusted_artifact_signing_key_hex: None,
                 timeout_secs,
                 cancel_token,
             })
@@ -418,10 +413,6 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 version_url,
                 activate: *activate,
                 restart_agent: *restart_agent,
-                trusted_artifact_signing_key_hex: config
-                    .update
-                    .trusted_artifact_signing_key_hex
-                    .as_deref(),
                 timeout_secs,
                 cancel_token,
             })

@@ -16,7 +16,6 @@ chrono-tz.workspace = true
 chrono.workspace = true
 clap.workspace = true
 croner.workspace = true
-ed25519-dalek.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true

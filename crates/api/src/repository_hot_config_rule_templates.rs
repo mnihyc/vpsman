@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
-use vpsman_common::validate_data_source_config_patch_section;
+use vpsman_common::validate_incremental_config_patch_section;
 
 use crate::{
     model::{
@@ -76,37 +76,38 @@ impl Repository {
             created_at: now.clone(),
             updated_at: now,
         };
-        validate_rule_template_renderable(&template.raw_generator_body)?;
+        validate_rule_template_renderable(&template.raw_generator_body, &template.field_schema)?;
         match self {
             Self::Memory(memory) => {
                 self.ensure_builtin_hot_config_rule_templates().await?;
                 let mut templates = memory.hot_config_rule_templates.write().await;
-                if templates
-                    .iter()
-                    .any(|existing| existing.id == id && existing.built_in)
+                let saved = if let Some(existing) =
+                    templates.iter_mut().find(|existing| existing.id == id)
                 {
-                    anyhow::bail!("hot_config_rule_template_builtin_immutable");
-                }
-                if let Some(existing) = templates.iter_mut().find(|existing| existing.id == id) {
+                    let created_at = existing.created_at.clone();
+                    let built_in = existing.built_in;
                     *existing = HotConfigRuleTemplateView {
-                        created_at: existing.created_at.clone(),
-                        ..template.clone()
+                        id: template.id,
+                        name: template.name.clone(),
+                        category: template.category.clone(),
+                        domain: template.domain.clone(),
+                        description: template.description.clone(),
+                        field_schema: template.field_schema.clone(),
+                        raw_generator_body: template.raw_generator_body.clone(),
+                        docs_metadata: template.docs_metadata.clone(),
+                        built_in,
+                        actor_id: template.actor_id,
+                        created_at,
+                        updated_at: template.updated_at.clone(),
                     };
+                    existing.clone()
                 } else {
                     templates.push(template.clone());
-                }
-                Ok(template)
+                    template.clone()
+                };
+                Ok(saved)
             }
             Self::Postgres(pool) => {
-                let built_in: Option<bool> = sqlx::query_scalar(
-                    "SELECT built_in FROM hot_config_rule_templates WHERE id = $1",
-                )
-                .bind(id)
-                .fetch_optional(pool)
-                .await?;
-                if built_in.unwrap_or(false) {
-                    anyhow::bail!("hot_config_rule_template_builtin_immutable");
-                }
                 let row = sqlx::query(
                     r#"
                     INSERT INTO hot_config_rule_templates (
@@ -174,9 +175,13 @@ impl Repository {
             .into_iter()
             .find(|candidate| candidate.id == template_id)
             .with_context(|| format!("hot_config_rule_template_not_found:{template_id}"))?;
-        let rendered = render_template_body(&template.raw_generator_body, &request.values)?;
+        let rendered = render_template_body(
+            &template.raw_generator_body,
+            &request.values,
+            &template.field_schema,
+        )?;
         let patch: toml::Value =
-            toml::from_str(&rendered).context("failed to parse rendered hot-config patch TOML")?;
+            toml::from_str(&rendered).context("failed to parse rendered config patch TOML")?;
         let affected_sections = validate_rendered_patch(&patch)?;
         Ok(HotConfigRuleTemplateRenderView {
             template_id: template.id,
@@ -194,12 +199,6 @@ impl Repository {
             Self::Memory(memory) => {
                 self.ensure_builtin_hot_config_rule_templates().await?;
                 let mut templates = memory.hot_config_rule_templates.write().await;
-                if templates
-                    .iter()
-                    .any(|existing| existing.id == template_id && existing.built_in)
-                {
-                    anyhow::bail!("hot_config_rule_template_builtin_immutable");
-                }
                 let before = templates.len();
                 templates.retain(|template| template.id != template_id);
                 anyhow::ensure!(
@@ -209,15 +208,13 @@ impl Repository {
                 Ok(())
             }
             Self::Postgres(pool) => {
-                let result = sqlx::query(
-                    "DELETE FROM hot_config_rule_templates WHERE id = $1 AND built_in = false",
-                )
-                .bind(template_id)
-                .execute(pool)
-                .await?;
+                let result = sqlx::query("DELETE FROM hot_config_rule_templates WHERE id = $1")
+                    .bind(template_id)
+                    .execute(pool)
+                    .await?;
                 anyhow::ensure!(
                     result.rows_affected() > 0,
-                    "hot_config_rule_template_not_found_or_builtin"
+                    "hot_config_rule_template_not_found"
                 );
                 Ok(())
             }
@@ -227,47 +224,20 @@ impl Repository {
     async fn ensure_builtin_hot_config_rule_templates(&self) -> Result<()> {
         match self {
             Self::Memory(memory) => {
+                let mut seeded = memory.hot_config_rule_templates_seeded.write().await;
+                if *seeded {
+                    return Ok(());
+                }
                 let mut templates = memory.hot_config_rule_templates.write().await;
                 for template in builtin_rule_templates() {
                     if !templates.iter().any(|existing| existing.id == template.id) {
                         templates.push(template);
                     }
                 }
+                *seeded = true;
                 Ok(())
             }
-            Self::Postgres(pool) => {
-                for template in builtin_rule_templates() {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO hot_config_rule_templates (
-                            id,
-                            name,
-                            category,
-                            domain,
-                            description,
-                            field_schema,
-                            raw_generator_body,
-                            docs_metadata,
-                            built_in,
-                            actor_id
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL)
-                        ON CONFLICT (id) DO NOTHING
-                        "#,
-                    )
-                    .bind(template.id)
-                    .bind(&template.name)
-                    .bind(&template.category)
-                    .bind(&template.domain)
-                    .bind(&template.description)
-                    .bind(SqlJson(&template.field_schema))
-                    .bind(&template.raw_generator_body)
-                    .bind(SqlJson(&template.docs_metadata))
-                    .execute(pool)
-                    .await?;
-                }
-                Ok(())
-            }
+            Self::Postgres(_) => Ok(()),
         }
     }
 }
@@ -289,23 +259,43 @@ fn rule_template_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigRuleTem
     })
 }
 
-fn validate_rule_template_renderable(body: &str) -> Result<()> {
-    let rendered = render_template_body(body, &serde_json::json!({}))?;
+fn validate_rule_template_renderable(body: &str, field_schema: &JsonValue) -> Result<()> {
+    let rendered = render_template_body(body, &serde_json::json!({}), field_schema)?;
     let patch: toml::Value =
-        toml::from_str(&rendered).context("failed to parse hot-config template TOML")?;
+        toml::from_str(&rendered).context("failed to parse config template TOML")?;
     validate_rendered_patch(&patch)?;
     Ok(())
 }
 
-fn render_template_body(body: &str, values: &JsonValue) -> Result<String> {
+fn render_template_body(
+    body: &str,
+    values: &JsonValue,
+    field_schema: &JsonValue,
+) -> Result<String> {
     let mut rendered = body.to_string();
     let values = values.as_object();
     for placeholder in placeholders(body) {
-        let value = values.and_then(|values| values.get(&placeholder));
+        let value = values
+            .and_then(|values| values.get(&placeholder))
+            .or_else(|| schema_default(field_schema, &placeholder));
         let literal = value.map(toml_literal).transpose()?.unwrap_or_default();
         rendered = rendered.replace(&format!("{{{{{placeholder}}}}}"), &literal);
     }
     Ok(rendered)
+}
+
+fn schema_default<'a>(field_schema: &'a JsonValue, placeholder: &str) -> Option<&'a JsonValue> {
+    for section in ["fields", "properties"] {
+        let default = field_schema
+            .get(section)
+            .and_then(JsonValue::as_object)
+            .and_then(|fields| fields.get(placeholder))
+            .and_then(|field| field.get("default"));
+        if default.is_some() {
+            return default;
+        }
+    }
+    None
 }
 
 fn placeholders(body: &str) -> Vec<String> {
@@ -351,15 +341,15 @@ fn toml_literal(value: &JsonValue) -> Result<String> {
 
 fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
     let Some(table) = patch.as_table() else {
-        anyhow::bail!("hot config rule-template patch must be a TOML table");
+        anyhow::bail!("config rule-template patch must be a TOML table");
     };
     anyhow::ensure!(
         !table.is_empty(),
-        "hot config rule-template patch must contain at least one section"
+        "config rule-template patch must contain at least one section"
     );
     let mut sections = Vec::new();
     for section in table.keys() {
-        validate_data_source_config_patch_section(section)
+        validate_incremental_config_patch_section(section)
             .map_err(|message| anyhow::anyhow!(message))?;
         sections.push(section.clone());
     }
@@ -377,12 +367,12 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             "Switch telemetry collection source and optional Linux paths.",
             serde_json::json!({
                 "fields": {
-                    "source": {"type": "string", "enum": ["linux_procfs", "custom_command", "linux_procfs_and_custom_command"]},
+                    "source": {"type": "string", "enum": ["linux_procfs", "custom_command", "linux_procfs_and_custom_command"], "default": "linux_procfs"},
                     "proc_root": {"type": "string", "default": "/proc"},
                     "sys_class_net_dir": {"type": "string", "default": "/sys/class/net"}
                 }
             }),
-            "[telemetry]\nsource = \"{{source}}\"\nproc_root = \"{{proc_root}}\"\nsys_class_net_dir = \"{{sys_class_net_dir}}\"\n",
+            "[telemetry]\nsource = {{source}}\nproc_root = {{proc_root}}\nsys_class_net_dir = {{sys_class_net_dir}}\n",
         ),
         builtin_template(
             "22222222-2222-4222-8222-222222222222",
@@ -392,11 +382,11 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             "Set command execution environment and PTY policy.",
             serde_json::json!({
                 "fields": {
-                    "environment_policy": {"type": "string", "enum": ["inherit", "clean", "minimal_path"]},
-                    "pty_policy": {"type": "string", "enum": ["native_pty", "disabled"]}
+                    "environment_policy": {"type": "string", "enum": ["inherit", "clean", "minimal_path"], "default": "inherit"},
+                    "pty_policy": {"type": "string", "enum": ["native_pty", "disabled"], "default": "native_pty"}
                 }
             }),
-            "[execution]\nenvironment_policy = \"{{environment_policy}}\"\npty_policy = \"{{pty_policy}}\"\n",
+            "[execution]\nenvironment_policy = {{environment_policy}}\npty_policy = {{pty_policy}}\n",
         ),
         builtin_template(
             "33333333-3333-4333-8333-333333333333",
@@ -412,6 +402,40 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
                 }
             }),
             "[network]\napply_enabled = {{apply_enabled}}\nruntime_reconcile_enabled = {{runtime_reconcile_enabled}}\nruntime_command_timeout_secs = {{runtime_command_timeout_secs}}\n",
+        ),
+        builtin_template(
+            "55555555-5555-4555-8555-555555555555",
+            "Autonomous updater enabled",
+            "update",
+            "agent_update",
+            "Enable agent autonomous self-update from an external version manifest.",
+            serde_json::json!({
+                "fields": {
+                    "unmanaged_version_url": {"type": "string", "default": "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"},
+                    "unmanaged_interval_secs": {"type": "integer", "minimum": 300, "maximum": 604800, "default": 86400},
+                    "unmanaged_jitter_secs": {"type": "integer", "minimum": 0, "maximum": 604800, "default": 86400},
+                    "unmanaged_activate": {"type": "boolean", "default": true},
+                    "unmanaged_restart_agent": {"type": "boolean", "default": true}
+                }
+            }),
+            "[update]\nunmanaged_enabled = true\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
+        ),
+        builtin_template(
+            "66666666-6666-4666-8666-666666666666",
+            "Autonomous updater disabled",
+            "update",
+            "agent_update",
+            "Disable agent autonomous self-update while keeping manifest URL and interval values explicit in agent config.",
+            serde_json::json!({
+                "fields": {
+                    "unmanaged_version_url": {"type": "string", "default": "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"},
+                    "unmanaged_interval_secs": {"type": "integer", "minimum": 300, "maximum": 604800, "default": 86400},
+                    "unmanaged_jitter_secs": {"type": "integer", "minimum": 0, "maximum": 604800, "default": 86400},
+                    "unmanaged_activate": {"type": "boolean", "default": true},
+                    "unmanaged_restart_agent": {"type": "boolean", "default": true}
+                }
+            }),
+            "[update]\nunmanaged_enabled = false\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
         ),
         builtin_template(
             "44444444-4444-4444-8444-444444444444",
@@ -455,7 +479,8 @@ fn builtin_template(
         docs_metadata: serde_json::json!({
             "expandable": true,
             "affected_sections": [category],
-            "patch_only": true
+            "patch_only": true,
+            "predefined": true
         }),
         built_in: true,
         actor_id: None,

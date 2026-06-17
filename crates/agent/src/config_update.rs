@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    validate_data_source_config_patch_section, validate_hot_config_update, AgentConfig,
+    validate_hot_config_update, validate_incremental_config_patch_section, AgentConfig,
     CommandOutput, OutputStream, MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
@@ -61,22 +61,22 @@ pub(crate) fn apply_hot_config_update(
 ) -> Result<Vec<CommandOutput>> {
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "hot config TOML exceeds {} bytes",
+        "full config override TOML exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
     if let Some(base_config_sha256_hex) = base_config_sha256_hex {
         anyhow::ensure!(
             config_sha256_hex(current)? == base_config_sha256_hex,
-            "hot config base hash is stale"
+            "full config override base hash is stale"
         );
     }
     let mut updated: AgentConfig =
-        toml::from_str(toml_document).context("failed to parse hot config TOML")?;
+        toml::from_str(toml_document).context("failed to parse full config override TOML")?;
     if preserve_redacted {
         preserve_redacted_fields(current, &mut updated);
     }
     validate_hot_config_update(current, &updated)
-        .map_err(|message| anyhow::anyhow!("invalid hot config: {message}"))?;
+        .map_err(|message| anyhow::anyhow!("invalid full config override: {message}"))?;
     persist_config_update(current, &updated, config_path)?;
     *current = updated;
 
@@ -109,9 +109,6 @@ fn redact_preserved_fields(config: &mut AgentConfig) {
     if config.noise.server_public_key_hex.is_some() {
         config.noise.server_public_key_hex = Some(REDACTED_PRESERVE.to_string());
     }
-    if config.update.trusted_artifact_signing_key_hex.is_some() {
-        config.update.trusted_artifact_signing_key_hex = Some(REDACTED_PRESERVE.to_string());
-    }
 }
 
 fn preserve_redacted_fields(current: &AgentConfig, updated: &mut AgentConfig) {
@@ -124,10 +121,6 @@ fn preserve_redacted_fields(current: &AgentConfig, updated: &mut AgentConfig) {
     if updated.noise.server_public_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
         updated.noise.server_public_key_hex = current.noise.server_public_key_hex.clone();
     }
-    if updated.update.trusted_artifact_signing_key_hex.as_deref() == Some(REDACTED_PRESERVE) {
-        updated.update.trusted_artifact_signing_key_hex =
-            current.update.trusted_artifact_signing_key_hex.clone();
-    }
 }
 
 fn redacted_config_fields() -> Vec<&'static str> {
@@ -135,7 +128,6 @@ fn redacted_config_fields() -> Vec<&'static str> {
         "client_id",
         "noise.client_private_key_hex",
         "noise.server_public_key_hex",
-        "update.trusted_artifact_signing_key_hex",
     ]
 }
 
@@ -249,7 +241,7 @@ fn merge_data_source_patch(target: &mut toml::Value, patch: toml::Value) -> Resu
         "data-source config patch must contain at least one section"
     );
     for (section, value) in patch_table {
-        validate_data_source_config_patch_section(&section)
+        validate_incremental_config_patch_section(&section)
             .map_err(|message| anyhow::anyhow!(message))?;
         merge_toml_value(target_table, section, value);
     }
@@ -301,7 +293,7 @@ fn persist_config_update(
     if config_path.exists() {
         fs::copy(config_path, &rollback).with_context(|| {
             format!(
-                "failed to write hot config rollback copy {}",
+                "failed to write config rollback copy {}",
                 rollback.display()
             )
         })?;
@@ -314,7 +306,7 @@ fn persist_config_update(
 
     let temp = temp_config_path(config_path);
     let updated_document =
-        toml::to_string_pretty(updated).context("failed to serialize hot config")?;
+        toml::to_string_pretty(updated).context("failed to serialize updated config")?;
     fs::write(&temp, updated_document)
         .with_context(|| format!("failed to write temp config {}", temp.display()))?;
     fs::rename(&temp, config_path).with_context(|| {

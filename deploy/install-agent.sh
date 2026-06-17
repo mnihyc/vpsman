@@ -37,6 +37,11 @@ service_enable_requested() {
   is_true "${VPSMAN_AGENT_ENABLE_SERVICE:-${VPSMAN_ENABLE_SERVICE:-0}}"
 }
 
+require_uint() {
+  local name="$1" value="${!1:-}"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be an unsigned integer"
+}
+
 cleanup_paths=()
 cleanup() {
   local path
@@ -61,6 +66,20 @@ release_base_url() {
   fi
 }
 
+release_pinned_base_url() {
+  local tag="$1"
+  if [[ -n "${VPSMAN_RELEASE_BASE_URL:-}" ]]; then
+    printf '%s\n' "${VPSMAN_RELEASE_BASE_URL%/}"
+  else
+    printf 'https://github.com/%s/releases/download/%s\n' "${VPSMAN_RELEASE_REPO:-mnihyc/vpsman}" "$tag"
+  fi
+}
+
+extract_release_tag() {
+  local metadata="$1"
+  sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata" | head -n 1
+}
+
 agent_release_asset() {
   local machine
   machine="$(uname -m)"
@@ -83,7 +102,7 @@ download_release_asset() {
 
 download_default_agent_binary() {
   local output="$1"
-  local asset base_url download_dir
+  local asset base_url pinned_base_url download_dir resolved_tag
   asset="$(agent_release_asset)"
   base_url="$(release_base_url)"
   download_dir="$(mktemp -d)"
@@ -93,9 +112,13 @@ download_default_agent_binary() {
   require_tool sha256sum
   require_tool awk
 
-  log "downloading $asset from $base_url"
-  download_release_asset "$base_url/$asset" "$download_dir/$asset"
-  download_release_asset "$base_url/SHA256SUMS" "$download_dir/SHA256SUMS"
+  download_release_asset "$base_url/version.json" "$download_dir/version.json"
+  resolved_tag="$(extract_release_tag "$download_dir/version.json")"
+  [[ -n "$resolved_tag" ]] || die "release manifest does not contain a tag"
+  pinned_base_url="$(release_pinned_base_url "$resolved_tag")"
+  log "downloading $asset from $pinned_base_url"
+  download_release_asset "$pinned_base_url/$asset" "$download_dir/$asset"
+  download_release_asset "$pinned_base_url/SHA256SUMS" "$download_dir/SHA256SUMS"
   awk -v asset="$asset" '$2 == asset { print; found = 1 } END { exit found ? 0 : 1 }' \
     "$download_dir/SHA256SUMS" >"$download_dir/SHA256SUMS.selected" \
     || die "release checksum manifest does not contain $asset"
@@ -172,6 +195,10 @@ else
 fi
 
 config_file="$config_dir/agent.toml"
+VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS="${VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS:-86400}"
+VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS="${VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS:-86400}"
+require_uint VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS
+require_uint VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS
 {
   printf 'client_id = %s\n' "$(toml_quote "$VPSMAN_AGENT_CLIENT_ID")"
   printf 'display_name = %s\n' "$(toml_quote "${VPSMAN_AGENT_DISPLAY_NAME:-$VPSMAN_AGENT_CLIENT_ID}")"
@@ -186,6 +213,13 @@ config_file="$config_dir/agent.toml"
   printf 'command_timeout_secs = %s\n' "${VPSMAN_COMMAND_TIMEOUT_SECS:-30}"
   printf 'gateway_retry_secs = %s\n' "${VPSMAN_GATEWAY_RETRY_SECS:-60}"
   printf 'gateway_connect_timeout_secs = %s\n' "${VPSMAN_GATEWAY_CONNECT_TIMEOUT_SECS:-10}"
+  printf '\n[update]\n'
+  printf 'unmanaged_enabled = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED:-0}" && printf true || printf false)"
+  printf 'unmanaged_version_url = %s\n' "$(toml_quote "${VPSMAN_AGENT_UNMANAGED_UPDATE_VERSION_URL:-https://github.com/mnihyc/vpsman/releases/latest/download/version.json}")"
+  printf 'unmanaged_interval_secs = %s\n' "$VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS"
+  printf 'unmanaged_jitter_secs = %s\n' "$VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS"
+  printf 'unmanaged_activate = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_ACTIVATE:-1}" && printf true || printf false)"
+  printf 'unmanaged_restart_agent = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_RESTART_AGENT:-1}" && printf true || printf false)"
 } >"$config_file"
 
 first=1
@@ -226,6 +260,7 @@ UNIT
   fi
   cat <<UNIT
 ExecStart=$agent_bin --config $config_file run
+Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
 Restart=always
 RestartSec=5
 UMask=0077

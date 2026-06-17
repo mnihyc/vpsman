@@ -160,26 +160,6 @@ pub(crate) fn http_put_json(
     )
 }
 
-pub(crate) fn http_post_file(
-    base_url: &str,
-    path: &str,
-    bearer_token: Option<&str>,
-    file_path: &Path,
-    content_type: &str,
-    extra_headers: &[(&str, String)],
-) -> Result<String> {
-    let response = http_request_file(
-        base_url,
-        "POST",
-        path,
-        bearer_token,
-        file_path,
-        content_type,
-        extra_headers,
-    )?;
-    Ok(String::from_utf8_lossy(&response).trim().to_string())
-}
-
 fn http_request(
     base_url: &str,
     method: &str,
@@ -219,43 +199,6 @@ fn http_request_bytes(
             let tcp = connect_tcp(&parsed)?;
             let mut stream = tls_stream(tcp, &parsed)?;
             write_request_and_read_response(&mut stream, &request, &body)?
-        }
-    };
-    decode_api_response_bytes(method, &request_path, &response)
-}
-
-fn http_request_file(
-    base_url: &str,
-    method: &str,
-    path: &str,
-    bearer_token: Option<&str>,
-    file_path: &Path,
-    content_type: &str,
-    extra_headers: &[(&str, String)],
-) -> Result<Vec<u8>> {
-    let parsed = parse_api_url(base_url)?;
-    let request_path = parsed.request_path(path);
-    let metadata = std::fs::metadata(file_path)
-        .with_context(|| format!("failed to stat upload file {}", file_path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "upload path is not a file");
-    let request = build_request_with_len(
-        method,
-        &request_path,
-        &parsed.host_header(),
-        bearer_token,
-        metadata.len(),
-        content_type,
-        extra_headers,
-    )?;
-    let response = match parsed.scheme {
-        ApiScheme::Http => {
-            let mut stream = connect_tcp(&parsed)?;
-            write_request_file_and_read_response(&mut stream, &request, file_path)?
-        }
-        ApiScheme::Https => {
-            let tcp = connect_tcp(&parsed)?;
-            let mut stream = tls_stream(tcp, &parsed)?;
-            write_request_file_and_read_response(&mut stream, &request, file_path)?
         }
     };
     decode_api_response_bytes(method, &request_path, &response)
@@ -551,34 +494,6 @@ fn read_crlf_line(stream: &mut impl Read) -> Result<String> {
             return String::from_utf8(bytes).context("API response line is not UTF-8");
         }
     }
-}
-
-fn write_request_file_and_read_response(
-    stream: &mut (impl Read + Write),
-    request: &str,
-    file_path: &Path,
-) -> Result<Vec<u8>> {
-    stream.write_all(request.as_bytes())?;
-    let mut file =
-        File::open(file_path).with_context(|| format!("failed to open {}", file_path.display()))?;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        stream.write_all(&buffer[..read])?;
-    }
-    stream.flush()?;
-
-    let mut response = Vec::new();
-    stream
-        .take((MAX_API_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut response)?;
-    if response.len() > MAX_API_RESPONSE_BYTES {
-        anyhow::bail!("API response exceeded {MAX_API_RESPONSE_BYTES} bytes");
-    }
-    Ok(response)
 }
 
 fn validate_header_name(name: &str) -> Result<()> {

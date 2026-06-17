@@ -381,9 +381,6 @@ export function App() {
                 onCreateJob={dashboard.createJob}
                 onCreateArtifactCleanupJob={dashboard.createArtifactCleanupJob}
                 onCreateAgentUpdateRelease={dashboard.createAgentUpdateRelease}
-                onUploadAgentUpdateArtifact={
-                  dashboard.uploadAgentUpdateArtifact
-                }
                 onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
                 onDownloadOutputChunk={dashboard.downloadJobOutputChunk}
                 onDownloadOutputStream={dashboard.downloadJobOutputStream}

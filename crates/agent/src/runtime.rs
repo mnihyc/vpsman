@@ -305,7 +305,6 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
         version_url,
         activate: config.update.unmanaged_activate,
         restart_agent: config.update.unmanaged_restart_agent,
-        trusted_artifact_signing_key_hex: config.update.trusted_artifact_signing_key_hex.as_deref(),
         timeout_secs: config.auth.command_timeout_secs.max(300),
         cancel_token: CommandCancelToken::default(),
     })
@@ -1088,6 +1087,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         return Ok(true);
     }
     if let JobCommand::HotConfig {
+        apply_mode: _,
         toml,
         preserve_redacted,
         base_config_sha256_hex,
@@ -1106,7 +1106,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                     reconcile_configured_runtime_tunnels(config, "hot_config_update").await;
                 log_configured_runtime_tunnel_reconcile(&reconcile);
                 if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
-                    warn!(%error, "failed to attach runtime tunnel reconcile report to hot config output");
+                    warn!(%error, "failed to attach runtime tunnel reconcile report to full config output");
                 }
                 outputs
             }
@@ -1123,7 +1123,11 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
-    if let JobCommand::DataSourceConfigPatch { toml } = &request.command {
+    if let JobCommand::DataSourceConfigPatch {
+        apply_mode: _,
+        toml,
+    } = &request.command
+    {
         let outputs = match apply_data_source_config_patch(
             request.job_id,
             config,
@@ -1487,19 +1491,11 @@ async fn execute_authorized_command(
         JobCommand::UpdateAgent {
             artifact_url,
             sha256_hex,
-            artifact_signature_hex,
-            artifact_signing_key_hex,
         } => {
             execute_update_agent(AgentUpdateInput {
                 job_id: request.job_id,
                 artifact_url,
                 sha256_hex,
-                artifact_signature_hex: artifact_signature_hex.as_deref(),
-                artifact_signing_key_hex: artifact_signing_key_hex.as_deref(),
-                trusted_artifact_signing_key_hex: config
-                    .update
-                    .trusted_artifact_signing_key_hex
-                    .as_deref(),
                 timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
@@ -1518,10 +1514,6 @@ async fn execute_authorized_command(
                 version_url,
                 activate: *activate,
                 restart_agent: *restart_agent,
-                trusted_artifact_signing_key_hex: config
-                    .update
-                    .trusted_artifact_signing_key_hex
-                    .as_deref(),
                 timeout_secs,
                 cancel_token: cancel_token.clone(),
             })

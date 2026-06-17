@@ -148,19 +148,33 @@ jobs:
           import json
           import os
           from pathlib import Path
+          from urllib.parse import quote
 
           root = Path("release-assets")
-          assets = sorted(path.name for path in root.iterdir() if path.is_file())
+          asset_names = sorted(path.name for path in root.iterdir() if path.is_file())
           metadata_path = Path("version-template.json")
           metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+          release_tag = os.environ["RELEASE_TAG"]
+          release_base_url = (
+              "https://github.com/"
+              + os.environ["GITHUB_REPOSITORY"]
+              + "/releases/download/"
+              + quote(release_tag, safe="")
+          )
+          def release_asset(name):
+              return {
+                  "name": name,
+                  "download_url": release_base_url + "/" + quote(name, safe=""),
+              }
           metadata.update(
               {
-                  "schema_version": 1,
+                  "schema_version": 2,
                   "project": "vpsman",
-                  "tag": os.environ["RELEASE_TAG"],
-                  "version": os.environ["RELEASE_TAG"].removeprefix("v"),
+                  "tag": release_tag,
+                  "version": release_tag.removeprefix("v"),
                   "commit": os.environ["GITHUB_SHA"],
-                  "assets": assets,
+                  "assets": [release_asset(name) for name in asset_names],
+                  "checksum_manifest": release_asset("SHA256SUMS"),
               }
           )
           (root / "version.json").write_text(

@@ -301,7 +301,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: Some(store),
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

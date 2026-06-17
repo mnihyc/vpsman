@@ -350,7 +350,6 @@ fn dashboard_test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

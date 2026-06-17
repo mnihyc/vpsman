@@ -36,7 +36,6 @@ start_api() {
     VPSMAN_MIGRATIONS_DIR="$ROOT_DIR/migrations" \
     VPSMAN_INTERNAL_TOKEN="$internal_token" \
     VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/backups" \
-    VPSMAN_UPDATE_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/updates" \
     RUST_LOG="vpsman_api=warn" \
       target/debug/vpsman-api >"$api_log" 2>&1 &
     api_pid="$!"

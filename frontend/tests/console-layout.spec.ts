@@ -983,6 +983,82 @@ test("manages data-source preset assignments from the config view", async ({
   });
 });
 
+test("renders updater rules and submits explicit config apply modes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "updater config rule editing is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Rules");
+
+  const rules = page.locator(".configRuleWorkspace");
+  await expect(rules.getByText("Autonomous updater enabled")).toBeVisible();
+  await expect(rules.getByText("Autonomous updater disabled")).toBeVisible();
+  const updaterEnabledRule = rules.getByRole("button", {
+    name: /Autonomous updater enabled/,
+  });
+  await activate(updaterEnabledRule);
+  await expect(updaterEnabledRule.locator("em")).toHaveText("predefined");
+  await expect(rules.getByLabel("Rule render values JSON")).toHaveValue(
+    /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
+  );
+  await expect(
+    rules.getByRole("button", { name: "Review deletion" }),
+  ).toBeEnabled();
+  await activate(rules.getByRole("button", { name: "Render patch" }));
+  await expect(rules.getByLabel("Rendered rule patch TOML")).toHaveValue(
+    /\[update\][\s\S]*unmanaged_enabled = true[\s\S]*version\.json/,
+  );
+
+  await unlockPrivilegeFor(page, "Config", "Bulk apply");
+  const bulk = page.locator(".configApplyGrid");
+  await bulk
+    .getByLabel("Rule template")
+    .selectOption({ label: "Autonomous updater disabled" });
+  await expect(bulk.getByLabel("Rule values JSON")).toHaveValue(
+    /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
+  );
+  await activate(bulk.getByRole("button", { name: "Render patch" }));
+  await expect(
+    bulk.getByLabel("Bulk rendered incremental config patch"),
+  ).toHaveValue(
+    /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
+  );
+  await bulk
+    .getByRole("searchbox", { name: "Bulk config selector expression" })
+    .fill("id:agent-sfo-01");
+  await activate(bulk.getByRole("button", { name: "Review targets" }));
+  await expect(bulk.getByText("1/3")).toBeVisible();
+  await activate(bulk.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply config patch");
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    command: "data_source_config_patch",
+    operation: {
+      apply_mode: "incremental_patch",
+      type: "data_source_config_patch",
+    },
+    selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
+  });
+  expect((request as { operation: { toml: string } }).operation.toml).toContain(
+    "[update]",
+  );
+  expect((request as { operation: { toml: string } }).operation.toml).toContain(
+    "unmanaged_enabled = false",
+  );
+});
+
 test("uses an exact VPS combobox for single config jobs", async ({
   page,
 }, testInfo) => {
@@ -1030,6 +1106,33 @@ test("uses an exact VPS combobox for single config jobs", async ({
   });
   expect(request).toMatchObject({
     command: "config_read",
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+
+  const configEditor = page.getByLabel("Single VPS redacted config TOML");
+  await expect(configEditor).toHaveValue(/client_id = "agent-fra-02"/);
+  await expect(configEditor).toHaveValue(
+    /unmanaged_version_url = "https:\/\/github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json"/,
+  );
+  await activate(page.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Confirm single-VPS config apply")).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply config");
+
+  const applyRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(applyRequest).toMatchObject({
+    command: "hot_config",
+    operation: {
+      apply_mode: "full_override",
+      base_config_sha256_hex: "b".repeat(64),
+      preserve_redacted: true,
+      type: "hot_config",
+    },
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
   });

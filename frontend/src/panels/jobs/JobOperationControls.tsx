@@ -32,7 +32,7 @@ export function OperationModeTabs({
     { label: "File push", mode: "file_push" },
     { label: "Resumable upload", mode: "file_transfer_upload" },
     { label: "Resumable download", mode: "file_transfer_download" },
-    { label: "Hot config", mode: "hot_config" },
+    { label: "Full config", mode: "hot_config" },
     { label: "Update", mode: "agent_update" },
     { label: "Check update", mode: "agent_update_check" },
     { label: "Activate", mode: "agent_update_activate" },
@@ -149,8 +149,6 @@ export function JobOperationEditor({
   setSupervisorEnv,
   setSupervisorLogBytes,
   setSupervisorName,
-  setUpdateArtifactSignatureHex,
-  setUpdateArtifactSigningKeyHex,
   setUpdateArtifactUrl,
   setUpdateCheckActivate,
   setUpdateCheckRestartAgent,
@@ -166,8 +164,6 @@ export function JobOperationEditor({
   supervisorLogBytes,
   supervisorName,
   shellScript,
-  updateArtifactSignatureHex,
-  updateArtifactSigningKeyHex,
   updateArtifactUrl,
   updateCheckActivate,
   updateCheckRestartAgent,
@@ -253,8 +249,6 @@ export function JobOperationEditor({
   setSupervisorEnv: (value: string) => void;
   setSupervisorLogBytes: (value: number) => void;
   setSupervisorName: (value: string) => void;
-  setUpdateArtifactSignatureHex: (value: string) => void;
-  setUpdateArtifactSigningKeyHex: (value: string) => void;
   setUpdateArtifactUrl: (value: string) => void;
   setUpdateCheckActivate: (value: boolean) => void;
   setUpdateCheckRestartAgent: (value: boolean) => void;
@@ -270,8 +264,6 @@ export function JobOperationEditor({
   supervisorLogBytes: number;
   supervisorName: string;
   shellScript: string;
-  updateArtifactSignatureHex: string;
-  updateArtifactSigningKeyHex: string;
   updateArtifactUrl: string;
   updateCheckActivate: boolean;
   updateCheckRestartAgent: boolean;
@@ -627,13 +619,13 @@ export function JobOperationEditor({
       <div className="operationNote compactOperation">
         <Settings2 size={18} />
         <div>
-          <strong>Agent config</strong>
-          <span>Versioned TOML, privilege-unlocked, rollback file on agent</span>
+          <strong>Full agent config override</strong>
+          <span>Replaces the agent config after validation and writes a rollback file</span>
         </div>
         <label className="wideField">
           <span>TOML</span>
           <textarea
-            aria-label="Hot config TOML"
+            aria-label="Full override config TOML"
             onChange={(event) => setHotConfigToml(event.target.value)}
             placeholder={`client_id = "edge-a"\ndisplay_name = "edge-a"`}
             rows={6}
@@ -703,7 +695,7 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Agent binary</strong>
-          <span>HTTPS artifact staged side-by-side after SHA-256 and optional Ed25519 verification</span>
+          <span>HTTPS artifact staged side-by-side after SHA-256 verification</span>
         </div>
         <label className="wideField">
           <span>Artifact URL</span>
@@ -723,24 +715,6 @@ export function JobOperationEditor({
             value={updateSha256Hex}
           />
         </label>
-        <label className="wideField">
-          <span>Signature</span>
-          <input
-            aria-label="Agent update artifact signature"
-            onChange={(event) => setUpdateArtifactSignatureHex(event.target.value)}
-            placeholder="Optional 128 hex characters"
-            value={updateArtifactSignatureHex}
-          />
-        </label>
-        <label className="wideField">
-          <span>Signing key</span>
-          <input
-            aria-label="Agent update signing key"
-            onChange={(event) => setUpdateArtifactSigningKeyHex(event.target.value)}
-            placeholder="Optional 64 hex characters"
-            value={updateArtifactSigningKeyHex}
-          />
-        </label>
       </div>
     );
   }
@@ -751,7 +725,7 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Version manifest</strong>
-          <span>Fetches version.json, verifies SHA256SUMS, stages the matching agent artifact, then optionally activates</span>
+          <span>Fetches version.json, uses its tag-pinned asset URL, verifies SHA256SUMS, then optionally activates</span>
         </div>
         <label className="wideField">
           <span>Manifest URL</span>

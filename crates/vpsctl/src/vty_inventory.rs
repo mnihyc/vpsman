@@ -694,11 +694,11 @@ pub(crate) fn submit_vty_inventory_command(
                 "json" => Ok(body),
                 "toml" => {
                     let value: serde_json::Value = serde_json::from_str(&body)
-                        .context("invalid data-source hot-config response")?;
+                        .context("invalid data-source config response")?;
                     Ok(value
                         .get("toml")
                         .and_then(serde_json::Value::as_str)
-                        .context("data-source hot-config response missing toml")?
+                        .context("data-source config response missing toml")?
                         .to_string())
                 }
                 _ => anyhow::bail!("--format must be toml or json"),

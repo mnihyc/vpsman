@@ -157,7 +157,6 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-live-backup "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-backup-chunked-upload "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-minio-backup-artifact "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-minio-update-artifact "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-hot-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-data-source-config-patch "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-agent-update "VPSMAN_RELEASE_SKIP_SMOKES=1"
@@ -202,12 +201,8 @@ else
   if [[ "${VPSMAN_RELEASE_RUN_S3_SMOKES:-0}" == "1" ]]; then
     run_step smoke-minio-backup-artifact \
       env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-minio-backup-artifact.sh
-    run_step smoke-minio-update-artifact \
-      env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-minio-update-artifact.sh
   else
     skip_step smoke-minio-backup-artifact \
-      "VPSMAN_RELEASE_RUN_S3_SMOKES!=1; local filesystem object storage is the baseline"
-    skip_step smoke-minio-update-artifact \
       "VPSMAN_RELEASE_RUN_S3_SMOKES!=1; local filesystem object storage is the baseline"
   fi
   run_step smoke-live-hot-config \

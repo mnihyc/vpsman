@@ -18,9 +18,7 @@ use crate::cli_access::{
     TelemetryNetworkRatesCommand, TelemetryRollupsCommand, TelemetryTunnelsCommand,
     TotpConfirmCommand, TotpPasswordCommand,
 };
-use crate::cli_update::{
-    AgentUpdateArtifactUploadArgs, AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs,
-};
+use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs};
 use crate::commands_network::{
     TunnelAllocateCommand, TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand,
     TunnelProbeCommand, TunnelPromoteAdapterCommand, TunnelRollbackCommand, TunnelSpeedTestCommand,
@@ -398,15 +396,31 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
     },
+    ConfigPatch {
+        #[arg(long)]
+        config_file: PathBuf,
+        #[arg(long, value_delimiter = ',')]
+        clients: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
+        password_env: String,
+        #[arg(long)]
+        super_salt_hex: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        privilege_ttl_secs: u64,
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
+        #[arg(long, default_value_t = false)]
+        force_unprivileged: bool,
+    },
     AgentUpdate {
         #[arg(long)]
         artifact_url: String,
         #[arg(long)]
         sha256_hex: String,
-        #[arg(long)]
-        artifact_signature_hex: Option<String>,
-        #[arg(long)]
-        artifact_signing_key_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
@@ -490,14 +504,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
-    AgentUpdateSignature {
-        #[arg(long)]
-        artifact_file: PathBuf,
-        #[arg(long)]
-        signing_seed_hex: String,
-    },
     AgentUpdateReleasePublish(AgentUpdateReleasePublishArgs),
-    AgentUpdateArtifactUpload(AgentUpdateArtifactUploadArgs),
     AgentUpdateReleaseLatest(AgentUpdateReleaseLatestArgs),
     AgentUpdateReleases {
         #[arg(long, default_value_t = 25)]

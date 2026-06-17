@@ -56,7 +56,6 @@ fn schedule_test_state(repo: Repository) -> AppState {
         internal_token: None,
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -423,8 +422,6 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
     request.operation = JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: "ab".repeat(32),
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
     };
     let schedule = repo.create_schedule(request, &operator).await.unwrap();
     let next_run_before = schedule.next_run_at.clone();

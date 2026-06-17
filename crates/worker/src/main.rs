@@ -34,8 +34,6 @@ use vpsman_server_core::{
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
-const DEFAULT_UPDATE_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/updates";
-
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
@@ -168,8 +166,6 @@ struct Args {
     backup_policy_prune_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
-    update_object_store_dir: Option<PathBuf>,
     #[arg(long, env = "VPSMAN_OBJECT_ENDPOINT")]
     object_endpoint: Option<String>,
     #[arg(long, env = "VPSMAN_OBJECT_BUCKET")]
@@ -182,22 +178,6 @@ struct Args {
     object_region: String,
     #[arg(long, env = "VPSMAN_OBJECT_CREATE_BUCKET", default_value_t = false)]
     object_create_bucket: bool,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ENDPOINT")]
-    update_object_endpoint: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_BUCKET")]
-    update_object_bucket: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ACCESS_KEY")]
-    update_object_access_key: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_SECRET_KEY")]
-    update_object_secret_key: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_REGION", default_value = "us-east-1")]
-    update_object_region: String,
-    #[arg(
-        long,
-        env = "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
-        default_value_t = false
-    )]
-    update_object_create_bucket: bool,
     #[arg(
         long,
         env = "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
@@ -222,19 +202,16 @@ struct WorkerRuntimeConfig {
     backup_policy_prune_config: BackupPolicyRetentionPruneConfig,
     schedule_dispatch_config: ScheduleDispatchConfig,
     backup_object_store: BackupObjectStore,
-    update_object_store: BackupObjectStore,
 }
 
 #[derive(Clone, Copy)]
 struct ArtifactObjectStores<'a> {
     backup: &'a BackupObjectStore,
-    update: &'a BackupObjectStore,
 }
 
 impl WorkerRuntimeConfig {
     fn from_args(args: &Args) -> Result<Self> {
         let backup_object_store = build_backup_object_store(args)?;
-        let update_object_store = build_update_object_store(args)?;
         let backup_policy_prune_object_store = build_backup_policy_prune_object_store(args)?
             .or_else(|| Some(backup_object_store.clone()));
         Ok(Self {
@@ -267,7 +244,6 @@ impl WorkerRuntimeConfig {
                 args.require_registered_agent_updates,
             ),
             backup_object_store,
-            update_object_store,
         })
     }
 }
@@ -405,11 +381,6 @@ impl Args {
             "VPSMAN_BACKUP_OBJECT_STORE_DIR",
             config.storage.backup_object_store_dir.as_deref(),
         );
-        apply_opt_path(
-            &mut self.update_object_store_dir,
-            "VPSMAN_UPDATE_OBJECT_STORE_DIR",
-            config.storage.update_object_store_dir.as_deref(),
-        );
         apply_opt_string(
             &mut self.object_endpoint,
             "VPSMAN_OBJECT_ENDPOINT",
@@ -420,35 +391,15 @@ impl Args {
             "VPSMAN_OBJECT_BUCKET",
             config.storage.object_bucket.as_deref(),
         );
-        apply_opt_string(
-            &mut self.update_object_endpoint,
-            "VPSMAN_UPDATE_OBJECT_ENDPOINT",
-            config.storage.update_object_endpoint.as_deref(),
-        );
-        apply_opt_string(
-            &mut self.update_object_bucket,
-            "VPSMAN_UPDATE_OBJECT_BUCKET",
-            config.storage.update_object_bucket.as_deref(),
-        );
         apply_string_default(
             &mut self.object_region,
             "VPSMAN_OBJECT_REGION",
             config.storage.object_region.as_deref(),
         );
-        apply_string_default(
-            &mut self.update_object_region,
-            "VPSMAN_UPDATE_OBJECT_REGION",
-            config.storage.update_object_region.as_deref(),
-        );
         apply_bool_default(
             &mut self.object_create_bucket,
             "VPSMAN_OBJECT_CREATE_BUCKET",
             config.storage.object_create_bucket,
-        );
-        apply_bool_default(
-            &mut self.update_object_create_bucket,
-            "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
-            config.storage.update_object_create_bucket,
         );
         if self.object_access_key.is_none() && env_absent("VPSMAN_OBJECT_ACCESS_KEY") {
             self.object_access_key =
@@ -457,16 +408,6 @@ impl Args {
         if self.object_secret_key.is_none() && env_absent("VPSMAN_OBJECT_SECRET_KEY") {
             self.object_secret_key =
                 read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
-        }
-        if self.update_object_access_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_ACCESS_KEY")
-        {
-            self.update_object_access_key =
-                read_secret_file_ref(config.secrets.update_object_access_key_file.as_deref())?;
-        }
-        if self.update_object_secret_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_SECRET_KEY")
-        {
-            self.update_object_secret_key =
-                read_secret_file_ref(config.secrets.update_object_secret_key_file.as_deref())?;
         }
         apply_u64_default(
             &mut self.schedule_command_timeout_secs,
@@ -517,32 +458,6 @@ fn build_backup_object_store(args: &Args) -> Result<BackupObjectStore> {
     }
 
     BackupObjectStore::filesystem(PathBuf::from(DEFAULT_BACKUP_OBJECT_STORE_DIR))
-}
-
-fn build_update_object_store(args: &Args) -> Result<BackupObjectStore> {
-    if let Some(store) = args
-        .update_object_store_dir
-        .clone()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(BackupObjectStore::filesystem)
-        .transpose()?
-    {
-        return Ok(store);
-    }
-
-    if let Some(store) = build_s3_object_store(
-        &args.update_object_endpoint,
-        &args.update_object_bucket,
-        &args.update_object_access_key,
-        &args.update_object_secret_key,
-        &args.update_object_region,
-        args.update_object_create_bucket,
-        "S3 update object storage requires VPSMAN_UPDATE_OBJECT_ENDPOINT, VPSMAN_UPDATE_OBJECT_BUCKET, VPSMAN_UPDATE_OBJECT_ACCESS_KEY, and VPSMAN_UPDATE_OBJECT_SECRET_KEY",
-    )? {
-        return Ok(store);
-    }
-
-    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_UPDATE_OBJECT_STORE_DIR))
 }
 
 fn build_s3_object_store(
@@ -731,7 +646,6 @@ async fn main() -> Result<()> {
             &pool,
             ArtifactObjectStores {
                 backup: &runtime_config.backup_object_store,
-                update: &runtime_config.update_object_store,
             },
             &worker_id,
             runtime_config.worker_lease_secs,
@@ -906,7 +820,6 @@ async fn main() -> Result<()> {
             &pool,
             ArtifactObjectStores {
                 backup: &runtime_config.backup_object_store,
-                update: &runtime_config.update_object_store,
             },
             &worker_id,
             runtime_config.worker_lease_secs,
@@ -1326,13 +1239,6 @@ async fn apply_artifact_cleanup_candidate(
         "file_transfer_source" => {
             delete_file_transfer_source_artifact(pool, object_stores.backup, candidate).await
         }
-        "agent_update" => {
-            if agent_update_artifact_is_referenced(pool, &candidate.object_key).await? {
-                tombstone_server_artifact(pool, candidate.id).await
-            } else {
-                delete_unreferenced_server_artifact(pool, object_stores.update, candidate).await
-            }
-        }
         "backup_artifact" => {
             if backup_artifact_is_referenced(
                 pool,
@@ -1546,23 +1452,6 @@ async fn tombstone_server_artifact(
     .execute(pool)
     .await?;
     Ok(ArtifactCleanupDisposition::Tombstoned)
-}
-
-async fn agent_update_artifact_is_referenced(pool: &PgPool, object_key: &str) -> Result<bool> {
-    let referenced = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM agent_update_releases
-            WHERE artifact_object_key = $1
-               OR rollback_artifact_object_key = $1
-        )
-        "#,
-    )
-    .bind(object_key)
-    .fetch_one(pool)
-    .await?;
-    Ok(referenced)
 }
 
 async fn backup_artifact_is_referenced(
@@ -2329,32 +2218,21 @@ async fn scheduled_agent_update_release_policy_allows(
     if !require_registered_agent_updates {
         return Ok(true);
     }
-    let JobCommand::UpdateAgent {
-        sha256_hex,
-        artifact_signing_key_hex,
-        ..
-    } = command
-    else {
+    let JobCommand::UpdateAgent { sha256_hex, .. } = command else {
         return Ok(true);
     };
-    let Some(signing_key_hex) = artifact_signing_key_hex else {
-        return Ok(false);
-    };
     let artifact_sha256_hex = sha256_hex.to_ascii_lowercase();
-    let signing_key_sha256_hex = payload_hash(signing_key_hex.to_ascii_lowercase().as_bytes());
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
             SELECT 1
             FROM agent_update_releases
-            WHERE status IN ('published_metadata_only', 'artifact_hosted')
+            WHERE status = 'published_external'
               AND artifact_sha256_hex = $1
-              AND artifact_signing_key_sha256_hex = $2
         )
         "#,
     )
     .bind(artifact_sha256_hex)
-    .bind(signing_key_sha256_hex)
     .fetch_one(&mut **tx)
     .await?;
     Ok(exists)
@@ -3179,7 +3057,6 @@ mod schedule_tests {
                 Some("filesystem")
             );
             assert_eq!(runtime.backup_object_store.kind(), "filesystem");
-            assert_eq!(runtime.update_object_store.kind(), "filesystem");
 
             std::fs::write(
                 &path,
@@ -3246,7 +3123,6 @@ mod schedule_tests {
                 Some("filesystem")
             );
             assert_eq!(runtime.backup_object_store.kind(), "filesystem");
-            assert_eq!(runtime.update_object_store.kind(), "filesystem");
         });
     }
 
@@ -3517,19 +3393,12 @@ mod schedule_tests {
         "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_DELETE_OBJECTS",
         "VPSMAN_WORKER_BACKUP_POLICY_PRUNE_OBJECT_STORE_DIR",
         "VPSMAN_BACKUP_OBJECT_STORE_DIR",
-        "VPSMAN_UPDATE_OBJECT_STORE_DIR",
         "VPSMAN_OBJECT_ENDPOINT",
         "VPSMAN_OBJECT_BUCKET",
         "VPSMAN_OBJECT_ACCESS_KEY",
         "VPSMAN_OBJECT_SECRET_KEY",
         "VPSMAN_OBJECT_REGION",
         "VPSMAN_OBJECT_CREATE_BUCKET",
-        "VPSMAN_UPDATE_OBJECT_ENDPOINT",
-        "VPSMAN_UPDATE_OBJECT_BUCKET",
-        "VPSMAN_UPDATE_OBJECT_ACCESS_KEY",
-        "VPSMAN_UPDATE_OBJECT_SECRET_KEY",
-        "VPSMAN_UPDATE_OBJECT_REGION",
-        "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
         "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
         "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
     ];
@@ -3602,7 +3471,6 @@ backup_policy_prune_object_store_dir = "{object_store_dir}"
 
 [storage]
 backup_object_store_dir = "{object_store_dir}/backups"
-update_object_store_dir = "{object_store_dir}/updates"
 "#
         )
     }

@@ -158,7 +158,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
         "builtin:busybox_ash_argv",
         "builtin:agent_iproute2_runtime_reconcile",
         "builtin:s3_path_style_reserved",
-        "builtin:https_signed_artifact",
+        "builtin:github_release_sha256",
     ];
     for name in curated_names {
         let preset = presets
@@ -228,14 +228,14 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
     for (_, _, expected) in assignments {
         assert!(
             rendered.toml.contains(expected),
-            "rendered hot config missing {expected}:\n{}",
+            "rendered config patch missing {expected}:\n{}",
             rendered.toml
         );
     }
 
     for preset_name in [
         "builtin:s3_path_style_reserved",
-        "builtin:https_signed_artifact",
+        "builtin:github_release_sha256",
     ] {
         let preset = presets
             .iter()
@@ -1151,7 +1151,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
     .await
     .unwrap();
 
-    let no_store_state = data_source_test_state(repo.clone(), None, None);
+    let no_store_state = data_source_test_state(repo.clone(), None);
     let no_store_rows = no_store_state
         .list_data_source_status(Some("edge-a"), None)
         .await
@@ -1199,21 +1199,11 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 name: "vpsman-agent".to_string(),
                 version: "2.0.0".to_string(),
                 channel: "stable".to_string(),
-                status: "published_metadata_only".to_string(),
+                status: "published_external".to_string(),
                 artifact_sha256_hex: "2".repeat(64),
-                artifact_signature_provided: true,
-                artifact_signature_sha256_hex: Some("3".repeat(64)),
-                artifact_signing_key_sha256_hex: "4".repeat(64),
                 artifact_url_sha256_hex: Some("5".repeat(64)),
-                artifact_object_key: None,
-                artifact_download_path: None,
                 rollback_artifact_sha256_hex: None,
-                rollback_artifact_signature_provided: false,
-                rollback_artifact_signature_sha256_hex: None,
-                rollback_artifact_signing_key_sha256_hex: None,
                 rollback_artifact_url_sha256_hex: None,
-                rollback_artifact_object_key: None,
-                rollback_artifact_download_path: None,
                 rollback_size_bytes: None,
                 size_bytes: Some(8192),
                 notes: None,
@@ -1225,17 +1215,14 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
         .await
         .unwrap();
     let update = status_row(&metadata_only_rows, "update_artifact_source");
-    assert_eq!(update.status, "metadata_only");
+    assert_eq!(update.status, "ready");
     assert_eq!(update.evidence["external_release_count"], 1);
 
     let backup_store_root =
         std::env::temp_dir().join(format!("vpsman-backup-store-{}", Uuid::new_v4()));
-    let update_store_root =
-        std::env::temp_dir().join(format!("vpsman-update-store-{}", Uuid::new_v4()));
     let ready_state = data_source_test_state(
         repo.clone(),
         Some(BackupObjectStore::filesystem(backup_store_root).unwrap()),
-        Some(BackupObjectStore::filesystem(update_store_root).unwrap()),
     );
     let ready_rows = ready_state
         .list_data_source_status(Some("edge-a"), None)
@@ -1246,14 +1233,13 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
     assert_eq!(backup.evidence["server_object_store_kind"], "filesystem");
     let update = status_row(&ready_rows, "update_artifact_source");
     assert_eq!(update.status, "ready");
-    assert_eq!(update.evidence["server_object_store_kind"], "filesystem");
     assert_eq!(update.evidence["release_count"], 1);
+    assert_eq!(update.evidence["external_release_count"], 1);
 }
 
 fn data_source_test_state(
     repo: Repository,
     backup_object_store: Option<BackupObjectStore>,
-    update_object_store: Option<BackupObjectStore>,
 ) -> AppState {
     AppState {
         repo,
@@ -1261,7 +1247,6 @@ fn data_source_test_state(
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store,
-        update_object_store,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

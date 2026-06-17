@@ -25,6 +25,9 @@ use crate::{
 pub(crate) const DEFAULT_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const MIN_ARTIFACT_MAX_BYTES: usize = 1024 * 1024;
 const MAX_ARTIFACT_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT: i64 = 8;
+const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 24 * 60 * 60;
+const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -33,7 +36,6 @@ pub(crate) struct AppState {
     pub(crate) internal_token: Option<String>,
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
-    pub(crate) update_object_store: Option<BackupObjectStore>,
     pub(crate) update_release_policy: UpdateReleasePolicy,
     pub(crate) fleet_alert_policy: FleetAlertPolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
@@ -51,6 +53,25 @@ pub(crate) struct DispatcherRuntimeConfig {
     pub(crate) event_post_secs: u64,
     pub(crate) internal_http_read_secs: u64,
     pub(crate) control_deadline_grace_secs: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorAuthThrottleConfig {
+    pub(crate) username_failed_attempt_limit: i64,
+    pub(crate) ip_failed_attempt_limit: i64,
+    pub(crate) failed_attempt_window_secs: u64,
+    pub(crate) lockout_secs: u64,
+}
+
+impl Default for OperatorAuthThrottleConfig {
+    fn default() -> Self {
+        Self {
+            username_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT,
+            ip_failed_attempt_limit: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_LIMIT,
+            failed_attempt_window_secs: DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS,
+            lockout_secs: DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS,
+        }
+    }
 }
 
 impl Default for DispatcherRuntimeConfig {
@@ -167,6 +188,59 @@ impl AppState {
         self.require_registered_agent_updates
     }
 
+    pub(crate) fn operator_auth_throttle_config(&self) -> OperatorAuthThrottleConfig {
+        let mut config = OperatorAuthThrottleConfig::default();
+        if let Some(suite) = self.current_suite_config() {
+            if env_absent("VPSMAN_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT") {
+                if let Some(value) = suite.api.operator_auth_username_failed_attempt_limit {
+                    config.username_failed_attempt_limit = value;
+                }
+            }
+            if env_absent("VPSMAN_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT") {
+                if let Some(value) = suite.api.operator_auth_ip_failed_attempt_limit {
+                    config.ip_failed_attempt_limit = value;
+                }
+            }
+            if env_absent("VPSMAN_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS") {
+                if let Some(value) = suite.api.operator_auth_failed_attempt_window_secs {
+                    config.failed_attempt_window_secs = value;
+                }
+            }
+            if env_absent("VPSMAN_OPERATOR_AUTH_LOCKOUT_SECS") {
+                if let Some(value) = suite.api.operator_auth_lockout_secs {
+                    config.lockout_secs = value;
+                }
+            }
+        }
+        if let Ok(value) = std::env::var("VPSMAN_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT") {
+            if let Ok(parsed) = value.parse::<i64>() {
+                config.username_failed_attempt_limit = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("VPSMAN_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT") {
+            if let Ok(parsed) = value.parse::<i64>() {
+                config.ip_failed_attempt_limit = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("VPSMAN_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                config.failed_attempt_window_secs = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("VPSMAN_OPERATOR_AUTH_LOCKOUT_SECS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                config.lockout_secs = parsed;
+            }
+        }
+        config.username_failed_attempt_limit = config.username_failed_attempt_limit.clamp(1, 1000);
+        config.ip_failed_attempt_limit = config.ip_failed_attempt_limit.clamp(1, 1000);
+        config.failed_attempt_window_secs = config
+            .failed_attempt_window_secs
+            .clamp(60, 30 * 24 * 60 * 60);
+        config.lockout_secs = config.lockout_secs.clamp(60, 30 * 24 * 60 * 60);
+        config
+    }
+
     pub(crate) fn schedule_apply_now_timeout_secs(&self) -> u64 {
         if let Ok(value) = std::env::var("VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS") {
             if let Ok(parsed) = value.parse::<u64>() {
@@ -235,14 +309,10 @@ fn env_absent(name: &str) -> bool {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct UpdateReleasePolicy {
     allowed_channels: Vec<String>,
-    trusted_signing_keys_hex: Vec<String>,
 }
 
 impl UpdateReleasePolicy {
-    pub(crate) fn new(
-        allowed_channels: Vec<String>,
-        trusted_signing_keys_hex: Vec<String>,
-    ) -> Result<Self> {
+    pub(crate) fn new(allowed_channels: Vec<String>) -> Result<Self> {
         let mut normalized_channels = Vec::new();
         for channel in allowed_channels {
             let channel = channel.trim().to_ascii_lowercase();
@@ -257,23 +327,8 @@ impl UpdateReleasePolicy {
             }
         }
 
-        let mut normalized_keys = Vec::new();
-        for key in trusted_signing_keys_hex {
-            let key = key.trim().to_ascii_lowercase();
-            if key.is_empty() {
-                continue;
-            }
-            if !is_fixed_hex(&key, 64) {
-                anyhow::bail!("trusted update signing key must be 32-byte hex");
-            }
-            if !normalized_keys.iter().any(|stored| stored == &key) {
-                normalized_keys.push(key);
-            }
-        }
-
         Ok(Self {
             allowed_channels: normalized_channels,
-            trusted_signing_keys_hex: normalized_keys,
         })
     }
 
@@ -292,26 +347,6 @@ impl UpdateReleasePolicy {
             Err(ApiError::forbidden(
                 "agent_update_release_channel_not_allowed",
             ))
-        }
-    }
-
-    pub(crate) fn validate_signing_key(
-        &self,
-        signing_key_hex: &str,
-        error_code: &'static str,
-    ) -> Result<(), ApiError> {
-        if self.trusted_signing_keys_hex.is_empty() {
-            return Ok(());
-        }
-        let signing_key_hex = signing_key_hex.trim().to_ascii_lowercase();
-        if self
-            .trusted_signing_keys_hex
-            .iter()
-            .any(|trusted| trusted == &signing_key_hex)
-        {
-            Ok(())
-        } else {
-            Err(ApiError::forbidden(error_code))
         }
     }
 }
@@ -351,7 +386,7 @@ impl AppState {
             )
         }) {
             let releases = self.repo.list_agent_update_releases(1000).await?;
-            enrich_update_status_rows(&mut rows, self.update_object_store.as_ref(), &releases);
+            enrich_update_status_rows(&mut rows, &releases);
         }
         if rows.iter().any(|row| {
             matches!(
@@ -463,10 +498,6 @@ fn is_safe_release_token(value: &str, max_bytes: usize) -> bool {
             .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
 }
 
-fn is_fixed_hex(value: &str, len: usize) -> bool {
-    value.len() == len && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-}
-
 fn enrich_backup_status_rows(
     rows: &mut [DataSourceStatusView],
     store: Option<&BackupObjectStore>,
@@ -545,14 +576,9 @@ fn enrich_backup_status_rows(
 
 fn enrich_update_status_rows(
     rows: &mut [DataSourceStatusView],
-    store: Option<&BackupObjectStore>,
     releases: &[AgentUpdateReleaseView],
 ) {
     let release_count = releases.len();
-    let hosted_release_count = releases
-        .iter()
-        .filter(|release| release.artifact_object_key.is_some())
-        .count();
     let external_release_count = releases
         .iter()
         .filter(|release| release.artifact_url_sha256_hex.is_some())
@@ -565,10 +591,7 @@ fn enrich_update_status_rows(
     }) {
         let runtime_evidence = json!({
             "workflow": "agent_update_releases",
-            "server_object_store_configured": store.is_some(),
-            "server_object_store_kind": store.map(BackupObjectStore::kind),
             "release_count": release_count,
-            "hosted_release_count": hosted_release_count,
             "external_release_count": external_release_count,
             "continuous_status": false,
         });
@@ -590,32 +613,30 @@ fn enrich_update_status_rows(
                     .to_string();
             continue;
         }
-        if store.is_some() {
+        if external_release_count > 0 {
             row.status = "ready".to_string();
             row.status_reason =
-                "update artifact store is configured; hosted signed releases can be published"
-                    .to_string();
-        } else if external_release_count > 0 {
-            row.status = "metadata_only".to_string();
-            row.status_reason =
-                "signed HTTPS update release metadata exists; hosted artifact storage is optional"
+                "external HTTPS update release metadata exists; agents download update artifacts outside the API"
                     .to_string();
         } else if update_source_accepts_external_url(row) {
             row.status = "selected_no_artifacts".to_string();
             row.status_reason =
-                "update artifact source is selected, but no hosted store or signed external release metadata exists"
+                "update artifact source is selected, but no external HTTPS release metadata exists"
                     .to_string();
         } else {
-            row.status = "selected_no_store".to_string();
+            row.status = "selected_no_artifacts".to_string();
             row.status_reason =
-                "update artifact-source preset is selected, but no server object store is configured"
+                "update artifact-source preset is selected, but no external artifact URL preset or release metadata exists"
                     .to_string();
         }
     }
 }
 
 fn update_source_accepts_external_url(row: &DataSourceStatusView) -> bool {
-    row.source_kind.contains("https") || row.preset_name.contains("https")
+    matches!(
+        row.source_kind.as_str(),
+        "external_https" | "github_release"
+    )
 }
 
 fn enrich_runtime_tunnel_status_rows(

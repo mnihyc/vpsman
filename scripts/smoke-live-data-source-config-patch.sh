@@ -410,6 +410,7 @@ reject_body="$(jq -nc \
     command: "data_source_config_patch",
     operation: {
       type: "data_source_config_patch",
+      apply_mode: "incremental_patch",
       toml: $toml
     },
     selector_expression: ("id:" + $client),

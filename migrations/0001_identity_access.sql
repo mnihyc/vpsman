@@ -111,6 +111,27 @@ CREATE INDEX operator_sessions_access_token_hash_idx
 CREATE INDEX operator_sessions_refresh_token_hash_idx
     ON operator_sessions (refresh_token_hash);
 
+CREATE TABLE operator_auth_throttle (
+    scope_kind TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    failed_attempts BIGINT NOT NULL DEFAULT 0,
+    window_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    locked_until TIMESTAMPTZ,
+    last_failed_at TIMESTAMPTZ,
+    last_failure_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (scope_kind, scope_key),
+    CONSTRAINT operator_auth_throttle_scope_kind_check
+        CHECK (scope_kind IN ('username', 'ip')),
+    CONSTRAINT operator_auth_throttle_failed_attempts_check
+        CHECK (failed_attempts >= 0)
+);
+
+CREATE INDEX operator_auth_throttle_locked_idx
+    ON operator_auth_throttle (locked_until)
+    WHERE locked_until IS NOT NULL;
+
 CREATE TABLE gateway_sessions (
     id UUID PRIMARY KEY,
     gateway_id TEXT NOT NULL,

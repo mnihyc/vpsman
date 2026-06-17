@@ -12,7 +12,7 @@ use vpsman_common::{
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED};
 
 use crate::{
-    model::JobOutputView,
+    model::{BootstrapOperatorRequest, JobOutputView, LoginRequest},
     repository::Repository,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
 };
@@ -329,6 +329,84 @@ async fn latest_status_output_json(
     .await
     .unwrap();
     serde_json::from_str(&value).unwrap()
+}
+
+#[tokio::test]
+async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 2,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 60,
+        lockout_secs: 60,
+    };
+    db.repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            db.repo
+                .login_operator_with_throttle(
+                    &LoginRequest {
+                        username: "admin".to_string(),
+                        password: "wrong-password-123".to_string(),
+                        totp_code: None,
+                    },
+                    "203.0.113.30",
+                    &throttle,
+                )
+                .await
+                .unwrap(),
+            crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+        ));
+    }
+    let second_repo = Repository::Postgres(db.pool.clone());
+    assert!(matches!(
+        second_repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "admin-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.30",
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Throttled
+    ));
+
+    let row = sqlx::query(
+        r#"
+        SELECT failed_attempts,
+               locked_until IS NOT NULL AND locked_until > now() AS locked
+        FROM operator_auth_throttle
+        WHERE scope_kind = 'username'
+          AND scope_key = 'admin'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let failed_attempts: i64 = row.try_get("failed_attempts").unwrap();
+    let locked: bool = row.try_get("locked").unwrap();
+    assert_eq!(failed_attempts, 2);
+    assert!(locked);
+    let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = $1")
+        .bind("operator_auth.lockout_created")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(audit_count, 1);
+    db.cleanup().await;
 }
 
 #[tokio::test]

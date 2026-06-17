@@ -69,7 +69,18 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
 ```
 
 The installer writes `agent.toml`, installs a systemd unit, and starts the agent.
-It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint.
+It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
+installer writes an `[update]` section with the official GitHub `version.json`
+release manifest, 24 hour interval, 24 hour jitter, activation enabled, and
+service-manager restart enabled. Autonomous updates remain disabled unless the
+install command sets `VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED=1` or a later
+incremental config patch enables `update.unmanaged_enabled`. When enabled, the
+agent uses the manifest's tag-pinned asset URL, verifies `SHA256SUMS`, stages
+the matching musl agent asset, activates it, and restarts itself. The installed
+systemd unit sets `VPSMAN_AGENT_RESTART_MODE=signal_only`, so systemd performs
+the restart after activation. Override
+`VPSMAN_AGENT_UNMANAGED_UPDATE_VERSION_URL` or `update.unmanaged_version_url`
+only when using a different external release host.
 
 Runtime command traffic is protected by the gateway Noise session. No extra
 server-side command-authentication key is provisioned. Operator authentication

@@ -61,8 +61,6 @@ export function buildOperation(
   hotConfigToml: string,
   updateArtifactUrl: string,
   updateSha256Hex: string,
-  updateArtifactSignatureHex: string,
-  updateArtifactSigningKeyHex: string,
   updateCheckVersionUrl: string,
   updateCheckActivate: boolean,
   updateCheckRestartAgent: boolean,
@@ -152,9 +150,9 @@ export function buildOperation(
   if (mode === "hot_config") {
     const toml = hotConfigToml.trim();
     if (!toml) {
-      throw new Error("Hot config TOML is required");
+      throw new Error("Full config TOML is required");
     }
-    return { type: "hot_config", toml };
+    return { type: "hot_config", apply_mode: "full_override", toml };
   }
   if (mode === "agent_update") {
     if (!updateArtifactUrl.startsWith("https://")) {
@@ -163,23 +161,6 @@ export function buildOperation(
     const sha256Hex = updateSha256Hex.trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
       throw new Error("Agent update SHA-256 must be 64 hex characters");
-    }
-    const signatureHex = updateArtifactSignatureHex.trim().toLowerCase();
-    const signingKeyHex = updateArtifactSigningKeyHex.trim().toLowerCase();
-    if (signatureHex || signingKeyHex) {
-      if (!/^[0-9a-f]{128}$/.test(signatureHex)) {
-        throw new Error("Agent update signature must be 128 hex characters");
-      }
-      if (!/^[0-9a-f]{64}$/.test(signingKeyHex)) {
-        throw new Error("Agent update signing key must be 64 hex characters");
-      }
-      return {
-        type: "agent_update",
-        artifact_url: updateArtifactUrl.trim(),
-        sha256_hex: sha256Hex,
-        artifact_signature_hex: signatureHex,
-        artifact_signing_key_hex: signingKeyHex,
-      };
     }
     return { type: "agent_update", artifact_url: updateArtifactUrl.trim(), sha256_hex: sha256Hex };
   }

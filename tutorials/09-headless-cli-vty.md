@@ -124,7 +124,7 @@ restore-plans
 migration-run <restore_plan_uuid> --confirmed
 agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
-agent-update-artifact-upload --name vpsman-agent --version 0.1.1 --artifact-file ./target/vpsman-agent --signing-seed-hex <seed> --rollback-artifact-file ./target/vpsman-agent.previous --stream --confirmed
+agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```

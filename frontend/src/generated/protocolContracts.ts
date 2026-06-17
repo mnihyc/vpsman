@@ -673,14 +673,12 @@ export const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS = {
 } as const satisfies Record<GeneratedTunnelEndpointStatus, GeneratedWorkflowStatusClass>;
 
 export const AGENT_UPDATE_RELEASE_STATUSES = [
-  "published_metadata_only",
-  "artifact_hosted",
+  "published_external",
 ] as const;
 export type GeneratedAgentUpdateReleaseStatus = typeof AGENT_UPDATE_RELEASE_STATUSES[number];
 
 export const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS = {
-  "published_metadata_only": "neutral",
-  "artifact_hosted": "successful",
+  "published_external": "successful",
 } as const satisfies Record<GeneratedAgentUpdateReleaseStatus, GeneratedWorkflowStatusClass>;
 
 export const SERVER_JOB_TYPES = [

@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
-    validate_agent_config_shape, validate_data_source_config_patch_section, AgentConfig,
-    JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
+    validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
+    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
+    HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
 use crate::{
@@ -39,8 +40,6 @@ pub(crate) struct VtyDataSourceHotConfigApplyRequest {
 pub(crate) struct VtyAgentUpdateRequest {
     artifact_url: String,
     sha256_hex: String,
-    artifact_signature_hex: Option<String>,
-    artifact_signing_key_hex: Option<String>,
     selection: VtyJobSelection,
     timeout_secs: u64,
     privilege_ttl_secs: u64,
@@ -133,7 +132,7 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
     let selection = VtyJobSelection::parse(&target_tokens)?;
     anyhow::ensure!(
         selection.confirmed,
-        "hot-config requires --confirmed because it changes persistent agent configuration"
+        "hot-config requires --confirmed because it applies a full agent config override"
     );
     Ok(VtyHotConfigRequest {
         config_file: config_file.context("hot-config requires --config-file <path>")?,
@@ -205,7 +204,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
     );
     anyhow::ensure!(
         confirmed,
-        "data-source-hot-config-apply requires --confirmed because it persists agent configuration"
+        "data-source-hot-config-apply requires --confirmed because it applies an incremental config patch"
     );
     Ok(VtyDataSourceHotConfigApplyRequest {
         client_id,
@@ -219,8 +218,6 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
 pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRequest> {
     let mut artifact_url = None;
     let mut sha256_hex = None;
-    let mut artifact_signature_hex = None;
-    let mut artifact_signing_key_hex = None;
     let mut timeout_secs = 300_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
@@ -242,24 +239,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
                     tokens
                         .get(index + 1)
                         .context("--sha256-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--artifact-signature-hex" => {
-                artifact_signature_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-signature-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--artifact-signing-key-hex" => {
-                artifact_signing_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-signing-key-hex requires a value")?
                         .to_string(),
                 );
                 index += 2;
@@ -303,12 +282,7 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
     );
     let artifact_url = artifact_url.context("agent-update requires --artifact-url <https-url>")?;
     let sha256_hex = sha256_hex.context("agent-update requires --sha256-hex <sha256>")?;
-    validate_update_input(
-        &artifact_url,
-        &sha256_hex,
-        artifact_signature_hex.as_deref(),
-        artifact_signing_key_hex.as_deref(),
-    )?;
+    validate_update_input(&artifact_url, &sha256_hex)?;
     let selection = VtyJobSelection::parse(&target_tokens)?;
     anyhow::ensure!(
         selection.confirmed,
@@ -317,8 +291,6 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
     Ok(VtyAgentUpdateRequest {
         artifact_url,
         sha256_hex: sha256_hex.to_ascii_lowercase(),
-        artifact_signature_hex: artifact_signature_hex.map(|value| value.to_ascii_lowercase()),
-        artifact_signing_key_hex: artifact_signing_key_hex.map(|value| value.to_ascii_lowercase()),
         selection,
         timeout_secs,
         privilege_ttl_secs,
@@ -476,24 +448,25 @@ pub(crate) fn submit_vty_hot_config(
 ) -> Result<String> {
     let toml_document = std::fs::read_to_string(&request.config_file).with_context(|| {
         format!(
-            "failed to read hot config {}",
+            "failed to read full config override {}",
             request.config_file.display()
         )
     })?;
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "hot config exceeds {} bytes",
+        "full config override exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
     let config: AgentConfig = toml::from_str(&toml_document).with_context(|| {
         format!(
-            "failed to parse hot config {}",
+            "failed to parse full config override {}",
             request.config_file.display()
         )
     })?;
     validate_agent_config_shape(&config)
-        .map_err(|message| anyhow::anyhow!("invalid hot config: {message}"))?;
+        .map_err(|message| anyhow::anyhow!("invalid full config override: {message}"))?;
     let operation = JobCommand::HotConfig {
+        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
         toml: toml_document,
         preserve_redacted: None,
         base_config_sha256_hex: None,
@@ -537,6 +510,7 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
         serde_json::from_str(&body).context("failed to parse rendered data-source patch")?;
     validate_data_source_config_patch(&rendered.toml)?;
     let operation = JobCommand::DataSourceConfigPatch {
+        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: rendered.toml,
     };
     let selection = VtyJobSelection {
@@ -569,8 +543,6 @@ pub(crate) fn submit_vty_agent_update(
     let operation = JobCommand::UpdateAgent {
         artifact_url: request.artifact_url,
         sha256_hex: request.sha256_hex,
-        artifact_signature_hex: request.artifact_signature_hex,
-        artifact_signing_key_hex: request.artifact_signing_key_hex,
     };
     submit_vty_config_operation(
         api_url,
@@ -678,7 +650,7 @@ fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
         "rendered data-source config patch has no sections"
     );
     for section in table.keys() {
-        validate_data_source_config_patch_section(section)
+        validate_incremental_config_patch_section(section)
             .map_err(|message| anyhow::anyhow!(message))?;
     }
     Ok(())
@@ -756,8 +728,6 @@ mod tests {
         parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_rollback,
         parse_vty_data_source_hot_config_apply, parse_vty_hot_config,
     };
-    use ed25519_dalek::SigningKey;
-    use vpsman_common::sign_update_artifact_hash;
 
     #[test]
     fn parses_hot_config_request() {
@@ -820,19 +790,12 @@ mod tests {
 
     #[test]
     fn parses_agent_update_request() {
-        let signing_key = SigningKey::from_bytes(&[33_u8; 32]);
         let sha256_hex = "ab".repeat(32);
-        let signature_hex = hex::encode(sign_update_artifact_hash(&signing_key, &sha256_hex));
-        let signing_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
         let request = parse_vty_agent_update(&[
             "--artifact-url",
             "https://updates.example/vpsman-agent",
             "--sha256-hex",
             &sha256_hex,
-            "--artifact-signature-hex",
-            &signature_hex,
-            "--artifact-signing-key-hex",
-            &signing_key_hex,
             "id:edge-a",
             "--timeout",
             "300",
@@ -845,8 +808,6 @@ mod tests {
 
         assert_eq!(request.artifact_url, "https://updates.example/vpsman-agent");
         assert_eq!(request.sha256_hex, "ab".repeat(32));
-        assert_eq!(request.artifact_signature_hex, Some(signature_hex));
-        assert_eq!(request.artifact_signing_key_hex, Some(signing_key_hex));
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["id:edge-a"]);
         assert_eq!(request.timeout_secs, 300);

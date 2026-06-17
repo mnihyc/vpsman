@@ -3,11 +3,49 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::model::*;
-use crate::repository::Repository;
+use crate::repository::{OperatorAuthThrottleRecord, Repository};
+use crate::state::OperatorAuthThrottleConfig;
 use crate::{
     generate_token, hash_operator_password, normalize_operator_scopes, token_hash, unix_now,
     verify_operator_password, ACCESS_TOKEN_TTL_SECS, REFRESH_TOKEN_TTL_SECS,
 };
+
+#[derive(Debug)]
+pub(crate) enum OperatorLoginAttempt {
+    Authenticated(Box<AuthResponse>),
+    InvalidCredentials,
+    Throttled,
+}
+
+#[derive(Clone, Copy)]
+enum OperatorLoginFailureReason {
+    UnknownUser,
+    BadPassword,
+    MissingTotp,
+    MissingTotpSecret,
+    TotpDecryptFailed,
+    BadTotp,
+}
+
+impl OperatorLoginFailureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownUser => "unknown_user",
+            Self::BadPassword => "bad_password",
+            Self::MissingTotp => "missing_totp",
+            Self::MissingTotpSecret => "missing_totp_secret",
+            Self::TotpDecryptFailed => "totp_decrypt_failed",
+            Self::BadTotp => "bad_totp",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AuthThrottleLockout {
+    scope_kind: &'static str,
+    scope_key: String,
+    failed_attempts: i64,
+}
 
 impl Repository {
     pub(crate) async fn operator_count(&self) -> Result<i64> {
@@ -83,6 +121,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn login_operator(
         &self,
         request: &LoginRequest,
@@ -109,6 +148,326 @@ impl Repository {
             }
         }
         Ok(Some(self.issue_session(operator.view()).await?))
+    }
+
+    pub(crate) async fn login_operator_with_throttle(
+        &self,
+        request: &LoginRequest,
+        remote_ip: &str,
+        throttle: &OperatorAuthThrottleConfig,
+    ) -> Result<OperatorLoginAttempt> {
+        let username_key = normalize_auth_throttle_username(&request.username);
+        let ip_key = normalize_auth_throttle_ip(remote_ip);
+        if self
+            .operator_auth_throttle_locked(&username_key, &ip_key)
+            .await?
+        {
+            return Ok(OperatorLoginAttempt::Throttled);
+        }
+
+        let Some(operator) = self.operator_by_username(&request.username).await? else {
+            self.record_operator_auth_failure(
+                &username_key,
+                &ip_key,
+                OperatorLoginFailureReason::UnknownUser,
+                throttle,
+            )
+            .await?;
+            return Ok(OperatorLoginAttempt::InvalidCredentials);
+        };
+        if !verify_operator_password(&request.password, &operator.password_hash)? {
+            self.record_operator_auth_failure(
+                &username_key,
+                &ip_key,
+                OperatorLoginFailureReason::BadPassword,
+                throttle,
+            )
+            .await?;
+            return Ok(OperatorLoginAttempt::InvalidCredentials);
+        }
+        if operator.totp_enabled {
+            let Some(code) = request.totp_code.as_deref() else {
+                self.record_operator_auth_failure(
+                    &username_key,
+                    &ip_key,
+                    OperatorLoginFailureReason::MissingTotp,
+                    throttle,
+                )
+                .await?;
+                return Ok(OperatorLoginAttempt::InvalidCredentials);
+            };
+            let Some(secret) = operator.encrypted_totp_secret() else {
+                self.record_operator_auth_failure(
+                    &username_key,
+                    &ip_key,
+                    OperatorLoginFailureReason::MissingTotpSecret,
+                    throttle,
+                )
+                .await?;
+                return Ok(OperatorLoginAttempt::InvalidCredentials);
+            };
+            let secret = match crate::auth_totp::decrypt_totp_secret(&request.password, &secret) {
+                Ok(secret) => secret,
+                Err(_) => {
+                    self.record_operator_auth_failure(
+                        &username_key,
+                        &ip_key,
+                        OperatorLoginFailureReason::TotpDecryptFailed,
+                        throttle,
+                    )
+                    .await?;
+                    return Ok(OperatorLoginAttempt::InvalidCredentials);
+                }
+            };
+            if !crate::auth_totp::verify_totp_code(&secret, code, unix_now()) {
+                self.record_operator_auth_failure(
+                    &username_key,
+                    &ip_key,
+                    OperatorLoginFailureReason::BadTotp,
+                    throttle,
+                )
+                .await?;
+                return Ok(OperatorLoginAttempt::InvalidCredentials);
+            }
+        }
+        let previous_failures = self
+            .operator_auth_previous_failures(&username_key, throttle)
+            .await?;
+        self.clear_operator_auth_success(&username_key).await?;
+        if previous_failures {
+            self.record_operator_auth_success_after_failures(&operator, &username_key, &ip_key)
+                .await?;
+        }
+        Ok(OperatorLoginAttempt::Authenticated(Box::new(
+            self.issue_session(operator.view()).await?,
+        )))
+    }
+
+    async fn operator_auth_throttle_locked(
+        &self,
+        username_key: &str,
+        ip_key: &str,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now();
+                let throttle = memory.operator_auth_throttle.read().await;
+                Ok(
+                    throttle_bucket_locked(&throttle, "username", username_key, now)
+                        || throttle_bucket_locked(&throttle, "ip", ip_key, now),
+                )
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM operator_auth_throttle
+                        WHERE (
+                            (scope_kind = 'username' AND scope_key = $1)
+                            OR (scope_kind = 'ip' AND scope_key = $2)
+                        )
+                          AND locked_until IS NOT NULL
+                          AND locked_until > now()
+                    ) AS locked
+                    "#,
+                )
+                .bind(username_key)
+                .bind(ip_key)
+                .fetch_one(pool)
+                .await?;
+                Ok(row.try_get("locked")?)
+            }
+        }
+    }
+
+    async fn record_operator_auth_failure(
+        &self,
+        username_key: &str,
+        ip_key: &str,
+        reason: OperatorLoginFailureReason,
+        throttle: &OperatorAuthThrottleConfig,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now();
+                let mut buckets = memory.operator_auth_throttle.write().await;
+                let mut lockouts = Vec::new();
+                if let Some(lockout) = record_memory_throttle_failure(
+                    &mut buckets,
+                    "username",
+                    username_key,
+                    throttle.username_failed_attempt_limit,
+                    throttle.failed_attempt_window_secs,
+                    throttle.lockout_secs,
+                    reason.as_str(),
+                    now,
+                ) {
+                    lockouts.push(lockout);
+                }
+                if let Some(lockout) = record_memory_throttle_failure(
+                    &mut buckets,
+                    "ip",
+                    ip_key,
+                    throttle.ip_failed_attempt_limit,
+                    throttle.failed_attempt_window_secs,
+                    throttle.lockout_secs,
+                    reason.as_str(),
+                    now,
+                ) {
+                    lockouts.push(lockout);
+                }
+                drop(buckets);
+                for lockout in lockouts {
+                    record_memory_auth_lockout_audit(memory, &lockout, reason.as_str()).await;
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let mut lockouts = Vec::new();
+                if let Some(lockout) = record_postgres_throttle_failure(
+                    &mut tx,
+                    "username",
+                    username_key,
+                    throttle.username_failed_attempt_limit,
+                    throttle.failed_attempt_window_secs,
+                    throttle.lockout_secs,
+                    reason.as_str(),
+                )
+                .await?
+                {
+                    lockouts.push(lockout);
+                }
+                if let Some(lockout) = record_postgres_throttle_failure(
+                    &mut tx,
+                    "ip",
+                    ip_key,
+                    throttle.ip_failed_attempt_limit,
+                    throttle.failed_attempt_window_secs,
+                    throttle.lockout_secs,
+                    reason.as_str(),
+                )
+                .await?
+                {
+                    lockouts.push(lockout);
+                }
+                for lockout in &lockouts {
+                    insert_postgres_auth_lockout_audit(&mut tx, lockout, reason.as_str()).await?;
+                }
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn operator_auth_previous_failures(
+        &self,
+        username_key: &str,
+        throttle: &OperatorAuthThrottleConfig,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now();
+                let buckets = memory.operator_auth_throttle.read().await;
+                Ok(throttle_bucket_has_recent_failures(
+                    &buckets,
+                    "username",
+                    username_key,
+                    now,
+                    throttle.failed_attempt_window_secs,
+                ))
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM operator_auth_throttle
+                        WHERE (
+                            (scope_kind = 'username' AND scope_key = $1)
+                        )
+                          AND failed_attempts > 0
+                          AND (
+                            window_started_at + make_interval(secs => $2::double precision) > now()
+                            OR (locked_until IS NOT NULL AND locked_until > now())
+                          )
+                    ) AS has_failures
+                    "#,
+                )
+                .bind(username_key)
+                .bind(throttle.failed_attempt_window_secs as f64)
+                .fetch_one(pool)
+                .await?;
+                Ok(row.try_get("has_failures")?)
+            }
+        }
+    }
+
+    async fn clear_operator_auth_success(&self, username_key: &str) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut buckets = memory.operator_auth_throttle.write().await;
+                buckets.remove(&("username".to_string(), username_key.to_string()));
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    "DELETE FROM operator_auth_throttle WHERE scope_kind = 'username' AND scope_key = $1",
+                )
+                .bind(username_key)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn record_operator_auth_success_after_failures(
+        &self,
+        operator: &OperatorRecord,
+        username_key: &str,
+        ip_key: &str,
+    ) -> Result<()> {
+        let metadata = serde_json::json!({
+            "operator_id": operator.id,
+            "username": operator.username,
+            "username_key": username_key,
+            "ip": ip_key,
+            "cleared_scope_kinds": ["username"],
+        });
+        match self {
+            Self::Memory(memory) => {
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(operator.id),
+                    action: "operator_auth.login_after_failures".to_string(),
+                    target: format!("operator:{}", operator.id),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.id)
+                .bind("operator_auth.login_after_failures")
+                .bind(format!("operator:{}", operator.id))
+                .bind(metadata)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
     }
 
     pub(crate) async fn refresh_operator_session(
@@ -814,6 +1173,251 @@ fn operator_session_insert_sql() -> &'static str {
         to_timestamp($6::double precision)
     )
     "#
+}
+
+fn normalize_auth_throttle_username(username: &str) -> String {
+    let normalized = username.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "<empty>".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_auth_throttle_ip(remote_ip: &str) -> String {
+    let normalized = remote_ip.trim();
+    if normalized.is_empty() {
+        "<unknown>".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn throttle_bucket_locked(
+    buckets: &std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
+    scope_kind: &str,
+    scope_key: &str,
+    now: u64,
+) -> bool {
+    buckets
+        .get(&(scope_kind.to_string(), scope_key.to_string()))
+        .and_then(|bucket| bucket.locked_until_unix)
+        .is_some_and(|locked_until| locked_until > now)
+}
+
+fn throttle_bucket_has_recent_failures(
+    buckets: &std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
+    scope_kind: &str,
+    scope_key: &str,
+    now: u64,
+    window_secs: u64,
+) -> bool {
+    buckets
+        .get(&(scope_kind.to_string(), scope_key.to_string()))
+        .is_some_and(|bucket| {
+            bucket.failed_attempts > 0
+                && (now.saturating_sub(bucket.window_started_unix) < window_secs
+                    || bucket
+                        .locked_until_unix
+                        .is_some_and(|locked_until| locked_until > now))
+        })
+}
+
+fn record_memory_throttle_failure(
+    buckets: &mut std::collections::HashMap<(String, String), OperatorAuthThrottleRecord>,
+    scope_kind: &'static str,
+    scope_key: &str,
+    attempt_limit: i64,
+    window_secs: u64,
+    lockout_secs: u64,
+    reason: &str,
+    now: u64,
+) -> Option<AuthThrottleLockout> {
+    let key = (scope_kind.to_string(), scope_key.to_string());
+    let bucket = buckets
+        .entry(key)
+        .or_insert_with(|| OperatorAuthThrottleRecord {
+            window_started_unix: now,
+            ..OperatorAuthThrottleRecord::default()
+        });
+    let was_locked = bucket
+        .locked_until_unix
+        .is_some_and(|locked_until| locked_until > now);
+    if now.saturating_sub(bucket.window_started_unix) >= window_secs {
+        bucket.failed_attempts = 0;
+        bucket.window_started_unix = now;
+        bucket.locked_until_unix = None;
+    }
+    bucket.failed_attempts = bucket.failed_attempts.saturating_add(1);
+    bucket.last_failure_reason = Some(reason.to_string());
+    if bucket.failed_attempts >= attempt_limit {
+        bucket.locked_until_unix = Some(now.saturating_add(lockout_secs));
+    }
+    let is_locked = bucket
+        .locked_until_unix
+        .is_some_and(|locked_until| locked_until > now);
+    (is_locked && !was_locked).then(|| AuthThrottleLockout {
+        scope_kind,
+        scope_key: scope_key.to_string(),
+        failed_attempts: bucket.failed_attempts,
+    })
+}
+
+async fn record_postgres_throttle_failure(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope_kind: &'static str,
+    scope_key: &str,
+    attempt_limit: i64,
+    window_secs: u64,
+    lockout_secs: u64,
+    reason: &str,
+) -> Result<Option<AuthThrottleLockout>> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("operator_auth_throttle:{scope_kind}:{scope_key}"))
+        .execute(&mut **tx)
+        .await?;
+
+    let existing = sqlx::query(
+        r#"
+        SELECT failed_attempts,
+               window_started_at + make_interval(secs => $3::double precision) <= now()
+                   AS window_expired,
+               locked_until IS NOT NULL AND locked_until > now() AS was_locked
+        FROM operator_auth_throttle
+        WHERE scope_kind = $1
+          AND scope_key = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(scope_kind)
+    .bind(scope_key)
+    .bind(window_secs as f64)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let (new_count, window_expired, was_locked) = if let Some(row) = existing {
+        let window_expired: bool = row.try_get("window_expired")?;
+        let failed_attempts: i64 = row.try_get("failed_attempts")?;
+        let was_locked: bool = row.try_get("was_locked")?;
+        (
+            if window_expired {
+                1
+            } else {
+                failed_attempts.saturating_add(1)
+            },
+            window_expired,
+            was_locked,
+        )
+    } else {
+        (1, true, false)
+    };
+    let lockout_created = !was_locked && new_count >= attempt_limit;
+
+    sqlx::query(
+        r#"
+        INSERT INTO operator_auth_throttle (
+            scope_kind,
+            scope_key,
+            failed_attempts,
+            window_started_at,
+            locked_until,
+            last_failed_at,
+            last_failure_reason,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            now(),
+            CASE WHEN $4 THEN now() + make_interval(secs => $5::double precision) ELSE NULL END,
+            now(),
+            $6,
+            now(),
+            now()
+        )
+        ON CONFLICT (scope_kind, scope_key) DO UPDATE
+        SET failed_attempts = $3,
+            window_started_at = CASE
+                WHEN $7 THEN now()
+                ELSE operator_auth_throttle.window_started_at
+            END,
+            locked_until = CASE
+                WHEN $4 THEN now() + make_interval(secs => $5::double precision)
+                WHEN $7 THEN NULL
+                ELSE operator_auth_throttle.locked_until
+            END,
+            last_failed_at = now(),
+            last_failure_reason = $6,
+            updated_at = now()
+        "#,
+    )
+    .bind(scope_kind)
+    .bind(scope_key)
+    .bind(new_count)
+    .bind(new_count >= attempt_limit)
+    .bind(lockout_secs as f64)
+    .bind(reason)
+    .bind(window_expired)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(lockout_created.then(|| AuthThrottleLockout {
+        scope_kind,
+        scope_key: scope_key.to_string(),
+        failed_attempts: new_count,
+    }))
+}
+
+async fn record_memory_auth_lockout_audit(
+    memory: &crate::repository::MemoryState,
+    lockout: &AuthThrottleLockout,
+    reason: &str,
+) {
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        action: "operator_auth.lockout_created".to_string(),
+        target: format!("operator-auth:{}:{}", lockout.scope_kind, lockout.scope_key),
+        command_hash: None,
+        metadata: auth_lockout_metadata(lockout, reason),
+        created_at: unix_now().to_string(),
+    });
+}
+
+async fn insert_postgres_auth_lockout_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    lockout: &AuthThrottleLockout,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("operator_auth.lockout_created")
+    .bind(format!(
+        "operator-auth:{}:{}",
+        lockout.scope_kind, lockout.scope_key
+    ))
+    .bind(auth_lockout_metadata(lockout, reason))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn auth_lockout_metadata(lockout: &AuthThrottleLockout, reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "scope_kind": lockout.scope_kind,
+        "scope_key": lockout.scope_key,
+        "failed_attempts": lockout.failed_attempts,
+        "last_failure_reason": reason,
+    })
 }
 
 pub(crate) fn parse_scopes(value: serde_json::Value) -> Vec<String> {

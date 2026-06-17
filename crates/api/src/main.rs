@@ -1,6 +1,5 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-mod agent_update_artifact_ingest;
 mod auth_model;
 mod auth_totp;
 mod backup_artifact_crypto;
@@ -118,7 +117,6 @@ use tracing::info;
 use vpsman_common::{read_secret_file_ref, SuiteConfig};
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
-const DEFAULT_UPDATE_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/updates";
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
@@ -232,36 +230,12 @@ struct Args {
     dispatcher_in_flight: usize,
     #[arg(long, env = "VPSMAN_BACKUP_OBJECT_STORE_DIR")]
     backup_object_store_dir: Option<PathBuf>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_STORE_DIR")]
-    update_object_store_dir: Option<PathBuf>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ENDPOINT")]
-    update_object_endpoint: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_BUCKET")]
-    update_object_bucket: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_ACCESS_KEY")]
-    update_object_access_key: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_SECRET_KEY")]
-    update_object_secret_key: Option<String>,
-    #[arg(long, env = "VPSMAN_UPDATE_OBJECT_REGION", default_value = "us-east-1")]
-    update_object_region: String,
-    #[arg(
-        long,
-        env = "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
-        default_value_t = false
-    )]
-    update_object_create_bucket: bool,
     #[arg(
         long,
         env = "VPSMAN_AGENT_UPDATE_ALLOWED_CHANNELS",
         value_delimiter = ','
     )]
     agent_update_allowed_channels: Vec<String>,
-    #[arg(
-        long,
-        env = "VPSMAN_AGENT_UPDATE_TRUSTED_SIGNING_KEYS_HEX",
-        value_delimiter = ','
-    )]
-    agent_update_trusted_signing_keys_hex: Vec<String>,
     #[arg(long, env = "VPSMAN_OBJECT_ENDPOINT")]
     object_endpoint: Option<String>,
     #[arg(long, env = "VPSMAN_OBJECT_BUCKET")]
@@ -394,11 +368,6 @@ impl Args {
             "VPSMAN_BACKUP_OBJECT_STORE_DIR",
             config.storage.backup_object_store_dir.as_deref(),
         );
-        apply_opt_path(
-            &mut self.update_object_store_dir,
-            "VPSMAN_UPDATE_OBJECT_STORE_DIR",
-            config.storage.update_object_store_dir.as_deref(),
-        );
         apply_opt_string(
             &mut self.object_endpoint,
             "VPSMAN_OBJECT_ENDPOINT",
@@ -409,35 +378,15 @@ impl Args {
             "VPSMAN_OBJECT_BUCKET",
             config.storage.object_bucket.as_deref(),
         );
-        apply_opt_string(
-            &mut self.update_object_endpoint,
-            "VPSMAN_UPDATE_OBJECT_ENDPOINT",
-            config.storage.update_object_endpoint.as_deref(),
-        );
-        apply_opt_string(
-            &mut self.update_object_bucket,
-            "VPSMAN_UPDATE_OBJECT_BUCKET",
-            config.storage.update_object_bucket.as_deref(),
-        );
         apply_string_default(
             &mut self.object_region,
             "VPSMAN_OBJECT_REGION",
             config.storage.object_region.as_deref(),
         );
-        apply_string_default(
-            &mut self.update_object_region,
-            "VPSMAN_UPDATE_OBJECT_REGION",
-            config.storage.update_object_region.as_deref(),
-        );
         apply_bool_default(
             &mut self.object_create_bucket,
             "VPSMAN_OBJECT_CREATE_BUCKET",
             config.storage.object_create_bucket,
-        );
-        apply_bool_default(
-            &mut self.update_object_create_bucket,
-            "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
-            config.storage.update_object_create_bucket,
         );
         if env_absent("VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES") {
             if let Some(value) = config.api.job_output_artifact_min_bytes {
@@ -500,16 +449,6 @@ impl Args {
         if self.object_secret_key.is_none() && env_absent("VPSMAN_OBJECT_SECRET_KEY") {
             self.object_secret_key =
                 read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
-        }
-        if self.update_object_access_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_ACCESS_KEY")
-        {
-            self.update_object_access_key =
-                read_secret_file_ref(config.secrets.update_object_access_key_file.as_deref())?;
-        }
-        if self.update_object_secret_key.is_none() && env_absent("VPSMAN_UPDATE_OBJECT_SECRET_KEY")
-        {
-            self.update_object_secret_key =
-                read_secret_file_ref(config.secrets.update_object_secret_key_file.as_deref())?;
         }
         Ok(())
     }
@@ -620,16 +559,12 @@ async fn main() -> Result<()> {
         },
     );
     let backup_object_store = build_backup_object_store(&args)?;
-    let update_object_store = build_update_object_store(&args)?;
     info!(
         backup_kind = backup_object_store.kind(),
-        update_kind = update_object_store.kind(),
-        "object stores enabled for backup/general artifacts and hosted updates"
+        "object store enabled for backup/general artifacts"
     );
-    let update_release_policy = UpdateReleasePolicy::new(
-        args.agent_update_allowed_channels.clone(),
-        args.agent_update_trusted_signing_keys_hex.clone(),
-    )?;
+    let update_release_policy =
+        UpdateReleasePolicy::new(args.agent_update_allowed_channels.clone())?;
     let fleet_alert_policy = FleetAlertPolicy::new(
         args.alert_memory_available_warning_ratio,
         args.alert_memory_available_critical_ratio,
@@ -640,7 +575,6 @@ async fn main() -> Result<()> {
     )?;
     info!(
         allowed_channels = args.agent_update_allowed_channels.len(),
-        trusted_signing_keys = args.agent_update_trusted_signing_keys_hex.len(),
         "agent update release policy configured"
     );
     let state = AppState {
@@ -649,7 +583,6 @@ async fn main() -> Result<()> {
         internal_token: Some(internal_token),
         gateway,
         backup_object_store: Some(backup_object_store),
-        update_object_store: Some(update_object_store),
         update_release_policy,
         fleet_alert_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
@@ -691,7 +624,11 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;
     info!(bind = %args.bind, "api listening");
-    axum::serve(listener, build_router(state)).await?;
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -764,32 +701,6 @@ fn build_backup_object_store(args: &Args) -> Result<BackupObjectStore> {
     }
 
     BackupObjectStore::filesystem(PathBuf::from(DEFAULT_BACKUP_OBJECT_STORE_DIR))
-}
-
-fn build_update_object_store(args: &Args) -> Result<BackupObjectStore> {
-    if let Some(store) = args
-        .update_object_store_dir
-        .clone()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(BackupObjectStore::filesystem)
-        .transpose()?
-    {
-        return Ok(store);
-    }
-
-    if let Some(store) = build_s3_object_store(
-        &args.update_object_endpoint,
-        &args.update_object_bucket,
-        &args.update_object_access_key,
-        &args.update_object_secret_key,
-        &args.update_object_region,
-        args.update_object_create_bucket,
-        "S3 update object storage requires VPSMAN_UPDATE_OBJECT_ENDPOINT, VPSMAN_UPDATE_OBJECT_BUCKET, VPSMAN_UPDATE_OBJECT_ACCESS_KEY, and VPSMAN_UPDATE_OBJECT_SECRET_KEY",
-    )? {
-        return Ok(store);
-    }
-
-    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_UPDATE_OBJECT_STORE_DIR))
 }
 
 fn build_s3_object_store(

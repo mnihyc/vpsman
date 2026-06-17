@@ -1939,8 +1939,7 @@
   padding: 14px;
 }
 
-.agentReleasesPanel .releaseIdentitySection,
-.agentReleasesPanel .releaseUploadSection {
+.agentReleasesPanel .releaseIdentitySection {
   grid-column: 1;
 }
 
@@ -2062,7 +2061,6 @@
   }
 
   .agentReleasesPanel .releaseIdentitySection,
-  .agentReleasesPanel .releaseUploadSection,
   .agentReleasesPanel .releaseArtifactSection {
     grid-column: 1;
   }

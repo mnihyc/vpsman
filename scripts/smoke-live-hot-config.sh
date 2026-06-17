@@ -234,6 +234,7 @@ reject_body="$(jq -nc \
     command: "hot_config",
     operation: {
       type: "hot_config",
+      apply_mode: "full_override",
       toml: $toml
     },
     selector_expression: ("id:" + $client),

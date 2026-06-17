@@ -62,6 +62,14 @@ impl ApiError {
             error: anyhow::anyhow!(code),
         }
     }
+
+    pub(crate) fn too_many_requests(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code,
+            error: anyhow::anyhow!(code),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {

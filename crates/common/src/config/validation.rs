@@ -9,7 +9,8 @@ use crate::{
     TunnelConfigBackend, TunnelEndpointSide,
 };
 
-pub const DATA_SOURCE_CONFIG_PATCH_SECTIONS: &[&str] = &["telemetry", "execution", "network"];
+pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
+    &["update", "telemetry", "execution", "network"];
 
 pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     validate_identifier(&config.client_id, "client_id", 128)?;
@@ -42,19 +43,14 @@ pub fn validate_hot_config_update(
     if updated.noise != current.noise {
         return Err("hot_config_cannot_change_noise_identity".to_string());
     }
-    if updated.update.trusted_artifact_signing_key_hex
-        != current.update.trusted_artifact_signing_key_hex
-    {
-        return Err("hot_config_cannot_change_update_signing_key".to_string());
-    }
     Ok(())
 }
 
-pub fn validate_data_source_config_patch_section(section: &str) -> Result<(), String> {
-    if DATA_SOURCE_CONFIG_PATCH_SECTIONS.contains(&section) {
+pub fn validate_incremental_config_patch_section(section: &str) -> Result<(), String> {
+    if INCREMENTAL_CONFIG_PATCH_SECTIONS.contains(&section) {
         Ok(())
     } else {
-        Err(format!("data_source_patch_section_not_allowed:{section}"))
+        Err(format!("config_patch_section_not_allowed:{section}"))
     }
 }
 
@@ -142,10 +138,6 @@ fn validate_backup_config(config: &AgentBackupConfig) -> Result<(), String> {
 }
 
 fn validate_update_config(config: &AgentUpdateConfig) -> Result<(), String> {
-    validate_optional_hex32(
-        config.trusted_artifact_signing_key_hex.as_deref(),
-        "update_trusted_artifact_signing_key_hex",
-    )?;
     validate_update_version_url(&config.unmanaged_version_url)?;
     if !(300..=604_800).contains(&config.unmanaged_interval_secs) {
         return Err("update_unmanaged_interval_secs_out_of_range".to_string());

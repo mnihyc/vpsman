@@ -3,8 +3,7 @@ use super::{
     AgentExecutionConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
     AgentExecutionPtyPolicy, AgentNetworkConfig, AgentNetworkPreset, AgentNoiseConfig,
     AgentNoiseMode, AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan,
-    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUpdateConfig,
-    AgentUserSessionsSource,
+    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
 };
 use crate::{
     plan_tunnel, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
@@ -80,30 +79,6 @@ fn validates_backup_recipient_and_limits() {
     assert_eq!(
         validate_agent_config_shape(&bad_limit).unwrap_err(),
         "backup_max_plaintext_bytes_out_of_range"
-    );
-}
-
-#[test]
-fn validates_update_artifact_signing_key() {
-    let config = AgentConfig {
-        update: AgentUpdateConfig {
-            trusted_artifact_signing_key_hex: Some("66".repeat(32)),
-            ..AgentUpdateConfig::default()
-        },
-        ..AgentConfig::default()
-    };
-    validate_agent_config_shape(&config).unwrap();
-
-    let invalid = AgentConfig {
-        update: AgentUpdateConfig {
-            trusted_artifact_signing_key_hex: Some("not-hex".to_string()),
-            ..AgentUpdateConfig::default()
-        },
-        ..AgentConfig::default()
-    };
-    assert_eq!(
-        validate_agent_config_shape(&invalid).unwrap_err(),
-        "update_trusted_artifact_signing_key_hex_must_be_32_byte_hex"
     );
 }
 
@@ -679,9 +654,6 @@ fn rejects_hot_config_identity_and_secret_changes() {
     );
 
     let mut updated = current.clone();
-    updated.update.trusted_artifact_signing_key_hex = Some("55".repeat(32));
-    assert_eq!(
-        validate_hot_config_update(&current, &updated).unwrap_err(),
-        "hot_config_cannot_change_update_signing_key"
-    );
+    updated.update.unmanaged_interval_secs = 3600;
+    validate_hot_config_update(&current, &updated).unwrap();
 }

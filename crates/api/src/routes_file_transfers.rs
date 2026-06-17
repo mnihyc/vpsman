@@ -25,6 +25,7 @@ use crate::{
     repository_file_transfers::{
         file_transfer_handoff_download_path, file_transfer_handoff_object_key,
     },
+    security::SCOPE_JOBS_READ,
     state::AppState,
     util::limit_or_default,
 };
@@ -53,7 +54,9 @@ pub(crate) async fn list_file_transfer_sessions(
     headers: HeaderMap,
     Query(query): Query<FileTransferSessionQuery>,
 ) -> Result<Json<Vec<FileTransferSessionView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     let client_id = query
         .client_id
         .as_deref()
@@ -78,7 +81,7 @@ pub(crate) async fn list_file_transfer_source_artifacts(
     Query(query): Query<crate::model::HistoryQuery>,
 ) -> Result<Json<Vec<FileTransferSourceArtifactView>>, ApiError> {
     let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
     Ok(Json(
         state
@@ -148,7 +151,7 @@ pub(crate) async fn download_file_transfer_source_artifact(
     Path(artifact_id): Path<Uuid>,
 ) -> Result<Response<Body>, ApiError> {
     let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
     let store = state
         .backup_object_store
@@ -262,7 +265,9 @@ pub(crate) async fn download_file_transfer_handoff(
     headers: HeaderMap,
     Path((client_id, session_id)): Path<(String, Uuid)>,
 ) -> Result<Response<Body>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
     validate_handoff_client_id(&client_id)?;
     let store = state
         .backup_object_store

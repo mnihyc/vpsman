@@ -230,8 +230,6 @@ export function JobDispatchPanel({
   const [hotConfigToml, setHotConfigToml] = useState("");
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
-  const [updateArtifactSignatureHex, setUpdateArtifactSignatureHex] = useState("");
-  const [updateArtifactSigningKeyHex, setUpdateArtifactSigningKeyHex] = useState("");
   const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
   const [updateCheckActivate, setUpdateCheckActivate] = useState(true);
   const [updateCheckRestartAgent, setUpdateCheckRestartAgent] = useState(true);
@@ -354,10 +352,6 @@ export function JobDispatchPanel({
     (fileTransferUploadSourceKind === "local-file" ? !!filePushSource : !!fileTransferSourceArtifactId);
   const fileTransferDownloadReady = filePath.startsWith("/");
   const backupReady = backupIncludeConfig || parseBackupPaths(backupPathsText).length > 0;
-  const updateSignatureReady =
-    (!updateArtifactSignatureHex.trim() && !updateArtifactSigningKeyHex.trim()) ||
-    (/^[0-9a-fA-F]{128}$/.test(updateArtifactSignatureHex.trim()) &&
-      /^[0-9a-fA-F]{64}$/.test(updateArtifactSigningKeyHex.trim()));
   const operationReady =
     mode === "shell"
       ? parsedArgv.length > 0
@@ -377,8 +371,7 @@ export function JobDispatchPanel({
                     ? hotConfigToml.trim().length > 0
                     : mode === "agent_update"
                         ? updateArtifactUrl.startsWith("https://") &&
-                          /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim()) &&
-                          updateSignatureReady
+                          /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim())
                         : mode === "agent_update_check"
                           ? updateCheckVersionUrl.trim().length > 0
                           : mode === "agent_update_activate"
@@ -536,8 +529,6 @@ export function JobDispatchPanel({
         setMode("agent_update");
         setUpdateArtifactUrl(operation.artifact_url);
         setUpdateSha256Hex(operation.sha256_hex);
-        setUpdateArtifactSignatureHex(operation.artifact_signature_hex ?? "");
-        setUpdateArtifactSigningKeyHex(operation.artifact_signing_key_hex ?? "");
         return;
       case "agent_update_check":
         setMode("agent_update_check");
@@ -599,8 +590,6 @@ export function JobDispatchPanel({
         hotConfigToml,
         updateArtifactUrl,
         updateSha256Hex,
-        updateArtifactSignatureHex,
-        updateArtifactSigningKeyHex,
         updateCheckVersionUrl,
         updateCheckActivate,
         updateCheckRestartAgent,
@@ -739,8 +728,6 @@ export function JobDispatchPanel({
         hotConfigToml,
         updateArtifactUrl,
         updateSha256Hex,
-        updateArtifactSignatureHex,
-        updateArtifactSigningKeyHex,
         updateCheckVersionUrl,
         updateCheckActivate,
         updateCheckRestartAgent,
@@ -969,8 +956,6 @@ export function JobDispatchPanel({
           setSupervisorEnv={setSupervisorEnv}
           setSupervisorLogBytes={setSupervisorLogBytes}
           setSupervisorName={setSupervisorName}
-          setUpdateArtifactSignatureHex={setUpdateArtifactSignatureHex}
-          setUpdateArtifactSigningKeyHex={setUpdateArtifactSigningKeyHex}
           setUpdateArtifactUrl={setUpdateArtifactUrl}
           setUpdateCheckActivate={setUpdateCheckActivate}
           setUpdateCheckRestartAgent={setUpdateCheckRestartAgent}
@@ -987,8 +972,6 @@ export function JobDispatchPanel({
           supervisorEnv={supervisorEnv}
           supervisorLogBytes={supervisorLogBytes}
           supervisorName={supervisorName}
-          updateArtifactSignatureHex={updateArtifactSignatureHex}
-          updateArtifactSigningKeyHex={updateArtifactSigningKeyHex}
           updateArtifactUrl={updateArtifactUrl}
           updateCheckActivate={updateCheckActivate}
           updateCheckRestartAgent={updateCheckRestartAgent}

@@ -146,7 +146,7 @@ export function ConfigPanel({
         <div className="sectionHeader">
           <div>
             <h2>{configTitle(subpage)}</h2>
-            <span>{actionError ?? error ?? (loading ? "Refreshing config state" : "Hot config console")}</span>
+            <span>{actionError ?? error ?? (loading ? "Refreshing config state" : "Config console")}</span>
           </div>
           <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
             <RefreshCw size={15} />
@@ -354,7 +354,7 @@ function RuleTemplateWorkspace({
                     <strong>{template.name}</strong>
                     <small>{template.description}</small>
                   </span>
-                  <em>{template.built_in ? "built-in" : "custom"}</em>
+                  <em>{template.built_in ? "predefined" : "custom"}</em>
                 </button>
               ))}
           </div>
@@ -379,7 +379,7 @@ function RuleTemplateWorkspace({
           </button>
           <button
             className="secondaryAction dangerAction"
-            disabled={pending || !selected || selected.built_in}
+            disabled={pending || !selected}
             onClick={() => selected && setDeleteTemplate(selected)}
             type="button"
           >
@@ -389,7 +389,7 @@ function RuleTemplateWorkspace({
         </div>
         <ConfirmationPrompt
           confirmLabel="Delete template"
-          detail="This removes the shared custom rule template. Built-in templates remain managed by the server."
+          detail="This removes the shared rule template. Predefined templates are operator-editable and can be recreated manually if needed."
           items={[
             { label: "Template", value: deleteTemplate?.name ?? "" },
             { label: "Domain", value: deleteTemplate?.domain ?? "" },
@@ -398,7 +398,7 @@ function RuleTemplateWorkspace({
           onConfirm={() => void deleteSelected()}
           open={deleteTemplate !== null}
           pending={pending}
-          title="Delete custom rule template"
+          title="Delete rule template"
           tone="danger"
         />
         {rendered && (
@@ -490,7 +490,11 @@ function BulkConfigApply({
         throw new Error("Bulk config apply is incomplete");
       }
       const clientIds = preview.targets.map((target) => target.id);
-      const operation: JobOperation = { type: "data_source_config_patch", toml: rendered.toml };
+      const operation: JobOperation = {
+        type: "data_source_config_patch",
+        apply_mode: "incremental_patch",
+        toml: rendered.toml,
+      };
       const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
       const built = await buildPrivilegeForJobOperation({
         clientIds,
@@ -557,7 +561,7 @@ function BulkConfigApply({
         <button className="secondaryAction" disabled={pending || !selectedTemplate} onClick={renderPatch} type="button">
           Render patch
         </button>
-        {rendered && <textarea aria-label="Bulk rendered hot-config patch" readOnly rows={8} value={rendered.toml} />}
+        {rendered && <textarea aria-label="Bulk rendered incremental config patch" readOnly rows={8} value={rendered.toml} />}
       </div>
       <div className="compactForm">
         <strong>Targets</strong>
@@ -734,6 +738,7 @@ function SingleVpsConfig({
       }
       const operation: JobOperation = {
         type: "hot_config",
+        apply_mode: "full_override",
         toml: redactedToml,
         preserve_redacted: true,
         base_config_sha256_hex: baseHash,
@@ -857,7 +862,7 @@ function configTitle(subpage: string): string {
     case "rules":
       return "Config rules";
     case "bulk":
-      return "Bulk hot config";
+      return "Bulk config patches";
     case "single":
       return "Single VPS config";
     default:

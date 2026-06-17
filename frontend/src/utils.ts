@@ -72,7 +72,7 @@ export function getHeroCopy(view: ActiveView): string {
     case "Schedules":
       return "Server-side schedule registry and due-run records";
     case "Config":
-      return "Rule-card hot config, data-source presets, and guarded full-config edits";
+      return "Rule-card patches, data-source presets, and guarded full-config edits";
     case "Audit":
       return "Operator and security events from the control plane";
     case "Tags":

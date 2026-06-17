@@ -350,19 +350,22 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "hot_config":
       return ordered([
         ["type", operation.type],
+        ["apply_mode", operation.apply_mode],
         ["toml", operation.toml],
         ["preserve_redacted", optional(operation.preserve_redacted)],
         ["base_config_sha256_hex", optional(operation.base_config_sha256_hex)],
       ]);
     case "data_source_config_patch":
-      return ordered([["type", operation.type], ["toml", operation.toml]]);
+      return ordered([
+        ["type", operation.type],
+        ["apply_mode", operation.apply_mode],
+        ["toml", operation.toml],
+      ]);
     case "agent_update":
       return ordered([
         ["type", operation.type],
         ["artifact_url", operation.artifact_url],
         ["sha256_hex", operation.sha256_hex],
-        ["artifact_signature_hex", optional(operation.artifact_signature_hex)],
-        ["artifact_signing_key_hex", optional(operation.artifact_signing_key_hex)],
       ]);
     case "agent_update_activate":
       return ordered([

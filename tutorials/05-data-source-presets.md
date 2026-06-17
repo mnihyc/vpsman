@@ -66,13 +66,13 @@ cargo run -p vpsctl -- data-source-preset-assign \
   --confirmed
 ```
 
-Render the selected config fragment for a VPS before dispatching hot config:
+Render the selected incremental config patch for a VPS:
 
 ```sh
 cargo run -p vpsctl -- data-source-hot-config --client-id edge-01
 ```
 
-Apply selected preset config through privileged hot config:
+Apply selected preset config through a privileged incremental patch:
 
 ```sh
 cargo run -p vpsctl -- data-source-hot-config-apply --client-id edge-01 --confirmed

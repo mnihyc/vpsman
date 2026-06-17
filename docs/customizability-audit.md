@@ -164,8 +164,8 @@ binary path, or one accounting source is not enough.
     server storage. Operators can save shared presets, save VPS-local presets,
     see built-in/default presets and assignment counts, and assign the selected
     preset by VPS or tag with API confirmation semantics. The panel, API, CLI,
-    and VTY can clone, diff, test, update, and preview the read-only hot-config
-    fragment rendered from a VPS's selected presets. The first Active source
+    and VTY can clone, diff, test, update, and preview the read-only config
+    patch rendered from a VPS's selected presets. The first Active source
     status read model is visible in API, CLI/VTY, and the Tags panel, including
     backup/update object-store readiness evidence, privilege-gated on-demand
     workflow evidence, and process-limit capability readiness for root-capable,
@@ -214,9 +214,9 @@ binary path, or one accounting source is not enough.
 - Curated built-in data-source presets now exist beyond defaults:
   host-mounted proc/sys telemetry, `vnstat` JSON traffic accounting, pinned
   `/usr/bin/ping`, host-mounted process inventory, pinned `w`/`who`, BusyBox
-  `ash`, runtime iproute2/tc reconciliation, S3/MinIO backup/update object
-  storage, and signed HTTPS update artifacts. These are selectable presets, not
-  automatic defaults.
+  `ash`, runtime iproute2/tc reconciliation, S3/MinIO backup object storage,
+  and external HTTPS/GitHub update artifact metadata with SHA-256 verification.
+  These are selectable presets, not automatic defaults.
 
 2026-06-02 03:19 PDT scan:
 

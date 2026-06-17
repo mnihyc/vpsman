@@ -30,6 +30,10 @@ pub struct SuiteApiConfig {
     pub alert_disk_available_critical_ratio: Option<f64>,
     pub alert_cpu_load_warning: Option<f64>,
     pub alert_cpu_load_critical: Option<f64>,
+    pub operator_auth_username_failed_attempt_limit: Option<i64>,
+    pub operator_auth_ip_failed_attempt_limit: Option<i64>,
+    pub operator_auth_failed_attempt_window_secs: Option<u64>,
+    pub operator_auth_lockout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -86,15 +90,10 @@ pub struct SuiteDatabaseConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteStorageConfig {
     pub backup_object_store_dir: Option<String>,
-    pub update_object_store_dir: Option<String>,
     pub object_endpoint: Option<String>,
     pub object_bucket: Option<String>,
     pub object_region: Option<String>,
     pub object_create_bucket: Option<bool>,
-    pub update_object_endpoint: Option<String>,
-    pub update_object_bucket: Option<String>,
-    pub update_object_region: Option<String>,
-    pub update_object_create_bucket: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -128,8 +127,6 @@ pub struct SuiteSecretRefs {
     pub privilege_verifier_key_file: Option<String>,
     pub object_access_key_file: Option<String>,
     pub object_secret_key_file: Option<String>,
-    pub update_object_access_key_file: Option<String>,
-    pub update_object_secret_key_file: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -281,6 +278,30 @@ impl SuiteConfig {
             4 * 1024 * 1024 * 1024,
             "api.artifact_max_bytes",
         )?;
+        validate_optional_i64(
+            self.api.operator_auth_username_failed_attempt_limit,
+            1,
+            1000,
+            "api.operator_auth_username_failed_attempt_limit",
+        )?;
+        validate_optional_i64(
+            self.api.operator_auth_ip_failed_attempt_limit,
+            1,
+            1000,
+            "api.operator_auth_ip_failed_attempt_limit",
+        )?;
+        validate_optional_u64(
+            self.api.operator_auth_failed_attempt_window_secs,
+            60,
+            30 * 24 * 60 * 60,
+            "api.operator_auth_failed_attempt_window_secs",
+        )?;
+        validate_optional_u64(
+            self.api.operator_auth_lockout_secs,
+            60,
+            30 * 24 * 60 * 60,
+            "api.operator_auth_lockout_secs",
+        )?;
         Ok(())
     }
 
@@ -304,15 +325,10 @@ impl SuiteConfig {
                 "database.migrations_dir".to_string(),
                 "secrets.*".to_string(),
                 "storage.backup_object_store_dir".to_string(),
-                "storage.update_object_store_dir".to_string(),
                 "storage.object_endpoint".to_string(),
                 "storage.object_bucket".to_string(),
                 "storage.object_region".to_string(),
                 "storage.object_create_bucket".to_string(),
-                "storage.update_object_endpoint".to_string(),
-                "storage.update_object_bucket".to_string(),
-                "storage.update_object_region".to_string(),
-                "storage.update_object_create_bucket".to_string(),
                 "capacity.api_db_pool".to_string(),
                 "capacity.worker_db_pool".to_string(),
                 "worker.once".to_string(),
@@ -333,6 +349,7 @@ impl SuiteConfig {
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),
                 "api.require_registered_agent_updates".to_string(),
+                "api.operator_auth_*".to_string(),
                 "worker.schedule_command_timeout_secs".to_string(),
                 "worker.tick_secs".to_string(),
                 "worker.worker_lease_secs".to_string(),

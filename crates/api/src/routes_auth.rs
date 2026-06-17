@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::HeaderMap,
     Json,
 };
@@ -13,6 +15,7 @@ use crate::{
         RefreshRequest, TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
         TotpSetupResponse, TotpUpdateOutcome,
     },
+    repository_auth::OperatorLoginAttempt,
     security::{normalize_operator_scopes, validate_operator_credentials, validate_operator_role},
     state::AppState,
 };
@@ -36,15 +39,27 @@ pub(crate) async fn bootstrap_operator(
 
 pub(crate) async fn login_operator(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_operator_credentials(&request.username, &request.password)?;
-    state
+    match state
         .repo
-        .login_operator(&request)
+        .login_operator_with_throttle(
+            &request,
+            &peer.ip().to_string(),
+            &state.operator_auth_throttle_config(),
+        )
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::unauthorized("invalid_operator_credentials"))
+    {
+        OperatorLoginAttempt::Authenticated(response) => Ok(Json(*response)),
+        OperatorLoginAttempt::InvalidCredentials => {
+            Err(ApiError::unauthorized("invalid_operator_credentials"))
+        }
+        OperatorLoginAttempt::Throttled => {
+            Err(ApiError::too_many_requests("operator_login_throttled"))
+        }
+    }
 }
 
 pub(crate) async fn refresh_operator_session(

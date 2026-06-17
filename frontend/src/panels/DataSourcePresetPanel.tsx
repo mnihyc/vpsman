@@ -252,7 +252,11 @@ export function DataSourcePresetPanel({
       }
       const rendered =
         renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : await onRenderHotConfig(renderClientId);
-      const operation: JobOperation = { type: "data_source_config_patch", toml: rendered.toml };
+      const operation: JobOperation = {
+        type: "data_source_config_patch",
+        apply_mode: "incremental_patch",
+        toml: rendered.toml,
+      };
       const selectorExpression = selectorExpressionForClientIds([renderClientId]);
       const timeoutSecs = clampInteger(applyTimeoutSecs, 1, 3600);
       const built = await buildPrivilegeForJobOperation({
@@ -379,7 +383,7 @@ export function DataSourcePresetPanel({
     pendingConfirmation === "assignment"
       ? "Confirm the selected preset and resolved VPS assignment set."
       : pendingConfirmation === "apply"
-        ? "Confirm the rendered hot-config patch for the selected VPS."
+        ? "Confirm the rendered incremental config patch for the selected VPS."
         : "Confirm updating this preset for assigned VPSs.";
   const dataSourceConfirmationItems =
     pendingConfirmation === "assignment"
@@ -578,7 +582,7 @@ export function DataSourcePresetPanel({
         <form className="compactForm presetForm" onSubmit={previewHotConfig}>
           <strong>Render selected config</strong>
           <span className="formHint">
-            Review the generated redacted hot-config patch for one VPS before applying it.
+            Review the generated incremental config patch for one VPS before applying it.
           </span>
           <label>
             <span>Review VPS</span>
@@ -599,7 +603,7 @@ export function DataSourcePresetPanel({
                 <span>{renderedHotConfig.assignments.length} selected presets</span>
                 <span>{renderedHotConfig.unsupported_domains.length} notes</span>
               </div>
-              <textarea aria-label="Rendered data-source hot-config TOML" readOnly value={renderedHotConfig.toml} />
+              <textarea aria-label="Rendered data-source config patch TOML" readOnly value={renderedHotConfig.toml} />
             </div>
           )}
           <div className="inlinePrivilege">
@@ -721,7 +725,7 @@ export function DataSourcePresetPanel({
                 <>
                   <div className="previewMeta">
                     <span>{lastTest.valid ? "valid" : "invalid"}</span>
-                    <span>{lastTest.renderable ? "hot-config renderable" : "workflow-managed"}</span>
+                    <span>{lastTest.renderable ? "incremental patch renderable" : "workflow-managed"}</span>
                   </div>
                   {lastTest.toml && <textarea aria-label="Tested preset TOML" readOnly value={lastTest.toml} />}
                   {lastTest.error && <span>{lastTest.error}</span>}
@@ -897,7 +901,6 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
     typeof evidence.server_object_store_kind === "string" ? evidence.server_object_store_kind : null;
   const artifactCount = typeof evidence.artifact_count === "number" ? evidence.artifact_count : null;
   const releaseCount = typeof evidence.release_count === "number" ? evidence.release_count : null;
-  const hostedReleaseCount = typeof evidence.hosted_release_count === "number" ? evidence.hosted_release_count : null;
   const externalReleaseCount =
     typeof evidence.external_release_count === "number" ? evidence.external_release_count : null;
   const backupRequestCount = typeof evidence.backup_request_count === "number" ? evidence.backup_request_count : null;
@@ -971,9 +974,6 @@ function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
   }
   if (releaseCount !== null) {
     parts.push(`${releaseCount} releases`);
-  }
-  if (hostedReleaseCount !== null && hostedReleaseCount > 0) {
-    parts.push(`${hostedReleaseCount} hosted`);
   }
   if (externalReleaseCount !== null && externalReleaseCount > 0) {
     parts.push(`${externalReleaseCount} external`);

@@ -334,6 +334,7 @@ mod tests {
         assert_eq!(
             target_capability_failure(
                 &JobCommand::HotConfig {
+                    apply_mode: vpsman_common::HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
                     toml: String::new(),
                     preserve_redacted: None,
                     base_config_sha256_hex: None,

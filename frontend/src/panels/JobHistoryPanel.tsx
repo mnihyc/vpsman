@@ -25,7 +25,6 @@ import type {
   ProcessSupervisorInventoryRecord,
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
-  UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
   WsJobOutputEvent,
   WsTerminalOutputEvent,
@@ -111,7 +110,6 @@ export function JobHistoryPanel({
   onCreateAgentUpdateRelease,
   onCreateArtifactCleanupJob,
   onCreateFileTransferHandoff,
-  onUploadAgentUpdateArtifact,
   onCreateJob,
   onDownloadFileBundle,
   onDownloadOutputArchive,
@@ -164,9 +162,6 @@ export function JobHistoryPanel({
     clientId: string,
     sessionId: string,
   ) => Promise<FileTransferHandoffRecord>;
-  onUploadAgentUpdateArtifact: (
-    request: UploadAgentUpdateArtifactRequest,
-  ) => Promise<AgentUpdateReleaseRecord>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDownloadOutputChunk: (
     jobId: string,
@@ -676,7 +671,6 @@ export function JobHistoryPanel({
             loading={loading}
             onCreateAgentUpdateRelease={onCreateAgentUpdateRelease}
             onRefresh={onRefresh}
-            onUploadAgentUpdateArtifact={onUploadAgentUpdateArtifact}
             releases={agentUpdateReleases}
           />
         </div>

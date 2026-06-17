@@ -1,11 +1,10 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiGetBlob, apiPost, apiPostBinary, buildListPath, isApiUnauthorized } from "../api";
+import { apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentUpdateReleaseRecord,
   CommandTemplateRecord,
   CreateAgentUpdateReleaseRequest,
-  CreateHostedAgentUpdateReleaseRequest,
   CreateJobRequest,
   CreateJobResponse,
   JobHistoryRecord,
@@ -16,8 +15,6 @@ import type {
   ProcessSupervisorInventoryRecord,
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
-  StreamedAgentUpdateArtifactRecord,
-  UploadAgentUpdateArtifactRequest,
   UpsertCommandTemplateRequest,
 } from "../types";
 import type {
@@ -544,56 +541,8 @@ export function useJobsData(
     [apiToken, loadAgentUpdateReleases, onAuditChanged],
   );
 
-  const uploadAgentUpdateArtifact = useCallback(
-    async (request: UploadAgentUpdateArtifactRequest) => {
-      const response = await apiPost<AgentUpdateReleaseRecord>("/api/v1/agent-update-releases/upload", apiToken, request);
-      await loadAgentUpdateReleases();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateReleases, onAuditChanged],
-  );
-
-  const streamAgentUpdateArtifact = useCallback(
-    async (file: File, artifactSignatureHex: string, artifactSigningKeyHex: string) => {
-      const response = await apiPostBinary<StreamedAgentUpdateArtifactRecord>(
-        "/api/v1/agent-update-artifacts/stream",
-        apiToken,
-        file,
-        {
-          "Content-Type": "application/octet-stream",
-          "x-vpsman-artifact-signature-hex": artifactSignatureHex,
-          "x-vpsman-artifact-signing-key-hex": artifactSigningKeyHex,
-          "x-vpsman-confirmed": "true",
-        },
-      );
-      return response;
-    },
-    [apiToken],
-  );
-
-  const createHostedAgentUpdateRelease = useCallback(
-    async (request: CreateHostedAgentUpdateReleaseRequest) => {
-      const response = await apiPost<AgentUpdateReleaseRecord>(
-        "/api/v1/agent-update-releases/hosted",
-        apiToken,
-        request,
-      );
-      await loadAgentUpdateReleases();
-      void onAuditChanged();
-      return response;
-    },
-    [apiToken, loadAgentUpdateReleases, onAuditChanged],
-  );
-
-
-
-
   return {
     createAgentUpdateRelease,
-    uploadAgentUpdateArtifact,
-    streamAgentUpdateArtifact,
-    createHostedAgentUpdateRelease,
     createJob,
     commandTemplates,
     agentUpdateReleases,

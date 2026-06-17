@@ -15,7 +15,7 @@ use rustls_pki_types::{CertificateDer, ServerName};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{task, time};
-use vpsman_common::{verify_update_artifact_signature, CommandOutput, OutputStream};
+use vpsman_common::{CommandOutput, OutputStream};
 
 use crate::{
     agent_binary_path::{current_agent_binary_path, rollback_path, staged_path},
@@ -26,15 +26,13 @@ use crate::{
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_ROOT_CERT_PEM_ENV: &str = "VPSMAN_UPDATE_ROOT_CERT_PEM";
+const VERSION_MANIFEST_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Clone)]
 pub(crate) struct AgentUpdateInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) artifact_url: &'a str,
     pub(crate) sha256_hex: &'a str,
-    pub(crate) artifact_signature_hex: Option<&'a str>,
-    pub(crate) artifact_signing_key_hex: Option<&'a str>,
-    pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
@@ -45,7 +43,6 @@ pub(crate) struct AgentUpdateCheckInput<'a> {
     pub(crate) version_url: &'a str,
     pub(crate) activate: bool,
     pub(crate) restart_agent: bool,
-    pub(crate) trusted_artifact_signing_key_hex: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
@@ -58,18 +55,6 @@ pub(crate) async fn execute_update_agent(
     input.cancel_token.check("agent_update")?;
     let artifact_url = input.artifact_url.to_string();
     let sha256_hex = normalize_sha256(input.sha256_hex)?;
-    let artifact_signature_hex =
-        normalize_optional_hex(input.artifact_signature_hex, 64, "artifact_signature_hex")?;
-    let artifact_signing_key_hex = normalize_optional_hex(
-        input.artifact_signing_key_hex,
-        32,
-        "artifact_signing_key_hex",
-    )?;
-    let trusted_artifact_signing_key_hex = normalize_optional_hex(
-        input.trusted_artifact_signing_key_hex,
-        32,
-        "trusted_artifact_signing_key_hex",
-    )?;
     let job_id = input.job_id;
     let cancel_token = input.cancel_token.clone();
     let output = match time::timeout(
@@ -80,9 +65,6 @@ pub(crate) async fn execute_update_agent(
                 job_id,
                 artifact_url: &artifact_url,
                 expected_sha256_hex: &sha256_hex,
-                artifact_signature_hex: artifact_signature_hex.as_deref(),
-                artifact_signing_key_hex: artifact_signing_key_hex.as_deref(),
-                trusted_artifact_signing_key_hex: trusted_artifact_signing_key_hex.as_deref(),
                 current_exe: &current_exe,
                 cancel_token: &cancel_token,
             })
@@ -109,11 +91,6 @@ pub(crate) async fn execute_update_check(
     input.cancel_token.check("agent_update_check")?;
     let job_id = input.job_id;
     let version_url = input.version_url.trim().to_string();
-    let trusted_artifact_signing_key_hex = normalize_optional_hex(
-        input.trusted_artifact_signing_key_hex,
-        32,
-        "trusted_artifact_signing_key_hex",
-    )?;
     let cancel_token = input.cancel_token.clone();
     let check = match time::timeout(
         timeout,
@@ -122,7 +99,6 @@ pub(crate) async fn execute_update_check(
             check_and_stage_update(CheckStageInput {
                 job_id,
                 version_url: &version_url,
-                trusted_artifact_signing_key_hex: trusted_artifact_signing_key_hex.as_deref(),
                 current_exe: &current_exe,
                 cancel_token: &cancel_token,
             })
@@ -165,9 +141,6 @@ struct UpdateStageInput<'a> {
     job_id: uuid::Uuid,
     artifact_url: &'a str,
     expected_sha256_hex: &'a str,
-    artifact_signature_hex: Option<&'a str>,
-    artifact_signing_key_hex: Option<&'a str>,
-    trusted_artifact_signing_key_hex: Option<&'a str>,
     current_exe: &'a Path,
     cancel_token: &'a CommandCancelToken,
 }
@@ -175,7 +148,6 @@ struct UpdateStageInput<'a> {
 struct CheckStageInput<'a> {
     job_id: uuid::Uuid,
     version_url: &'a str,
-    trusted_artifact_signing_key_hex: Option<&'a str>,
     current_exe: &'a Path,
     cancel_token: &'a CommandCancelToken,
 }
@@ -186,14 +158,33 @@ struct CheckStageResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct VersionManifest {
+struct VersionManifestHeader {
     schema_version: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionManifest {
     project: String,
     version: String,
     tag: String,
     #[serde(default)]
     commit: Option<String>,
-    assets: Vec<String>,
+    #[serde(default)]
+    assets: Vec<VersionManifestAsset>,
+    #[serde(default)]
+    checksum_manifest: Option<VersionManifestDownload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionManifestAsset {
+    name: String,
+    download_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionManifestDownload {
+    name: String,
+    download_url: String,
 }
 
 fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
@@ -207,12 +198,6 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
             input.expected_sha256_hex
         );
     }
-    let signature_status = verify_signature_policy(UpdateSignatureInput {
-        expected_sha256_hex: input.expected_sha256_hex,
-        artifact_signature_hex: input.artifact_signature_hex,
-        artifact_signing_key_hex: input.artifact_signing_key_hex,
-        trusted_artifact_signing_key_hex: input.trusted_artifact_signing_key_hex,
-    })?;
     let staged_path = staged_path(input.current_exe)?;
     let rollback_path = rollback_path(input.current_exe)?;
     input.cancel_token.check("agent_update")?;
@@ -222,7 +207,6 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
         "status": "staged",
         "sha256_hex": observed_sha256_hex,
         "size_bytes": artifact.len(),
-        "signature": signature_status,
         "staged_path": staged_path.display().to_string(),
         "rollback_path": rollback_path.display().to_string(),
         "activation": "manual_restart_required",
@@ -241,14 +225,16 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
     let manifest_bytes = fetch_update_artifact(input.version_url)
         .with_context(|| format!("failed to fetch update manifest {}", input.version_url))?;
     input.cancel_token.check("agent_update_check")?;
-    let manifest: VersionManifest =
-        serde_json::from_slice(&manifest_bytes).context("failed to parse update manifest")?;
-    if manifest.schema_version != 1 {
+    let header: VersionManifestHeader = serde_json::from_slice(&manifest_bytes)
+        .context("failed to parse update manifest header")?;
+    if header.schema_version != VERSION_MANIFEST_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported update manifest schema {}",
-            manifest.schema_version
+            header.schema_version
         );
     }
+    let manifest: VersionManifest =
+        serde_json::from_slice(&manifest_bytes).context("failed to parse update manifest")?;
     if manifest.project != "vpsman" {
         anyhow::bail!("unexpected update manifest project {}", manifest.project);
     }
@@ -284,7 +270,11 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
             staged_sha256_hex: None,
         });
     }
-    if !manifest.assets.iter().any(|asset| asset == asset_name) {
+    let Some(asset) = manifest
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+    else {
         let status = serde_json::json!({
             "type": "agent_update_check",
             "status": "asset_missing",
@@ -299,10 +289,17 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
             outputs: vec![status_output(input.job_id, status, Some(2), true)?],
             staged_sha256_hex: None,
         });
-    }
+    };
 
-    let artifact_url = sibling_update_url(input.version_url, asset_name)?;
-    let sums_url = sibling_update_url(input.version_url, "SHA256SUMS")?;
+    let checksum_manifest = manifest
+        .checksum_manifest
+        .as_ref()
+        .context("update manifest checksum entry is missing")?;
+    if checksum_manifest.name != "SHA256SUMS" {
+        anyhow::bail!("update manifest checksum entry must be SHA256SUMS");
+    }
+    let artifact_url = manifest_download_url(&asset.download_url, asset_name)?;
+    let sums_url = manifest_download_url(&checksum_manifest.download_url, "SHA256SUMS")?;
     let sums = String::from_utf8(
         fetch_update_artifact(&sums_url)
             .with_context(|| format!("failed to fetch update checksum manifest {sums_url}"))?,
@@ -327,9 +324,6 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
         job_id: input.job_id,
         artifact_url: &artifact_url,
         expected_sha256_hex: &expected_sha256_hex,
-        artifact_signature_hex: None,
-        artifact_signing_key_hex: None,
-        trusted_artifact_signing_key_hex: input.trusted_artifact_signing_key_hex,
         current_exe: input.current_exe,
         cancel_token: input.cancel_token,
     })?;
@@ -338,50 +332,6 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
         outputs,
         staged_sha256_hex: Some(expected_sha256_hex),
     })
-}
-
-struct UpdateSignatureInput<'a> {
-    expected_sha256_hex: &'a str,
-    artifact_signature_hex: Option<&'a str>,
-    artifact_signing_key_hex: Option<&'a str>,
-    trusted_artifact_signing_key_hex: Option<&'a str>,
-}
-
-fn verify_signature_policy(input: UpdateSignatureInput<'_>) -> Result<&'static str> {
-    match input.trusted_artifact_signing_key_hex {
-        Some(trusted_key) => {
-            let signature = input
-                .artifact_signature_hex
-                .context("trusted update artifact signing key requires artifact_signature_hex")?;
-            let signing_key = input
-                .artifact_signing_key_hex
-                .context("trusted update artifact signing key requires artifact_signing_key_hex")?;
-            if signing_key != trusted_key {
-                anyhow::bail!("update artifact signing key does not match trusted key");
-            }
-            if !verify_update_artifact_signature(signing_key, signature, input.expected_sha256_hex)
-            {
-                anyhow::bail!("update artifact signature verification failed");
-            }
-            Ok("verified")
-        }
-        None => match (input.artifact_signature_hex, input.artifact_signing_key_hex) {
-            (Some(signature), Some(signing_key)) => {
-                if !verify_update_artifact_signature(
-                    signing_key,
-                    signature,
-                    input.expected_sha256_hex,
-                ) {
-                    anyhow::bail!("update artifact signature verification failed");
-                }
-                Ok("verified_unpinned")
-            }
-            (None, None) => Ok("not_provided"),
-            _ => anyhow::bail!(
-                "artifact_signature_hex and artifact_signing_key_hex must be provided together"
-            ),
-        },
-    }
 }
 
 fn persist_staged_artifact(
@@ -445,46 +395,17 @@ fn agent_asset_name() -> Option<&'static str> {
     }
 }
 
-fn sibling_update_url(base_url: &str, sibling_name: &str) -> Result<String> {
-    if sibling_name.contains('/') || sibling_name.contains('\\') || sibling_name.is_empty() {
-        anyhow::bail!("update manifest sibling name is invalid");
+fn manifest_download_url(value: &str, asset_name: &str) -> Result<String> {
+    if asset_name.contains('/') || asset_name.contains('\\') || asset_name.is_empty() {
+        anyhow::bail!("update manifest asset name is invalid");
     }
-    let base_url = base_url.trim();
-    if let Some(path) = base_url.strip_prefix("file://") {
-        if !path.starts_with('/') {
-            anyhow::bail!("file update manifest URL requires an absolute path");
-        }
-        let parent = Path::new(path)
-            .parent()
-            .context("file update manifest URL has no parent directory")?;
-        return Ok(format!("file://{}", parent.join(sibling_name).display()));
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("update manifest download URL for {asset_name} is empty");
     }
-
-    let scheme_end = base_url
-        .find("://")
-        .context("update manifest URL is missing scheme")?;
-    let scheme = &base_url[..scheme_end];
-    if !matches!(scheme, "https" | "http") {
-        anyhow::bail!("update manifest URL scheme is unsupported");
-    }
-    let rest = &base_url[scheme_end + 3..];
-    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.is_empty() || authority.contains('@') {
-        anyhow::bail!("update manifest URL authority is invalid");
-    }
-    let suffix = &rest[authority_end..];
-    let path = suffix.split('?').next().unwrap_or("/");
-    let path = if path.is_empty() || path.starts_with('?') {
-        "/"
-    } else {
-        path
-    };
-    let parent = match path.rsplit_once('/') {
-        Some(("", _)) | None => "/".to_string(),
-        Some((parent, _)) => format!("{parent}/"),
-    };
-    Ok(format!("{scheme}://{authority}{parent}{sibling_name}"))
+    parse_artifact_url(value)
+        .with_context(|| format!("update manifest download URL for {asset_name} is invalid"))?;
+    Ok(value.to_string())
 }
 
 fn checksum_for_asset(checksums: &str, asset_name: &str) -> Result<String> {
@@ -712,21 +633,6 @@ fn normalize_sha256(value: &str) -> Result<String> {
     Ok(value)
 }
 
-fn normalize_optional_hex(
-    value: Option<&str>,
-    byte_len: usize,
-    field: &str,
-) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim().to_ascii_lowercase();
-    if value.len() != byte_len * 2 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        anyhow::bail!("{field} must be {byte_len} byte hex");
-    }
-    Ok(Some(value))
-}
-
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
@@ -859,12 +765,11 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     use super::{
-        add_pem_certificates, decode_http_response, normalize_sha256, parse_artifact_url,
-        sha256_hex, stage_update_artifact, UpdateStageInput,
+        add_pem_certificates, agent_asset_name, check_and_stage_update, decode_http_response,
+        normalize_sha256, parse_artifact_url, sha256_hex, stage_update_artifact, CheckStageInput,
+        UpdateStageInput,
     };
-    use ed25519_dalek::SigningKey;
     use rustls::RootCertStore;
-    use vpsman_common::sign_update_artifact_hash;
 
     #[test]
     fn parses_artifact_urls_and_rejects_remote_http() {
@@ -893,9 +798,6 @@ mod tests {
             job_id: uuid::Uuid::new_v4(),
             artifact_url: &format!("file://{}", artifact.display()),
             expected_sha256_hex: &hash,
-            artifact_signature_hex: None,
-            artifact_signing_key_hex: None,
-            trusted_artifact_signing_key_hex: None,
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
@@ -915,8 +817,111 @@ mod tests {
         );
         let status: serde_json::Value = serde_json::from_slice(&output.data).unwrap();
         assert_eq!(status["status"], "staged");
-        assert_eq!(status["signature"], "not_provided");
         assert!(status.get("artifact_url").is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_uses_explicit_manifest_download_urls() {
+        let Some(asset_name) = agent_asset_name() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
+        let manifest_dir = dir.join("manifest");
+        let asset_dir = dir.join("assets");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::create_dir_all(&asset_dir).unwrap();
+        let current = dir.join("vpsman-agent");
+        let artifact = asset_dir.join(asset_name);
+        let sums = asset_dir.join("SHA256SUMS");
+        let manifest_path = manifest_dir.join("version.json");
+        fs::write(&current, b"old-agent").unwrap();
+        fs::write(&artifact, b"new-agent").unwrap();
+        let artifact_sha = sha256_hex(b"new-agent");
+        fs::write(&sums, format!("{artifact_sha}  {asset_name}\n")).unwrap();
+        let artifact_url = format!("file://{}", artifact.display());
+        let sums_url = format!("file://{}", sums.display());
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": 2,
+                "project": "vpsman",
+                "version": "999.0.0",
+                "tag": "v999.0.0",
+                "commit": "unit-test",
+                "assets": [
+                    {
+                        "name": asset_name,
+                        "download_url": artifact_url.clone(),
+                    }
+                ],
+                "checksum_manifest": {
+                    "name": "SHA256SUMS",
+                    "download_url": sums_url.clone(),
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            result.staged_sha256_hex.as_deref(),
+            Some(artifact_sha.as_str())
+        );
+        assert_eq!(
+            fs::read(dir.join("vpsman-agent.next")).unwrap(),
+            b"new-agent"
+        );
+        let status: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(status["status"], "staging");
+        assert_eq!(status["artifact_url"], artifact_url);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_rejects_legacy_name_only_manifest() {
+        let Some(asset_name) = agent_asset_name() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("vpsman-agent");
+        let manifest_path = dir.join("version.json");
+        fs::write(&current, b"old-agent").unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": 1,
+                "project": "vpsman",
+                "version": "999.0.0",
+                "tag": "v999.0.0",
+                "assets": [asset_name],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = match check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+        }) {
+            Ok(_) => panic!("legacy update manifest unexpectedly passed"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("unsupported update manifest schema 1"));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -934,56 +939,11 @@ mod tests {
             job_id: uuid::Uuid::new_v4(),
             artifact_url: &format!("file://{}", artifact.display()),
             expected_sha256_hex: &"00".repeat(32),
-            artifact_signature_hex: None,
-            artifact_signing_key_hex: None,
-            trusted_artifact_signing_key_hex: None,
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
         .is_err());
         assert!(!dir.join("vpsman-agent.next").exists());
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn verifies_signed_artifact_before_staging_when_trusted_key_is_pinned() {
-        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        let current = dir.join("vpsman-agent");
-        let artifact = dir.join("vpsman-agent-new");
-        fs::write(&current, b"old-agent").unwrap();
-        fs::write(&artifact, b"signed-agent").unwrap();
-        let hash = sha256_hex(b"signed-agent");
-        let signing_key = SigningKey::from_bytes(&[41_u8; 32]);
-        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
-        let signature_hex = hex::encode(sign_update_artifact_hash(&signing_key, &hash));
-
-        let output = stage_update_artifact(UpdateStageInput {
-            job_id: uuid::Uuid::new_v4(),
-            artifact_url: &format!("file://{}", artifact.display()),
-            expected_sha256_hex: &hash,
-            artifact_signature_hex: Some(&signature_hex),
-            artifact_signing_key_hex: Some(&public_key_hex),
-            trusted_artifact_signing_key_hex: Some(&public_key_hex),
-            current_exe: &current,
-            cancel_token: &crate::command_worker::CommandCancelToken::default(),
-        })
-        .unwrap();
-        let status: serde_json::Value = serde_json::from_slice(&output.data).unwrap();
-        assert_eq!(status["signature"], "verified");
-
-        assert!(stage_update_artifact(UpdateStageInput {
-            job_id: uuid::Uuid::new_v4(),
-            artifact_url: &format!("file://{}", artifact.display()),
-            expected_sha256_hex: &hash,
-            artifact_signature_hex: Some(&signature_hex),
-            artifact_signing_key_hex: Some(&public_key_hex),
-            trusted_artifact_signing_key_hex: Some(&"00".repeat(32)),
-            current_exe: &current,
-            cancel_token: &crate::command_worker::CommandCancelToken::default(),
-        })
-        .is_err());
 
         let _ = fs::remove_dir_all(dir);
     }

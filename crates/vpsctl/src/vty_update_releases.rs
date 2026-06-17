@@ -1,9 +1,7 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 
 use crate::{
-    commands_config::{agent_update_artifact_upload_response, validate_update_input},
+    commands_config::validate_update_input,
     http::{http_get, http_post_json},
 };
 
@@ -14,26 +12,11 @@ pub(crate) struct VtyAgentUpdateReleaseRecordRequest {
     channel: String,
     artifact_url: String,
     sha256_hex: String,
-    artifact_signature_hex: String,
-    artifact_signing_key_hex: String,
-    rollback_artifact_file: Option<PathBuf>,
     rollback_artifact_url: Option<String>,
-    rollback_signing_seed_hex: Option<String>,
+    rollback_sha256_hex: Option<String>,
     size_bytes: Option<i64>,
+    rollback_size_bytes: Option<i64>,
     notes: Option<String>,
-}
-
-#[derive(Debug)]
-pub(crate) struct VtyAgentUpdateArtifactUploadRequest {
-    name: String,
-    version: String,
-    channel: String,
-    artifact_file: PathBuf,
-    signing_seed_hex: String,
-    rollback_artifact_file: Option<PathBuf>,
-    rollback_signing_seed_hex: Option<String>,
-    notes: Option<String>,
-    stream: bool,
 }
 
 pub(crate) fn parse_vty_agent_update_release_record(
@@ -44,12 +27,10 @@ pub(crate) fn parse_vty_agent_update_release_record(
     let mut channel = "stable".to_string();
     let mut artifact_url = None;
     let mut sha256_hex = None;
-    let mut artifact_signature_hex = None;
-    let mut artifact_signing_key_hex = None;
-    let mut rollback_artifact_file = None;
     let mut rollback_artifact_url = None;
-    let mut rollback_signing_seed_hex = None;
+    let mut rollback_sha256_hex = None;
     let mut size_bytes = None;
+    let mut rollback_size_bytes = None;
     let mut notes = None;
     let mut confirmed = false;
     let mut index = 0;
@@ -98,32 +79,6 @@ pub(crate) fn parse_vty_agent_update_release_record(
                 );
                 index += 2;
             }
-            "--artifact-signature-hex" => {
-                artifact_signature_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-signature-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--artifact-signing-key-hex" => {
-                artifact_signing_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-signing-key-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--rollback-artifact-file" => {
-                rollback_artifact_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollback-artifact-file requires a path")?,
-                ));
-                index += 2;
-            }
             "--rollback-artifact-url" => {
                 rollback_artifact_url = Some(
                     tokens
@@ -133,11 +88,11 @@ pub(crate) fn parse_vty_agent_update_release_record(
                 );
                 index += 2;
             }
-            "--rollback-signing-seed-hex" => {
-                rollback_signing_seed_hex = Some(
+            "--rollback-sha256-hex" => {
+                rollback_sha256_hex = Some(
                     tokens
                         .get(index + 1)
-                        .context("--rollback-signing-seed-hex requires a value")?
+                        .context("--rollback-sha256-hex requires a value")?
                         .to_string(),
                 );
                 index += 2;
@@ -149,6 +104,16 @@ pub(crate) fn parse_vty_agent_update_release_record(
                         .context("--size-bytes requires a value")?
                         .parse()
                         .context("--size-bytes must be an integer")?,
+                );
+                index += 2;
+            }
+            "--rollback-size-bytes" => {
+                rollback_size_bytes = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--rollback-size-bytes requires a value")?
+                        .parse()
+                        .context("--rollback-size-bytes must be an integer")?,
                 );
                 index += 2;
             }
@@ -170,35 +135,22 @@ pub(crate) fn parse_vty_agent_update_release_record(
     }
     anyhow::ensure!(
         confirmed,
-        "agent-update-release-record requires --confirmed because it records trusted update metadata"
+        "agent-update-release-record requires --confirmed because it records update metadata"
     );
     let artifact_url =
         artifact_url.context("agent-update-release-record requires --artifact-url <https-url>")?;
     let sha256_hex =
         sha256_hex.context("agent-update-release-record requires --sha256-hex <sha256>")?;
-    let artifact_signature_hex = artifact_signature_hex
-        .context("agent-update-release-record requires --artifact-signature-hex <signature>")?;
-    let artifact_signing_key_hex = artifact_signing_key_hex
-        .context("agent-update-release-record requires --artifact-signing-key-hex <key>")?;
-    validate_update_input(
-        &artifact_url,
-        &sha256_hex,
-        Some(&artifact_signature_hex),
-        Some(&artifact_signing_key_hex),
-    )?;
-    if rollback_artifact_file.is_some() {
-        let rollback_artifact_url = rollback_artifact_url
-            .as_deref()
-            .context("--rollback-artifact-url is required with --rollback-artifact-file")?;
-        anyhow::ensure!(
-            rollback_artifact_url.starts_with("https://"),
-            "rollback artifact URL must use https://"
-        );
-    } else {
-        anyhow::ensure!(
-            rollback_artifact_url.is_none() && rollback_signing_seed_hex.is_none(),
-            "--rollback-artifact-file is required when rollback URL or rollback signing seed is set"
-        );
+    validate_update_input(&artifact_url, &sha256_hex)?;
+    match (
+        rollback_artifact_url.as_deref(),
+        rollback_sha256_hex.as_deref(),
+    ) {
+        (Some(url), Some(sha256)) => validate_update_input(url, sha256)?,
+        (None, None) => {}
+        _ => anyhow::bail!(
+            "--rollback-artifact-url and --rollback-sha256-hex must be provided together"
+        ),
     }
     Ok(VtyAgentUpdateReleaseRecordRequest {
         name: name.context("agent-update-release-record requires --name <name>")?,
@@ -206,127 +158,11 @@ pub(crate) fn parse_vty_agent_update_release_record(
         channel,
         artifact_url,
         sha256_hex: sha256_hex.to_ascii_lowercase(),
-        artifact_signature_hex: artifact_signature_hex.to_ascii_lowercase(),
-        artifact_signing_key_hex: artifact_signing_key_hex.to_ascii_lowercase(),
-        rollback_artifact_file,
         rollback_artifact_url,
-        rollback_signing_seed_hex,
+        rollback_sha256_hex: rollback_sha256_hex.map(|value| value.to_ascii_lowercase()),
         size_bytes,
+        rollback_size_bytes,
         notes,
-    })
-}
-
-pub(crate) fn parse_vty_agent_update_artifact_upload(
-    tokens: &[&str],
-) -> Result<VtyAgentUpdateArtifactUploadRequest> {
-    let mut name = None;
-    let mut version = None;
-    let mut channel = "stable".to_string();
-    let mut artifact_file = None;
-    let mut signing_seed_hex = None;
-    let mut rollback_artifact_file = None;
-    let mut rollback_signing_seed_hex = None;
-    let mut notes = None;
-    let mut stream = false;
-    let mut confirmed = false;
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--name" => {
-                name = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--name requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--version" => {
-                version = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--version requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--channel" => {
-                channel = tokens
-                    .get(index + 1)
-                    .context("--channel requires a value")?
-                    .to_string();
-                index += 2;
-            }
-            "--artifact-file" => {
-                artifact_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-file requires a path")?,
-                ));
-                index += 2;
-            }
-            "--signing-seed-hex" => {
-                signing_seed_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--signing-seed-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--rollback-artifact-file" => {
-                rollback_artifact_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollback-artifact-file requires a path")?,
-                ));
-                index += 2;
-            }
-            "--rollback-signing-seed-hex" => {
-                rollback_signing_seed_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--rollback-signing-seed-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--note" => {
-                notes = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--note requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--stream" => {
-                stream = true;
-                index += 1;
-            }
-            "--confirmed" => {
-                confirmed = true;
-                index += 1;
-            }
-            other => anyhow::bail!("unknown agent-update-artifact-upload option {other}"),
-        }
-    }
-    anyhow::ensure!(
-        confirmed,
-        "agent-update-artifact-upload requires --confirmed because it uploads trusted update bytes"
-    );
-    Ok(VtyAgentUpdateArtifactUploadRequest {
-        name: name.context("agent-update-artifact-upload requires --name <name>")?,
-        version: version.context("agent-update-artifact-upload requires --version <version>")?,
-        channel,
-        artifact_file: artifact_file
-            .context("agent-update-artifact-upload requires --artifact-file <path>")?,
-        signing_seed_hex: signing_seed_hex
-            .context("agent-update-artifact-upload requires --signing-seed-hex <seed>")?,
-        rollback_artifact_file,
-        rollback_signing_seed_hex,
-        notes,
-        stream,
     })
 }
 
@@ -365,30 +201,6 @@ pub(crate) fn submit_vty_agent_update_release_record(
     token: Option<&str>,
     request: VtyAgentUpdateReleaseRecordRequest,
 ) -> Result<String> {
-    let rollback_signature =
-        if let Some(rollback_artifact_file) = request.rollback_artifact_file.as_ref() {
-            let rollback_artifact_url = request
-                .rollback_artifact_url
-                .as_deref()
-                .context("--rollback-artifact-url is required with --rollback-artifact-file")?;
-            let rollback_signing_seed_hex = request
-                .rollback_signing_seed_hex
-                .as_deref()
-                .context("--rollback-signing-seed-hex is required with --rollback-artifact-file")?;
-            let signature = crate::commands_config::build_update_signature(
-                rollback_artifact_file,
-                rollback_signing_seed_hex,
-            )?;
-            validate_update_input(
-                rollback_artifact_url,
-                &signature.artifact_sha256_hex,
-                Some(&signature.artifact_signature_hex),
-                Some(&signature.artifact_signing_key_hex),
-            )?;
-            Some((rollback_artifact_url.to_string(), signature))
-        } else {
-            None
-        };
     http_post_json(
         api_url,
         "/api/v1/agent-update-releases",
@@ -399,38 +211,13 @@ pub(crate) fn submit_vty_agent_update_release_record(
             "channel": request.channel,
             "artifact_url": request.artifact_url,
             "artifact_sha256_hex": request.sha256_hex,
-            "artifact_signature_hex": request.artifact_signature_hex,
-            "artifact_signing_key_hex": request.artifact_signing_key_hex,
-            "rollback_artifact_sha256_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_sha256_hex.clone()),
-            "rollback_artifact_signature_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_signature_hex.clone()),
-            "rollback_artifact_signing_key_hex": rollback_signature.as_ref().map(|(_, signature)| signature.artifact_signing_key_hex.clone()),
-            "rollback_artifact_url": rollback_signature.as_ref().map(|(url, _)| url.clone()),
-            "rollback_size_bytes": rollback_signature.as_ref().map(|(_, signature)| signature.size_bytes),
+            "rollback_artifact_sha256_hex": request.rollback_sha256_hex,
+            "rollback_artifact_url": request.rollback_artifact_url,
+            "rollback_size_bytes": request.rollback_size_bytes,
             "size_bytes": request.size_bytes,
             "notes": request.notes,
             "confirmed": true,
         }),
-    )
-}
-
-pub(crate) fn submit_vty_agent_update_artifact_upload(
-    api_url: &str,
-    token: Option<&str>,
-    request: VtyAgentUpdateArtifactUploadRequest,
-) -> Result<String> {
-    agent_update_artifact_upload_response(
-        api_url,
-        token,
-        request.name,
-        request.version,
-        request.channel,
-        request.artifact_file,
-        request.signing_seed_hex,
-        request.rollback_artifact_file,
-        request.rollback_signing_seed_hex,
-        request.notes,
-        true,
-        request.stream,
     )
 }
 
@@ -503,13 +290,11 @@ fn parse_vty_limit_command(command: &str, command_name: &'static str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
-    use vpsman_common::sign_update_artifact_hash;
 
     #[test]
     fn parses_vty_agent_update_release_record() {
-        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
         let sha256_hex = "aa".repeat(32);
+        let rollback_sha256_hex = "bb".repeat(32);
         let request = parse_vty_agent_update_release_record(&[
             "--name",
             "vpsman-agent",
@@ -521,18 +306,14 @@ mod tests {
             "https://updates.example/vpsman-agent",
             "--sha256-hex",
             &sha256_hex,
-            "--artifact-signature-hex",
-            &hex::encode(sign_update_artifact_hash(&signing_key, &sha256_hex)),
-            "--artifact-signing-key-hex",
-            &hex::encode(signing_key.verifying_key().to_bytes()),
-            "--rollback-artifact-file",
-            "./target/vpsman-agent.rollback",
             "--rollback-artifact-url",
             "https://updates.example/vpsman-agent.rollback",
-            "--rollback-signing-seed-hex",
-            &"10".repeat(32),
+            "--rollback-sha256-hex",
+            &rollback_sha256_hex,
             "--size-bytes",
             "1024",
+            "--rollback-size-bytes",
+            "512",
             "--confirmed",
         ])
         .unwrap();
@@ -541,51 +322,15 @@ mod tests {
         assert_eq!(request.version, "1.2.3");
         assert_eq!(request.channel, "stable");
         assert_eq!(request.size_bytes, Some(1024));
-        assert_eq!(
-            request.rollback_artifact_file.as_deref(),
-            Some(std::path::Path::new("./target/vpsman-agent.rollback"))
-        );
+        assert_eq!(request.rollback_size_bytes, Some(512));
         assert_eq!(
             request.rollback_artifact_url.as_deref(),
             Some("https://updates.example/vpsman-agent.rollback")
         );
-    }
-
-    #[test]
-    fn parses_vty_agent_update_artifact_upload() {
-        let rollback_seed = "22".repeat(32);
-        let request = parse_vty_agent_update_artifact_upload(&[
-            "--name",
-            "vpsman-agent",
-            "--version",
-            "1.2.3",
-            "--channel",
-            "stable",
-            "--artifact-file",
-            "./target/vpsman-agent",
-            "--signing-seed-hex",
-            &"11".repeat(32),
-            "--rollback-artifact-file",
-            "./target/vpsman-agent.rollback",
-            "--rollback-signing-seed-hex",
-            &rollback_seed,
-            "--note",
-            "hosted",
-            "--stream",
-            "--confirmed",
-        ])
-        .unwrap();
-
-        assert_eq!(request.name, "vpsman-agent");
-        assert_eq!(request.version, "1.2.3");
-        assert_eq!(request.channel, "stable");
-        assert!(request.rollback_artifact_file.is_some());
         assert_eq!(
-            request.rollback_signing_seed_hex.as_deref(),
-            Some(rollback_seed.as_str())
+            request.rollback_sha256_hex.as_deref(),
+            Some(&*rollback_sha256_hex)
         );
-        assert_eq!(request.notes.as_deref(), Some("hosted"));
-        assert!(request.stream);
     }
 
     #[test]
@@ -601,11 +346,18 @@ mod tests {
     #[test]
     fn rejects_unconfirmed_or_bad_vty_agent_update_release_record() {
         assert!(parse_vty_agent_update_release_record(&["--name", "vpsman-agent"]).is_err());
-        assert!(parse_vty_agent_update_artifact_upload(&[
+        assert!(parse_vty_agent_update_release_record(&[
             "--name",
             "vpsman-agent",
-            "--artifact-file",
-            "./agent.bin"
+            "--version",
+            "1.2.3",
+            "--artifact-url",
+            "https://updates.example/vpsman-agent",
+            "--sha256-hex",
+            &"aa".repeat(32),
+            "--rollback-artifact-url",
+            "https://updates.example/vpsman-agent.rollback",
+            "--confirmed",
         ])
         .is_err());
         assert!(submit_vty_agent_update_releases(

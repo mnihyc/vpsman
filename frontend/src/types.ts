@@ -1352,19 +1352,9 @@ export type AgentUpdateReleaseRecord = {
   channel: string;
   status: AgentUpdateReleaseStatus;
   artifact_sha256_hex: string;
-  artifact_signature_provided: boolean;
-  artifact_signature_sha256_hex: string | null;
-  artifact_signing_key_sha256_hex: string;
   artifact_url_sha256_hex: string | null;
-  artifact_object_key: string | null;
-  artifact_download_path: string | null;
   rollback_artifact_sha256_hex: string | null;
-  rollback_artifact_signature_provided: boolean;
-  rollback_artifact_signature_sha256_hex: string | null;
-  rollback_artifact_signing_key_sha256_hex: string | null;
   rollback_artifact_url_sha256_hex: string | null;
-  rollback_artifact_object_key: string | null;
-  rollback_artifact_download_path: string | null;
   rollback_size_bytes: number | null;
   size_bytes: number | null;
   notes: string | null;
@@ -1377,52 +1367,10 @@ export type CreateAgentUpdateReleaseRequest = {
   channel: string;
   artifact_url: string;
   artifact_sha256_hex: string;
-  artifact_signature_hex: string;
-  artifact_signing_key_hex: string;
   rollback_artifact_sha256_hex?: string | null;
-  rollback_artifact_signature_hex?: string | null;
-  rollback_artifact_signing_key_hex?: string | null;
   rollback_artifact_url?: string | null;
   rollback_size_bytes?: number | null;
   size_bytes?: number | null;
-  notes?: string | null;
-  confirmed: boolean;
-};
-
-export type UploadAgentUpdateArtifactRequest = {
-  name: string;
-  version: string;
-  channel: string;
-  artifact_base64: string;
-  artifact_signature_hex: string;
-  artifact_signing_key_hex: string;
-  rollback_artifact_base64?: string | null;
-  rollback_artifact_signature_hex?: string | null;
-  rollback_artifact_signing_key_hex?: string | null;
-  notes?: string | null;
-  confirmed: boolean;
-};
-
-export type StreamedAgentUpdateArtifactRecord = {
-  artifact_sha256_hex: string;
-  artifact_signature_provided: boolean;
-  artifact_signature_sha256_hex: string;
-  artifact_signing_key_sha256_hex: string;
-  artifact_object_key: string;
-  artifact_download_path: string;
-  size_bytes: number;
-};
-
-export type CreateHostedAgentUpdateReleaseRequest = {
-  name: string;
-  version: string;
-  channel: string;
-  artifact_sha256_hex: string;
-  artifact_signature_hex: string;
-  artifact_signing_key_hex: string;
-  rollback_artifact_sha256_hex?: string | null;
-  rollback_artifact_signature_hex?: string | null;
-  rollback_artifact_signing_key_hex?: string | null;
   notes?: string | null;
   confirmed: boolean;
 };
@@ -1560,17 +1508,16 @@ export type JobOperation =
   | { type: "config_read" }
   | {
       type: "hot_config";
+      apply_mode: "full_override";
       toml: string;
       preserve_redacted?: boolean | null;
       base_config_sha256_hex?: string | null;
     }
-  | { type: "data_source_config_patch"; toml: string }
+  | { type: "data_source_config_patch"; apply_mode: "incremental_patch"; toml: string }
   | {
       type: "agent_update";
       artifact_url: string;
       sha256_hex: string;
-      artifact_signature_hex?: string;
-      artifact_signing_key_hex?: string;
     }
   | {
       type: "agent_update_activate";

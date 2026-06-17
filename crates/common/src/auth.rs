@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -169,50 +168,6 @@ pub fn verify_privilege_assertion(
     Ok(intent_hash_hex)
 }
 
-pub fn sign_update_artifact_hash(signing_key: &SigningKey, sha256_hex: &str) -> Vec<u8> {
-    signing_key
-        .sign(&update_artifact_signature_payload(sha256_hex))
-        .to_bytes()
-        .to_vec()
-}
-
-pub fn verify_update_artifact_signature(
-    artifact_signing_key_hex: &str,
-    artifact_signature_hex: &str,
-    sha256_hex: &str,
-) -> bool {
-    let Ok(key_bytes) = hex::decode(artifact_signing_key_hex) else {
-        return false;
-    };
-    let Ok(key_bytes) = <[u8; 32]>::try_from(key_bytes.as_slice()) else {
-        return false;
-    };
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) else {
-        return false;
-    };
-    let Ok(signature_bytes) = hex::decode(artifact_signature_hex) else {
-        return false;
-    };
-    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
-        return false;
-    };
-    verifying_key
-        .verify(&update_artifact_signature_payload(sha256_hex), &signature)
-        .is_ok()
-}
-
-fn update_artifact_signature_payload(sha256_hex: &str) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(96);
-    push_len_prefixed(&mut payload, b"vpsman-update-artifact-v1");
-    push_len_prefixed(&mut payload, sha256_hex.as_bytes());
-    payload
-}
-
-fn push_len_prefixed(dst: &mut Vec<u8>, value: &[u8]) {
-    dst.extend_from_slice(&(value.len() as u32).to_be_bytes());
-    dst.extend_from_slice(value);
-}
-
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -226,30 +181,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn update_artifact_signature_rejects_hash_tampering() {
-        let signing = SigningKey::from_bytes(&[23_u8; 32]);
-        let public_key_hex = hex::encode(signing.verifying_key().to_bytes());
-        let sha256_hex = "ab".repeat(32);
-        let signature_hex = hex::encode(sign_update_artifact_hash(&signing, &sha256_hex));
-
-        assert!(verify_update_artifact_signature(
-            &public_key_hex,
-            &signature_hex,
-            &sha256_hex
-        ));
-        assert!(!verify_update_artifact_signature(
-            &public_key_hex,
-            &signature_hex,
-            &"cd".repeat(32)
-        ));
-        assert!(!verify_update_artifact_signature(
-            &"00".repeat(32),
-            &signature_hex,
-            &sha256_hex
-        ));
-    }
 
     #[test]
     fn privilege_assertion_authorizes_once_for_exact_intent() {

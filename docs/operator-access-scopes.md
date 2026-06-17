@@ -14,7 +14,8 @@ role receives the scopes needed for normal daily operation. The default
   job status, target status, audit metadata, alert state, data-source readiness,
   topology summaries, and other non-payload operational status.
 - `jobs:read`: durable job output payloads, output archives, file-download
-  payloads, output chunks, and output comparison previews.
+  payloads, output chunks, output comparison previews, file-transfer session
+  records, file-transfer source artifacts, and file-transfer handoff downloads.
 - `terminal:read`: terminal session records and retained PTY replay bytes.
 - `integrations:read`: webhook rules, webhook dry runs, webhook deliveries,
   alert notification channels, and alert notification deliveries.
@@ -22,8 +23,8 @@ role receives the scopes needed for normal daily operation. The default
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
 - `config:read`: data-source preset definitions, preset assignments,
-  diff/test output, rendered agent hot config, hot-config rule templates, and
-  rendered hot-config patches.
+  diff/test output, rendered agent config, config rule templates, rendered
+  incremental config patches, and private agent-update release metadata.
 - `network:read`: full tunnel plans, including saved input and generated
   runtime plan details.
 

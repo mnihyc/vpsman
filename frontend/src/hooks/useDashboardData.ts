@@ -369,7 +369,6 @@ export function useDashboardData(activeView: ActiveView) {
     createJob: jobs.createJob,
     createArtifactCleanupJob: jobs.createArtifactCleanupJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
-    uploadAgentUpdateArtifact: jobs.uploadAgentUpdateArtifact,
     createDataSourcePreset: inventory.createDataSourcePreset,
     createSchedule: schedules.createSchedule,
     updateSchedule: schedules.updateSchedule,

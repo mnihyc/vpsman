@@ -147,6 +147,257 @@ async fn concurrent_refresh_operator_session_mints_one_replacement() {
         .is_none());
 }
 
+#[tokio::test]
+async fn operator_login_throttle_locks_username_and_success_clears_username_bucket() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    repo.bootstrap_operator(&BootstrapOperatorRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+    })
+    .await
+    .unwrap();
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 2,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 60,
+        lockout_secs: 60,
+    };
+
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: "wrong-password-123".to_string(),
+                totp_code: None,
+            },
+            "203.0.113.10",
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::InvalidCredentials
+    ));
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.10",
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+
+    for _ in 0..2 {
+        assert!(matches!(
+            repo.login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "wrong-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.10",
+                &throttle,
+            )
+            .await
+            .unwrap(),
+            repository_auth::OperatorLoginAttempt::InvalidCredentials
+        ));
+    }
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.10",
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::Throttled
+    ));
+
+    let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
+    assert!(audit_json.contains("operator_auth.login_after_failures"));
+    assert!(audit_json.contains("operator_auth.lockout_created"));
+    assert!(audit_json.contains("\"scope_kind\":\"username\""));
+    assert!(!audit_json.contains("\"scope_kind\":\"ip\""));
+}
+
+#[tokio::test]
+async fn login_route_returns_too_many_requests_after_configured_failures() {
+    let state = memory_test_state();
+    let peer = "203.0.113.20:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+
+    for _ in 0..8 {
+        let error = routes_auth::login_operator(
+            axum::extract::State(state.clone()),
+            axum::extract::ConnectInfo(peer),
+            axum::Json(LoginRequest {
+                username: "missing-operator".to_string(),
+                password: "valid-shaped-password-123".to_string(),
+                totp_code: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.code, "invalid_operator_credentials");
+    }
+
+    let error = routes_auth::login_operator(
+        axum::extract::State(state),
+        axum::extract::ConnectInfo(peer),
+        axum::Json(LoginRequest {
+            username: "missing-operator".to_string(),
+            password: "valid-shaped-password-123".to_string(),
+            totp_code: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.code, "operator_login_throttled");
+}
+
+#[tokio::test]
+async fn login_route_ip_throttle_spans_unknown_usernames() {
+    let state = memory_test_state();
+    let peer = "203.0.113.21:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+
+    for index in 0..8 {
+        let error = routes_auth::login_operator(
+            axum::extract::State(state.clone()),
+            axum::extract::ConnectInfo(peer),
+            axum::Json(LoginRequest {
+                username: format!("missing-operator-{index}"),
+                password: "valid-shaped-password-123".to_string(),
+                totp_code: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.code, "invalid_operator_credentials");
+    }
+
+    let error = routes_auth::login_operator(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        axum::Json(LoginRequest {
+            username: "different-missing-operator".to_string(),
+            password: "valid-shaped-password-123".to_string(),
+            totp_code: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.code, "operator_login_throttled");
+
+    let other_peer = "203.0.113.22:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    let error = routes_auth::login_operator(
+        axum::extract::State(state),
+        axum::extract::ConnectInfo(other_peer),
+        axum::Json(LoginRequest {
+            username: "different-missing-operator".to_string(),
+            password: "valid-shaped-password-123".to_string(),
+            totp_code: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.code, "invalid_operator_credentials");
+}
+
+#[tokio::test]
+async fn missing_totp_counts_toward_login_throttle() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Uuid::new_v4(),
+    };
+    let TotpSetupOutcome::Created(setup) =
+        repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .encrypted_totp_secret()
+        .expect("encrypted totp secret");
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let code = crate::auth_totp::totp_code_for_step(&secret, unix_now() / 30);
+    let TotpUpdateOutcome::Updated(_) = repo
+        .confirm_operator_totp(&actor, password, &code)
+        .await
+        .unwrap()
+    else {
+        panic!("expected TOTP enabled");
+    };
+    assert!(!setup.secret_base32.is_empty());
+
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 1,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 60,
+        lockout_secs: 60,
+    };
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: None,
+            },
+            "203.0.113.23",
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::InvalidCredentials
+    ));
+    assert!(matches!(
+        repo.login_operator_with_throttle(
+            &LoginRequest {
+                username: "admin".to_string(),
+                password: password.to_string(),
+                totp_code: Some(code),
+            },
+            "203.0.113.23",
+            &throttle,
+        )
+        .await
+        .unwrap(),
+        repository_auth::OperatorLoginAttempt::Throttled
+    ));
+}
+
 #[test]
 fn operator_roles_are_ranked_for_authorization() {
     assert!(role_allows("admin", "operator"));
@@ -410,6 +661,61 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         .await,
     );
     assert_scope_forbidden(
+        routes_update_releases::list_agent_update_releases(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_update_releases::latest_agent_update_release(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(routes_update_releases::LatestReleaseQuery {
+                name: "vpsman-agent".to_string(),
+                channel: "stable".to_string(),
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_file_transfers::list_file_transfer_sessions(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(routes_file_transfers::FileTransferSessionQuery {
+                limit: None,
+                client_id: None,
+                session_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_file_transfers::list_file_transfer_source_artifacts(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_file_transfers::download_file_transfer_source_artifact(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_file_transfers::download_file_transfer_handoff(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(("client-a".to_string(), Uuid::new_v4())),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
         routes_network::list_tunnel_plans(axum::extract::State(state.clone()), viewer_headers)
             .await,
     );
@@ -438,7 +744,7 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     assert_not_scope_forbidden(
         routes_job_history::list_job_outputs(
             axum::extract::State(state.clone()),
-            jobs_headers,
+            jobs_headers.clone(),
             axum::extract::Path(Uuid::new_v4()),
         )
         .await,
@@ -505,8 +811,63 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     assert_not_scope_forbidden(
         routes_inventory::list_data_source_presets(
             axum::extract::State(state.clone()),
-            config_headers,
+            config_headers.clone(),
             axum::extract::Query(DataSourcePresetQuery { domain: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_update_releases::list_agent_update_releases(
+            axum::extract::State(state.clone()),
+            config_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_update_releases::latest_agent_update_release(
+            axum::extract::State(state.clone()),
+            config_headers.clone(),
+            axum::extract::Query(routes_update_releases::LatestReleaseQuery {
+                name: "vpsman-agent".to_string(),
+                channel: "stable".to_string(),
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_file_transfers::list_file_transfer_sessions(
+            axum::extract::State(state.clone()),
+            jobs_headers.clone(),
+            axum::extract::Query(routes_file_transfers::FileTransferSessionQuery {
+                limit: None,
+                client_id: None,
+                session_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_file_transfers::list_file_transfer_source_artifacts(
+            axum::extract::State(state.clone()),
+            jobs_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_file_transfers::download_file_transfer_source_artifact(
+            axum::extract::State(state.clone()),
+            jobs_headers.clone(),
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_file_transfers::download_file_transfer_handoff(
+            axum::extract::State(state.clone()),
+            jobs_headers,
+            axum::extract::Path(("client-a".to_string(), Uuid::new_v4())),
         )
         .await,
     );
@@ -957,7 +1318,6 @@ fn internal_gateway_token_requires_matching_bearer() {
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -1132,7 +1492,6 @@ fn internal_gateway_token_is_mandatory_for_memory_repository() {
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -1161,7 +1520,6 @@ fn memory_test_state() -> AppState {
         internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
-        update_object_store: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

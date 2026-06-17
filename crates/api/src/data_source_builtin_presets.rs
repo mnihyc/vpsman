@@ -310,21 +310,26 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
         BuiltInPreset {
             id: "00000000-0000-4000-8000-00000000000a",
             domain: "update_artifact_source",
-            name: "builtin:local_filesystem_or_https",
+            name: "builtin:external_https_sha256",
             is_default: true,
-            description: "Default signed update artifact source using hosted filesystem or HTTPS URL",
-            definition: serde_json::json!({"provider": "local_filesystem_or_https"}),
+            description:
+                "Default external HTTPS update artifact source with SHA-256 verification",
+            definition: serde_json::json!({
+                "provider": "external_https",
+                "requires_sha256": true
+            }),
         },
         BuiltInPreset {
             id: "00000000-0000-4000-8000-0000000000a1",
             domain: "update_artifact_source",
-            name: "builtin:https_signed_artifact",
+            name: "builtin:github_release_sha256",
             is_default: false,
-            description: "Signed HTTPS update artifact source preset for externally hosted releases",
+            description:
+                "GitHub Releases update artifact source using version.json download URLs and SHA256SUMS",
             definition: serde_json::json!({
-                "provider": "https_signed_artifact",
+                "provider": "github_release",
                 "requires_sha256": true,
-                "requires_signature": true
+                "manifest": "version_json_download_urls_sha256sums"
             }),
         },
         BuiltInPreset {

@@ -5,31 +5,28 @@ import { agentUpdateReleaseStatusBadgeClass } from "../../jobStatusPresentation"
 import type {
   AgentUpdateReleaseRecord,
   CreateAgentUpdateReleaseRequest,
-  UploadAgentUpdateArtifactRequest,
 } from "../../types";
 import { formatTime, runPanelAction, shortHash } from "../../utils";
 
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+function parseOptionalPositiveInteger(value: string, label: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${label} must be a positive integer`);
   }
-  return window.btoa(binary);
+  return parsed;
 }
 
 export function AgentUpdateReleasesPanel({
   loading,
   onCreateAgentUpdateRelease,
   onRefresh,
-  onUploadAgentUpdateArtifact,
   releases,
 }: {
   loading: boolean;
   onCreateAgentUpdateRelease: (request: CreateAgentUpdateReleaseRequest) => Promise<AgentUpdateReleaseRecord>;
   onRefresh: () => void;
-  onUploadAgentUpdateArtifact: (request: UploadAgentUpdateArtifactRequest) => Promise<AgentUpdateReleaseRecord>;
   releases: AgentUpdateReleaseRecord[];
 }) {
   const [releaseName, setReleaseName] = useState("vpsman-agent");
@@ -37,117 +34,49 @@ export function AgentUpdateReleasesPanel({
   const [releaseChannel, setReleaseChannel] = useState("stable");
   const [releaseArtifactUrl, setReleaseArtifactUrl] = useState("");
   const [releaseSha256Hex, setReleaseSha256Hex] = useState("");
-  const [releaseSignatureHex, setReleaseSignatureHex] = useState("");
-  const [releaseSigningKeyHex, setReleaseSigningKeyHex] = useState("");
   const [releaseSizeBytes, setReleaseSizeBytes] = useState("");
   const [rollbackArtifactUrl, setRollbackArtifactUrl] = useState("");
   const [rollbackSha256Hex, setRollbackSha256Hex] = useState("");
-  const [rollbackSignatureHex, setRollbackSignatureHex] = useState("");
-  const [rollbackSigningKeyHex, setRollbackSigningKeyHex] = useState("");
   const [rollbackSizeBytes, setRollbackSizeBytes] = useState("");
   const [releaseNotes, setReleaseNotes] = useState("");
-  const [releaseUploadFile, setReleaseUploadFile] = useState<File | null>(null);
-  const [rollbackUploadFile, setRollbackUploadFile] = useState<File | null>(null);
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [releasePending, setReleasePending] = useState(false);
 
   async function recordAgentUpdateRelease() {
     await runPanelAction(setReleasePending, setReleaseError, async () => {
+      const artifactUrl = releaseArtifactUrl.trim();
       const sha256Hex = releaseSha256Hex.trim().toLowerCase();
-      const signatureHex = releaseSignatureHex.trim().toLowerCase();
-      const signingKeyHex = releaseSigningKeyHex.trim().toLowerCase();
-      if (!releaseArtifactUrl.trim().startsWith("https://")) {
+      if (!artifactUrl.startsWith("https://")) {
         throw new Error("Artifact URL must use https://");
       }
       if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
         throw new Error("Artifact SHA-256 must be 64 hex characters");
       }
-      if (!/^[0-9a-f]{128}$/.test(signatureHex)) {
-        throw new Error("Signature must be 128 hex characters");
-      }
-      if (!/^[0-9a-f]{64}$/.test(signingKeyHex)) {
-        throw new Error("Signing key must be 64 hex characters");
-      }
+      const rollbackUrl = rollbackArtifactUrl.trim();
       const rollbackSha = rollbackSha256Hex.trim().toLowerCase();
-      const rollbackSignature = rollbackSignatureHex.trim().toLowerCase();
-      const rollbackSigningKey = rollbackSigningKeyHex.trim().toLowerCase();
-      const hasRollback = Boolean(
-        rollbackArtifactUrl.trim() || rollbackSha || rollbackSignature || rollbackSigningKey || rollbackSizeBytes.trim(),
-      );
+      const hasRollback = Boolean(rollbackUrl || rollbackSha || rollbackSizeBytes.trim());
       if (hasRollback) {
-        if (!rollbackArtifactUrl.trim().startsWith("https://")) {
+        if (!rollbackUrl.startsWith("https://")) {
           throw new Error("Rollback artifact URL must use https://");
         }
         if (!/^[0-9a-f]{64}$/.test(rollbackSha)) {
           throw new Error("Rollback SHA-256 must be 64 hex characters");
-        }
-        if (!/^[0-9a-f]{128}$/.test(rollbackSignature)) {
-          throw new Error("Rollback signature must be 128 hex characters");
-        }
-        if (!/^[0-9a-f]{64}$/.test(rollbackSigningKey)) {
-          throw new Error("Rollback signing key must be 64 hex characters");
         }
       }
       await onCreateAgentUpdateRelease({
         name: releaseName.trim(),
         version: releaseVersion.trim(),
         channel: releaseChannel.trim() || "stable",
-        artifact_url: releaseArtifactUrl.trim(),
+        artifact_url: artifactUrl,
         artifact_sha256_hex: sha256Hex,
-        artifact_signature_hex: signatureHex,
-        artifact_signing_key_hex: signingKeyHex,
         rollback_artifact_sha256_hex: hasRollback ? rollbackSha : null,
-        rollback_artifact_signature_hex: hasRollback ? rollbackSignature : null,
-        rollback_artifact_signing_key_hex: hasRollback ? rollbackSigningKey : null,
-        rollback_artifact_url: hasRollback ? rollbackArtifactUrl.trim() : null,
-        rollback_size_bytes: hasRollback && rollbackSizeBytes.trim() ? Number(rollbackSizeBytes.trim()) : null,
-        size_bytes: releaseSizeBytes.trim() ? Number(releaseSizeBytes.trim()) : null,
+        rollback_artifact_url: hasRollback ? rollbackUrl : null,
+        rollback_size_bytes: hasRollback ? parseOptionalPositiveInteger(rollbackSizeBytes, "Rollback size") : null,
+        size_bytes: parseOptionalPositiveInteger(releaseSizeBytes, "Size"),
         notes: releaseNotes.trim() || null,
         confirmed: true,
       });
       clearReleaseInputs();
-    });
-  }
-
-  async function uploadAgentUpdateArtifact() {
-    await runPanelAction(setReleasePending, setReleaseError, async () => {
-      if (!releaseUploadFile) {
-        throw new Error("Select an artifact file");
-      }
-      const signatureHex = releaseSignatureHex.trim().toLowerCase();
-      const signingKeyHex = releaseSigningKeyHex.trim().toLowerCase();
-      if (!/^[0-9a-f]{128}$/.test(signatureHex)) {
-        throw new Error("Signature must be 128 hex characters");
-      }
-      if (!/^[0-9a-f]{64}$/.test(signingKeyHex)) {
-        throw new Error("Signing key must be 64 hex characters");
-      }
-      const rollbackSignature = rollbackSignatureHex.trim().toLowerCase();
-      const rollbackSigningKey = rollbackSigningKeyHex.trim().toLowerCase();
-      if (rollbackUploadFile) {
-        if (!/^[0-9a-f]{128}$/.test(rollbackSignature)) {
-          throw new Error("Rollback signature must be 128 hex characters");
-        }
-        if (!/^[0-9a-f]{64}$/.test(rollbackSigningKey)) {
-          throw new Error("Rollback signing key must be 64 hex characters");
-        }
-      }
-      await onUploadAgentUpdateArtifact({
-        name: releaseName.trim(),
-        version: releaseVersion.trim(),
-        channel: releaseChannel.trim() || "stable",
-        artifact_base64: await fileToBase64(releaseUploadFile),
-        artifact_signature_hex: signatureHex,
-        artifact_signing_key_hex: signingKeyHex,
-        rollback_artifact_base64: rollbackUploadFile ? await fileToBase64(rollbackUploadFile) : null,
-        rollback_artifact_signature_hex: rollbackUploadFile ? rollbackSignature : null,
-        rollback_artifact_signing_key_hex: rollbackUploadFile ? rollbackSigningKey : null,
-        notes: releaseNotes.trim() || null,
-        confirmed: true,
-      });
-      clearReleaseInputs();
-      setReleaseUploadFile(null);
-      setRollbackUploadFile(null);
     });
   }
 
@@ -155,13 +84,9 @@ export function AgentUpdateReleasesPanel({
     setReleaseVersion("");
     setReleaseArtifactUrl("");
     setReleaseSha256Hex("");
-    setReleaseSignatureHex("");
-    setReleaseSigningKeyHex("");
     setReleaseSizeBytes("");
     setRollbackArtifactUrl("");
     setRollbackSha256Hex("");
-    setRollbackSignatureHex("");
-    setRollbackSigningKeyHex("");
     setRollbackSizeBytes("");
     setReleaseNotes("");
   }
@@ -171,7 +96,7 @@ export function AgentUpdateReleasesPanel({
       <div className="sectionHeader">
         <div>
           <h2>Agent update releases</h2>
-          <span>{releases.length} signed metadata records</span>
+          <span>{releases.length} external release records</span>
         </div>
         <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
           Refresh
@@ -181,15 +106,14 @@ export function AgentUpdateReleasesPanel({
         <div className="operationNote compactOperation">
           <PackageCheck size={18} />
           <div>
-            <strong>Record signed release</strong>
-            <span>Choose one workflow: register HTTPS metadata, or upload a local artifact with the same signature fields.</span>
+            <strong>External release metadata</strong>
+            <span>Register an externally hosted artifact by HTTPS URL and SHA-256.</span>
           </div>
         </div>
 
         <div className="releaseFormSection releaseIdentitySection">
           <div className="releaseFormSectionHeader">
             <strong>Release identity</strong>
-            <span>Human-facing name, semantic version, and release channel.</span>
           </div>
           <label>
             <span>Name</span>
@@ -212,28 +136,19 @@ export function AgentUpdateReleasesPanel({
         <div className="releaseFormSection releaseArtifactSection">
           <div className="releaseFormSectionHeader">
             <strong>Primary artifact</strong>
-            <span>Required for metadata registration; signature fields are also used for local upload.</span>
           </div>
           <label className="wideField">
             <span>Artifact URL</span>
             <input
               aria-label="Release artifact URL"
               onChange={(event) => setReleaseArtifactUrl(event.target.value)}
-              placeholder="https://updates.example/vpsman-agent"
+              placeholder="https://github.com/owner/repo/releases/download/tag/vpsman-agent-linux-x86_64-musl"
               value={releaseArtifactUrl}
             />
           </label>
           <label>
             <span>SHA-256</span>
             <input aria-label="Release SHA-256" onChange={(event) => setReleaseSha256Hex(event.target.value)} value={releaseSha256Hex} />
-          </label>
-          <label>
-            <span>Signature</span>
-            <input aria-label="Release signature" onChange={(event) => setReleaseSignatureHex(event.target.value)} value={releaseSignatureHex} />
-          </label>
-          <label>
-            <span>Signing key</span>
-            <input aria-label="Release signing key" onChange={(event) => setReleaseSigningKeyHex(event.target.value)} value={releaseSigningKeyHex} />
           </label>
           <label>
             <span>Size bytes</span>
@@ -250,36 +165,19 @@ export function AgentUpdateReleasesPanel({
         <div className="releaseFormSection releaseArtifactSection">
           <div className="releaseFormSectionHeader">
             <strong>Rollback artifact</strong>
-            <span>Optional fallback metadata for safe update reversal.</span>
           </div>
           <label className="wideField">
             <span>Rollback URL</span>
             <input
               aria-label="Rollback artifact URL"
               onChange={(event) => setRollbackArtifactUrl(event.target.value)}
-              placeholder="https://updates.example/vpsman-agent.previous"
+              placeholder="https://github.com/owner/repo/releases/download/tag/vpsman-agent-previous"
               value={rollbackArtifactUrl}
             />
           </label>
           <label>
             <span>Rollback SHA-256</span>
             <input aria-label="Rollback SHA-256" onChange={(event) => setRollbackSha256Hex(event.target.value)} value={rollbackSha256Hex} />
-          </label>
-          <label>
-            <span>Rollback signature</span>
-            <input
-              aria-label="Rollback signature"
-              onChange={(event) => setRollbackSignatureHex(event.target.value)}
-              value={rollbackSignatureHex}
-            />
-          </label>
-          <label>
-            <span>Rollback signing key</span>
-            <input
-              aria-label="Rollback signing key"
-              onChange={(event) => setRollbackSigningKeyHex(event.target.value)}
-              value={rollbackSigningKeyHex}
-            />
           </label>
           <label>
             <span>Rollback size</span>
@@ -293,27 +191,9 @@ export function AgentUpdateReleasesPanel({
           </label>
         </div>
 
-        <div className="releaseFormSection releaseUploadSection">
-          <div className="releaseFormSectionHeader">
-            <strong>Local upload</strong>
-            <span>Object-store upload uses the release identity plus signature and signing-key fields above.</span>
-          </div>
-          <label>
-            <span>Artifact file</span>
-            <input aria-label="Release artifact file" onChange={(event) => setReleaseUploadFile(event.target.files?.[0] ?? null)} type="file" />
-          </label>
-          <label>
-            <span>Rollback file</span>
-            <input aria-label="Rollback artifact file" onChange={(event) => setRollbackUploadFile(event.target.files?.[0] ?? null)} type="file" />
-          </label>
-        </div>
-
         <div className="releaseFormActions">
           <button className="primaryAction" disabled={releasePending} onClick={recordAgentUpdateRelease} type="button">
-            Record metadata
-          </button>
-          <button className="secondaryAction" disabled={releasePending} onClick={uploadAgentUpdateArtifact} type="button">
-            Upload artifact
+            Record release
           </button>
         </div>
         {releaseError && <span className="inlineError">{releaseError}</span>}
@@ -324,8 +204,7 @@ export function AgentUpdateReleasesPanel({
           { label: "Status", value: (release) => release.status },
           { label: "Artifact", value: (release) => release.artifact_sha256_hex },
           { label: "Rollback", value: (release) => release.rollback_artifact_sha256_hex },
-          { label: "Signature", value: (release) => release.artifact_signature_sha256_hex },
-          { label: "Source", value: (release) => release.artifact_download_path ?? "" },
+          { label: "URL hash", value: (release) => release.artifact_url_sha256_hex ?? "" },
         ]}
         itemLabel="releases"
         items={releases}
@@ -335,7 +214,7 @@ export function AgentUpdateReleasesPanel({
           <div className="emptyState">
             <PackageCheck size={22} />
             <strong>No release metadata</strong>
-            <span>Publish signed metadata before enforcing registered agent updates.</span>
+            <span>Record an external HTTPS artifact before enforcing registered updates.</span>
           </div>
         }
       >
@@ -346,8 +225,7 @@ export function AgentUpdateReleasesPanel({
               <span>Status</span>
               <span>Artifact</span>
               <span>Rollback</span>
-              <span>Signature</span>
-              <span>Source</span>
+              <span>URL hash</span>
               <span>Created</span>
             </div>
             {releaseRows.map((release) => (
@@ -363,11 +241,9 @@ export function AgentUpdateReleasesPanel({
                 <span className="monoValue">
                   {release.rollback_artifact_sha256_hex ? shortHash(release.rollback_artifact_sha256_hex) : "none"}
                 </span>
-                <span className="monoValue">{release.artifact_signature_sha256_hex ? shortHash(release.artifact_signature_sha256_hex) : "unsigned"}</span>
                 <span className="monoValue">
-                  {release.artifact_download_path ??
-                    (release.artifact_url_sha256_hex ? shortHash(release.artifact_url_sha256_hex) : "not stored")}
-                  {release.rollback_artifact_download_path && <small>{release.rollback_artifact_download_path}</small>}
+                  {release.artifact_url_sha256_hex ? shortHash(release.artifact_url_sha256_hex) : "not stored"}
+                  {release.rollback_artifact_url_sha256_hex && <small>{shortHash(release.rollback_artifact_url_sha256_hex)}</small>}
                 </span>
                 <span>{formatTime(release.created_at)}</span>
               </div>

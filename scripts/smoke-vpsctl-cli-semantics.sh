@@ -30,15 +30,6 @@ require_contains() {
   fi
 }
 
-require_not_contains() {
-  local text="$1"
-  local forbidden="$2"
-  local label="$3"
-  if [[ "$text" == *"$forbidden"* ]]; then
-    fail "$label leaked forbidden text"
-  fi
-}
-
 require_regex() {
   local text="$1"
   local regex="$2"
@@ -80,16 +71,21 @@ require_regex "$noise_out" '"public_key_hex":"[0-9a-f]{64}"' "noise-keygen"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-cli-semantics.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
-artifact_file="$tmp_dir/vpsman-agent"
-printf 'signed update artifact\n' >"$artifact_file"
-update_seed_hex="3333333333333333333333333333333333333333333333333333333333333333"
-update_signature_out="$("$bin" agent-update-signature \
-  --artifact-file "$artifact_file" \
-  --signing-seed-hex "$update_seed_hex")"
-require_regex "$update_signature_out" '"artifact_sha256_hex":"[0-9a-f]{64}"' "agent-update-signature"
-require_regex "$update_signature_out" '"artifact_signature_hex":"[0-9a-f]{128}"' "agent-update-signature"
-require_regex "$update_signature_out" '"artifact_signing_key_hex":"[0-9a-f]{64}"' "agent-update-signature"
-require_not_contains "$update_signature_out" "$update_seed_hex" "agent-update-signature"
+update_help="$("$bin" agent-update --help)"
+require_contains "$update_help" "--artifact-url" "agent-update help"
+require_contains "$update_help" "--sha256-hex" "agent-update help"
+config_patch_help="$("$bin" config-patch --help)"
+require_contains "$config_patch_help" "--config-file" "config-patch help"
+
+printf '[auth]\ncommand_timeout_secs = 10\n' >"$tmp_dir/bad-config-patch.toml"
+if "$bin" config-patch \
+  --config-file "$tmp_dir/bad-config-patch.toml" \
+  --clients edge-a \
+  --confirmed \
+  >"$tmp_dir/bad-config-patch.out" 2>"$tmp_dir/bad-config-patch.err"; then
+  fail "config-patch accepted a disallowed section"
+fi
+require_contains "$(cat "$tmp_dir/bad-config-patch.err")" "config_patch_section_not_allowed:auth" "bad config patch"
 
 if "$bin" tunnel-probe \
   --plan-file "$tmp_dir/missing-plan.json" \
@@ -114,7 +110,8 @@ printf '  "vpsctl_cli_semantics_smoke": "ok",\n'
 printf '  "checks": [\n'
 printf '    "local_tunnel_plan_all_kinds",\n'
 printf '    "noise_keygen_shape",\n'
-printf '    "agent_update_signature_json",\n'
+printf '    "agent_update_external_url_shape",\n'
+printf '    "config_patch_bounds_rejected",\n'
 printf '    "network_probe_bounds_rejected",\n'
 printf '    "network_speed_bounds_rejected"\n'
 printf '  ]\n'

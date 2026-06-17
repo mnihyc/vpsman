@@ -89,7 +89,6 @@ VPSMAN_GATEWAY_CONTROL_URL="$gateway_control_url" \
 VPSMAN_PUBLIC_GATEWAY_ENDPOINTS="primary=$gateway_addr=10" \
 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX="$gateway_public_hex" \
 VPSMAN_BACKUP_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/backups" \
-VPSMAN_UPDATE_OBJECT_STORE_DIR="$SMOKE_TMPDIR/object-store/updates" \
 RUST_LOG="vpsman_api=warn" \
   "$api_bin" >"$api_log" 2>&1 &
 smoke_track_pid "$!"

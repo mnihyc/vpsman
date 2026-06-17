@@ -1,118 +1,107 @@
 # Tutorial 08: Agent Updates
 
-Agent updates are privilege-gated and staged. The default flow is publish
-metadata or upload a hosted artifact, dispatch staging, then activate or roll
-back.
-When the API hosts artifacts, set `VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL` to
-the HTTPS origin that fronts `/api/v1/agent-update-artifacts/{sha256}` so
-release records can show operator-ready download URLs.
+Agent updates use external HTTPS artifacts. The API is a private operator
+control-plane service; it records release metadata and dispatches jobs, but it
+does not host public update binaries and does not expose artifact byte routes.
 
-## Sign An Artifact
+The default self-update source is the GitHub release manifest:
 
-Build the static agent and create detached signature metadata:
+```text
+https://github.com/mnihyc/vpsman/releases/latest/download/version.json
+```
+
+Agents installed by the one-line installer are configured with this default
+manifest URL and 24 hour interval/jitter values, but autonomous updates are
+disabled unless the install command sets
+`VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED=1` or a later incremental config patch
+enables `update.unmanaged_enabled`. When enabled, the autonomous updater reads
+`version.json`, checks `SHA256SUMS`, downloads the matching musl agent asset
+from the release, stages it, activates it, and restarts the agent according to
+local update settings.
+
+Operators can enable or disable autonomous updates from the dashboard under
+Config -> Rules with the predefined updater rule templates. These templates are
+ordinary operator-managed records: they can be edited, cloned, or deleted.
+The CLI can apply the same setting with an incremental config patch:
+
+```toml
+[update]
+unmanaged_enabled = true
+unmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+unmanaged_interval_secs = 86400
+unmanaged_jitter_secs = 86400
+unmanaged_activate = true
+unmanaged_restart_agent = true
+```
+
+```sh
+cargo run -p vpsctl -- config-patch \
+  --config-file ./enable-autonomous-updater.toml \
+  --tags edge \
+  --confirmed
+```
+
+## Publish External Release Metadata
+
+Build the static agent and publish it through GitHub Releases or another
+operator-controlled HTTPS host:
 
 ```sh
 cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
-cargo run -p vpsctl -- agent-update-signature \
-  --artifact-file ./target/x86_64-unknown-linux-musl/release/vpsman-agent \
-  --signing-seed-hex <64_hex_seed>
+sha256sum ./target/x86_64-unknown-linux-musl/release/vpsman-agent
 ```
 
-## Publish Or Upload Release Metadata
-
-Metadata-only release record:
+Record the external release metadata in the private API:
 
 ```sh
 cargo run -p vpsctl -- agent-update-release-publish \
   --name vpsman-agent \
   --version 0.1.0 \
   --channel stable \
-  --artifact-file ./target/x86_64-unknown-linux-musl/release/vpsman-agent \
-  --artifact-url https://updates.example/vpsman-agent \
-  --signing-seed-hex <64_hex_seed> \
+  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
+  --sha256-hex <64_hex_sha256> \
+  --size-bytes <artifact_size_bytes> \
   --confirmed
 ```
 
-Add a rollback bundle to metadata-only release records when the previous binary
-is hosted elsewhere:
+Add rollback metadata when the previous binary is also externally hosted:
 
 ```sh
 cargo run -p vpsctl -- agent-update-release-publish \
   --name vpsman-agent \
   --version 0.1.1 \
   --channel stable \
-  --artifact-file ./target/x86_64-unknown-linux-musl/release/vpsman-agent \
-  --artifact-url https://updates.example/vpsman-agent \
-  --signing-seed-hex <64_hex_seed> \
-  --rollback-artifact-file ./target/previous/vpsman-agent \
-  --rollback-artifact-url https://updates.example/vpsman-agent.previous \
+  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl \
+  --sha256-hex <64_hex_sha256> \
+  --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
+  --rollback-sha256-hex <64_hex_rollback_sha256> \
   --confirmed
 ```
 
-Hosted local-object-store artifact:
-
-```sh
-cargo run -p vpsctl -- agent-update-artifact-upload \
-  --name vpsman-agent \
-  --version 0.1.0 \
-  --channel stable \
-  --artifact-file ./target/x86_64-unknown-linux-musl/release/vpsman-agent \
-  --signing-seed-hex <64_hex_seed> \
-  --confirmed
-```
-
-Production streamed hosted artifact with rollback bundle:
-
-```sh
-cargo run -p vpsctl -- agent-update-artifact-upload \
-  --name vpsman-agent \
-  --version 0.1.1 \
-  --channel stable \
-  --artifact-file ./target/x86_64-unknown-linux-musl/release/vpsman-agent \
-  --signing-seed-hex <64_hex_seed> \
-  --rollback-artifact-file ./target/previous/vpsman-agent \
-  --stream \
-  --confirmed
-```
-
-`--stream` sends raw signed artifact bodies to
-`/api/v1/agent-update-artifacts/stream`; the API hashes while writing a temp
-file, verifies the detached signature, commits content-addressed objects, then
-records the release from `/api/v1/agent-update-releases/hosted`. Use the
-non-stream JSON/base64 upload only for small compatibility workflows.
-
-Production deployments can restrict release policy:
-
-```sh
-export VPSMAN_AGENT_UPDATE_ALLOWED_CHANNELS=stable,beta
-export VPSMAN_AGENT_UPDATE_TRUSTED_SIGNING_KEYS_HEX=<64_hex_public_key>
-```
-
-Inspect releases:
+Inspect recorded releases:
 
 ```sh
 cargo run -p vpsctl -- agent-update-releases --limit 10
 cargo run -p vpsctl -- agent-update-release-latest --name vpsman-agent --channel stable
 ```
 
+When `require_registered_agent_updates` is enabled, direct update jobs are
+accepted only when the requested artifact SHA exists in the release registry.
+
 ## Dispatch A Direct Update Job
 
-Agent update jobs follow the same model as other privileged jobs: resolve the
-targets, dispatch to every resolved VPS, then poll job/target/output endpoints
-for progress and results. There is no staged server-side promotion queue.
+Direct update jobs are privileged mutating jobs. They download from the supplied
+external HTTPS URL, verify SHA-256, stage the binary, and create local rollback
+material.
 
 ```sh
 cargo run -p vpsctl -- agent-update \
-  --artifact-url https://updates.example/vpsman-agent \
+  --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl \
   --sha256-hex <64_hex_sha256> \
-  --artifact-signature-hex <128_hex_signature> \
-  --artifact-signing-key-hex <64_hex_public_key> \
   --tags edge \
   --confirmed
 ```
 
-The agent downloads over HTTPS, verifies SHA-256, verifies the signature when a
-trusted key is pinned, stages the binary, and creates local rollback material.
 Use normal job inspection commands to review progress:
 
 ```sh
@@ -151,15 +140,3 @@ cargo run -p vpsctl -- agent-update-rollback \
 
 Unprivileged targets report degraded mutation capability by default. Use
 `--force-unprivileged` only for a deliberate best-effort attempt.
-
-## Verify Update State
-
-```sh
-cargo run -p vpsctl -- jobs --limit 20
-cargo run -p vpsctl -- audit --limit 50
-```
-
-The API records activation-pending, activation-failed, heartbeat-verified, and
-rollback evidence in job outputs and audit rows without storing artifact URLs,
-detached signatures, public signing keys, plaintext super password, or trust
-anchors in operator-facing lifecycle metadata.

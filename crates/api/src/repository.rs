@@ -32,6 +32,14 @@ pub(crate) enum Repository {
 }
 
 #[derive(Clone, Default)]
+pub(crate) struct OperatorAuthThrottleRecord {
+    pub(crate) failed_attempts: i64,
+    pub(crate) window_started_unix: u64,
+    pub(crate) locked_until_unix: Option<u64>,
+    pub(crate) last_failure_reason: Option<String>,
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
     pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
@@ -53,8 +61,11 @@ pub(crate) struct MemoryState {
     pub(crate) data_source_presets: Arc<RwLock<Vec<DataSourcePresetView>>>,
     pub(crate) data_source_assignments: Arc<RwLock<Vec<DataSourcePresetAssignmentView>>>,
     pub(crate) hot_config_rule_templates: Arc<RwLock<Vec<HotConfigRuleTemplateView>>>,
+    pub(crate) hot_config_rule_templates_seeded: Arc<RwLock<bool>>,
     pub(crate) operators: Arc<RwLock<Vec<OperatorRecord>>>,
     pub(crate) sessions: Arc<RwLock<Vec<OperatorSessionRecord>>>,
+    pub(crate) operator_auth_throttle:
+        Arc<RwLock<HashMap<(String, String), OperatorAuthThrottleRecord>>>,
     pub(crate) jobs: Arc<RwLock<Vec<JobHistoryView>>>,
     pub(crate) job_request_fingerprints: Arc<RwLock<HashMap<Uuid, String>>>,
     pub(crate) job_operations: Arc<RwLock<HashMap<Uuid, vpsman_common::JobCommand>>>,

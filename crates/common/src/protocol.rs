@@ -36,6 +36,8 @@ pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE: &str = "full_override";
+pub const DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH: &str = "incremental_patch";
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -253,10 +255,8 @@ pub const TUNNEL_ENDPOINT_STATUS_CLASS_BY_STATUS: [(&str, &str); 3] = [
     ("rolled_back", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
-    ("published_metadata_only", WORKFLOW_STATUS_CLASS_NEUTRAL),
-    ("artifact_hosted", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
-];
+pub const AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
+    [("published_external", WORKFLOW_STATUS_CLASS_SUCCESSFUL)];
 
 pub const SERVER_JOB_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("queued", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
@@ -1758,7 +1758,7 @@ pub const TUNNEL_PLAN_STATUSES: &[&str] = &[
     "partially_rolled_back",
 ];
 pub const TUNNEL_ENDPOINT_STATUSES: &[&str] = &["planned", "applied", "rolled_back"];
-pub const AGENT_UPDATE_RELEASE_STATUSES: &[&str] = &["published_metadata_only", "artifact_hosted"];
+pub const AGENT_UPDATE_RELEASE_STATUSES: &[&str] = &["published_external"];
 
 pub const SERVER_JOB_TYPE_ARTIFACT_CLEANUP: &str = "artifact_cleanup";
 pub const SERVER_JOB_STATUS_QUEUED: &str = "queued";
@@ -2252,22 +2252,19 @@ impl MigrationLinkStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentUpdateReleaseStatus {
-    PublishedMetadataOnly,
-    ArtifactHosted,
+    PublishedExternal,
 }
 
 impl AgentUpdateReleaseStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::PublishedMetadataOnly => "published_metadata_only",
-            Self::ArtifactHosted => "artifact_hosted",
+            Self::PublishedExternal => "published_external",
         }
     }
 
     pub fn from_storage(value: &str) -> Option<Self> {
         match value {
-            "published_metadata_only" => Some(Self::PublishedMetadataOnly),
-            "artifact_hosted" => Some(Self::ArtifactHosted),
+            "published_external" => Some(Self::PublishedExternal),
             _ => None,
         }
     }
@@ -2330,6 +2327,7 @@ pub enum JobCommand {
     },
     ConfigRead,
     HotConfig {
+        apply_mode: String,
         toml: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preserve_redacted: Option<bool>,
@@ -2337,16 +2335,13 @@ pub enum JobCommand {
         base_config_sha256_hex: Option<String>,
     },
     DataSourceConfigPatch {
+        apply_mode: String,
         toml: String,
     },
     #[serde(rename = "agent_update")]
     UpdateAgent {
         artifact_url: String,
         sha256_hex: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        artifact_signature_hex: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        artifact_signing_key_hex: Option<String>,
     },
     AgentUpdateActivate {
         staged_sha256_hex: String,
@@ -3491,12 +3486,9 @@ mod tests {
         let command = JobCommand::UpdateAgent {
             artifact_url: "https://updates.example/vpsman-agent".to_string(),
             sha256_hex: "ab".repeat(32),
-            artifact_signature_hex: None,
-            artifact_signing_key_hex: None,
         };
         let encoded = serde_json::to_value(&command).unwrap();
         assert_eq!(encoded["type"], "agent_update");
-        assert!(encoded.get("artifact_signature_hex").is_none());
 
         let legacy = serde_json::json!({
             "type": "update_agent",

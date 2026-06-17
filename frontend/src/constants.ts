@@ -76,9 +76,9 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "bulk", label: "Bulk", description: "Selector-based tag add, remove, and delete" },
   ],
   Config: [
-    { id: "overview", label: "Overview", description: "Hot config posture, source selections, and recent operations" },
+    { id: "overview", label: "Overview", description: "Config posture, source selections, and recent operations" },
     { id: "rules", label: "Rules", description: "Rule-card templates and generated patch previews" },
-    { id: "bulk", label: "Bulk apply", description: "Privilege-unlocked bulk hot-config patches by selector" },
+    { id: "bulk", label: "Bulk apply", description: "Privilege-unlocked incremental patches by selector" },
     { id: "single", label: "Single VPS", description: "Redacted full-config read and guarded apply" },
     { id: "templates", label: "Templates", description: "Data-source preset definition, assignment, and lifecycle" },
     { id: "status", label: "Status", description: "Active data-source selections and health" },

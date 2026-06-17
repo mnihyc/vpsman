@@ -67,7 +67,7 @@ const allViews: ScreenshotEntry[] = [
   {
     view: "Config",
     subpage: "Bulk apply",
-    heading: "Bulk hot config",
+    heading: "Bulk config patches",
     id: "08-config-bulk",
   },
   {

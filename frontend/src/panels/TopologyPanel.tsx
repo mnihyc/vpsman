@@ -998,7 +998,11 @@ export function TopologyPanel({
       let submitted = 0;
       for (const target of targets) {
         const toml = buildMonitoringConfigPatchToml(target.clientId, tunnelPlans, enabled);
-        const operation = { type: "data_source_config_patch" as const, toml };
+        const operation = {
+          type: "data_source_config_patch" as const,
+          apply_mode: "incremental_patch" as const,
+          toml,
+        };
         const selectorExpression = selectorExpressionForClientIds([target.clientId]);
         const timeoutSecs = 120;
         const builtPrivilege = await buildPrivilegeForJobOperation({

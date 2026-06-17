@@ -4,11 +4,11 @@ use vpsman_common::{
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
     job_command_protocol_version as common_job_command_protocol_version, payload_hash,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config,
-    validate_agent_config_shape, validate_data_source_config_patch_section,
-    validate_runtime_topology_intent, validate_runtime_tunnel_control,
-    verify_update_artifact_signature, AgentConfig, JobCommand, ProcessResourceLimits,
-    ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend, MAX_AGENT_HOT_CONFIG_BYTES,
-    MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    validate_agent_config_shape, validate_incremental_config_patch_section,
+    validate_runtime_topology_intent, validate_runtime_tunnel_control, AgentConfig, JobCommand,
+    ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend,
+    DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
+    MAX_AGENT_HOT_CONFIG_BYTES, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
     NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
@@ -223,10 +223,16 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         }
         JobCommand::ConfigRead => Ok(()),
         JobCommand::HotConfig {
+            apply_mode,
             toml,
             preserve_redacted: _,
             base_config_sha256_hex,
         } => {
+            if apply_mode != HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE {
+                return Err(ApiError::bad_request(
+                    "hot_config_apply_mode_must_be_full_override",
+                ));
+            }
             validate_hot_config_document(toml)?;
             if let Some(base_config_sha256_hex) = base_config_sha256_hex {
                 validate_sha256_hex(
@@ -236,20 +242,18 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             }
             Ok(())
         }
-        JobCommand::DataSourceConfigPatch { toml } => {
+        JobCommand::DataSourceConfigPatch { apply_mode, toml } => {
+            if apply_mode != DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH {
+                return Err(ApiError::bad_request(
+                    "data_source_config_apply_mode_must_be_incremental_patch",
+                ));
+            }
             validate_data_source_config_patch_document(toml)
         }
         JobCommand::UpdateAgent {
             artifact_url,
             sha256_hex,
-            artifact_signature_hex,
-            artifact_signing_key_hex,
-        } => validate_update_agent(
-            artifact_url,
-            sha256_hex,
-            artifact_signature_hex.as_deref(),
-            artifact_signing_key_hex.as_deref(),
-        ),
+        } => validate_update_agent(artifact_url, sha256_hex),
         JobCommand::AgentUpdateActivate {
             staged_sha256_hex, ..
         } => validate_sha256_hex(staged_sha256_hex, "agent_update_activate_sha256_invalid"),
@@ -864,18 +868,13 @@ fn validate_data_source_config_patch_document(toml_document: &str) -> Result<(),
         return Err(ApiError::bad_request("data_source_config_patch_empty"));
     }
     for section in table.keys() {
-        validate_data_source_config_patch_section(section)
-            .map_err(|_| ApiError::bad_request("data_source_config_patch_section_not_allowed"))?;
+        validate_incremental_config_patch_section(section)
+            .map_err(|_| ApiError::bad_request("config_patch_section_not_allowed"))?;
     }
     Ok(())
 }
 
-fn validate_update_agent(
-    artifact_url: &str,
-    sha256_hex: &str,
-    artifact_signature_hex: Option<&str>,
-    artifact_signing_key_hex: Option<&str>,
-) -> Result<(), ApiError> {
+fn validate_update_agent(artifact_url: &str, sha256_hex: &str) -> Result<(), ApiError> {
     if artifact_url.is_empty() || artifact_url.len() > 2048 || artifact_url.as_bytes().contains(&0)
     {
         return Err(ApiError::bad_request("invalid_update_artifact_url"));
@@ -885,29 +884,6 @@ fn validate_update_agent(
     }
     if !is_sha256_hex(sha256_hex) {
         return Err(ApiError::bad_request("invalid_update_sha256"));
-    }
-    match (artifact_signature_hex, artifact_signing_key_hex) {
-        (Some(signature), Some(signing_key)) => {
-            if !is_hex_len(signature, 128) {
-                return Err(ApiError::bad_request("invalid_update_artifact_signature"));
-            }
-            if !is_hex_len(signing_key, 64) {
-                return Err(ApiError::bad_request("invalid_update_artifact_signing_key"));
-            }
-            if !verify_update_artifact_signature(
-                signing_key,
-                signature,
-                &sha256_hex.to_ascii_lowercase(),
-            ) {
-                return Err(ApiError::bad_request("invalid_update_artifact_signature"));
-            }
-        }
-        (None, None) => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "update_artifact_signature_and_key_required_together",
-            ));
-        }
     }
     Ok(())
 }
@@ -956,10 +932,6 @@ fn is_localhost_http_authority(rest: &str) -> bool {
         }
     };
     matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-fn is_hex_len(value: &str, expected_len: usize) -> bool {
-    value.len() == expected_len && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn is_sha256_hex(value: &str) -> bool {

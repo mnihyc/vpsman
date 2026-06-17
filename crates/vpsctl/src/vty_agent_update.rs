@@ -33,7 +33,7 @@ pub(crate) fn submit_vty_agent_update_command(
             &privilege_context.password,
             &privilege_context.salt_hex,
             parse_vty_agent_update(&parts[1..]).with_context(|| {
-                "usage: agent-update --artifact-url <https-url> --sha256-hex <sha256> [--artifact-signature-hex <sig>] [--artifact-signing-key-hex <key>] <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
+                "usage: agent-update --artifact-url <https-url> --sha256-hex <sha256> <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
             })?,
         ),
         "agent-update-activate" => submit_vty_agent_update_activate(

@@ -593,8 +593,6 @@ fn hot_config_rule_template_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("not_found") {
         ApiError::not_found("hot_config_rule_template_not_found")
-    } else if message.contains("builtin_immutable") {
-        ApiError::conflict("hot_config_rule_template_builtin_immutable")
     } else {
         ApiError::from(error)
     }

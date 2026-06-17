@@ -13,6 +13,17 @@ import {
   JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
 } from "../../src/generated/protocolContracts";
 
+type FixtureJobOutput = {
+  client_id: string;
+  created_at?: string;
+  data_base64?: string;
+  done?: boolean;
+  exit_code?: number | null;
+  job_id?: string;
+  seq?: number;
+  stream: string;
+};
+
 export {
   buildEncryptedBackupArtifactFixture,
   sha256Hex,
@@ -687,7 +698,6 @@ dispatcher_in_flight = 64
 
 [storage]
 backup_object_store_dir = "/var/lib/vpsman/objects/backups"
-update_object_store_dir = "/var/lib/vpsman/objects/updates"
 
 [timeout]
 dispatch_ack_secs = 30
@@ -764,15 +774,10 @@ const suiteConfigValidation = {
     "database.migrations_dir",
     "secrets.*",
     "storage.backup_object_store_dir",
-    "storage.update_object_store_dir",
     "storage.object_endpoint",
     "storage.object_bucket",
     "storage.object_region",
     "storage.object_create_bucket",
-    "storage.update_object_endpoint",
-    "storage.update_object_bucket",
-    "storage.update_object_region",
-    "storage.update_object_create_bucket",
     "capacity.api_db_pool",
     "capacity.worker_db_pool",
     "worker.once",
@@ -1171,20 +1176,17 @@ const dataSourceStatus = [
     evidence: {
       continuous_status: false,
       external_release_count: 1,
-      hosted_release_count: 0,
       release_count: 1,
-      server_object_store_configured: false,
-      server_object_store_kind: null,
       workflow: "agent_update_releases",
     },
     module: "Update artifact source",
     preset_id: "00000000-0000-4000-8000-00000000000a",
-    preset_name: "builtin:local_filesystem_or_https",
+    preset_name: "builtin:external_https_sha256",
     preset_scope: "built_in",
-    source_kind: "local_filesystem_or_https",
-    status: "metadata_only",
+    source_kind: "external_https",
+    status: "ready",
     status_reason:
-      "signed HTTPS update release metadata exists; hosted artifact storage is optional",
+      "external HTTPS update release metadata exists; agents download update artifacts outside the API",
   },
 ];
 
@@ -1199,7 +1201,7 @@ const hotConfigRuleTemplates = [
     docs_metadata: {
       examples: ['runtime_traffic_accounting_source = "vnstat"'],
       notes: [
-        "Generates a partial hot-config patch only for the traffic accounting source.",
+        "Generates an incremental config patch only for the traffic accounting source.",
       ],
     },
     domain: "runtime_traffic_accounting_source",
@@ -1216,6 +1218,68 @@ const hotConfigRuleTemplates = [
     id: "91919191-1111-4111-8111-919191919191",
     name: "Traffic source",
     raw_generator_body: "runtime_traffic_accounting_source = {{source}}",
+    updated_at: "2026-06-02T10:00:00Z",
+  },
+  {
+    actor_id: null,
+    built_in: true,
+    category: "Update",
+    created_at: "2026-06-02T10:00:00Z",
+    description:
+      "Enables autonomous agent updates from the official GitHub release manifest.",
+    docs_metadata: {
+      predefined: true,
+      notes: ["Generates an incremental config patch for the updater section."],
+    },
+    domain: "agent_update",
+    field_schema: {
+      properties: {
+        unmanaged_version_url: {
+          default: "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+          type: "string",
+        },
+        unmanaged_interval_secs: { default: 86400, type: "integer" },
+        unmanaged_jitter_secs: { default: 86400, type: "integer" },
+        unmanaged_activate: { default: true, type: "boolean" },
+        unmanaged_restart_agent: { default: true, type: "boolean" },
+      },
+      type: "object",
+    },
+    id: "55555555-5555-4555-8555-555555555555",
+    name: "Autonomous updater enabled",
+    raw_generator_body:
+      "[update]\nunmanaged_enabled = true\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
+    updated_at: "2026-06-02T10:00:00Z",
+  },
+  {
+    actor_id: null,
+    built_in: true,
+    category: "Update",
+    created_at: "2026-06-02T10:00:00Z",
+    description:
+      "Disables autonomous agent updates while keeping updater defaults explicit.",
+    docs_metadata: {
+      predefined: true,
+      notes: ["Generates an incremental config patch for the updater section."],
+    },
+    domain: "agent_update",
+    field_schema: {
+      properties: {
+        unmanaged_version_url: {
+          default: "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+          type: "string",
+        },
+        unmanaged_interval_secs: { default: 86400, type: "integer" },
+        unmanaged_jitter_secs: { default: 86400, type: "integer" },
+        unmanaged_activate: { default: true, type: "boolean" },
+        unmanaged_restart_agent: { default: true, type: "boolean" },
+      },
+      type: "object",
+    },
+    id: "66666666-6666-4666-8666-666666666666",
+    name: "Autonomous updater disabled",
+    raw_generator_body:
+      "[update]\nunmanaged_enabled = false\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
     updated_at: "2026-06-02T10:00:00Z",
   },
 ];
@@ -1535,19 +1599,17 @@ const agentUpdateReleases = [
   {
     actor_id: null,
     artifact_sha256_hex: "d".repeat(64),
-    artifact_signature_provided: true,
-    artifact_signature_sha256_hex: "a".repeat(64),
-    artifact_signing_key_sha256_hex: "e".repeat(64),
-    artifact_object_key: null,
-    artifact_download_path: null,
     artifact_url_sha256_hex: "f".repeat(64),
     channel: "stable",
     created_at: "2026-05-31T10:08:55Z",
     id: "23232323-3434-4567-8abc-defdefdefdef",
     name: "vpsman-agent",
-    notes: "signed smoke metadata",
+    notes: "external smoke metadata",
+    rollback_artifact_sha256_hex: null,
+    rollback_artifact_url_sha256_hex: null,
+    rollback_size_bytes: null,
     size_bytes: 1024,
-    status: "published_metadata_only",
+    status: "published_external",
     version: "0.1.0",
   },
 ];
@@ -2042,6 +2104,7 @@ export async function installConsoleApiMock(page: Page) {
           status: string;
         }>
       >();
+      const createdJobOutputs = new Map<string, FixtureJobOutput[]>();
       const serverJobsFixture: Array<Record<string, unknown>> = [];
       const commandTypeForOperation = (
         operation: Record<string, unknown> | undefined,
@@ -2218,6 +2281,61 @@ export async function installConsoleApiMock(page: Page) {
           return input.clone().json() as Promise<unknown>;
         }
         return null;
+      };
+      const asFixtureRecord = (value: unknown): Record<string, unknown> | null =>
+        value && !Array.isArray(value) && typeof value === "object"
+          ? (value as Record<string, unknown>)
+          : null;
+      const fixtureSchemaDefault = (fieldSchema: unknown, field: string) => {
+        const schema = asFixtureRecord(fieldSchema) ?? {};
+        const fields =
+          asFixtureRecord(schema.fields) ??
+          asFixtureRecord(schema.properties) ??
+          {};
+        const spec = asFixtureRecord(fields[field]);
+        return spec && "default" in spec ? spec.default : undefined;
+      };
+      const tomlLiteralFixture = (value: unknown): string => {
+        if (typeof value === "string") {
+          return JSON.stringify(value);
+        }
+        if (typeof value === "boolean") {
+          return value ? "true" : "false";
+        }
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return String(value);
+        }
+        if (Array.isArray(value)) {
+          return `[${value.map((item) => tomlLiteralFixture(item)).join(", ")}]`;
+        }
+        if (value === null || value === undefined) {
+          return '""';
+        }
+        return JSON.stringify(value);
+      };
+      const renderRuleTemplateBodyFixture = (
+        rawGeneratorBody: string,
+        values: Record<string, unknown>,
+        fieldSchema: unknown,
+      ) =>
+        rawGeneratorBody.replace(
+          /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g,
+          (_match, field: string) =>
+            tomlLiteralFixture(
+              field in values
+                ? values[field]
+                : fixtureSchemaDefault(fieldSchema, field),
+            ),
+        );
+      const affectedSectionsForTomlFixture = (
+        toml: string,
+        fallback: string,
+      ) => {
+        const sections = Array.from(
+          toml.matchAll(/^\s*\[([^\]]+)\]/gm),
+          (match) => match[1].trim(),
+        ).filter(Boolean);
+        return sections.length > 0 ? sections : [fallback];
       };
       const artifactBodyForTransfer = (clientId: string, sessionId: string) =>
         `server-side transfer handoff ${clientId} ${sessionId}`;
@@ -2458,6 +2576,7 @@ export async function installConsoleApiMock(page: Page) {
           target_count: 1,
         };
         const outputs =
+          createdJobOutputs.get(jobId) ??
           (
             jobOutputsFixture as Record<
               string,
@@ -2497,6 +2616,7 @@ export async function installConsoleApiMock(page: Page) {
         const comparisonMode = mode === "text" ? "text" : "binary";
         const targets = jobTargetsFor(jobId);
         const outputs =
+          createdJobOutputs.get(jobId) ??
           (
             jobOutputsFixture as Record<
               string,
@@ -3302,18 +3422,25 @@ export async function installConsoleApiMock(page: Page) {
             hotConfigRuleTemplatesFixture.find(
               (record: { id: string }) => record.id === templateId,
             ) ?? hotConfigRuleTemplatesFixture[0];
+          const body = await readJsonBody(input, init);
+          const values =
+            asFixtureRecord(asFixtureRecord(body)?.values) ?? {};
+          const toml = renderRuleTemplateBodyFixture(
+            template.raw_generator_body,
+            values,
+            template.field_schema,
+          );
           return jsonResponse({
-            affected_sections: [template.domain],
+            affected_sections: affectedSectionsForTomlFixture(
+              toml,
+              template.domain,
+            ),
             docs_metadata: template.docs_metadata,
             generated_at: "2026-06-02T10:06:00Z",
             name: template.name,
-            patch: {
-              [template.domain]: {
-                source: "vnstat",
-              },
-            },
+            patch: {},
             template_id: template.id,
-            toml: '[data_sources]\nruntime_traffic_accounting_source = "vnstat"\n',
+            toml,
           });
         }
         if (
@@ -3671,7 +3798,8 @@ export async function installConsoleApiMock(page: Page) {
         );
         if (outputMatch && method === "GET") {
           return jsonResponse(
-            (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
+            createdJobOutputs.get(outputMatch[1]) ??
+              (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
               [],
           );
         }
@@ -4166,6 +4294,30 @@ export async function installConsoleApiMock(page: Page) {
           }));
           const jobId = "11111111-2222-4333-8444-555555555555";
           createdJobTargets.set(jobId, targetRecords);
+          if (commandType === "config_read") {
+            createdJobOutputs.set(
+              jobId,
+              targetRecords.map((target, index) => ({
+                client_id: target.client_id,
+                created_at: "2026-05-31T10:09:00Z",
+                data_base64: btoa(
+                  JSON.stringify({
+                    base_config_sha256_hex: "b".repeat(64),
+                    toml:
+                      'client_id = "' +
+                      target.client_id +
+                      '"\n\n[update]\nunmanaged_enabled = false\nunmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"\nunmanaged_interval_secs = 86400\nunmanaged_jitter_secs = 86400\nunmanaged_activate = true\nunmanaged_restart_agent = true\n',
+                    type: "config_read",
+                  }),
+                ),
+                done: true,
+                exit_code: 0,
+                job_id: jobId,
+                seq: index,
+                stream: "status",
+              })),
+            );
+          }
           return jsonResponse({
             target_count: targets.length,
             target_counts: targetCountsFromStatuses(

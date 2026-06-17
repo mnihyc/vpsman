@@ -167,7 +167,6 @@ with configured size and hash validation before responding to the client:
 
 ```sh
 bash scripts/smoke-minio-backup-artifact.sh
-bash scripts/smoke-minio-update-artifact.sh
 ```
 
 ## Plan And Run Restore

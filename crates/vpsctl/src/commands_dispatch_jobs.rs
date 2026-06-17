@@ -542,11 +542,35 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
+        Command::ConfigPatch {
+            config_file,
+            clients,
+            tags,
+            password_env,
+            super_salt_hex,
+            privilege_ttl_secs,
+            timeout_secs,
+            confirmed,
+            force_unprivileged,
+        } => {
+            commands_config::config_patch(
+                api_url,
+                token,
+                config_file,
+                clients,
+                tags,
+                password_env,
+                super_salt_hex,
+                privilege_ttl_secs,
+                timeout_secs,
+                confirmed,
+                force_unprivileged,
+            )?;
+            Ok(None)
+        }
         Command::AgentUpdate {
             artifact_url,
             sha256_hex,
-            artifact_signature_hex,
-            artifact_signing_key_hex,
             clients,
             tags,
             password_env,
@@ -562,8 +586,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 commands_config::AgentUpdateOptions {
                     artifact_url,
                     sha256_hex,
-                    artifact_signature_hex,
-                    artifact_signing_key_hex,
                     clients,
                     tags,
                     password_env,
@@ -662,13 +684,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::AgentUpdateSignature {
-            artifact_file,
-            signing_seed_hex,
-        } => {
-            commands_config::agent_update_signature(artifact_file, signing_seed_hex)?;
-            Ok(None)
-        }
         Command::AgentUpdateReleasePublish(command) => {
             commands_config::agent_update_release_publish(
                 api_url,
@@ -677,32 +692,15 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     name: command.name,
                     version: command.version,
                     channel: command.channel,
-                    artifact_file: command.artifact_file,
                     artifact_url: command.artifact_url,
-                    signing_seed_hex: command.signing_seed_hex,
-                    rollback_artifact_file: command.rollback_artifact_file,
+                    sha256_hex: command.sha256_hex,
                     rollback_artifact_url: command.rollback_artifact_url,
-                    rollback_signing_seed_hex: command.rollback_signing_seed_hex,
+                    rollback_sha256_hex: command.rollback_sha256_hex,
+                    size_bytes: command.size_bytes,
+                    rollback_size_bytes: command.rollback_size_bytes,
                     notes: command.notes,
                     confirmed: command.confirmed,
                 },
-            )?;
-            Ok(None)
-        }
-        Command::AgentUpdateArtifactUpload(command) => {
-            commands_config::agent_update_artifact_upload(
-                api_url,
-                token,
-                command.name,
-                command.version,
-                command.channel,
-                command.artifact_file,
-                command.signing_seed_hex,
-                command.rollback_artifact_file,
-                command.rollback_signing_seed_hex,
-                command.notes,
-                command.confirmed,
-                command.stream,
             )?;
             Ok(None)
         }

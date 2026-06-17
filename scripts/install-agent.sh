@@ -159,6 +159,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
+Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -182,6 +183,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
+Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

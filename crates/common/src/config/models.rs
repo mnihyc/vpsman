@@ -67,8 +67,6 @@ pub struct AgentBackupConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentUpdateConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trusted_artifact_signing_key_hex: Option<String>,
     #[serde(default = "default_agent_unmanaged_update_enabled")]
     pub unmanaged_enabled: bool,
     #[serde(default = "default_agent_unmanaged_update_version_url")]
@@ -86,7 +84,6 @@ pub struct AgentUpdateConfig {
 impl Default for AgentUpdateConfig {
     fn default() -> Self {
         Self {
-            trusted_artifact_signing_key_hex: None,
             unmanaged_enabled: default_agent_unmanaged_update_enabled(),
             unmanaged_version_url: default_agent_unmanaged_update_version_url(),
             unmanaged_interval_secs: default_agent_unmanaged_update_interval_secs(),
@@ -98,7 +95,7 @@ impl Default for AgentUpdateConfig {
 }
 
 pub fn default_agent_unmanaged_update_enabled() -> bool {
-    true
+    false
 }
 
 pub fn default_agent_unmanaged_update_version_url() -> String {
