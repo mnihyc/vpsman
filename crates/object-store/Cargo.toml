@@ -14,3 +14,4 @@ reqwest.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+vpsman-common = { path = "../common" }

@@ -585,7 +585,7 @@ async fn main() -> Result<()> {
     args.apply_suite_config(&suite_config)
         .map_err(anyhow::Error::msg)?;
     info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = build_info::release_version(),
         server_build_number = build_info::server_build_number(),
         "worker build metadata"
     );

@@ -14,10 +14,11 @@ use crate::{
         upsert_fleet_alert_notification_channel, upsert_fleet_alert_policy,
     },
     routes_auth::{
-        bootstrap_operator, confirm_operator_totp, create_operator, current_operator,
-        disable_operator_totp, list_operator_sessions, list_operators, login_operator,
-        refresh_operator_session, revoke_operator_session, setup_operator_totp,
-        update_operator_preferences,
+        bootstrap_operator, clear_operator_totp, confirm_operator_totp, create_operator,
+        current_operator, delete_operator, disable_operator, disable_operator_totp,
+        enable_operator, list_operator_auth_events, list_operator_sessions, list_operators,
+        login_operator, refresh_operator_session, reset_operator_password, revoke_operator_session,
+        setup_operator_totp, update_operator, update_operator_preferences,
     },
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
@@ -28,7 +29,9 @@ use crate::{
         upload_backup_artifact, upload_backup_artifact_session_chunk,
         MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
-    routes_command_templates::{list_command_templates, upsert_command_template},
+    routes_command_templates::{
+        delete_command_template, list_command_templates, upsert_command_template,
+    },
     routes_dashboard::dashboard_overview,
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
@@ -112,6 +115,31 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/operators",
             get(list_operators).post(create_operator),
+        )
+        .route("/api/v1/operators/{operator_id}", put(update_operator))
+        .route(
+            "/api/v1/operators/{operator_id}/disable",
+            post(disable_operator),
+        )
+        .route(
+            "/api/v1/operators/{operator_id}/enable",
+            post(enable_operator),
+        )
+        .route(
+            "/api/v1/operators/{operator_id}/delete",
+            post(delete_operator),
+        )
+        .route(
+            "/api/v1/operators/{operator_id}/password-reset",
+            post(reset_operator_password),
+        )
+        .route(
+            "/api/v1/operators/{operator_id}/totp-clear",
+            post(clear_operator_totp),
+        )
+        .route(
+            "/api/v1/operator-auth-events",
+            get(list_operator_auth_events),
         )
         .route("/api/v1/operator-sessions", get(list_operator_sessions))
         .route(
@@ -282,6 +310,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/command-templates",
             get(list_command_templates).post(upsert_command_template),
+        )
+        .route(
+            "/api/v1/command-templates/{template_id}",
+            delete(delete_command_template),
         )
         .route(
             "/api/v1/agent-update-releases",

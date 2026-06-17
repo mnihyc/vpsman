@@ -122,7 +122,7 @@ async fn connect_and_stream(
     let hello = AgentHello {
         client_id: config.client_id.clone(),
         process_incarnation_id,
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        agent_version: crate::build_info::agent_release_version().to_string(),
         internal_build_number: crate::build_info::agent_build_number(),
         os_release: config
             .telemetry

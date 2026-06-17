@@ -1551,7 +1551,22 @@ const networkJobs = [
 
 const commandTemplates = [
   {
+    actor_id: null,
+    built_in: true,
+    command_type: "shell_argv",
+    created_at: "builtin",
+    defaults: { confirmed: false, destructive: false, force_unprivileged: false, timeout_secs: 30 },
+    display_group: "shell",
+    id: "00000000-0000-4100-8000-000000000001",
+    name: "Default shell command",
+    operation: { argv: ["/usr/bin/uptime"], pty: false, type: "shell" },
+    scope_kind: "global",
+    scope_value: null,
+    updated_at: "builtin",
+  },
+  {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    built_in: false,
     command_type: "shell_argv",
     created_at: "2026-05-31T10:04:00Z",
     defaults: { timeout_secs: 30 },
@@ -2075,6 +2090,7 @@ export async function installConsoleApiMock(page: Page) {
         jobOutputComparisons: [] as unknown[],
         commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
+        operatorActions: [] as unknown[],
         operatorPreferences: [] as unknown[],
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
@@ -2093,6 +2109,39 @@ export async function installConsoleApiMock(page: Page) {
         configurable: true,
         value: requests,
       });
+      const operatorRecords = [
+        {
+          created_at: "2026-01-01T00:00:00Z",
+          deleted_at: null as string | null,
+          disabled_at: null as string | null,
+          id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          role: "admin",
+          scopes: ["*"],
+          session_refresh_ttl_secs: 31_536_000,
+          status: "active",
+          totp_enabled: false,
+          username: "console-admin",
+        },
+        {
+          created_at: "2026-01-02T00:00:00Z",
+          deleted_at: null as string | null,
+          disabled_at: null as string | null,
+          id: "99999999-aaaa-4bbb-8ccc-000000000002",
+          role: "operator",
+          scopes: ["fleet:read", "jobs:write"],
+          session_refresh_ttl_secs: 7_776_000,
+          status: "active",
+          totp_enabled: true,
+          username: "noc-operator",
+        },
+      ];
+      const operatorView = (record: (typeof operatorRecords)[number]) => ({
+        ...record,
+        preferences: currentOperatorPreferences,
+      });
+      const findOperator = (operatorId: string) =>
+        operatorRecords.find((operator) => operator.id === operatorId) ??
+        operatorRecords[0];
       const createdJobTargets = new Map<
         string,
         Array<{
@@ -3062,46 +3111,70 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/gateway-sessions" && method === "GET")
           return emptyArrayResponse();
         if (pathname === "/api/v1/auth/me" && method === "GET")
-          return jsonResponse({
-            id: "99999999-aaaa-4bbb-8ccc-000000000001",
-            preferences: currentOperatorPreferences,
-            role: "admin",
-            scopes: ["*"],
-            totp_enabled: false,
-            username: "console-admin",
-          });
+          return jsonResponse(operatorView(operatorRecords[0]));
         if (pathname === "/api/v1/auth/preferences" && method === "PUT") {
           const body = await readJsonBody(input, init);
           requests.operatorPreferences.push(body);
           Object.assign(currentOperatorPreferences, body);
-          return jsonResponse({
-            id: "99999999-aaaa-4bbb-8ccc-000000000001",
-            preferences: currentOperatorPreferences,
-            role: "admin",
-            scopes: ["*"],
+          return jsonResponse(operatorView(operatorRecords[0]));
+        }
+        if (pathname === "/api/v1/operators" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({ action: "create", body });
+          const record = {
+            created_at: "2026-01-03T00:00:00Z",
+            deleted_at: null as string | null,
+            disabled_at: null as string | null,
+            id: `99999999-aaaa-4bbb-8ccc-${String(operatorRecords.length + 1).padStart(12, "0")}`,
+            role: String(body.role ?? "operator"),
+            scopes: Array.isArray(body.scopes)
+              ? body.scopes.map(String)
+              : [],
+            session_refresh_ttl_secs:
+              typeof body.session_refresh_ttl_secs === "number"
+                ? body.session_refresh_ttl_secs
+                : 31_536_000,
+            status: "active",
             totp_enabled: false,
-            username: "console-admin",
-          });
+            username: String(body.username ?? "new-operator"),
+          };
+          operatorRecords.push(record);
+          return jsonResponse(operatorView(record));
         }
         if (pathname === "/api/v1/operators" && method === "GET") {
-          return jsonResponse([
-            {
-              id: "99999999-aaaa-4bbb-8ccc-000000000001",
-              preferences: currentOperatorPreferences,
-              role: "admin",
-              scopes: ["*"],
-              totp_enabled: false,
-              username: "console-admin",
-            },
-            {
-              id: "99999999-aaaa-4bbb-8ccc-000000000002",
-              preferences: currentOperatorPreferences,
-              role: "operator",
-              scopes: ["fleet:read", "jobs:write"],
-              totp_enabled: true,
-              username: "noc-operator",
-            },
-          ]);
+          return jsonResponse(operatorRecords.map(operatorView));
+        }
+        const operatorMutationMatch = pathname.match(
+          /^\/api\/v1\/operators\/([^/]+)(?:\/([^/]+))?$/,
+        );
+        if (operatorMutationMatch && (method === "PUT" || method === "POST")) {
+          const operatorId = decodeURIComponent(operatorMutationMatch[1]);
+          const action = operatorMutationMatch[2] ?? "update";
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({ action, body, operator_id: operatorId });
+          const record = findOperator(operatorId);
+          if (method === "PUT") {
+            record.role = String(body.role ?? record.role);
+            record.scopes = Array.isArray(body.scopes)
+              ? body.scopes.map(String)
+              : record.scopes;
+            record.session_refresh_ttl_secs =
+              typeof body.session_refresh_ttl_secs === "number"
+                ? body.session_refresh_ttl_secs
+                : record.session_refresh_ttl_secs;
+          } else if (action === "enable") {
+            record.status = "active";
+            record.disabled_at = null;
+          } else if (action === "disable") {
+            record.status = "disabled";
+            record.disabled_at = "2026-01-03T00:10:00Z";
+          } else if (action === "delete") {
+            record.status = "deleted";
+            record.deleted_at = "2026-01-03T00:10:00Z";
+          } else if (action === "totp-clear") {
+            record.totp_enabled = false;
+          }
+          return jsonResponse(operatorView(record));
         }
         if (pathname === "/api/v1/operator-sessions" && method === "GET")
           return jsonResponse([
@@ -3116,6 +3189,43 @@ export async function installConsoleApiMock(page: Page) {
               refresh_expires_at: "2026-01-15T00:00:00Z",
               revoked: false,
               revoked_at: null,
+            },
+            {
+              id: "88888888-aaaa-4bbb-8ccc-000000000002",
+              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              operator_role: "admin",
+              operator_username: "console-admin",
+              current: false,
+              created_at: "2026-01-01T01:00:00Z",
+              expires_at: "2026-01-01T01:15:00Z",
+              refresh_expires_at: "2026-01-15T01:00:00Z",
+              revoked: false,
+              revoked_at: null,
+            },
+          ]);
+        if (pathname === "/api/v1/operator-auth-events" && method === "GET")
+          return jsonResponse([
+            {
+              id: "77777777-aaaa-4bbb-8ccc-000000000001",
+              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              username: "console-admin",
+              result: "success",
+              reason: null,
+              remote_ip: "127.0.0.1",
+              user_agent: "Playwright",
+              session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+              created_at: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "77777777-aaaa-4bbb-8ccc-000000000002",
+              operator_id: null,
+              username: "unknown-user",
+              result: "failure",
+              reason: "invalid_credentials",
+              remote_ip: "127.0.0.1",
+              user_agent: "Playwright",
+              session_id: null,
+              created_at: "2026-01-01T00:01:00Z",
             },
           ]);
         if (pathname === "/api/v1/client-key-revocations" && method === "GET")
@@ -3567,6 +3677,7 @@ export async function installConsoleApiMock(page: Page) {
           };
           return jsonResponse({
             actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            built_in: false,
             command_type: commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             defaults: request.defaults ?? {},
@@ -3582,6 +3693,20 @@ export async function installConsoleApiMock(page: Page) {
             scope_value: request.scope_value ?? null,
             updated_at: "2026-06-02T10:04:00Z",
           });
+        }
+        const commandTemplateMatch = pathname.match(/^\/api\/v1\/command-templates\/([^/]+)$/);
+        if (commandTemplateMatch && method === "DELETE") {
+          const templateId = decodeURIComponent(commandTemplateMatch[1]);
+          const template = commandTemplatesFixture.find(
+            (record: { id: string }) => record.id === templateId,
+          );
+          if (!template) {
+            return jsonResponse({ error: "command_template_not_found" }, 404);
+          }
+          if ((template as { built_in?: boolean }).built_in) {
+            return jsonResponse({ error: "command_template_builtin_immutable" }, 409);
+          }
+          return jsonResponse(template);
         }
         if (pathname === "/api/v1/agent-update-releases" && method === "GET") {
           return jsonResponse(agentUpdateReleasesFixture);

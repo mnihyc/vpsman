@@ -9,8 +9,6 @@ import {
   Save,
   ShieldCheck,
   Trash2,
-  UserPlus,
-  UserX,
   Wifi,
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
@@ -22,7 +20,6 @@ import { generateNoiseKeypair } from "../noiseKeygen";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
-  OperatorSessionRecord,
   OperatorView,
   TotpSetupResponse,
 } from "../types";
@@ -44,7 +41,6 @@ import {
 
 const accessSubpages = [
   "Overview",
-  "Operators",
   "Privilege unlock",
   "VPS keys",
   "Gateway",
@@ -54,7 +50,6 @@ type AccessSubpage = (typeof accessSubpages)[number];
 type AccessConfirmationAction =
   | "agent-identity"
   | "key-revoke"
-  | "operator-session-revoke"
   | "session-clear"
   | "totp-disable"
   | "vault-clear";
@@ -67,12 +62,6 @@ type AccessPanelProps = {
   lastLiveEvent: string;
   loading: boolean;
   onClearSession: () => void;
-  onCreateOperator: (
-    username: string,
-    role: string,
-    password: string,
-    scopes: string[],
-  ) => Promise<void>;
   onConfirmTotp: (password: string, code: string) => Promise<void>;
   onDisableTotp: (password: string, code: string) => Promise<void>;
   onRefresh: () => Promise<void>;
@@ -81,7 +70,6 @@ type AccessPanelProps = {
     reason: string | null,
     confirmed: boolean,
   ) => Promise<void>;
-  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
   onUpsertAgentIdentity: (
     request: UpsertAgentIdentityRequest,
@@ -89,8 +77,6 @@ type AccessPanelProps = {
   operator: OperatorView | null;
   clientKeyRevocations: ClientKeyRevocationView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
-  operatorSessions: OperatorSessionRecord[];
-  operators: OperatorView[];
   privilegeMaterial: PrivilegeMaterial | null;
   sessionVaultAvailable: boolean;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
@@ -99,8 +85,6 @@ type AccessPanelProps = {
 
 function accessSubpageFromRoute(subpage: string): AccessSubpage {
   switch (subpage) {
-    case "operators":
-      return "Operators";
     case "privilege":
       return "Privilege unlock";
     case "clients":
@@ -121,18 +105,14 @@ export function AccessPanel({
   loading,
   onClearSession,
   onConfirmTotp,
-  onCreateOperator,
   onDisableTotp,
   onRefresh,
   onRevokeClientKey,
-  onRevokeOperatorSession,
   onSetupTotp,
   onUpsertAgentIdentity,
   operator,
   clientKeyRevocations,
   keyLifecycleReport,
-  operatorSessions,
-  operators,
   privilegeMaterial,
   sessionVaultAvailable,
   setPrivilegeMaterial,
@@ -145,14 +125,6 @@ export function AccessPanel({
   const [vaultAvailable, setVaultAvailable] = useState(() =>
     hasPrivilegeVault(),
   );
-  const [newOperatorUsername, setNewOperatorUsername] = useState("");
-  const [newOperatorPassword, setNewOperatorPassword] = useState("");
-  const [newOperatorRole, setNewOperatorRole] = useState("operator");
-  const [newOperatorScopes, setNewOperatorScopes] = useState("");
-  const [operatorActionError, setOperatorActionError] = useState<string | null>(
-    null,
-  );
-  const [operatorActionPending, setOperatorActionPending] = useState(false);
   const [totpPassword, setTotpPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [totpSetup, setTotpSetup] = useState<TotpSetupResponse | null>(null);
@@ -174,9 +146,6 @@ export function AccessPanel({
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  const [operatorSessionRevokeId, setOperatorSessionRevokeId] = useState<
-    string | null
-  >(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AccessConfirmationAction | null>(null);
 
@@ -215,11 +184,6 @@ export function AccessPanel({
   const revokedClientCount = lifecycleClients.filter(
     (client) => client.status === "revoked" || client.current_key_revoked,
   ).length;
-  const canCreateOperator =
-    canManageOperators &&
-    newOperatorUsername.trim().length > 0 &&
-    newOperatorPassword.length >= 12 &&
-    !operatorActionPending;
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
@@ -245,35 +209,6 @@ export function AccessPanel({
       clearVault();
     }
     setPendingConfirmation(null);
-  }
-
-  async function createOperator(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canCreateOperator) {
-      return;
-    }
-    setOperatorActionPending(true);
-    setOperatorActionError(null);
-    try {
-      await onCreateOperator(
-        newOperatorUsername.trim(),
-        newOperatorRole,
-        newOperatorPassword,
-        parseListInput(newOperatorScopes),
-      );
-      setNewOperatorUsername("");
-      setNewOperatorPassword("");
-      setNewOperatorRole("operator");
-      setNewOperatorScopes("");
-    } catch (actionError) {
-      setOperatorActionError(
-        actionError instanceof Error
-          ? actionError.message
-          : "Operator creation failed",
-      );
-    } finally {
-      setOperatorActionPending(false);
-    }
   }
 
   async function setupTotp() {
@@ -338,20 +273,6 @@ export function AccessPanel({
     } finally {
       setTotpPending(false);
     }
-  }
-
-  function requestOperatorSessionRevoke(sessionId: string) {
-    setOperatorSessionRevokeId(sessionId);
-    setPendingConfirmation("operator-session-revoke");
-  }
-
-  async function confirmOperatorSessionRevoke() {
-    if (!operatorSessionRevokeId) {
-      return;
-    }
-    await onRevokeOperatorSession(operatorSessionRevokeId);
-    setOperatorSessionRevokeId(null);
-    setPendingConfirmation(null);
   }
 
   async function handleGenerateKeypair() {
@@ -462,7 +383,7 @@ export function AccessPanel({
               {error ??
                 (loading
                   ? "Refreshing access records"
-                  : "Operators, direct gateway agent identities, and active sessions")}
+                  : "Direct gateway identities, browser session state, and live access streams")}
             </span>
           </div>
           <button
@@ -568,130 +489,6 @@ export function AccessPanel({
                 inventory visibility, but it never issues claim tokens and
                 agents never call the panel for runtime configuration.
               </p>
-            </section>
-          </div>
-        )}
-
-        {activeSubpage === "Operators" && (
-          <div className="workspaceSection accessTableStack">
-            <section className="controlPanel">
-              <div className="sectionHeader compact">
-                <h2>Operators</h2>
-                <span>{operators.length} configured</span>
-              </div>
-              <CrudPager
-                fields={[
-                  { label: "Username", value: (item) => item.username },
-                  { label: "Role", value: (item) => item.role },
-                  { label: "Scopes", value: (item) => item.scopes.join(" ") },
-                ]}
-                itemLabel="operators"
-                items={operators}
-                pageSize={8}
-                storageKey="vpsman.access.operators"
-                title="Operators"
-              >
-                {(pagedOperators) => (
-                  <table className="dataTable compactTable">
-                    <thead>
-                      <tr>
-                        <th>Username</th>
-                        <th>Role</th>
-                        <th>Scopes</th>
-                        <th>TOTP</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedOperators.map((item) => (
-                        <tr key={item.id}>
-                          <td>{item.username}</td>
-                          <td>
-                            <span
-                              className={`statusPill ${statusClass(item.role)}`}
-                            >
-                              {item.role}
-                            </span>
-                          </td>
-                          <td>
-                            {item.scopes.length > 0
-                              ? item.scopes.join(", ")
-                              : "all role defaults"}
-                          </td>
-                          <td>{item.totp_enabled ? "enabled" : "off"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CrudPager>
-            </section>
-            <section className="controlPanel">
-              <div className="sectionHeader compact">
-                <h2>Operator sessions</h2>
-                <span>{operatorSessions.length} recent sessions</span>
-              </div>
-              <CrudPager
-                fields={[
-                  {
-                    label: "Operator",
-                    value: (item) => item.operator_username,
-                  },
-                  { label: "Role", value: (item) => item.operator_role },
-                  { label: "Revoked", value: (item) => item.revoked },
-                ]}
-                itemLabel="sessions"
-                items={operatorSessions}
-                pageSize={8}
-                storageKey="vpsman.access.operatorSessions"
-                title="Operator sessions"
-              >
-                {(pagedSessions) => (
-                  <table className="dataTable compactTable">
-                    <thead>
-                      <tr>
-                        <th>Operator</th>
-                        <th>Created</th>
-                        <th>Expires</th>
-                        <th>Status</th>
-                        <th>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedSessions.map((session) => (
-                        <tr key={session.id}>
-                          <td>{session.operator_username}</td>
-                          <td>{formatTime(session.created_at)}</td>
-                          <td>{formatTime(session.expires_at)}</td>
-                          <td>
-                            {session.current
-                              ? "current"
-                              : session.revoked
-                                ? "revoked"
-                                : "active"}
-                          </td>
-                          <td>
-                            <button
-                              className="secondaryAction compactAction dangerAction"
-                              disabled={
-                                !canManageOperators ||
-                                session.current ||
-                                session.revoked
-                              }
-                              onClick={() =>
-                                requestOperatorSessionRevoke(session.id)
-                              }
-                              type="button"
-                            >
-                              <UserX size={14} />
-                              Review revoke
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CrudPager>
             </section>
           </div>
         )}
@@ -986,70 +783,6 @@ export function AccessPanel({
 
         <div
           className="sectionHeader compact"
-          hidden={activeSubpage !== "Operators"}
-        >
-          <h2>Create operator</h2>
-          <span>{operatorActionError ?? "Role and scope assignment"}</span>
-        </div>
-        <form
-          className="sideForm"
-          hidden={activeSubpage !== "Operators"}
-          onSubmit={(event) => void createOperator(event)}
-        >
-          <label>
-            <span>Username</span>
-            <input
-              aria-label="New operator username"
-              disabled={!canManageOperators || operatorActionPending}
-              onChange={(event) => setNewOperatorUsername(event.target.value)}
-              value={newOperatorUsername}
-            />
-          </label>
-          <label>
-            <span>Password</span>
-            <input
-              aria-label="New operator password"
-              disabled={!canManageOperators || operatorActionPending}
-              minLength={12}
-              onChange={(event) => setNewOperatorPassword(event.target.value)}
-              type="password"
-              value={newOperatorPassword}
-            />
-          </label>
-          <label>
-            <span>Role</span>
-            <select
-              aria-label="New operator role"
-              disabled={!canManageOperators || operatorActionPending}
-              onChange={(event) => setNewOperatorRole(event.target.value)}
-              value={newOperatorRole}
-            >
-              <option value="operator">Operator</option>
-              <option value="admin">Admin</option>
-            </select>
-          </label>
-          <label>
-            <span>Scopes</span>
-            <input
-              aria-label="New operator scopes"
-              disabled={!canManageOperators || operatorActionPending}
-              onChange={(event) => setNewOperatorScopes(event.target.value)}
-              placeholder="fleet:read, jobs:read, jobs:write"
-              value={newOperatorScopes}
-            />
-          </label>
-          <button
-            className="secondaryAction"
-            disabled={!canCreateOperator}
-            type="submit"
-          >
-            <UserPlus size={17} />
-            Create operator
-          </button>
-        </form>
-
-        <div
-          className="sectionHeader compact"
           hidden={activeSubpage !== "VPS keys"}
         >
           <h2>Import identity</h2>
@@ -1258,36 +991,8 @@ export function AccessPanel({
         </div>
 
         <div
-          className="accessConfigHeading"
-          hidden={activeSubpage !== "Operators"}
-        >
-          <strong>Local panel state</strong>
-          <span>Browser session and privilege vault controls</span>
-        </div>
-        <div className="sideForm" hidden={activeSubpage !== "Operators"}>
-          <button
-            className="secondaryAction"
-            onClick={() => setPendingConfirmation("session-clear")}
-            type="button"
-          >
-            <KeyRound size={17} />
-            Review session clear
-          </button>
-          <button
-            className="secondaryAction dangerAction"
-            disabled={!vaultAvailable}
-            onClick={() => setPendingConfirmation("vault-clear")}
-            type="button"
-          >
-            <Trash2 size={17} />
-            Review vault clear
-          </button>
-        </div>
-
-        <div
           className="timeline"
           hidden={
-            activeSubpage === "Operators" ||
             activeSubpage === "VPS keys" ||
             activeSubpage === "Gateway"
           }
@@ -1335,21 +1040,6 @@ export function AccessPanel({
         open={pendingConfirmation === "key-revoke"}
         pending={revokePending}
         title="Confirm current key revocation"
-        tone="danger"
-      />
-      <ConfirmationPrompt
-        confirmLabel="Revoke session"
-        detail="This revokes the selected operator bearer session."
-        items={[
-          { label: "Session", value: operatorSessionRevokeId ?? "-" },
-        ]}
-        onCancel={() => {
-          setOperatorSessionRevokeId(null);
-          setPendingConfirmation(null);
-        }}
-        onConfirm={() => void confirmOperatorSessionRevoke()}
-        open={pendingConfirmation === "operator-session-revoke"}
-        title="Confirm operator session revocation"
         tone="danger"
       />
       <ConfirmationPrompt

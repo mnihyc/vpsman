@@ -158,6 +158,14 @@ export function SchedulesPanel({
       null,
     [commandTemplates, selectedTemplateId],
   );
+  const builtinTemplates = useMemo(
+    () => commandTemplates.filter((template) => template.built_in),
+    [commandTemplates],
+  );
+  const userTemplates = useMemo(
+    () => commandTemplates.filter((template) => !template.built_in),
+    [commandTemplates],
+  );
   const scheduleOperation = useMemo<JobOperation | null>(
     () =>
       selectedTemplate?.operation ??
@@ -1028,11 +1036,29 @@ export function SchedulesPanel({
                 value={selectedTemplateId}
               >
                 <option value="">One-off shell argv</option>
-                {commandTemplates.map((template) => (
-                  <option key={template.id} value={template.id}>
-                    {template.name} · {template.command_type}
-                  </option>
-                ))}
+                {builtinTemplates.length > 0 && (
+                  <optgroup label="Built-in templates">
+                    {builtinTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {userTemplates.length > 0 && (
+                  <>
+                    <option disabled value="__user_template_separator">
+                      ────────── User-defined templates ──────────
+                    </option>
+                    <optgroup label="User-defined templates">
+                      {userTemplates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name} · {template.command_type}
+                        </option>
+                      ))}
+                    </optgroup>
+                  </>
+                )}
               </select>
             </label>
             <label>

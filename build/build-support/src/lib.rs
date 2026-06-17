@@ -6,7 +6,34 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseIdentity {
+    pub version: String,
+    pub tag: Option<String>,
+}
+
+pub fn emit_release_identity() {
+    println!("cargo:rerun-if-env-changed=VPSMAN_RELEASE_VERSION");
+    println!("cargo:rerun-if-env-changed=VPSMAN_RELEASE_TAG");
+    println!("cargo:rerun-if-env-changed=GITHUB_REF_TYPE");
+    println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
+
+    let identity = resolve_release_identity(
+        |name| std::env::var(name).ok(),
+        &std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by Cargo"),
+    );
+    println!(
+        "cargo:rustc-env=VPSMAN_RELEASE_VERSION={}",
+        identity.version
+    );
+    if let Some(tag) = identity.tag {
+        println!("cargo:rustc-env=VPSMAN_RELEASE_TAG={tag}");
+    }
+}
+
 pub fn emit_component_build_number_for(component_env: &str, component_name: &str) {
+    emit_release_identity();
+
     let counter_path = counter_path(component_name);
     println!("cargo:rerun-if-env-changed=VPSMAN_BUILD_NUMBER_DIR");
     println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
@@ -19,6 +46,56 @@ pub fn emit_component_build_number_for(component_env: &str, component_name: &str
     };
 
     println!("cargo:rustc-env={component_env}={build_number}");
+}
+
+fn resolve_release_identity(
+    get_env: impl Fn(&str) -> Option<String>,
+    cargo_package_version: &str,
+) -> ReleaseIdentity {
+    let explicit_tag = clean_env(get_env("VPSMAN_RELEASE_TAG"));
+    let github_tag = match (
+        clean_env(get_env("GITHUB_REF_TYPE")),
+        clean_env(get_env("GITHUB_REF_NAME")),
+    ) {
+        (Some(kind), Some(name)) if kind == "tag" => Some(name),
+        _ => None,
+    };
+    let tag = explicit_tag.or(github_tag);
+    let explicit_version = clean_env(get_env("VPSMAN_RELEASE_VERSION"));
+    let version = explicit_version
+        .clone()
+        .or_else(|| tag.as_deref().map(version_from_tag))
+        .unwrap_or_else(|| cargo_package_version.trim().to_string());
+
+    assert!(
+        !version.is_empty() && !version.chars().any(char::is_whitespace),
+        "VPSMAN_RELEASE_VERSION must be non-empty and contain no whitespace"
+    );
+    if let Some(tag) = tag.as_deref() {
+        assert!(
+            !tag.chars().any(char::is_whitespace),
+            "VPSMAN_RELEASE_TAG must contain no whitespace"
+        );
+        if explicit_version.is_some() {
+            let tag_version = version_from_tag(tag);
+            assert_eq!(
+                tag_version, version,
+                "VPSMAN_RELEASE_VERSION must match VPSMAN_RELEASE_TAG without a leading v"
+            );
+        }
+    }
+
+    ReleaseIdentity { version, tag }
+}
+
+fn clean_env(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn version_from_tag(tag: &str) -> String {
+    tag.strip_prefix('v').unwrap_or(tag).to_string()
 }
 
 fn counter_path(component_name: &str) -> PathBuf {
@@ -92,5 +169,63 @@ impl CounterLock {
 impl Drop for CounterLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_release_identity;
+
+    fn env_from<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        |name| {
+            pairs
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+        }
+    }
+
+    #[test]
+    fn release_identity_prefers_explicit_release_env() {
+        let identity = resolve_release_identity(
+            env_from(&[
+                ("VPSMAN_RELEASE_TAG", "v1.2.3"),
+                ("VPSMAN_RELEASE_VERSION", "1.2.3"),
+            ]),
+            "0.1.0",
+        );
+
+        assert_eq!(identity.version, "1.2.3");
+        assert_eq!(identity.tag.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn release_identity_derives_version_from_github_tag() {
+        let identity = resolve_release_identity(
+            env_from(&[("GITHUB_REF_TYPE", "tag"), ("GITHUB_REF_NAME", "v2.0.1")]),
+            "0.1.0",
+        );
+
+        assert_eq!(identity.version, "2.0.1");
+        assert_eq!(identity.tag.as_deref(), Some("v2.0.1"));
+    }
+
+    #[test]
+    fn release_identity_falls_back_to_cargo_package_version() {
+        let identity = resolve_release_identity(env_from(&[]), "0.1.0");
+
+        assert_eq!(identity.version, "0.1.0");
+        assert_eq!(identity.tag, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "VPSMAN_RELEASE_VERSION must match VPSMAN_RELEASE_TAG")]
+    fn release_identity_rejects_tag_version_mismatch() {
+        let _ = resolve_release_identity(
+            env_from(&[
+                ("VPSMAN_RELEASE_TAG", "v1.2.3"),
+                ("VPSMAN_RELEASE_VERSION", "1.2.4"),
+            ]),
+            "0.1.0",
+        );
     }
 }

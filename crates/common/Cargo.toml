@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+build = "build.rs"
 
 [dependencies]
 base64.workspace = true
@@ -23,3 +24,6 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
+
+[build-dependencies]
+vpsman-build-support = { path = "../../build/build-support" }

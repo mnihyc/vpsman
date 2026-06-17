@@ -160,6 +160,14 @@ api_post() {
     "$api_url$path"
 }
 
+api_delete() {
+  local path="$1"
+  curl -fsS \
+    -X DELETE \
+    -H "Authorization: Bearer $access_token" \
+    "$api_url$path"
+}
+
 api_post_expect_status() {
   local path="$1"
   local json="$2"
@@ -794,10 +802,33 @@ command_template_request="$(jq -n '{
 }')"
 command_template_json="$(api_post "/api/v1/command-templates" "$command_template_request")"
 command_template_id="$(jq -r '.id' <<<"$command_template_json")"
-jq -e '.name == "pg-smoke-tag-uptime" and .scope_kind == "tag" and .scope_value == "edge" and .command_type == "shell_argv" and .operation.type == "shell"' \
+jq -e '.name == "pg-smoke-tag-uptime" and .built_in == false and .scope_kind == "tag" and .scope_value == "edge" and .command_type == "shell_argv" and .operation.type == "shell"' \
   <<<"$command_template_json" >/dev/null
 api_get "/api/v1/command-templates?limit=20&scope_kind=tag&scope_value=edge" | jq -e --arg template_id "$command_template_id" '
-  any(.[]; .id == $template_id and .name == "pg-smoke-tag-uptime" and .command_type == "shell_argv")
+  any(.[]; .id == $template_id and .name == "pg-smoke-tag-uptime" and .built_in == false and .command_type == "shell_argv")
+' >/dev/null
+api_get "/api/v1/command-templates?limit=20" | jq -e '
+  any(.[]; .name == "Default shell command" and .built_in == true and .scope_kind == "global") and
+  any(.[]; .name == "Default manual update check" and .built_in == true and .operation.type == "agent_update_check")
+' >/dev/null
+immutable_template_json="$(api_post_expect_status "/api/v1/command-templates" "$(jq -n '{
+  name: "Default shell command",
+  scope_kind: "global",
+  operation: {
+    type: "shell",
+    argv: ["/bin/true"],
+    pty: false
+  },
+  defaults: {},
+  confirmed: true
+}')" "409")"
+jq -e '.error == "command_template_builtin_immutable" and .status == 409' \
+  <<<"$immutable_template_json" >/dev/null
+api_delete "/api/v1/command-templates/$command_template_id" | jq -e --arg template_id "$command_template_id" '
+  .id == $template_id and .built_in == false and .name == "pg-smoke-tag-uptime"
+' >/dev/null
+api_get "/api/v1/command-templates?limit=20&scope_kind=tag&scope_value=edge" | jq -e --arg template_id "$command_template_id" '
+  all(.[]; .id != $template_id)
 ' >/dev/null
 
 rejected_job_payload="$(jq -n '{
@@ -829,7 +860,8 @@ jq -e '
   any(.[]; .action == "backup.artifact_metadata_recorded") and
   any(.[]; .action == "backup_policy.retention_pruned") and
   any(.[]; .action == "restore.planned_metadata_only") and
-  any(.[]; .action == "command_template.upserted")
+  any(.[]; .action == "command_template.upserted") and
+  any(.[]; .action == "command_template.deleted")
 ' <<<"$audit_json" >/dev/null || {
   jq -r '.[].action' <<<"$audit_json" | sort | uniq -c >&2
   exit 1
@@ -942,7 +974,8 @@ jq -e '
   any(.[]; .action == "backup.requested_metadata_only") and
   any(.[]; .action == "backup.artifact_metadata_recorded") and
   any(.[]; .action == "restore.planned_metadata_only") and
-  any(.[]; .action == "command_template.upserted")
+  any(.[]; .action == "command_template.upserted") and
+  any(.[]; .action == "command_template.deleted")
 ' <<<"$audit_json" >/dev/null || {
   jq -r '.[].action' <<<"$audit_json" | sort | uniq -c >&2
   exit 1

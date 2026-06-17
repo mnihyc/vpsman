@@ -19,6 +19,10 @@ import {
   type GeneratedJobCommandType,
 } from "../generated/protocolContracts";
 import {
+  DEFAULT_UPDATE_VERSION_URL,
+  type JobDispatchPreset,
+} from "../jobDispatchPreset";
+import {
   buildPrivilegeAssertion,
   canonicalJobPrivilegeIntent,
   operationPayloadHashHex,
@@ -66,7 +70,6 @@ import { JobOperationEditor, OperationModeTabs } from "./jobs/JobOperationContro
 import { agentsMatchingExpression, parseSearchExpression } from "../searchExpression";
 import { TargetImpactPreview, targetImpactModeForDispatch } from "./TargetImpactPreview";
 
-const DEFAULT_UPDATE_VERSION_URL = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json";
 const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
 
 export type TerminalComposerAction = {
@@ -156,7 +159,9 @@ export function JobDispatchPanel({
   agents,
   fileTransferSources,
   commandTemplates,
+  dispatchPreset,
   terminalComposerAction,
+  onDispatchPresetApplied,
   onCreateJob,
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
@@ -166,6 +171,7 @@ export function JobDispatchPanel({
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onResolveTargets,
+  onDeleteCommandTemplate,
   onUpsertCommandTemplate,
   privilegeMaterial,
   setPrivilegeMaterial,
@@ -173,7 +179,9 @@ export function JobDispatchPanel({
   agents: AgentView[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
   commandTemplates: CommandTemplateRecord[];
+  dispatchPreset?: JobDispatchPreset | null;
   terminalComposerAction?: TerminalComposerAction | null;
+  onDispatchPresetApplied?: () => void;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
@@ -183,6 +191,7 @@ export function JobDispatchPanel({
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
+  onDeleteCommandTemplate: (templateId: string) => Promise<CommandTemplateRecord>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
@@ -227,6 +236,7 @@ export function JobDispatchPanel({
   const [templateScopeKind, setTemplateScopeKind] = useState<"global" | "provider" | "tag" | "client">("global");
   const [templateScopeValue, setTemplateScopeValue] = useState("");
   const [templatePending, setTemplatePending] = useState(false);
+  const [templateConfirmation, setTemplateConfirmation] = useState<"save-copy" | "delete" | null>(null);
   const [hotConfigToml, setHotConfigToml] = useState("");
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
@@ -260,6 +270,44 @@ export function JobDispatchPanel({
   const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+
+  useEffect(() => {
+    if (!dispatchPreset) {
+      return;
+    }
+    setMode(dispatchPreset.mode);
+    if (dispatchPreset.selectorExpression !== undefined) {
+      setSelectorExpression(dispatchPreset.selectorExpression);
+    }
+    if (dispatchPreset.timeoutSecs !== undefined) {
+      setTimeoutSecs(clampInteger(dispatchPreset.timeoutSecs, 1, 3600));
+    } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
+      setTimeoutSecs(60);
+    } else if (dispatchPreset.mode.startsWith("agent_update")) {
+      setTimeoutSecs(300);
+    }
+    if (dispatchPreset.mode === "agent_update") {
+      setUpdateArtifactUrl(dispatchPreset.updateArtifactUrl ?? "");
+      setUpdateSha256Hex(dispatchPreset.updateSha256Hex ?? "");
+    }
+    if (dispatchPreset.mode === "agent_update_check") {
+      setUpdateCheckVersionUrl(dispatchPreset.updateCheckVersionUrl ?? DEFAULT_UPDATE_VERSION_URL);
+      setUpdateCheckActivate(dispatchPreset.updateCheckActivate ?? true);
+      setUpdateCheckRestartAgent(dispatchPreset.updateCheckRestartAgent ?? true);
+    }
+    if (dispatchPreset.mode === "agent_update_activate") {
+      setUpdateActivationSha256Hex(dispatchPreset.updateActivationSha256Hex ?? "");
+      setUpdateRestartAgent(dispatchPreset.updateRestartAgent ?? true);
+    }
+    if (dispatchPreset.mode === "agent_update_rollback") {
+      setUpdateRollbackSha256Hex(dispatchPreset.updateRollbackSha256Hex ?? "");
+    }
+    setPreview(null);
+    setActionError(null);
+    setDispatchPromptOpen(false);
+    clearExecutionResults();
+    onDispatchPresetApplied?.();
+  }, [dispatchPreset, onDispatchPresetApplied]);
 
   useEffect(() => {
     if (!terminalComposerAction) {
@@ -393,6 +441,15 @@ export function JobDispatchPanel({
   const supportsForceUnprivileged = impactMode !== "generic";
   const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction);
   const impactTargets = preview?.targets ?? expressionTargets;
+  const selectedTemplate = commandTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+  const builtinTemplates = useMemo(
+    () => commandTemplates.filter((template) => template.built_in),
+    [commandTemplates],
+  );
+  const userTemplates = useMemo(
+    () => commandTemplates.filter((template) => !template.built_in),
+    [commandTemplates],
+  );
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const confirmationTargets = preview?.targets ?? expressionTargets;
   const dispatchConfirmationItems = [
@@ -483,10 +540,24 @@ export function JobDispatchPanel({
       return;
     }
     applyTemplateOperation(template.operation);
-    setTemplateName(template.name);
+    applyTemplateDefaults(template.defaults);
+    setTemplateName(template.built_in ? `${template.name} copy` : template.name);
     setTemplateScopeKind(template.scope_kind as "global" | "provider" | "tag" | "client");
     setTemplateScopeValue(template.scope_value ?? "");
+    setTemplateConfirmation(null);
     setActionError(null);
+  }
+
+  function applyTemplateDefaults(defaults: CommandTemplateRecord["defaults"]) {
+    if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
+      return;
+    }
+    if (typeof defaults.timeout_secs === "number") {
+      setTimeoutSecs(clampInteger(defaults.timeout_secs, 1, 3600));
+    }
+    if (typeof defaults.force_unprivileged === "boolean") {
+      setForceUnprivileged(defaults.force_unprivileged);
+    }
   }
 
   function applyTemplateOperation(operation: CommandTemplateRecord["operation"]) {
@@ -550,7 +621,11 @@ export function JobDispatchPanel({
     }
   }
 
-  async function saveCommandTemplate() {
+  async function saveCommandTemplate(confirmedBuiltinCopy = false) {
+    if (selectedTemplate?.built_in && !confirmedBuiltinCopy) {
+      setTemplateConfirmation("save-copy");
+      return;
+    }
     await runPanelAction(setTemplatePending, setActionError, async () => {
       const name = templateName.trim();
       if (!name) {
@@ -602,7 +677,7 @@ export function JobDispatchPanel({
         filePushMode,
         null,
       );
-      await onUpsertCommandTemplate({
+      const saved = await onUpsertCommandTemplate({
         name,
         scope_kind: templateScopeKind,
         scope_value: scopeValue,
@@ -616,6 +691,22 @@ export function JobDispatchPanel({
         },
         confirmed: true,
       });
+      setSelectedTemplateId(saved.id);
+      setTemplateName(saved.name);
+      setTemplateScopeKind(saved.scope_kind as "global" | "provider" | "tag" | "client");
+      setTemplateScopeValue(saved.scope_value ?? "");
+      setTemplateConfirmation(null);
+    });
+  }
+
+  async function deleteSelectedCommandTemplate() {
+    if (!selectedTemplate || selectedTemplate.built_in) {
+      return;
+    }
+    await runPanelAction(setTemplatePending, setActionError, async () => {
+      await onDeleteCommandTemplate(selectedTemplate.id);
+      setSelectedTemplateId("");
+      setTemplateConfirmation(null);
     });
   }
 
@@ -828,17 +919,35 @@ export function JobDispatchPanel({
           <label>
             <span>Template</span>
             <select
-              aria-label="Saved command template"
+              aria-label="Template selector"
               onChange={(event) => applyCommandTemplate(event.target.value)}
               value={selectedTemplateId}
             >
-              <option value="">Select saved template</option>
-              {commandTemplates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name} · {template.scope_kind}
-                  {template.scope_value ? `:${template.scope_value}` : ""}
-                </option>
-              ))}
+              <option value="">Select template</option>
+              {builtinTemplates.length > 0 && (
+                <optgroup label="Built-in templates">
+                  {builtinTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {userTemplates.length > 0 && (
+                <>
+                  <option disabled value="__user_template_separator">
+                    ────────── User-defined templates ──────────
+                  </option>
+                  <optgroup label="User-defined templates">
+                    {userTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name} · {template.scope_kind}
+                        {template.scope_value ? `:${template.scope_value}` : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                </>
+              )}
             </select>
           </label>
           <label>
@@ -873,15 +982,66 @@ export function JobDispatchPanel({
               value={templateScopeKind === "global" ? "" : templateScopeValue}
             />
           </label>
-          <button
-            className="secondaryAction"
-            disabled={templatePending}
-            onClick={() => void saveCommandTemplate()}
-            type="button"
-          >
-            Save template
-          </button>
+          <div className="templateToolbarActions">
+            <button
+              className="secondaryAction"
+              disabled={templatePending}
+              onClick={() => void saveCommandTemplate()}
+              type="button"
+            >
+              {selectedTemplate?.built_in ? "Save copy" : "Save"}
+            </button>
+            <button
+              className="secondaryAction dangerAction"
+              disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
+              onClick={() => setTemplateConfirmation("delete")}
+              type="button"
+            >
+              Delete
+            </button>
+          </div>
         </div>
+        <ConfirmationPrompt
+          confirmLabel="Save copy"
+          detail="Creates a user-defined command template. The built-in template remains unchanged."
+          items={[
+            { label: "Built-in", value: selectedTemplate?.name ?? "-" },
+            { label: "Copy name", value: templateName.trim() || "-" },
+            {
+              label: "Scope",
+              value:
+                templateScopeKind === "global"
+                  ? "global"
+                  : `${templateScopeKind}:${templateScopeValue.trim() || "-"}`,
+            },
+          ]}
+          onCancel={() => setTemplateConfirmation(null)}
+          onConfirm={() => void saveCommandTemplate(true)}
+          open={templateConfirmation === "save-copy"}
+          pending={templatePending}
+          title="Save built-in as user template"
+        />
+        <ConfirmationPrompt
+          confirmLabel="Delete template"
+          detail="Deletes this user-defined command template. Built-in templates cannot be deleted."
+          items={[
+            { label: "Template", value: selectedTemplate?.name ?? "-" },
+            {
+              label: "Scope",
+              value: selectedTemplate
+                ? selectedTemplate.scope_value
+                  ? `${selectedTemplate.scope_kind}:${selectedTemplate.scope_value}`
+                  : selectedTemplate.scope_kind
+                : "-",
+            },
+          ]}
+          onCancel={() => setTemplateConfirmation(null)}
+          onConfirm={() => void deleteSelectedCommandTemplate()}
+          open={templateConfirmation === "delete"}
+          pending={templatePending}
+          title="Confirm template delete"
+          tone="danger"
+        />
         <OperationModeTabs mode={mode} onModeChange={setMode} />
         <JobOperationEditor
           commandText={commandText}

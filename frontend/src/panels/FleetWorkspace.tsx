@@ -97,6 +97,10 @@ import {
   shortId,
   type VpsNameDisplayMode,
 } from "../utils";
+import {
+  DEFAULT_UPDATE_VERSION_URL,
+  type JobDispatchPresetInput,
+} from "../jobDispatchPreset";
 import type {
   ActiveView,
   AgentView,
@@ -190,6 +194,7 @@ export function FleetWorkspace({
   onCreateJob,
   onBulkMutateTags,
   onNavigatePanel,
+  onOpenJobDispatchPreset,
   onRenderDataSourceHotConfig,
   onDeleteFleetAlertNotificationChannel,
   onDeleteFleetAlertPolicy,
@@ -240,6 +245,7 @@ export function FleetWorkspace({
     request: BulkTagMutationRequest,
   ) => Promise<TagMutationResponse>;
   onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onRenderDataSourceHotConfig: (
     clientId: string,
   ) => Promise<DataSourceHotConfigResponse>;
@@ -512,6 +518,19 @@ export function FleetWorkspace({
     onNavigatePanel?.("Jobs", "files");
   }
 
+  function openUpdateCheckWorkflow(rows: AgentView[]) {
+    onOpenJobDispatchPreset({
+      mode: "agent_update_check",
+      selectorExpression: selectorExpressionForClientIds(
+        rows.map((agent) => agent.id),
+      ),
+      timeoutSecs: 300,
+      updateCheckActivate: true,
+      updateCheckRestartAgent: true,
+      updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
+    });
+  }
+
   function requestDeleteAgent(rows: AgentView[]) {
     if (rows.length !== 1) {
       return;
@@ -566,7 +585,9 @@ export function FleetWorkspace({
                 onSelect: (rows) => onSelectAgent(rows[0].id),
               },
               {
-                label: "Open bulk execution",
+                label: "Open dispatch",
+                icon: <TerminalSquare size={15} />,
+                separatorBefore: true,
                 onSelect: (rows) =>
                   openSelectorWorkflow(
                     rows,
@@ -576,7 +597,13 @@ export function FleetWorkspace({
                   ),
               },
               {
+                label: "Check update",
+                icon: <ArrowUpCircle size={15} />,
+                onSelect: openUpdateCheckWorkflow,
+              },
+              {
                 label: "Open multi-file actions",
+                separatorBefore: true,
                 onSelect: (rows) =>
                   openSelectorWorkflow(
                     rows,
@@ -592,6 +619,7 @@ export function FleetWorkspace({
               },
               {
                 label: "Open bulk tags",
+                separatorBefore: true,
                 onSelect: (rows) =>
                   openSelectorWorkflow(
                     rows,
@@ -623,6 +651,7 @@ export function FleetWorkspace({
               },
               {
                 label: "Copy client IDs",
+                separatorBefore: true,
                 onSelect: (rows) =>
                   void copyText(rows.map((agent) => agent.id).join("\n")),
               },
@@ -656,6 +685,7 @@ export function FleetWorkspace({
                 disabled: (rows) => rows.length !== 1,
                 icon: <Trash2 size={15} />,
                 onSelect: requestDeleteAgent,
+                separatorBefore: true,
                 tone: "danger",
               },
             ]}
@@ -726,6 +756,7 @@ export function FleetWorkspace({
                 latestRollups={latestRollups}
                 mutateTagsForAgents={mutateTagsForAgents}
                 onOpenFileBrowser={openFileBrowserWorkflow}
+                onOpenUpdateCheck={openUpdateCheckWorkflow}
                 onOpenSelectorWorkflow={openSelectorWorkflow}
                 selectionStatsMode={selectionStatsMode}
                 setSelectionStatsMode={setSelectionStatsMode}
@@ -1606,6 +1637,7 @@ function FleetSelectionPanel({
   latestRollups,
   mutateTagsForAgents,
   onOpenFileBrowser,
+  onOpenUpdateCheck,
   onOpenSelectorWorkflow,
   selectionStatsMode,
   setSelectionStatsMode,
@@ -1623,6 +1655,7 @@ function FleetSelectionPanel({
     tag: string,
   ) => Promise<TagMutationResponse>;
   onOpenFileBrowser: (rows: AgentView[]) => void;
+  onOpenUpdateCheck: (rows: AgentView[]) => void;
   onOpenSelectorWorkflow: (
     rows: AgentView[],
     view: ActiveView,
@@ -1669,6 +1702,13 @@ function FleetSelectionPanel({
         <div className="fleetSelectionActions">
           <button
             className="secondaryAction compactAction"
+            onClick={() => onOpenUpdateCheck(agents)}
+            type="button"
+          >
+            <ArrowUpCircle size={14} /> Check update
+          </button>
+          <button
+            className="secondaryAction compactAction"
             onClick={() =>
               onOpenSelectorWorkflow(
                 agents,
@@ -1679,7 +1719,7 @@ function FleetSelectionPanel({
             }
             type="button"
           >
-            <TerminalSquare size={14} /> Bulk execution
+            <TerminalSquare size={14} /> Open dispatch
           </button>
           <button
             className="secondaryAction compactAction"

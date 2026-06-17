@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 
-use crate::http::{http_delete, http_get, http_post_json};
+use crate::{
+    http::{http_delete, http_get, http_post_json, http_put_json},
+    util::percent_encode_query_value,
+};
 
 pub(crate) fn health(api_url: &str) -> Result<()> {
     println!("{}", http_get(api_url, "/health", None)?);
@@ -81,6 +84,8 @@ pub(crate) fn operator_create(
     role: String,
     scopes: Vec<String>,
     password_env: String,
+    session_refresh_ttl_secs: u64,
+    admin_risk_acknowledged: bool,
 ) -> Result<()> {
     let password = std::env::var(&password_env)
         .with_context(|| format!("environment variable {password_env} is not set"))?;
@@ -95,7 +100,118 @@ pub(crate) fn operator_create(
                 "password": password,
                 "role": role,
                 "scopes": scopes,
+                "session_refresh_ttl_secs": session_refresh_ttl_secs,
+                "admin_risk_acknowledged": admin_risk_acknowledged,
             }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn operator_update(
+    api_url: &str,
+    token: Option<&str>,
+    operator_id: String,
+    role: String,
+    scopes: Vec<String>,
+    session_refresh_ttl_secs: u64,
+    admin_risk_acknowledged: bool,
+) -> Result<()> {
+    println!(
+        "{}",
+        http_put_json(
+            api_url,
+            &format!("/api/v1/operators/{operator_id}"),
+            token,
+            &serde_json::json!({
+                "role": role,
+                "scopes": scopes,
+                "session_refresh_ttl_secs": session_refresh_ttl_secs,
+                "confirmed": true,
+                "admin_risk_acknowledged": admin_risk_acknowledged,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn operator_set_status(
+    api_url: &str,
+    token: Option<&str>,
+    operator_id: String,
+    action: &str,
+    admin_risk_acknowledged: bool,
+) -> Result<()> {
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/operators/{operator_id}/{action}"),
+            token,
+            &serde_json::json!({
+                "confirmed": true,
+                "admin_risk_acknowledged": admin_risk_acknowledged,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn operator_password_reset(
+    api_url: &str,
+    token: Option<&str>,
+    operator_id: String,
+    password_env: String,
+    admin_risk_acknowledged: bool,
+) -> Result<()> {
+    let password = std::env::var(&password_env)
+        .with_context(|| format!("environment variable {password_env} is not set"))?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/operators/{operator_id}/password-reset"),
+            token,
+            &serde_json::json!({
+                "password": password,
+                "confirmed": true,
+                "admin_risk_acknowledged": admin_risk_acknowledged,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn operator_auth_events(
+    api_url: &str,
+    token: Option<&str>,
+    limit: u16,
+    operator_id: Option<String>,
+    username: Option<String>,
+    result: Option<String>,
+) -> Result<()> {
+    let mut params = vec![format!("limit={}", limit.clamp(1, 200))];
+    if let Some(operator_id) = operator_id.filter(|value| !value.trim().is_empty()) {
+        params.push(format!(
+            "operator_id={}",
+            percent_encode_query_value(&operator_id)
+        ));
+    }
+    if let Some(username) = username.filter(|value| !value.trim().is_empty()) {
+        params.push(format!(
+            "username={}",
+            percent_encode_query_value(&username)
+        ));
+    }
+    if let Some(result) = result.filter(|value| !value.trim().is_empty()) {
+        params.push(format!("result={}", percent_encode_query_value(&result)));
+    }
+    println!(
+        "{}",
+        http_get(
+            api_url,
+            &format!("/api/v1/operator-auth-events?{}", params.join("&")),
+            token,
         )?
     );
     Ok(())

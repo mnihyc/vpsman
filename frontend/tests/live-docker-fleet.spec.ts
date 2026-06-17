@@ -182,15 +182,15 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-expanded-telemetry-detail",
     "Expanded VPS row showing live telemetry detail for a real agent.",
   );
-  await grid.getByRole("button", { name: "Selection" }).click();
+  await grid.getByRole("button", { name: "Action" }).click();
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
-    "fleet-selection-actions-open",
-    "Bulk selection action menu opened after selecting two VPS rows.",
+    "fleet-action-menu-open",
+    "Bulk action menu opened after selecting two VPS rows.",
   );
   await page.keyboard.press("Escape");
   await firstRow.click({ button: "right" });
@@ -620,7 +620,7 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
   );
 
   await row.getByLabel("Select Alert policy rules row").check();
-  await grid.getByRole("button", { name: "Selection" }).click();
+  await grid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Details" }).click();
   await expect(page.getByText("Alert policy details")).toBeVisible();
   await maybeExtendedScreenshot(
@@ -676,7 +676,7 @@ async function exerciseAlertNotificationChannels(
   );
 
   await row.getByLabel("Select Alert notification channels row").check();
-  await grid.getByRole("button", { name: "Selection" }).click();
+  await grid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Details" }).click();
   await expect(page.getByText("Notification channel details")).toBeVisible();
   await maybeExtendedScreenshot(
@@ -878,8 +878,8 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Jobs",
-      subpage: "Updates",
-      marker: "Agent update releases",
+      subpage: "Update registry",
+      marker: "Agent update registry",
       screenshot: "page-jobs-updates",
     },
     {
@@ -1004,12 +1004,6 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Access",
-      subpage: "Operators",
-      marker: "Operators",
-      screenshot: "page-access-operators",
-    },
-    {
-      view: "Access",
       subpage: "VPS keys",
       marker: "Gateway agent identities",
       screenshot: "page-access-vps-keys",
@@ -1025,6 +1019,18 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       subpage: "Privilege unlock",
       marker: "Privilege unlock",
       screenshot: "page-access-privilege-unlock",
+    },
+    {
+      view: "System",
+      subpage: "Users",
+      marker: "System users",
+      screenshot: "page-system-users",
+    },
+    {
+      view: "System",
+      subpage: "Sessions",
+      marker: "System sessions",
+      screenshot: "page-system-sessions",
     },
     {
       view: "System",

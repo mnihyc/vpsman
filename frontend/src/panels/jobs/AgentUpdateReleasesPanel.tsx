@@ -1,10 +1,16 @@
 import { useState } from "react";
 import { PackageCheck } from "lucide-react";
 import { CrudPager } from "../../components/CrudPager";
+import {
+  DEFAULT_UPDATE_VERSION_URL,
+  type JobDispatchPresetInput,
+} from "../../jobDispatchPreset";
 import { agentUpdateReleaseStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   AgentUpdateReleaseRecord,
   CreateAgentUpdateReleaseRequest,
+  JsonValue,
+  SuiteConfigResponse,
 } from "../../types";
 import { formatTime, runPanelAction, shortHash } from "../../utils";
 
@@ -21,13 +27,21 @@ function parseOptionalPositiveInteger(value: string, label: string): number | nu
 export function AgentUpdateReleasesPanel({
   loading,
   onCreateAgentUpdateRelease,
+  onOpenDispatchPreset,
   onRefresh,
   releases,
+  suiteConfig,
+  suiteConfigError,
+  suiteConfigLoading,
 }: {
   loading: boolean;
   onCreateAgentUpdateRelease: (request: CreateAgentUpdateReleaseRequest) => Promise<AgentUpdateReleaseRecord>;
+  onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onRefresh: () => void;
   releases: AgentUpdateReleaseRecord[];
+  suiteConfig: SuiteConfigResponse | null;
+  suiteConfigError: string | null;
+  suiteConfigLoading: boolean;
 }) {
   const [releaseName, setReleaseName] = useState("vpsman-agent");
   const [releaseVersion, setReleaseVersion] = useState("");
@@ -41,6 +55,8 @@ export function AgentUpdateReleasesPanel({
   const [releaseNotes, setReleaseNotes] = useState("");
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [releasePending, setReleasePending] = useState(false);
+  const latestRelease = releases[0] ?? null;
+  const policy = registeredUpdatePolicy(suiteConfig, suiteConfigError, suiteConfigLoading);
 
   async function recordAgentUpdateRelease() {
     await runPanelAction(setReleasePending, setReleaseError, async () => {
@@ -95,19 +111,86 @@ export function AgentUpdateReleasesPanel({
     <div className="fleetPanel agentReleasesPanel">
       <div className="sectionHeader">
         <div>
-          <h2>Agent update releases</h2>
-          <span>{releases.length} external release records</span>
+          <h2>Agent update registry</h2>
+          <span>{releases.length} registered external artifact{releases.length === 1 ? "" : "s"}</span>
         </div>
-        <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-          Refresh
-        </button>
+        <div className="sectionActions">
+          <button
+            className="primaryAction compactAction"
+            onClick={() =>
+              onOpenDispatchPreset({
+                mode: "agent_update_check",
+                selectorExpression: "",
+                updateCheckActivate: true,
+                updateCheckRestartAgent: true,
+                updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
+              })
+            }
+            type="button"
+          >
+            Check latest GitHub update
+          </button>
+          <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            Refresh
+          </button>
+        </div>
+      </div>
+      <div className="releaseWorkflowBar">
+        <div>
+          <strong>{policy.label}</strong>
+          <span>{policy.detail}</span>
+        </div>
+        <div className="releaseQuickActions" aria-label="Agent update dispatch shortcuts">
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenDispatchPreset({
+                mode: "agent_update",
+                selectorExpression: "",
+                updateSha256Hex: latestRelease?.artifact_sha256_hex ?? "",
+              })
+            }
+            type="button"
+          >
+            Manual update
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenDispatchPreset({
+                mode: "agent_update_activate",
+                selectorExpression: "",
+                updateActivationSha256Hex: latestRelease?.artifact_sha256_hex ?? "",
+                updateRestartAgent: true,
+                timeoutSecs: 60,
+              })
+            }
+            type="button"
+          >
+            Activate staged
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() =>
+              onOpenDispatchPreset({
+                mode: "agent_update_rollback",
+                selectorExpression: "",
+                updateRollbackSha256Hex: latestRelease?.rollback_artifact_sha256_hex ?? "",
+                timeoutSecs: 60,
+              })
+            }
+            type="button"
+          >
+            Rollback
+          </button>
+        </div>
       </div>
       <div className="releaseRecordForm">
         <div className="operationNote compactOperation">
           <PackageCheck size={18} />
           <div>
             <strong>External release metadata</strong>
-            <span>Register an externally hosted artifact by HTTPS URL and SHA-256.</span>
+            <span>Register HTTPS artifact hashes for strict API-side admission control; update jobs are dispatched from the command composer.</span>
           </div>
         </div>
 
@@ -253,4 +336,55 @@ export function AgentUpdateReleasesPanel({
       </CrudPager>
     </div>
   );
+}
+
+function registeredUpdatePolicy(
+  suiteConfig: SuiteConfigResponse | null,
+  suiteConfigError: string | null,
+  suiteConfigLoading: boolean,
+): { detail: string; label: string } {
+  if (suiteConfigLoading) {
+    return {
+      label: "Registered-update policy loading",
+      detail: "Loading suite config before showing whether direct manual updates require a registry entry.",
+    };
+  }
+  if (suiteConfigError) {
+    return {
+      label: "Registered-update policy unavailable",
+      detail: suiteConfigError,
+    };
+  }
+  const enforced = readBooleanPath(suiteConfig?.redacted ?? null, ["api", "require_registered_agent_updates"]);
+  if (enforced === true) {
+    return {
+      label: "Registered-update policy enforced",
+      detail: "Manual update jobs are accepted only when the requested artifact SHA-256 exists in this registry.",
+    };
+  }
+  if (enforced === false) {
+    return {
+      label: "Registered-update policy not enforced",
+      detail: "This registry is optional audit metadata. Manifest-based update checks and direct manual updates can still be dispatched.",
+    };
+  }
+  return {
+    label: "Registered-update policy unknown",
+    detail: "Open System config to confirm whether manual update jobs require registered artifact hashes.",
+  };
+}
+
+function readBooleanPath(value: JsonValue | null, path: string[]): boolean | null {
+  let current: JsonValue | undefined | null = value;
+  for (const key of path) {
+    if (!isJsonRecord(current)) {
+      return null;
+    }
+    current = current[key];
+  }
+  return typeof current === "boolean" ? current : null;
+}
+
+function isJsonRecord(value: JsonValue | undefined | null): value is Record<string, JsonValue> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

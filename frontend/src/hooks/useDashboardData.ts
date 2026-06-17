@@ -138,6 +138,7 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
       void inventory.loadTagInventory();
+      void system.loadSuiteConfig();
     } else if (activeView === "Schedules") {
       void schedules.loadSchedules();
       void jobs.loadJobs();
@@ -158,7 +159,7 @@ export function useDashboardData(activeView: ActiveView) {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
     } else if (activeView === "System") {
-      void access.loadCurrentOperatorProfile();
+      void access.loadCurrentOperator();
       void inventory.loadTagInventory();
       void system.loadSystemDashboard();
       void system.loadSuiteConfig();
@@ -350,6 +351,7 @@ export function useDashboardData(activeView: ActiveView) {
     backupsLoading: backups.backupsLoading,
     clearSession,
     clientKeyRevocations: access.clientKeyRevocations,
+    clearOperatorTotp: access.clearOperatorTotp,
     cloneDataSourcePreset: inventory.cloneDataSourcePreset,
     confirmTotp: access.confirmTotp,
     createOperator: access.createOperator,
@@ -389,6 +391,7 @@ export function useDashboardData(activeView: ActiveView) {
     handleAuthVaultUnlock,
     jobs: jobs.jobs,
     commandTemplates: jobs.commandTemplates,
+    deleteCommandTemplate: jobs.deleteCommandTemplate,
     agentUpdateReleases: jobs.agentUpdateReleases,
     jobsError: jobs.jobsError,
     jobsLoading: jobs.jobsLoading,
@@ -461,6 +464,7 @@ export function useDashboardData(activeView: ActiveView) {
     ospfRecommendations: topology.ospfRecommendations,
     ospfUpdatePlans: topology.ospfUpdatePlans,
     operator: access.operator,
+    operatorAuthEvents: access.operatorAuthEvents,
     operators: access.operators,
     operatorSessions: access.operatorSessions,
     preferencesError: access.preferencesError,
@@ -485,6 +489,7 @@ export function useDashboardData(activeView: ActiveView) {
     resolveJobTargets: inventory.resolveJobTargets,
     revokeClientKey: access.revokeClientKey,
     revokeOperatorSession: access.revokeOperatorSession,
+    resetOperatorPassword: access.resetOperatorPassword,
     pruneHistoryRetention: audit.pruneHistoryRetention,
     setupTotp: access.setupTotp,
     testDataSourcePreset: inventory.testDataSourcePreset,
@@ -499,6 +504,7 @@ export function useDashboardData(activeView: ActiveView) {
     systemDashboardWindow: system.systemDashboardWindow,
     setSystemDashboardPointDensity: system.setSystemDashboardPointDensity,
     setSystemDashboardWindow: system.setSystemDashboardWindow,
+    setOperatorStatus: access.setOperatorStatus,
     loadSystemDashboard: system.loadSystemDashboard,
     suiteConfig: system.suiteConfig,
     suiteConfigError: system.suiteConfigError,
@@ -518,6 +524,7 @@ export function useDashboardData(activeView: ActiveView) {
     topologyLoading: topology.topologyLoading,
     tunnelPlans: topology.tunnelPlans,
     updateDataSourcePreset: inventory.updateDataSourcePreset,
+    updateOperator: access.updateOperator,
     upsertHotConfigRuleTemplate: inventory.upsertHotConfigRuleTemplate,
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,

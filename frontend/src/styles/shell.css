@@ -802,7 +802,7 @@ nav {
 
 .confirmationPrompt {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   gap: 12px;
   min-width: 0;
@@ -886,8 +886,11 @@ nav {
 }
 
 .confirmationPromptActions {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -905,6 +908,12 @@ nav {
 .inspector .confirmationPromptBody dl,
 .actionDrawer .confirmationPromptBody dl {
   grid-template-columns: minmax(0, 1fr);
+}
+
+@media (max-width: 640px) {
+  .confirmationPromptBody dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .linkButton {
@@ -1036,6 +1045,12 @@ h2 {
   color: #5f6368;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.consoleMenuSeparator {
+  height: 1px;
+  margin: 6px 4px;
+  background: #e8eaed;
 }
 
 .consoleMenuItem {

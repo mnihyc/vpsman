@@ -27,7 +27,7 @@ use crate::{
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::validate_schedule_request,
-    security::operator_has_scope,
+    security::{operator_has_scope, SCOPE_BACKUPS_READ},
     selector_expression::id_selector_expression,
     state::AppState,
     unix_now,
@@ -45,7 +45,9 @@ pub(crate) async fn list_backup_requests(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<BackupRequestView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
     Ok(Json(state.repo.query_backup_requests(&query).await?))
 }
 
@@ -54,7 +56,9 @@ pub(crate) async fn list_backup_artifacts(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<BackupArtifactView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
     Ok(Json(state.repo.query_backup_artifacts(&query).await?))
 }
 
@@ -62,7 +66,9 @@ pub(crate) async fn list_backup_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<BackupPolicyView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
     Ok(Json(state.repo.list_backup_policies().await?))
 }
 
@@ -658,7 +664,7 @@ pub(crate) async fn download_backup_artifact(
     Path(backup_request_id): Path<uuid::Uuid>,
 ) -> Result<Response<Body>, ApiError> {
     let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "backups:write")
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
     let store = state
         .backup_object_store

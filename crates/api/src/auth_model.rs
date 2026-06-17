@@ -8,6 +8,7 @@ pub(crate) struct OperatorRecord {
     pub(crate) id: Uuid,
     pub(crate) username: String,
     pub(crate) password_hash: String,
+    pub(crate) status: String,
     pub(crate) role: String,
     pub(crate) scopes: Vec<String>,
     pub(crate) preferences: OperatorPreferences,
@@ -15,6 +16,10 @@ pub(crate) struct OperatorRecord {
     pub(crate) totp_secret_ciphertext_hex: Option<String>,
     pub(crate) totp_secret_nonce_hex: Option<String>,
     pub(crate) totp_secret_salt_hex: Option<String>,
+    pub(crate) session_refresh_ttl_secs: u64,
+    pub(crate) created_at: String,
+    pub(crate) disabled_at: Option<String>,
+    pub(crate) deleted_at: Option<String>,
 }
 
 impl OperatorRecord {
@@ -22,6 +27,7 @@ impl OperatorRecord {
         OperatorView {
             id: self.id,
             username: self.username.clone(),
+            status: self.status.clone(),
             role: self.role.clone(),
             scopes: if self.scopes.is_empty() {
                 crate::security::default_operator_scopes(&self.role)
@@ -30,6 +36,10 @@ impl OperatorRecord {
             },
             preferences: self.preferences.clone().normalized(),
             totp_enabled: self.totp_enabled,
+            session_refresh_ttl_secs: self.session_refresh_ttl_secs,
+            created_at: self.created_at.clone(),
+            disabled_at: self.disabled_at.clone(),
+            deleted_at: self.deleted_at.clone(),
         }
     }
 
@@ -228,10 +238,15 @@ fn normalize_dashboard_curve_exclusions(values: Vec<String>) -> Vec<String> {
 pub(crate) struct OperatorView {
     pub(crate) id: Uuid,
     pub(crate) username: String,
+    pub(crate) status: String,
     pub(crate) role: String,
     pub(crate) scopes: Vec<String>,
     pub(crate) preferences: OperatorPreferences,
     pub(crate) totp_enabled: bool,
+    pub(crate) session_refresh_ttl_secs: u64,
+    pub(crate) created_at: String,
+    pub(crate) disabled_at: Option<String>,
+    pub(crate) deleted_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -274,6 +289,59 @@ pub(crate) struct CreateOperatorRequest {
     pub(crate) role: String,
     #[serde(default)]
     pub(crate) scopes: Vec<String>,
+    pub(crate) session_refresh_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateOperatorRequest {
+    pub(crate) role: String,
+    #[serde(default)]
+    pub(crate) scopes: Vec<String>,
+    pub(crate) session_refresh_ttl_secs: u64,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorLifecycleRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorPasswordResetRequest {
+    pub(crate) password: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorAuthEventQuery {
+    pub(crate) limit: Option<u16>,
+    pub(crate) operator_id: Option<Uuid>,
+    pub(crate) username: Option<String>,
+    pub(crate) result: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct OperatorAuthEventView {
+    pub(crate) id: Uuid,
+    pub(crate) operator_id: Option<Uuid>,
+    pub(crate) username: String,
+    pub(crate) result: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) remote_ip: Option<String>,
+    pub(crate) user_agent: Option<String>,
+    pub(crate) session_id: Option<Uuid>,
+    pub(crate) created_at: String,
 }
 
 #[derive(Debug, Deserialize)]

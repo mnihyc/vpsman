@@ -88,7 +88,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "dispatch", label: "Dispatch", description: "Compose privileged commands and terminal actions" },
     { id: "files", label: "Files", description: "Browse, edit, upload, download, and manage one VPS filesystem" },
     { id: "multi_files", label: "Multi files", description: "Bulk file actions by selector expression and policy" },
-    { id: "updates", label: "Updates", description: "Agent releases and update jobs" },
+    { id: "updates", label: "Update registry", description: "Registered external agent release metadata" },
     { id: "transfers", label: "Transfer history", description: "Source artifacts, handoffs, and resumable transfer sessions" },
     { id: "terminal", label: "Terminal sessions", description: "Retained terminal sessions and replay" },
     { id: "processes", label: "Processes", description: "Process supervisor inventory" },
@@ -119,7 +119,6 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   ],
   Access: [
     { id: "overview", label: "Overview", description: "Session, vault, key, and live stream posture" },
-    { id: "operators", label: "Operators", description: "Operator accounts, sessions, and TOTP" },
     { id: "clients", label: "VPS keys", description: "Gateway identities and client key lifecycle" },
     { id: "gateway", label: "Gateway", description: "Gateway sessions and control-plane stream state" },
     { id: "privilege", label: "Privilege unlock", description: "Local privilege unlock and vault controls" },
@@ -129,6 +128,16 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
       id: "dashboard",
       label: "Dashboard",
       description: "Control-plane capacity, queues, deadlines, gateway events, and service health",
+    },
+    {
+      id: "users",
+      label: "Users",
+      description: "Operator accounts, roles, scopes, lifecycle, password reset, and TOTP reset",
+    },
+    {
+      id: "sessions",
+      label: "Sessions",
+      description: "Operator sessions and login history",
     },
     {
       id: "config",

@@ -672,7 +672,7 @@ impl S3BackupObjectStore {
         );
         headers.insert(
             reqwest::header::USER_AGENT,
-            HeaderValue::from_str(&format!("vpsman-api/{}", env!("CARGO_PKG_VERSION")))
+            HeaderValue::from_str(&format!("vpsman-api/{}", vpsman_common::release_version()))
                 .context("invalid S3 user-agent header")?,
         );
         let client = reqwest::Client::builder()

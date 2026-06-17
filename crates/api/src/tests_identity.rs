@@ -218,6 +218,11 @@ fn identity_operator() -> AuthContext {
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
         },
         session_id: Uuid::nil(),
     }

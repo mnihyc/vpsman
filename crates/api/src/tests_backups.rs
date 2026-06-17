@@ -404,11 +404,17 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         privilege_assertion: None,
     };
 
-    let (_status, Json(response)) = create_job(State(state), headers, Json(job_request))
+    let (_status, Json(response)) = create_job(State(state.clone()), headers, Json(job_request))
         .await
         .unwrap();
     assert_eq!(response.status, "queued");
-    let _dispatch = gateway_task.await.unwrap();
+    crate::job_dispatcher::dispatch_due_job_targets(&state)
+        .await
+        .unwrap();
+    let _dispatch = tokio::time::timeout(std::time::Duration::from_secs(2), gateway_task)
+        .await
+        .expect("backup gateway dispatch was not attempted")
+        .unwrap();
     wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
 
@@ -1634,6 +1640,11 @@ fn backup_test_operator() -> AuthContext {
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
         },
         session_id: Uuid::new_v4(),
     }

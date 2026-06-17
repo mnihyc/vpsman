@@ -56,6 +56,12 @@
   min-width: 0;
 }
 
+.templateToolbarActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .releaseRecordForm {
   display: grid;
   gap: 12px;
@@ -1939,6 +1945,42 @@
   padding: 14px;
 }
 
+.releaseWorkflowBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid #dfe3eb;
+  border-bottom: 1px solid #dfe3eb;
+  background: #f8fafd;
+  padding: 12px 14px;
+}
+
+.releaseWorkflowBar > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.releaseWorkflowBar strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.releaseWorkflowBar span {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.releaseQuickActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
 .agentReleasesPanel .releaseIdentitySection {
   grid-column: 1;
 }
@@ -2058,6 +2100,15 @@
 @media (max-width: 1180px) {
   .agentReleasesPanel .releaseRecordForm {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .releaseWorkflowBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .releaseQuickActions {
+    justify-content: flex-start;
   }
 
   .agentReleasesPanel .releaseIdentitySection,

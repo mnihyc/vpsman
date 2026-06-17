@@ -4,14 +4,21 @@ import {
   AlertTriangle,
   CheckCircle2,
   Database,
+  KeyRound,
   LockKeyhole,
   Network,
+  Pencil,
   RefreshCw,
   Save,
   ServerCog,
   SlidersHorizontal,
+  ShieldCheck,
   TimerReset,
+  Trash2,
+  UserPlus,
+  UserX,
 } from "lucide-react";
+import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
@@ -23,7 +30,9 @@ import {
 } from "../privilege";
 import type {
   JsonValue,
+  OperatorAuthEventRecord,
   OperatorView,
+  OperatorSessionRecord,
   SuiteConfigResponse,
   SuiteConfigUpdateResponse,
   SuiteConfigValidateResponse,
@@ -33,6 +42,7 @@ import type {
 } from "../types";
 import type { SystemDashboardPointDensity, SystemDashboardWindow } from "../hooks/useSystemData";
 import { PreferencesPanel } from "./PreferencesPanel";
+import { formatTime, shortId, statusClass } from "../utils";
 
 type SystemPanelProps = {
   activeSubpage: string;
@@ -44,14 +54,44 @@ type SystemPanelProps = {
   onDashboardPointDensityChange: (density: SystemDashboardPointDensity) => void;
   onDashboardRefresh: () => void;
   onDashboardWindowChange: (window: SystemDashboardWindow) => void;
+  onClearOperatorTotp: (operatorId: string, adminRiskAcknowledged: boolean) => Promise<void>;
+  onCreateOperator: (
+    username: string,
+    role: string,
+    password: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
   onLoadSuiteConfig: () => void;
   onOpenPrivilegeUnlock: () => void;
+  onResetOperatorPassword: (
+    operatorId: string,
+    password: string,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
+  onSetOperatorStatus: (
+    operatorId: string,
+    status: "active" | "disabled" | "deleted",
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  onUpdateOperator: (
+    operatorId: string,
+    role: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
   onUpdateSuiteConfig: (
     toml: string,
     privilegeAssertion: unknown,
   ) => Promise<SuiteConfigUpdateResponse>;
   onValidateSuiteConfig: (toml: string) => Promise<SuiteConfigValidateResponse>;
   operator: OperatorView | null;
+  operatorAuthEvents: OperatorAuthEventRecord[];
+  operatorSessions: OperatorSessionRecord[];
+  operators: OperatorView[];
   privilegeMaterial: PrivilegeMaterial | null;
   suiteConfig: SuiteConfigResponse | null;
   suiteConfigError: string | null;
@@ -74,6 +114,60 @@ const pointDensityOptions: Array<{ label: string; value: SystemDashboardPointDen
   { label: "Dense", value: "dense" },
 ];
 
+const operatorRoleOptions = ["viewer", "operator", "admin"];
+const commonScopeOptions = [
+  "fleet:read",
+  "jobs:read",
+  "backups:read",
+  "terminal:read",
+  "integrations:read",
+  "templates:read",
+  "schedules:read",
+  "config:read",
+  "network:read",
+  "jobs:write",
+  "inventory:write",
+  "schedules:write",
+  "backups:write",
+  "network:write",
+  "*",
+];
+const defaultSessionTtlDays = 365;
+const operatorHelpText = {
+  username:
+    "Login username. Existing operator usernames are locked in the editor; create a new operator for a new login name.",
+  createPassword:
+    "Initial operator password. It must be at least 12 characters and is used only when creating the user.",
+  newPassword:
+    "Replacement password. Save does not read or send this field; use Reset password to apply it and revoke existing sessions.",
+  role:
+    "Role controls the default permission bundle. Admin grants full operator control; operator and viewer are narrower unless scopes override them.",
+  sessionRefreshTtl:
+    "Refresh-token/session lifetime in days for newly issued operator sessions. This is not the short access-token expiry shown in System > Sessions.",
+  scopes:
+    "Optional scope override. Leave empty for role defaults. Accepts comma or space separated scopes such as fleet:read, jobs:write, config:read, or *.",
+  shortcuts:
+    "Append a scope token to the override field. These shortcuts are editable text helpers, not immutable presets.",
+  save:
+    "Save role, scopes, and refresh-token session TTL only. This action never changes the password field.",
+  resetPassword:
+    "Apply the New password field, then revoke existing sessions for this operator.",
+  clearTotp:
+    "Remove stored TOTP secret material and revoke existing sessions. The user must enroll TOTP again before using it.",
+  enable:
+    "Allow this disabled operator to log in again.",
+  disable:
+    "Block login and revoke existing sessions without deleting the operator record.",
+  delete:
+    "Delete this operator record for login purposes, block login, and revoke existing sessions. The backend keeps the username reserved.",
+  create:
+    "Create the operator record. Password is required for creation and is not shown in the confirmation message.",
+  sessionAccessExpires:
+    "Short access-token expiry for this bearer session.",
+  sessionRefreshExpires:
+    "Refresh-token/session expiry. This is controlled by the user's refresh TTL setting.",
+};
+
 export function SystemPanel({
   activeSubpage,
   dashboard,
@@ -84,11 +178,20 @@ export function SystemPanel({
   onDashboardPointDensityChange,
   onDashboardRefresh,
   onDashboardWindowChange,
+  onClearOperatorTotp,
+  onCreateOperator,
   onLoadSuiteConfig,
   onOpenPrivilegeUnlock,
+  onResetOperatorPassword,
+  onRevokeOperatorSession,
+  onSetOperatorStatus,
+  onUpdateOperator,
   onUpdateSuiteConfig,
   onValidateSuiteConfig,
   operator,
+  operatorAuthEvents,
+  operatorSessions,
+  operators,
   privilegeMaterial,
   suiteConfig,
   suiteConfigError,
@@ -109,6 +212,28 @@ export function SystemPanel({
       />
     );
   }
+  if (activeSubpage === "users") {
+    return (
+      <SystemUsersPanel
+        currentOperator={operator}
+        onClearOperatorTotp={onClearOperatorTotp}
+        onCreateOperator={onCreateOperator}
+        onResetOperatorPassword={onResetOperatorPassword}
+        onSetOperatorStatus={onSetOperatorStatus}
+        onUpdateOperator={onUpdateOperator}
+        operators={operators}
+      />
+    );
+  }
+  if (activeSubpage === "sessions") {
+    return (
+      <SystemSessionsPanel
+        authEvents={operatorAuthEvents}
+        onRevokeOperatorSession={onRevokeOperatorSession}
+        sessions={operatorSessions}
+      />
+    );
+  }
   if (activeSubpage === "operator") {
     return <PreferencesPanel operator={operator} tags={tags} />;
   }
@@ -124,6 +249,888 @@ export function SystemPanel({
       window={dashboardWindow}
     />
   );
+}
+
+type PendingUserAction =
+  | {
+      kind: "create";
+      username: string;
+      role: string;
+      password: string;
+      scopes: string[];
+      sessionRefreshTtlSecs: number;
+      adminRisk: boolean;
+    }
+  | {
+      kind: "update";
+      operator: OperatorView;
+      role: string;
+      scopes: string[];
+      sessionRefreshTtlSecs: number;
+      adminRisk: boolean;
+    }
+  | {
+      kind: "status";
+      operators: OperatorView[];
+      status: "active" | "disabled" | "deleted";
+      adminRisk: boolean;
+    }
+  | {
+      kind: "password";
+      operator: OperatorView;
+      password: string;
+      adminRisk: boolean;
+    }
+  | {
+      kind: "totp";
+      operators: OperatorView[];
+      adminRisk: boolean;
+    };
+
+function FieldLabel({ help, label }: { help: string; label: string }) {
+  return (
+    <span className="fieldLabelWithHelp">
+      <span>{label}</span>
+      <span
+        aria-label={`${label} help`}
+        className="fieldHelpIcon"
+        role="img"
+        tabIndex={0}
+        title={help}
+      >
+        ?
+      </span>
+    </span>
+  );
+}
+
+function SystemUsersPanel({
+  currentOperator,
+  onClearOperatorTotp,
+  onCreateOperator,
+  onResetOperatorPassword,
+  onSetOperatorStatus,
+  onUpdateOperator,
+  operators,
+}: {
+  currentOperator: OperatorView | null;
+  onClearOperatorTotp: (operatorId: string, adminRiskAcknowledged: boolean) => Promise<void>;
+  onCreateOperator: (
+    username: string,
+    role: string,
+    password: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  onResetOperatorPassword: (
+    operatorId: string,
+    password: string,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  onSetOperatorStatus: (
+    operatorId: string,
+    status: "active" | "disabled" | "deleted",
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  onUpdateOperator: (
+    operatorId: string,
+    role: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+  ) => Promise<void>;
+  operators: OperatorView[];
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedOperator = operators.find((item) => item.id === selectedId) ?? null;
+  const [draftUsername, setDraftUsername] = useState("");
+  const [draftPassword, setDraftPassword] = useState("");
+  const [draftRole, setDraftRole] = useState("operator");
+  const [draftScopes, setDraftScopes] = useState("");
+  const [draftSessionTtlDays, setDraftSessionTtlDays] = useState(defaultSessionTtlDays);
+  const [pendingAction, setPendingAction] = useState<PendingUserAction | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
+  const canManageUsers = currentOperator?.role === "admin";
+
+  useEffect(() => {
+    if (!selectedOperator) {
+      return;
+    }
+    setDraftUsername(selectedOperator.username);
+    setDraftPassword("");
+    setDraftRole(selectedOperator.role);
+    setDraftScopes(selectedOperator.scopes.join(", "));
+    setDraftSessionTtlDays(secondsToDays(selectedOperator.session_refresh_ttl_secs));
+    setActionError(null);
+  }, [selectedOperator]);
+
+  const userColumns = useMemo<ConsoleDataGridColumn<OperatorView>[]>(
+    () => [
+      {
+        id: "username",
+        header: "Username",
+        cell: (row) => <span className="operatorRecordName">{row.username}</span>,
+        searchValue: (row) => row.username,
+        sortValue: (row) => row.username,
+      },
+      {
+        id: "status",
+        header: "Status",
+        cell: (row) => <span className={`statusPill ${statusClass(row.status)}`}>{row.status}</span>,
+        searchValue: (row) => row.status,
+        sortValue: (row) => row.status,
+      },
+      {
+        id: "role",
+        header: "Role",
+        cell: (row) => <span className={`statusPill ${statusClass(row.role)}`}>{row.role}</span>,
+        searchValue: (row) => row.role,
+        sortValue: (row) => row.role,
+      },
+      {
+        id: "ttl",
+        header: "Session TTL",
+        cell: (row) => (
+          <span title={operatorHelpText.sessionRefreshTtl}>
+            {secondsToDays(row.session_refresh_ttl_secs)}d
+          </span>
+        ),
+        sortValue: (row) => row.session_refresh_ttl_secs,
+      },
+      {
+        id: "totp",
+        header: "TOTP",
+        cell: (row) => (row.totp_enabled ? "enabled" : "off"),
+        searchValue: (row) => row.totp_enabled,
+        sortValue: (row) => row.totp_enabled,
+      },
+      {
+        id: "created",
+        header: "Created",
+        cell: (row) => formatTime(row.created_at),
+        sortValue: (row) => row.created_at,
+      },
+    ],
+    [],
+  );
+
+  function resetCreateDraft() {
+    setSelectedId(null);
+    setDraftUsername("");
+    setDraftPassword("");
+    setDraftRole("operator");
+    setDraftScopes("");
+    setDraftSessionTtlDays(defaultSessionTtlDays);
+    setActionError(null);
+  }
+
+  function submitCreate() {
+    const username = draftUsername.trim();
+    const password = draftPassword;
+    if (!username || password.length < 12) {
+      setActionError("Username and a 12+ character password are required");
+      return;
+    }
+    const scopes = parseScopeList(draftScopes);
+    const sessionRefreshTtlSecs = daysToSeconds(draftSessionTtlDays);
+    setPendingAction({
+      kind: "create",
+      username,
+      role: draftRole,
+      password,
+      scopes,
+      sessionRefreshTtlSecs,
+      adminRisk: draftRole === "admin",
+    });
+  }
+
+  function submitUpdate() {
+    if (!selectedOperator) {
+      return;
+    }
+    setPendingAction({
+      kind: "update",
+      operator: selectedOperator,
+      role: draftRole,
+      scopes: parseScopeList(draftScopes),
+      sessionRefreshTtlSecs: daysToSeconds(draftSessionTtlDays),
+      adminRisk: selectedOperator.role === "admin" || draftRole === "admin",
+    });
+  }
+
+  function submitStatus(status: "active" | "disabled" | "deleted") {
+    if (!selectedOperator) {
+      return;
+    }
+    setPendingAction({
+      kind: "status",
+      operators: [selectedOperator],
+      status,
+      adminRisk: selectedOperator.role === "admin",
+    });
+  }
+
+  function submitBulkStatus(rows: OperatorView[], status: "active" | "disabled" | "deleted") {
+    const operatorsToChange = rows.filter((operator) => operator.status !== "deleted");
+    if (operatorsToChange.length === 0) {
+      return;
+    }
+    setPendingAction({
+      kind: "status",
+      operators: operatorsToChange,
+      status,
+      adminRisk: operatorsToChange.some((operator) => operator.role === "admin"),
+    });
+  }
+
+  function submitPasswordReset() {
+    if (!selectedOperator || draftPassword.length < 12) {
+      setActionError("A 12+ character replacement password is required");
+      return;
+    }
+    setPendingAction({
+      kind: "password",
+      operator: selectedOperator,
+      password: draftPassword,
+      adminRisk: selectedOperator.role === "admin",
+    });
+  }
+
+  function submitTotpClear() {
+    if (!selectedOperator) {
+      return;
+    }
+    setPendingAction({
+      kind: "totp",
+      operators: [selectedOperator],
+      adminRisk: selectedOperator.role === "admin",
+    });
+  }
+
+  function submitBulkTotpClear(rows: OperatorView[]) {
+    const operatorsToChange = rows.filter((operator) => operator.totp_enabled && operator.status !== "deleted");
+    if (operatorsToChange.length === 0) {
+      return;
+    }
+    setPendingAction({
+      kind: "totp",
+      operators: operatorsToChange,
+      adminRisk: operatorsToChange.some((operator) => operator.role === "admin"),
+    });
+  }
+
+  async function confirmUserAction() {
+    if (!pendingAction) {
+      return;
+    }
+    setActionPending(true);
+    setActionError(null);
+    try {
+      if (pendingAction.kind === "create") {
+        await onCreateOperator(
+          pendingAction.username,
+          pendingAction.role,
+          pendingAction.password,
+          pendingAction.scopes,
+          pendingAction.sessionRefreshTtlSecs,
+          pendingAction.adminRisk,
+        );
+        resetCreateDraft();
+      } else if (pendingAction.kind === "update") {
+        await onUpdateOperator(
+          pendingAction.operator.id,
+          pendingAction.role,
+          pendingAction.scopes,
+          pendingAction.sessionRefreshTtlSecs,
+          pendingAction.adminRisk,
+        );
+      } else if (pendingAction.kind === "status") {
+        for (const operator of pendingAction.operators) {
+          await onSetOperatorStatus(
+            operator.id,
+            pendingAction.status,
+            pendingAction.adminRisk,
+          );
+        }
+      } else if (pendingAction.kind === "password") {
+        await onResetOperatorPassword(
+          pendingAction.operator.id,
+          pendingAction.password,
+          pendingAction.adminRisk,
+        );
+        setDraftPassword("");
+      } else {
+        for (const operator of pendingAction.operators) {
+          await onClearOperatorTotp(operator.id, pendingAction.adminRisk);
+        }
+      }
+      setPendingAction(null);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "User action failed");
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  const editingDeleted = selectedOperator?.status === "deleted";
+
+  return (
+    <div className="workspace singleColumn systemWorkspace systemUsersWorkspace">
+      <section className="controlPanel systemUsersTablePanel">
+        <div className="sectionHeader fleetInstancesHeader">
+          <div>
+            <h2>Users</h2>
+            <span>{operators.length} operator records</span>
+          </div>
+          <span className="sectionContext">
+            {selectedOperator ? `Selected ${selectedOperator.username}` : "Create or select an operator record"}
+          </span>
+        </div>
+        <ConsoleDataGrid
+          actions={[
+            {
+              label: "Edit selected",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Load ${rows[0].username} into the editor.`
+                  : "Select exactly one operator to edit.",
+              disabled: (rows) => rows.length !== 1,
+              icon: <Pencil size={14} />,
+              onSelect: (rows) => setSelectedId(rows[0].id),
+            },
+            {
+              label: "Enable selected",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Allow ${rows[0].username} to log in again.`
+                  : `Allow ${rows.length} disabled operators to log in again.`,
+              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "disabled"),
+              icon: <CheckCircle2 size={14} />,
+              onSelect: (rows) => submitBulkStatus(rows, "active"),
+            },
+            {
+              label: "Disable selected",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Block ${rows[0].username} login and revoke existing sessions.`
+                  : `Block login and revoke existing sessions for ${rows.length} operators.`,
+              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "active"),
+              icon: <UserX size={14} />,
+              onSelect: (rows) => submitBulkStatus(rows, "disabled"),
+              tone: "danger",
+            },
+            {
+              label: "Delete selected",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
+                  : `Delete ${rows.length} operators for login purposes and revoke existing sessions.`,
+              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status === "deleted"),
+              icon: <Trash2 size={14} />,
+              onSelect: (rows) => submitBulkStatus(rows, "deleted"),
+              tone: "danger",
+            },
+            {
+              label: "Clear TOTP selected",
+              description: (rows) =>
+                rows.length === 1
+                  ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
+                  : `Remove stored TOTP secret material and revoke sessions for ${rows.length} operators.`,
+              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => !row.totp_enabled || row.status === "deleted"),
+              icon: <ShieldCheck size={14} />,
+              onSelect: submitBulkTotpClear,
+            },
+          ]}
+          columns={userColumns}
+          defaultPageSize={12}
+          empty="No operators"
+          getRowId={(row) => row.id}
+          itemLabel="users"
+          onOpenRow={(row) => setSelectedId(row.id)}
+          rows={operators}
+          searchPlaceholder="Search username, role, status, or TOTP"
+          storageKey="vpsman.system.users"
+          title="Users"
+          toolbarActions={
+            <button
+              className="secondaryAction compactAction"
+              onClick={resetCreateDraft}
+              title="Clear the editor and prepare a new operator record."
+              type="button"
+            >
+              <UserPlus size={16} />
+              <span>New</span>
+            </button>
+          }
+        />
+      </section>
+
+      <section className="controlPanel operatorEditorPanel" aria-label="Operator user editor">
+        <div className="sectionHeader fleetInstancesHeader">
+          <div>
+            <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
+            <span>{actionError ?? (canManageUsers ? "Ready" : "Admin role required for changes")}</span>
+          </div>
+          {selectedOperator && (
+            <span className="sectionContext">
+              {selectedOperator.status} · {selectedOperator.role} · {secondsToDays(selectedOperator.session_refresh_ttl_secs)}d session TTL
+            </span>
+          )}
+        </div>
+        <div className="operatorEditorBody">
+          <div className="operatorEditorFields">
+            <label>
+              <FieldLabel help={operatorHelpText.username} label="Username" />
+              <input
+                aria-label="Operator username"
+                disabled={Boolean(selectedOperator)}
+                onChange={(event) => setDraftUsername(event.target.value)}
+                title={operatorHelpText.username}
+                value={draftUsername}
+              />
+            </label>
+            <label>
+              <FieldLabel
+                help={selectedOperator ? operatorHelpText.newPassword : operatorHelpText.createPassword}
+                label={selectedOperator ? "New password" : "Password"}
+              />
+              <input
+                aria-label="Operator password"
+                disabled={!canManageUsers || editingDeleted}
+                minLength={12}
+                onChange={(event) => setDraftPassword(event.target.value)}
+                placeholder={selectedOperator ? "Only fill to reset" : "12+ characters"}
+                title={selectedOperator ? operatorHelpText.newPassword : operatorHelpText.createPassword}
+                type="password"
+                value={draftPassword}
+              />
+            </label>
+            <label>
+              <FieldLabel help={operatorHelpText.role} label="Role" />
+              <select
+                aria-label="Operator role"
+                disabled={!canManageUsers || editingDeleted}
+                onChange={(event) => setDraftRole(event.target.value)}
+                title={operatorHelpText.role}
+                value={draftRole}
+              >
+                {operatorRoleOptions.map((role) => (
+                  <option key={role} value={role}>{role}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <FieldLabel help={operatorHelpText.sessionRefreshTtl} label="Session TTL days" />
+              <input
+                aria-label="Session refresh TTL days"
+                disabled={!canManageUsers || editingDeleted}
+                max={3650}
+                min={1}
+                onChange={(event) => setDraftSessionTtlDays(Number(event.target.value))}
+                title={operatorHelpText.sessionRefreshTtl}
+                type="number"
+                value={draftSessionTtlDays}
+              />
+            </label>
+          </div>
+
+          <div className="operatorScopeEditor">
+            <label>
+              <FieldLabel help={operatorHelpText.scopes} label="Scopes" />
+              <textarea
+                aria-label="Operator scopes"
+                disabled={!canManageUsers || editingDeleted}
+                onChange={(event) => setDraftScopes(event.target.value)}
+                placeholder="Leave empty for role defaults"
+                rows={4}
+                title={operatorHelpText.scopes}
+                value={draftScopes}
+              />
+            </label>
+            <div
+              className="operatorScopeShortcuts"
+              aria-label="Scope shortcuts"
+              title={operatorHelpText.shortcuts}
+            >
+              {commonScopeOptions.map((scope) => (
+                <button
+                  className="tagChip"
+                  disabled={!canManageUsers || editingDeleted}
+                  key={scope}
+                  onClick={() => setDraftScopes(addScopeToken(draftScopes, scope))}
+                  title={scope === "*" ? "Append * to grant all operator scopes." : `Append ${scope} to the scope override field.`}
+                  type="button"
+                >
+                  {scope}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="operatorEditorActions">
+            {selectedOperator ? (
+              <>
+                <button
+                  className="secondaryAction"
+                  disabled={!canManageUsers || editingDeleted}
+                  onClick={submitUpdate}
+                  title={operatorHelpText.save}
+                  type="button"
+                >
+                  <Save size={17} />
+                  Save
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={!canManageUsers || editingDeleted || draftPassword.length < 12}
+                  onClick={submitPasswordReset}
+                  title={operatorHelpText.resetPassword}
+                  type="button"
+                >
+                  <KeyRound size={17} />
+                  Reset password
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={!canManageUsers || editingDeleted || !selectedOperator.totp_enabled}
+                  onClick={submitTotpClear}
+                  title={operatorHelpText.clearTotp}
+                  type="button"
+                >
+                  <ShieldCheck size={17} />
+                  Clear TOTP
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={!canManageUsers || selectedOperator.status !== "disabled"}
+                  onClick={() => submitStatus("active")}
+                  title={operatorHelpText.enable}
+                  type="button"
+                >
+                  <CheckCircle2 size={17} />
+                  Enable
+                </button>
+                <button
+                  className="secondaryAction dangerAction"
+                  disabled={!canManageUsers || selectedOperator.status !== "active"}
+                  onClick={() => submitStatus("disabled")}
+                  title={operatorHelpText.disable}
+                  type="button"
+                >
+                  <UserX size={17} />
+                  Disable
+                </button>
+                <button
+                  className="secondaryAction dangerAction"
+                  disabled={!canManageUsers || editingDeleted}
+                  onClick={() => submitStatus("deleted")}
+                  title={operatorHelpText.delete}
+                  type="button"
+                >
+                  <Trash2 size={17} />
+                  Delete
+                </button>
+              </>
+            ) : (
+              <button
+                className="secondaryAction"
+                disabled={!canManageUsers}
+                onClick={submitCreate}
+                title={operatorHelpText.create}
+                type="button"
+              >
+                <UserPlus size={17} />
+                Create
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+      <ConfirmationPrompt
+        confirmLabel={pendingUserActionLabel(pendingAction)}
+        detail={pendingUserActionDetail(pendingAction)}
+        items={pendingUserActionItems(pendingAction)}
+        onCancel={() => setPendingAction(null)}
+        onConfirm={() => void confirmUserAction()}
+        open={pendingAction !== null}
+        pending={actionPending}
+        title={pendingAction?.adminRisk ? "Confirm admin user action" : "Confirm user action"}
+        tone={pendingAction?.adminRisk ? "danger" : "normal"}
+      />
+    </div>
+  );
+}
+
+function SystemSessionsPanel({
+  authEvents,
+  onRevokeOperatorSession,
+  sessions,
+}: {
+  authEvents: OperatorAuthEventRecord[];
+  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
+  sessions: OperatorSessionRecord[];
+}) {
+  const [pendingSessions, setPendingSessions] = useState<OperatorSessionRecord[]>([]);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sessionColumns = useMemo<ConsoleDataGridColumn<OperatorSessionRecord>[]>(
+    () => [
+      { id: "operator", header: "User", cell: (row) => row.operator_username, searchValue: (row) => row.operator_username },
+      { id: "role", header: "Role", cell: (row) => row.operator_role, searchValue: (row) => row.operator_role },
+      { id: "created", header: "Created", cell: (row) => formatTime(row.created_at), sortValue: (row) => row.created_at },
+      {
+        id: "access",
+        header: "Access expires",
+        cell: (row) => (
+          <span title={operatorHelpText.sessionAccessExpires}>
+            {formatTime(row.expires_at)}
+          </span>
+        ),
+        sortValue: (row) => row.expires_at,
+      },
+      {
+        id: "refresh",
+        header: "Refresh expires",
+        cell: (row) => (
+          <span title={operatorHelpText.sessionRefreshExpires}>
+            {formatTime(row.refresh_expires_at)}
+          </span>
+        ),
+        sortValue: (row) => row.refresh_expires_at,
+      },
+      {
+        id: "state",
+        header: "State",
+        cell: (row) => row.current ? "current" : row.revoked ? "revoked" : "active",
+        searchValue: (row) => row.current ? "current" : row.revoked ? "revoked" : "active",
+      },
+    ],
+    [],
+  );
+  const eventColumns = useMemo<ConsoleDataGridColumn<OperatorAuthEventRecord>[]>(
+    () => [
+      { id: "time", header: "Time", cell: (row) => formatTime(row.created_at), sortValue: (row) => row.created_at },
+      { id: "username", header: "Username", cell: (row) => row.username, searchValue: (row) => row.username },
+      {
+        id: "result",
+        header: "Result",
+        cell: (row) => <span className={`statusPill ${statusClass(row.result)}`}>{row.result}</span>,
+        searchValue: (row) => row.result,
+      },
+      { id: "reason", header: "Reason", cell: (row) => row.reason ?? "-", searchValue: (row) => row.reason },
+      { id: "remote", header: "Remote IP", cell: (row) => row.remote_ip ?? "-", searchValue: (row) => row.remote_ip },
+      { id: "session", header: "Session", cell: (row) => shortId(row.session_id), searchValue: (row) => row.session_id },
+    ],
+    [],
+  );
+
+  async function confirmSessionRevoke() {
+    if (pendingSessions.length === 0) {
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      for (const session of pendingSessions) {
+        await onRevokeOperatorSession(session.id);
+      }
+      setPendingSessions([]);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Session revoke failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="workspace singleColumn systemWorkspace">
+      <div className="workspaceStack">
+        <section className="controlPanel">
+          <div className="sectionHeader compact">
+            <h2>Sessions</h2>
+            <span>{sessions.length} recent sessions</span>
+          </div>
+          {error && <div className="panelError">{error}</div>}
+          <ConsoleDataGrid
+            actions={[
+              {
+                label: "Revoke selected",
+                description: (rows) =>
+                  rows.length === 1
+                    ? `Revoke the bearer session for ${rows[0].operator_username}.`
+                    : `Revoke ${rows.length} selected bearer sessions.`,
+                tone: "danger",
+                icon: <UserX size={14} />,
+                disabled: (rows) => rows.length === 0 || rows.some((row) => row.current || row.revoked),
+                onSelect: (rows) => setPendingSessions(rows),
+              },
+            ]}
+            columns={sessionColumns}
+            defaultPageSize={12}
+            empty="No operator sessions"
+            getRowId={(row) => row.id}
+            itemLabel="sessions"
+            rows={sessions}
+            searchPlaceholder="Search user, role, or state"
+            storageKey="vpsman.system.sessions"
+            title="Sessions"
+          />
+        </section>
+        <section className="controlPanel">
+          <div className="sectionHeader compact">
+            <h2>Authentication history</h2>
+            <span>{authEvents.length} login results</span>
+          </div>
+          <ConsoleDataGrid
+            columns={eventColumns}
+            defaultPageSize={12}
+            empty="No authentication events"
+            getRowId={(row) => row.id}
+            itemLabel="events"
+            rows={authEvents}
+            searchPlaceholder="Search username, result, reason, remote IP, or session"
+            storageKey="vpsman.system.authEvents"
+            title="Authentication history"
+          />
+        </section>
+      </div>
+      <ConfirmationPrompt
+        confirmLabel={pendingSessions.length === 1 ? "Revoke session" : "Revoke sessions"}
+        detail={
+          pendingSessions.some((session) => session.operator_role === "admin")
+            ? "This revokes an admin user's bearer session. Existing browser state for that session will stop working after the current access token expires or is checked again."
+            : pendingSessions.length === 1
+              ? "This revokes the selected bearer session."
+              : "This revokes the selected bearer sessions."
+        }
+        items={[
+          { label: "Sessions", value: pendingSessions.length },
+          { label: "Users", value: pendingSessions.map((session) => session.operator_username).join(", ") || "-" },
+          { label: "Admin sessions", value: pendingSessions.filter((session) => session.operator_role === "admin").length },
+        ]}
+        onCancel={() => setPendingSessions([])}
+        onConfirm={() => void confirmSessionRevoke()}
+        open={pendingSessions.length > 0}
+        pending={pending}
+        title={pendingSessions.some((session) => session.operator_role === "admin") ? "Confirm admin session revoke" : "Confirm session revoke"}
+        tone="danger"
+      />
+    </div>
+  );
+}
+
+function parseScopeList(value: string): string[] {
+  return value
+    .split(/[,\s]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean)
+    .filter((scope, index, scopes) => scopes.indexOf(scope) === index);
+}
+
+function addScopeToken(current: string, scope: string): string {
+  const scopes = parseScopeList(current);
+  if (!scopes.includes(scope)) {
+    scopes.push(scope);
+  }
+  return scopes.join(", ");
+}
+
+function daysToSeconds(value: number): number {
+  return Math.max(1, Math.min(3650, Math.round(value || defaultSessionTtlDays))) * 24 * 60 * 60;
+}
+
+function secondsToDays(value: number): number {
+  return Math.max(1, Math.round(value / (24 * 60 * 60)));
+}
+
+function pendingUserActionLabel(action: PendingUserAction | null): string {
+  if (!action) {
+    return "Confirm";
+  }
+  switch (action.kind) {
+    case "create":
+      return "Create user";
+    case "update":
+      return "Save user";
+    case "status":
+      if (action.operators.length === 1) {
+        return action.status === "active" ? "Enable user" : action.status === "disabled" ? "Disable user" : "Delete user";
+      }
+      return action.status === "active" ? "Enable users" : action.status === "disabled" ? "Disable users" : "Delete users";
+    case "password":
+      return "Reset password";
+    case "totp":
+      return action.operators.length === 1 ? "Clear TOTP" : "Clear TOTP secrets";
+  }
+}
+
+function pendingUserActionDetail(action: PendingUserAction | null): ReactNode {
+  if (!action) {
+    return "";
+  }
+  const adminDetail = action.adminRisk
+    ? " This action targets or grants admin privileges; verify that the selected account and role change are intentional."
+    : "";
+  switch (action.kind) {
+    case "create":
+      return `Create an operator record for ${action.username}.${adminDetail}`;
+    case "update":
+      return `Update role, scopes, and session lifetime for ${action.operator.username}.${adminDetail}`;
+    case "status":
+      return `${pendingUserActionLabel(action)} for ${formatOperatorSelection(action.operators)}.${adminDetail}`;
+    case "password":
+      return `Replace the password and revoke existing sessions for ${action.operator.username}.${adminDetail}`;
+    case "totp":
+      return `Clear stored TOTP secret material and revoke existing sessions for ${formatOperatorSelection(action.operators)}.${adminDetail}`;
+  }
+}
+
+function pendingUserActionItems(action: PendingUserAction | null): Array<{ label: string; value: ReactNode }> {
+  if (!action) {
+    return [];
+  }
+  if (action.kind === "create") {
+    return [
+      { label: "Username", value: action.username },
+      { label: "Role", value: action.role },
+      { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
+      { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+    ];
+  }
+  if (action.kind === "update") {
+    return [
+      { label: "Username", value: action.operator.username },
+      { label: "Role", value: action.role },
+      { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
+      { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+    ];
+  }
+  if (action.kind === "password") {
+    return [
+      { label: "Username", value: action.operator.username },
+      { label: "Role", value: action.operator.role },
+    ];
+  }
+  if (action.kind === "status" || action.kind === "totp") {
+    return [
+      { label: action.operators.length === 1 ? "Username" : "Users", value: formatOperatorSelection(action.operators) },
+      { label: "Count", value: action.operators.length },
+    ];
+  }
+  return [];
+}
+
+function formatOperatorSelection(operators: OperatorView[]): string {
+  if (operators.length === 0) {
+    return "-";
+  }
+  const names = operators.map((operator) => operator.username);
+  if (names.length <= 4) {
+    return names.join(", ");
+  }
+  return `${names.slice(0, 4).join(", ")} +${names.length - 4} more`;
 }
 
 function SystemDashboardPanel({

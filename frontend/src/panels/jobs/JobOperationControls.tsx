@@ -33,7 +33,7 @@ export function OperationModeTabs({
     { label: "Resumable upload", mode: "file_transfer_upload" },
     { label: "Resumable download", mode: "file_transfer_download" },
     { label: "Full config", mode: "hot_config" },
-    { label: "Update", mode: "agent_update" },
+    { label: "Manual update", mode: "agent_update" },
     { label: "Check update", mode: "agent_update_check" },
     { label: "Activate", mode: "agent_update_activate" },
     { label: "Rollback", mode: "agent_update_rollback" },

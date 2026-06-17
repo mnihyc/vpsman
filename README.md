@@ -58,6 +58,10 @@ The release workflow stamps it with the exact tag, commit, generated asset
 list, and tag-pinned per-asset download URLs before uploading it to GitHub
 Releases as `version.json`.
 
+The GitHub release tag is the canonical shipped version. Release builds embed
+that tag-derived version into the server, agent, and CLI binaries so the agent
+updater compares against the same version published in `version.json`.
+
 The frontend artifact is a static Vite build intended for Nginx, Apache2, or an
 equivalent static server.
 

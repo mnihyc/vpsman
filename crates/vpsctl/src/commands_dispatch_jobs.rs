@@ -684,11 +684,11 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::AgentUpdateReleasePublish(command) => {
-            commands_config::agent_update_release_publish(
+        Command::AgentUpdateReleaseRecord(command) => {
+            commands_config::agent_update_release_record(
                 api_url,
                 token,
-                commands_config::AgentUpdateReleasePublishOptions {
+                commands_config::AgentUpdateReleaseRecordOptions {
                     name: command.name,
                     version: command.version,
                     channel: command.channel,

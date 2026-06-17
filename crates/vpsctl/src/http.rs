@@ -236,7 +236,7 @@ fn build_request_with_len(
 ) -> Result<String> {
     let mut request = format!(
         "{method} {request_path} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: vpsctl/{} build/{}\r\nConnection: close\r\nAccept: application/json\r\n",
-        env!("CARGO_PKG_VERSION"),
+        crate::build_info::cli_release_version(),
         crate::build_info::CLI_BUILD_NUMBER
     );
     if let Some(token) = bearer_token {

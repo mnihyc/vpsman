@@ -30,8 +30,9 @@ max_plaintext_bytes = 1048576
 # The autonomous updater is configured with production defaults but is disabled
 # unless the installer or a later incremental config patch explicitly enables
 # it. Agents use the official GitHub release manifest's tag-pinned asset URL,
-# verify SHA256SUMS, stage newer musl agent artifacts, activate them, and
-# restart themselves when enabled.
+# compare it with the release version embedded in the binary, verify
+# SHA256SUMS, stage newer musl agent artifacts, activate them, and restart
+# themselves when enabled.
 unmanaged_enabled = false
 unmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
 unmanaged_interval_secs = 86400

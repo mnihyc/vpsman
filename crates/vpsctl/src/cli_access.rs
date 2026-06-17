@@ -35,11 +35,63 @@ pub(crate) struct OperatorCreateCommand {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Comma-separated scopes, for example fleet:read,jobs:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write"
+        help = "Comma-separated scopes, for example fleet:read,jobs:read,backups:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write"
     )]
     pub(crate) scopes: Vec<String>,
     #[arg(long, default_value = "VPSMAN_NEW_OPERATOR_PASSWORD")]
     pub(crate) password_env: String,
+    #[arg(long, default_value_t = 31_536_000)]
+    pub(crate) session_refresh_ttl_secs: u64,
+    #[arg(long, default_value_t = false)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OperatorUpdateCommand {
+    #[arg(long)]
+    pub(crate) operator_id: String,
+    #[arg(long)]
+    pub(crate) role: String,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Comma-separated scopes. Leave empty for role defaults."
+    )]
+    pub(crate) scopes: Vec<String>,
+    #[arg(long, default_value_t = 31_536_000)]
+    pub(crate) session_refresh_ttl_secs: u64,
+    #[arg(long, default_value_t = false)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OperatorLifecycleCommand {
+    #[arg(long)]
+    pub(crate) operator_id: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OperatorPasswordResetCommand {
+    #[arg(long)]
+    pub(crate) operator_id: String,
+    #[arg(long, default_value = "VPSMAN_NEW_OPERATOR_PASSWORD")]
+    pub(crate) password_env: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) admin_risk_acknowledged: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OperatorAuthEventsCommand {
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: u16,
+    #[arg(long)]
+    pub(crate) operator_id: Option<String>,
+    #[arg(long)]
+    pub(crate) username: Option<String>,
+    #[arg(long)]
+    pub(crate) result: Option<String>,
 }
 
 #[derive(Debug, Args)]

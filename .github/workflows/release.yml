@@ -36,6 +36,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip
 
+      - name: Resolve release identity
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          else
+            release_tag="${DISPATCH_TAG}"
+          fi
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
+            exit 1
+          fi
+          release_version="${release_tag#v}"
+          {
+            echo "VPSMAN_RELEASE_TAG=$release_tag"
+            echo "VPSMAN_RELEASE_VERSION=$release_version"
+          } >> "$GITHUB_ENV"
+
       - name: Cache Cargo
         uses: actions/cache@v5
         with:
@@ -70,6 +90,26 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/vpsman-agent release-artifacts/assets/vpsman-agent-linux-aarch64-musl
           cp target/x86_64-unknown-linux-musl/release/vpsctl release-artifacts/assets/vpsctl-linux-x86_64-musl
           cp target/aarch64-unknown-linux-musl/release/vpsctl release-artifacts/assets/vpsctl-linux-aarch64-musl
+
+      - name: Verify binary release identity
+        run: |
+          set -euo pipefail
+          agent_version="$(release-artifacts/assets/vpsman-agent-linux-x86_64-musl --version)"
+          cli_version="$(release-artifacts/assets/vpsctl-linux-x86_64-musl --version)"
+          case "$agent_version" in
+            *"$VPSMAN_RELEASE_VERSION"*) ;;
+            *)
+              echo "agent version does not contain release version $VPSMAN_RELEASE_VERSION: $agent_version" >&2
+              exit 1
+              ;;
+          esac
+          case "$cli_version" in
+            *"$VPSMAN_RELEASE_VERSION"*) ;;
+            *)
+              echo "vpsctl version does not contain release version $VPSMAN_RELEASE_VERSION: $cli_version" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v6
@@ -128,16 +168,26 @@ jobs:
 
       - name: Resolve release tag
         id: release-tag
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            release_tag="${GITHUB_REF_NAME}"
           else
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            release_tag="${DISPATCH_TAG}"
           fi
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Flatten release assets
         env:
           RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release-tag.outputs.version }}
         run: |
           set -euo pipefail
           rm -rf release-assets
@@ -171,7 +221,7 @@ jobs:
                   "schema_version": 2,
                   "project": "vpsman",
                   "tag": release_tag,
-                  "version": release_tag.removeprefix("v"),
+                  "version": os.environ["RELEASE_VERSION"],
                   "commit": os.environ["GITHUB_SHA"],
                   "assets": [release_asset(name) for name in asset_names],
                   "checksum_manifest": release_asset("SHA256SUMS"),
@@ -180,6 +230,17 @@ jobs:
           (root / "version.json").write_text(
               json.dumps(metadata, indent=2, sort_keys=True) + "\n"
           )
+          '
+          python3 -c '
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path("release-assets/version.json").read_text())
+          if metadata.get("tag") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("version.json tag does not match release tag")
+          if metadata.get("version") != os.environ["RELEASE_VERSION"]:
+              raise SystemExit("version.json version does not match release version")
           '
           (cd release-assets && sha256sum * > SHA256SUMS)
 

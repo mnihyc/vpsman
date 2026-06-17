@@ -1609,6 +1609,182 @@
   border-top: 1px solid #eef1f6;
 }
 
+.systemUsersWorkspace {
+  align-items: start;
+}
+
+.systemUsersTablePanel,
+.operatorEditorPanel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.systemUsersTablePanel .consoleDataGrid {
+  border-top: 1px solid #eef1f6;
+}
+
+.operatorRecordName {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: #202124;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operatorEditorBody {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px 18px 18px;
+}
+
+.operatorEditorFields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.operatorScopeEditor {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(280px, 1.2fr);
+  align-items: start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.operatorEditorFields label,
+.operatorScopeEditor label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.operatorEditorFields label > span,
+.operatorScopeEditor label > span {
+  color: #5f6368;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.operatorEditorFields label > .fieldLabelWithHelp,
+.operatorScopeEditor label > .fieldLabelWithHelp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  line-height: 1.1;
+}
+
+.fieldHelpIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #f8fafd;
+  color: #5f6368;
+  cursor: help;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: none;
+}
+
+.fieldHelpIcon:focus-visible {
+  outline: 2px solid #1a73e8;
+  outline-offset: 2px;
+}
+
+.operatorEditorFields input,
+.operatorEditorFields select,
+.operatorScopeEditor textarea {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: #202124;
+  outline: 0;
+  padding: 0 10px;
+}
+
+.operatorScopeEditor textarea {
+  min-height: 104px;
+  padding: 10px;
+  resize: vertical;
+}
+
+.operatorEditorFields input:focus,
+.operatorEditorFields select:focus,
+.operatorScopeEditor textarea:focus {
+  border-color: #1a73e8;
+}
+
+.operatorScopeShortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.operatorScopeShortcuts .tagChip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  max-width: 100%;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #f8fafd;
+  color: #3c4043;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+  padding: 0 10px;
+}
+
+.operatorScopeShortcuts .tagChip:disabled {
+  color: #80868b;
+  cursor: not-allowed;
+}
+
+.operatorEditorActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .operatorEditorFields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operatorScopeEditor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .operatorEditorFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .operatorEditorActions {
+    align-items: stretch;
+  }
+}
+
 .countryBadge {
   display: inline-flex;
   align-items: center;

@@ -5,7 +5,16 @@ use clap::{Parser, Subcommand};
 use vpsman_common::{validate_agent_config_shape, AgentConfig};
 
 #[derive(Debug, Parser)]
-#[command(name = "vpsman-agent", about = "Headless VPS management agent")]
+#[command(
+    name = "vpsman-agent",
+    about = "Headless VPS management agent",
+    version = concat!(
+        env!("VPSMAN_RELEASE_VERSION"),
+        " (agent build ",
+        env!("VPSMAN_AGENT_BUILD_NUMBER"),
+        ")"
+    )
+)]
 pub(crate) struct Args {
     #[arg(
         long,

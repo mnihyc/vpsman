@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -70,6 +77,7 @@ export type ConsoleDataGridAction<T> = {
   icon?: ReactNode;
   label: string;
   onSelect: (rows: T[]) => void;
+  separatorBefore?: boolean;
   tone?: "danger" | "normal";
 };
 
@@ -465,41 +473,52 @@ export function ConsoleDataGrid<T>({
                 <button
                   className="secondaryAction compactAction"
                   disabled={selectedRows.length === 0}
+                  title={
+                    selectedRows.length === 0
+                      ? "Select table rows to use actions."
+                      : `Open actions for ${selectedRows.length} selected ${
+                          selectedRows.length === 1 ? "row" : "rows"
+                        }.`
+                  }
                   type="button"
                 >
-                  <span>Selection</span>
+                  <span>Action</span>
                   <ChevronDown size={16} />
                 </button>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content align="end" className="consoleMenu">
-                  {actions.map((action) => {
+                  {actions.map((action, index) => {
                     const description = actionDescription(
                       action,
                       selectedRows,
                     );
                     return (
-                      <DropdownMenu.Item
-                        className={
-                          action.tone === "danger"
-                            ? "consoleMenuItem danger"
-                            : "consoleMenuItem"
-                        }
-                        disabled={
-                          selectedRows.length === 0 ||
-                          action.disabled?.(selectedRows)
-                        }
-                        key={action.label}
-                        onSelect={() => invokeAction(action)}
-                        title={description}
-                      >
-                        {action.icon && (
-                          <span className="consoleMenuIcon" aria-hidden>
-                            {action.icon}
-                          </span>
+                      <Fragment key={action.label}>
+                        {action.separatorBefore && index > 0 && (
+                          <DropdownMenu.Separator className="consoleMenuSeparator" />
                         )}
-                        <span>{action.label}</span>
-                      </DropdownMenu.Item>
+                        <DropdownMenu.Item
+                          className={
+                            action.tone === "danger"
+                              ? "consoleMenuItem danger"
+                              : "consoleMenuItem"
+                          }
+                          disabled={
+                            selectedRows.length === 0 ||
+                            action.disabled?.(selectedRows)
+                          }
+                          onSelect={() => invokeAction(action)}
+                          title={description}
+                        >
+                          {action.icon && (
+                            <span className="consoleMenuIcon" aria-hidden>
+                              {action.icon}
+                            </span>
+                          )}
+                          <span>{action.label}</span>
+                        </DropdownMenu.Item>
+                      </Fragment>
                     );
                   })}
                 </DropdownMenu.Content>
@@ -699,30 +718,34 @@ export function ConsoleDataGrid<T>({
                       {showContextSelectionActions && (
                         <>
                           <ContextMenu.Label className="consoleMenuLabel">
-                            Selection actions
+                            Actions
                           </ContextMenu.Label>
-                          {actions.map((action) => (
-                            <ContextMenu.Item
-                              className={
-                                action.tone === "danger"
-                                  ? "consoleMenuItem danger"
-                                  : "consoleMenuItem"
-                              }
-                              disabled={
-                                selectedRows.length === 0 ||
-                                action.disabled?.(selectedRows)
-                              }
-                              key={`selection:${action.label}`}
-                              onSelect={() => invokeAction(action)}
-                              title={actionDescription(action, selectedRows)}
-                            >
-                              {action.icon && (
-                                <span className="consoleMenuIcon" aria-hidden>
-                                  {action.icon}
-                                </span>
+                          {actions.map((action, index) => (
+                            <Fragment key={`selection:${action.label}`}>
+                              {action.separatorBefore && index > 0 && (
+                                <ContextMenu.Separator className="consoleMenuSeparator" />
                               )}
-                              <span>{action.label}</span>
-                            </ContextMenu.Item>
+                              <ContextMenu.Item
+                                className={
+                                  action.tone === "danger"
+                                    ? "consoleMenuItem danger"
+                                    : "consoleMenuItem"
+                                }
+                                disabled={
+                                  selectedRows.length === 0 ||
+                                  action.disabled?.(selectedRows)
+                                }
+                                onSelect={() => invokeAction(action)}
+                                title={actionDescription(action, selectedRows)}
+                              >
+                                {action.icon && (
+                                  <span className="consoleMenuIcon" aria-hidden>
+                                    {action.icon}
+                                  </span>
+                                )}
+                                <span>{action.label}</span>
+                              </ContextMenu.Item>
+                            </Fragment>
                           ))}
                         </>
                       )}

@@ -13,6 +13,7 @@ use crate::{
         BulkResolveRequest, CreateRestorePlanRequest, ListQuery, RestorePlanStatus, RestorePlanView,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
+    security::SCOPE_BACKUPS_READ,
     selector_expression::id_selector_expression,
     state::AppState,
 };
@@ -25,7 +26,9 @@ pub(crate) async fn list_restore_plans(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<RestorePlanView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
     Ok(Json(state.repo.query_restore_plans(&query).await?))
 }
 

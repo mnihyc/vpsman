@@ -5,6 +5,7 @@ use uuid::Uuid;
 pub(crate) struct CommandTemplateView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
+    pub(crate) built_in: bool,
     pub(crate) scope_kind: String,
     pub(crate) scope_value: Option<String>,
     pub(crate) command_type: String,

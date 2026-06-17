@@ -882,10 +882,15 @@ export type WsTerminalOutputEvent = Extract<
 export type OperatorView = {
   id: string;
   username: string;
+  status: "active" | "disabled" | "deleted" | string;
   role: string;
   scopes: string[];
   preferences: OperatorPreferences;
   totp_enabled: boolean;
+  session_refresh_ttl_secs: number;
+  created_at: string;
+  disabled_at: string | null;
+  deleted_at: string | null;
 };
 
 export type OperatorPreferences = {
@@ -914,6 +919,18 @@ export type OperatorSessionRecord = {
   refresh_expires_at: string;
   revoked: boolean;
   revoked_at: string | null;
+};
+
+export type OperatorAuthEventRecord = {
+  id: string;
+  operator_id: string | null;
+  username: string;
+  result: "success" | "failure" | "throttled" | string;
+  reason: string | null;
+  remote_ip: string | null;
+  user_agent: string | null;
+  session_id: string | null;
+  created_at: string;
 };
 
 export type AuthResponse = {
@@ -975,6 +992,7 @@ export type ArtifactCleanupPreviewRecord = {
 export type CommandTemplateRecord = {
   id: string;
   name: string;
+  built_in: boolean;
   scope_kind: "global" | "provider" | "tag" | "client" | string;
   scope_value: string | null;
   command_type: JobCommandType;

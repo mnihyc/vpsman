@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::http::{http_delete, http_get, http_post_json};
+use crate::http::{http_delete, http_get, http_post_json, http_put_json};
 
 pub(crate) fn submit_vty_direct_command(
     api_url: &str,
@@ -25,6 +25,11 @@ pub(crate) fn submit_vty_direct_command(
         "operator-sessions" => Ok(Some(http_get(
             api_url,
             "/api/v1/operator-sessions?limit=50",
+            token,
+        )?)),
+        "operator-auth-events" => Ok(Some(http_get(
+            api_url,
+            "/api/v1/operator-auth-events?limit=50",
             token,
         )?)),
         "tags" => Ok(Some(http_get(api_url, "/api/v1/tags", token)?)),
@@ -56,6 +61,24 @@ pub(crate) fn submit_vty_direct_command(
         command if command.starts_with("operator-create ") => {
             Ok(Some(submit_operator_create(api_url, token, command)?))
         }
+        command if command.starts_with("operator-update ") => {
+            Ok(Some(submit_operator_update(api_url, token, command)?))
+        }
+        command if command.starts_with("operator-disable ") => Ok(Some(submit_operator_lifecycle(
+            api_url, token, command, "disable",
+        )?)),
+        command if command.starts_with("operator-enable ") => Ok(Some(submit_operator_lifecycle(
+            api_url, token, command, "enable",
+        )?)),
+        command if command.starts_with("operator-delete ") => Ok(Some(submit_operator_lifecycle(
+            api_url, token, command, "delete",
+        )?)),
+        command if command.starts_with("operator-password-reset ") => Ok(Some(
+            submit_operator_password_reset(api_url, token, command)?,
+        )),
+        command if command.starts_with("operator-totp-clear ") => Ok(Some(
+            submit_operator_lifecycle(api_url, token, command, "totp-clear")?,
+        )),
         command if command.starts_with("operator-sessions ") => {
             Ok(Some(submit_operator_sessions(api_url, token, command)?))
         }
@@ -154,9 +177,9 @@ fn has_flag(parts: &[&str], name: &str) -> bool {
 
 fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
     let parts = command.split_whitespace().collect::<Vec<_>>();
-    if !(4..=5).contains(&parts.len()) {
+    if parts.len() < 4 {
         return Ok(
-            "usage: operator-create <username> <role> <password_env> [fleet:read,jobs:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write]".to_string(),
+            "usage: operator-create <username> <role> <password_env> [scope,scope] [--session-refresh-ttl-secs <secs>] [--admin-risk-acknowledged]".to_string(),
         );
     }
     let password = match std::env::var(parts[3]) {
@@ -176,7 +199,86 @@ fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> 
             "username": parts[1],
             "role": parts[2],
             "password": password,
-            "scopes": parts.get(4).map(|scopes| scopes.split(',').filter(|scope| !scope.is_empty()).collect::<Vec<_>>()).unwrap_or_default(),
+            "scopes": parts.get(4).filter(|value| !value.starts_with("--")).map(|scopes| scopes.split(',').filter(|scope| !scope.is_empty()).collect::<Vec<_>>()).unwrap_or_default(),
+            "session_refresh_ttl_secs": optional_flag(&parts, "--session-refresh-ttl-secs")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(31_536_000),
+            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+        }),
+    )
+}
+
+fn submit_operator_update(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let operator_id = required_flag(&parts, "--operator-id")?;
+    let role = required_flag(&parts, "--role")?;
+    let scopes = optional_flag(&parts, "--scopes")
+        .map(|value| split_csv(&value))
+        .unwrap_or_default();
+    http_put_json(
+        api_url,
+        &format!("/api/v1/operators/{operator_id}"),
+        token,
+        &serde_json::json!({
+            "role": role,
+            "scopes": scopes,
+            "session_refresh_ttl_secs": optional_flag(&parts, "--session-refresh-ttl-secs")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(31_536_000),
+            "confirmed": true,
+            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+        }),
+    )
+}
+
+fn submit_operator_lifecycle(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+    action: &str,
+) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let operator_id = required_flag(&parts, "--operator-id").or_else(|_| {
+        parts
+            .get(1)
+            .map(|value| (*value).to_string())
+            .ok_or_else(|| anyhow::anyhow!("missing operator id"))
+    })?;
+    http_post_json(
+        api_url,
+        &format!("/api/v1/operators/{operator_id}/{action}"),
+        token,
+        &serde_json::json!({
+            "confirmed": true,
+            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+        }),
+    )
+}
+
+fn submit_operator_password_reset(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+) -> Result<String> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let operator_id = required_flag(&parts, "--operator-id").or_else(|_| {
+        parts
+            .get(1)
+            .map(|value| (*value).to_string())
+            .ok_or_else(|| anyhow::anyhow!("missing operator id"))
+    })?;
+    let password_env = optional_flag(&parts, "--password-env")
+        .or_else(|| parts.get(2).map(|value| (*value).to_string()))
+        .unwrap_or_else(|| "VPSMAN_NEW_OPERATOR_PASSWORD".to_string());
+    let password = std::env::var(&password_env)?;
+    http_post_json(
+        api_url,
+        &format!("/api/v1/operators/{operator_id}/password-reset"),
+        token,
+        &serde_json::json!({
+            "password": password,
+            "confirmed": true,
+            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
         }),
     )
 }
@@ -208,6 +310,15 @@ fn submit_operator_session_revoke(
         &format!("/api/v1/operator-sessions/{}", parts[1]),
         token,
     )
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn submit_history_retention_upsert(

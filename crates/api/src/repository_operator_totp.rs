@@ -13,7 +13,7 @@ use crate::{
     },
     repository::Repository,
     repository_auth::{parse_operator_preferences, parse_scopes},
-    unix_now, verify_operator_password,
+    unix_now, verify_operator_password, DEFAULT_REFRESH_TOKEN_TTL_SECS,
 };
 
 impl Repository {
@@ -255,13 +255,18 @@ async fn select_operator_for_update(
             id,
             username,
             password_hash,
+            status,
             role,
             scopes,
             preferences,
             totp_enabled,
             totp_secret_ciphertext_hex,
             totp_secret_nonce_hex,
-            totp_secret_salt_hex
+            totp_secret_salt_hex,
+            session_refresh_ttl_secs,
+            created_at::text AS created_at,
+            disabled_at::text AS disabled_at,
+            deleted_at::text AS deleted_at
         FROM operators
         WHERE id = $1
         FOR UPDATE
@@ -275,6 +280,7 @@ async fn select_operator_for_update(
             id: row.try_get("id")?,
             username: row.try_get("username")?,
             password_hash: row.try_get("password_hash")?,
+            status: row.try_get("status")?,
             role: row.try_get("role")?,
             scopes: parse_scopes(row.try_get("scopes")?),
             preferences: parse_operator_preferences(row.try_get("preferences")?),
@@ -282,6 +288,13 @@ async fn select_operator_for_update(
             totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
             totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
             totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+            session_refresh_ttl_secs: row
+                .try_get::<i64, _>("session_refresh_ttl_secs")?
+                .try_into()
+                .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+            created_at: row.try_get("created_at")?,
+            disabled_at: row.try_get("disabled_at")?,
+            deleted_at: row.try_get("deleted_at")?,
         })
     })
     .transpose()

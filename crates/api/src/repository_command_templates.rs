@@ -3,7 +3,10 @@ use base64::Engine as _;
 use sqlx::{types::Json as SqlJson, Row};
 use std::collections::BTreeMap;
 use uuid::Uuid;
-use vpsman_common::{job_command_display_group, job_command_type_label, JobCommand};
+use vpsman_common::{
+    job_command_display_group, job_command_requires_confirmation, job_command_type_label,
+    AgentUpdateConfig, JobCommand, TerminalUserPolicy,
+};
 
 use crate::{
     model::{AuditLogView, AuthContext, JobOutputView},
@@ -25,15 +28,29 @@ impl Repository {
         display_group: Option<&str>,
     ) -> Result<Vec<CommandTemplateView>> {
         let limit = limit.clamp(1, 200);
-        match self {
+        let mut builtins = builtin_command_templates()
+            .into_iter()
+            .filter(|row| {
+                command_template_matches_filters(
+                    row,
+                    scope_kind,
+                    scope_value,
+                    command_type,
+                    display_group,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut user_rows = match self {
             Self::Memory(memory) => {
                 let mut rows = memory.command_templates.read().await.clone();
                 rows.retain(|row| {
-                    scope_kind.is_none_or(|value| row.scope_kind == value)
-                        && scope_value.is_none_or(|value| row.scope_value.as_deref() == Some(value))
-                        && command_type.is_none_or(|value| row.command_type == value)
-                        && display_group
-                            .is_none_or(|value| row.display_group.as_deref() == Some(value))
+                    command_template_matches_filters(
+                        row,
+                        scope_kind,
+                        scope_value,
+                        command_type,
+                        display_group,
+                    )
                 });
                 rows.sort_by(|left, right| {
                     right
@@ -41,7 +58,7 @@ impl Repository {
                         .cmp(&left.updated_at)
                         .then_with(|| left.name.cmp(&right.name))
                 });
-                Ok(rows.into_iter().take(limit as usize).collect())
+                rows.into_iter().take(limit as usize).collect()
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -77,9 +94,11 @@ impl Repository {
                 rows.into_iter()
                     .map(command_template_from_row)
                     .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
-                    .map_err(Into::into)
+                    .map_err(anyhow::Error::from)?
             }
-        }
+        };
+        builtins.append(&mut user_rows);
+        Ok(builtins.into_iter().take(limit as usize).collect())
     }
 
     pub(crate) async fn upsert_command_template(
@@ -88,6 +107,14 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<CommandTemplateView> {
         let now = unix_now().to_string();
+        ensure!(
+            !command_template_name_scope_is_builtin(
+                &request.name,
+                &request.scope_kind,
+                request.scope_value.as_deref(),
+            ),
+            "command_template_builtin_immutable"
+        );
         let parts = command_template_parts(request)?;
         match self {
             Self::Memory(memory) => {
@@ -102,15 +129,23 @@ impl Repository {
                     existing.operation = parts.operation.clone();
                     existing.defaults = normalized_defaults(request);
                     existing.actor_id = Some(operator.operator.id);
+                    existing.built_in = false;
                     existing.updated_at = now.clone();
                     let view = existing.clone();
                     drop(rows);
-                    record_command_template_audit(self, &view, operator).await?;
+                    record_command_template_audit(
+                        self,
+                        &view,
+                        operator,
+                        "command_template.upserted",
+                    )
+                    .await?;
                     return Ok(view);
                 }
                 let view = CommandTemplateView {
                     id: Uuid::new_v4(),
                     name: request.name.clone(),
+                    built_in: false,
                     scope_kind: request.scope_kind.clone(),
                     scope_value: request.scope_value.clone(),
                     command_type: parts.command_type.clone(),
@@ -123,7 +158,8 @@ impl Repository {
                 };
                 rows.push(view.clone());
                 drop(rows);
-                record_command_template_audit(self, &view, operator).await?;
+                record_command_template_audit(self, &view, operator, "command_template.upserted")
+                    .await?;
                 Ok(view)
             }
             Self::Postgres(pool) => {
@@ -221,8 +257,63 @@ impl Repository {
                 };
                 tx.commit().await?;
                 let view = command_template_from_row(row)?;
-                record_command_template_audit(self, &view, operator).await?;
+                record_command_template_audit(self, &view, operator, "command_template.upserted")
+                    .await?;
                 Ok(view)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_command_template(
+        &self,
+        template_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<Option<CommandTemplateView>> {
+        ensure!(
+            !command_template_id_is_builtin(template_id),
+            "command_template_builtin_immutable"
+        );
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory.command_templates.write().await;
+                let Some(index) = rows.iter().position(|row| row.id == template_id) else {
+                    return Ok(None);
+                };
+                let view = rows.remove(index);
+                drop(rows);
+                record_command_template_audit(self, &view, operator, "command_template.deleted")
+                    .await?;
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    DELETE FROM command_templates
+                    WHERE id = $1
+                    RETURNING
+                        id,
+                        name,
+                        scope_kind,
+                        scope_value,
+                        command_type,
+                        display_group,
+                        operation,
+                        defaults,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(template_id)
+                .fetch_optional(pool)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                let view = command_template_from_row(row)?;
+                record_command_template_audit(self, &view, operator, "command_template.deleted")
+                    .await?;
+                Ok(Some(view))
             }
         }
     }
@@ -373,6 +464,120 @@ impl Repository {
             groups,
             rows,
         })
+    }
+}
+
+pub(crate) fn command_template_id_is_builtin(template_id: Uuid) -> bool {
+    builtin_command_templates()
+        .iter()
+        .any(|template| template.id == template_id)
+}
+
+pub(crate) fn command_template_name_scope_is_builtin(
+    name: &str,
+    scope_kind: &str,
+    scope_value: Option<&str>,
+) -> bool {
+    builtin_command_templates().iter().any(|template| {
+        template.name == name
+            && template.scope_kind == scope_kind
+            && template.scope_value.as_deref() == scope_value
+    })
+}
+
+fn command_template_matches_filters(
+    row: &CommandTemplateView,
+    scope_kind: Option<&str>,
+    scope_value: Option<&str>,
+    command_type: Option<&str>,
+    display_group: Option<&str>,
+) -> bool {
+    scope_kind.is_none_or(|value| row.scope_kind == value)
+        && scope_value.is_none_or(|value| row.scope_value.as_deref() == Some(value))
+        && command_type.is_none_or(|value| row.command_type == value)
+        && display_group.is_none_or(|value| row.display_group.as_deref() == Some(value))
+}
+
+fn builtin_command_templates() -> Vec<CommandTemplateView> {
+    let update = AgentUpdateConfig::default();
+    vec![
+        builtin_command_template(
+            "00000000-0000-4100-8000-000000000001",
+            "Default shell command",
+            JobCommand::Shell {
+                argv: vec!["/usr/bin/uptime".to_string()],
+                pty: false,
+            },
+            30,
+        ),
+        builtin_command_template(
+            "00000000-0000-4100-8000-000000000002",
+            "Default terminal shell",
+            JobCommand::TerminalOpen {
+                session_id: Uuid::nil(),
+                argv: vec!["/bin/sh".to_string(), "-l".to_string()],
+                cwd: None,
+                user: None,
+                user_policy: TerminalUserPolicy::Fail,
+                cols: 120,
+                rows: 40,
+                replay_from_seq: None,
+                idle_timeout_secs: 1800,
+                flow_window_bytes: 64 * 1024,
+            },
+            30,
+        ),
+        builtin_command_template(
+            "00000000-0000-4100-8000-000000000003",
+            "Default backup",
+            JobCommand::Backup {
+                paths: vec!["/etc/hostname".to_string()],
+                include_config: true,
+                recipient_public_key_hex: None,
+            },
+            30,
+        ),
+        builtin_command_template(
+            "00000000-0000-4100-8000-000000000004",
+            "Default manual update check",
+            JobCommand::AgentUpdateCheck {
+                version_url: Some(update.unmanaged_version_url),
+                activate: update.unmanaged_activate,
+                restart_agent: update.unmanaged_restart_agent,
+            },
+            300,
+        ),
+    ]
+}
+
+fn builtin_command_template(
+    id: &str,
+    name: &str,
+    command: JobCommand,
+    timeout_secs: u64,
+) -> CommandTemplateView {
+    let command_type = job_command_type_label(&command).to_string();
+    let display_group = job_command_display_group(&command_type).map(ToString::to_string);
+    let requires_confirmation = job_command_requires_confirmation(&command);
+    CommandTemplateView {
+        id: Uuid::parse_str(id).expect("builtin command template id must be a UUID"),
+        name: name.to_string(),
+        built_in: true,
+        scope_kind: "global".to_string(),
+        scope_value: None,
+        command_type,
+        display_group,
+        operation: serde_json::to_value(command)
+            .expect("builtin command template operation must serialize"),
+        defaults: serde_json::json!({
+            "confirmed": requires_confirmation,
+            "destructive": requires_confirmation,
+            "force_unprivileged": false,
+            "timeout_secs": timeout_secs,
+        }),
+        actor_id: None,
+        created_at: "builtin".to_string(),
+        updated_at: "builtin".to_string(),
     }
 }
 
@@ -540,6 +745,7 @@ fn command_template_from_row(
     Ok(CommandTemplateView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
+        built_in: false,
         scope_kind: row.try_get("scope_kind")?,
         scope_value: row.try_get("scope_value")?,
         command_type: row.try_get("command_type")?,
@@ -564,6 +770,7 @@ async fn record_command_template_audit(
     repo: &Repository,
     template: &CommandTemplateView,
     operator: &AuthContext,
+    action: &'static str,
 ) -> Result<()> {
     let metadata = serde_json::json!({
         "template_id": template.id,
@@ -580,7 +787,7 @@ async fn record_command_template_audit(
             memory.audits.write().await.push(AuditLogView {
                 id: Uuid::new_v4(),
                 actor_id: Some(operator.operator.id),
-                action: "command_template.upserted".to_string(),
+                action: action.to_string(),
                 target: format!("command_template:{}", template.id),
                 command_hash: None,
                 metadata,
@@ -596,7 +803,7 @@ async fn record_command_template_audit(
             )
             .bind(Uuid::new_v4())
             .bind(operator.operator.id)
-            .bind("command_template.upserted")
+            .bind(action)
             .bind(format!("command_template:{}", template.id))
             .bind(metadata)
             .execute(pool)
@@ -694,4 +901,127 @@ fn sanitized_preview(bytes: &[u8]) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{OperatorPreferences, OperatorView},
+        repository::{MemoryState, Repository},
+        DEFAULT_REFRESH_TOKEN_TTL_SECS,
+    };
+
+    fn test_operator() -> AuthContext {
+        AuthContext {
+            operator: OperatorView {
+                id: Uuid::new_v4(),
+                username: "template-admin".to_string(),
+                role: "admin".to_string(),
+                scopes: vec!["*".to_string()],
+                preferences: OperatorPreferences::default(),
+                totp_enabled: false,
+                status: "active".to_string(),
+                session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+                created_at: unix_now().to_string(),
+                disabled_at: None,
+                deleted_at: None,
+            },
+            session_id: Uuid::new_v4(),
+        }
+    }
+
+    fn shell_template_request(name: &str, scope_kind: &str) -> UpsertCommandTemplateRequest {
+        UpsertCommandTemplateRequest {
+            name: name.to_string(),
+            scope_kind: scope_kind.to_string(),
+            scope_value: None,
+            display_group: None,
+            operation: serde_json::json!({
+                "type": "shell",
+                "argv": ["/usr/bin/uptime"],
+                "pty": false
+            }),
+            defaults: serde_json::json!({
+                "timeout_secs": 30,
+                "confirmed": false
+            }),
+            confirmed: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn command_template_builtins_are_listed_and_immutable() {
+        let repo = Repository::Memory(MemoryState::default());
+        let templates = repo
+            .list_command_templates(20, None, None, None, None)
+            .await
+            .unwrap();
+
+        let shell = templates
+            .iter()
+            .find(|template| template.name == "Default shell command")
+            .expect("default shell builtin missing");
+        assert!(shell.built_in);
+        assert_eq!(shell.scope_kind, "global");
+        assert_eq!(shell.command_type, "shell_argv");
+
+        let updates = repo
+            .list_command_templates(20, None, None, Some("agent_update_check"), None)
+            .await
+            .unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].built_in);
+        assert_eq!(updates[0].name, "Default manual update check");
+
+        let error = repo
+            .upsert_command_template(
+                &shell_template_request("Default shell command", "global"),
+                &test_operator(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("command_template_builtin_immutable"));
+    }
+
+    #[tokio::test]
+    async fn user_defined_command_templates_can_be_deleted() {
+        let repo = Repository::Memory(MemoryState::default());
+        let operator = test_operator();
+        let created = repo
+            .upsert_command_template(
+                &shell_template_request("operator-health-check", "global"),
+                &operator,
+            )
+            .await
+            .unwrap();
+        assert!(!created.built_in);
+
+        let deleted = repo
+            .delete_command_template(created.id, &operator)
+            .await
+            .unwrap()
+            .expect("user template should delete");
+        assert_eq!(deleted.id, created.id);
+        assert!(!deleted.built_in);
+
+        let templates = repo
+            .list_command_templates(20, None, None, None, None)
+            .await
+            .unwrap();
+        assert!(!templates.iter().any(|template| template.id == created.id));
+
+        let Repository::Memory(memory) = repo else {
+            unreachable!("test uses memory repository");
+        };
+        let audits = memory.audits.read().await;
+        assert!(audits
+            .iter()
+            .any(|audit| audit.action == "command_template.upserted"));
+        assert!(audits
+            .iter()
+            .any(|audit| audit.action == "command_template.deleted"));
+    }
 }

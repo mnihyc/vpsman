@@ -238,7 +238,7 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
     if manifest.project != "vpsman" {
         anyhow::bail!("unexpected update manifest project {}", manifest.project);
     }
-    let current_version = env!("CARGO_PKG_VERSION");
+    let current_version = crate::build_info::agent_release_version();
     let Some(asset_name) = agent_asset_name() else {
         let status = serde_json::json!({
             "type": "agent_update_check",
@@ -545,7 +545,7 @@ fn send_http_get(stream: &mut impl Write, parsed: &ParsedArtifactUrl) -> Result<
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: vpsman-agent/{} build/{}\r\nAccept: application/octet-stream\r\nConnection: close\r\n\r\n",
         parsed.path_and_query,
         parsed.host_header(),
-        env!("CARGO_PKG_VERSION"),
+        crate::build_info::agent_release_version(),
         crate::build_info::AGENT_BUILD_NUMBER
     );
     stream.write_all(request.as_bytes())?;
@@ -818,6 +818,48 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&output.data).unwrap();
         assert_eq!(status["status"], "staged");
         assert!(status.get("artifact_url").is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_check_uses_embedded_release_version_for_current_detection() {
+        let Some(_) = agent_asset_name() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("vpsman-agent");
+        let manifest_path = dir.join("version.json");
+        let current_version = crate::build_info::agent_release_version();
+        fs::write(&current, b"current-agent").unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": 2,
+                "project": "vpsman",
+                "version": current_version,
+                "tag": format!("v{current_version}"),
+                "assets": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+        })
+        .unwrap();
+
+        assert_eq!(result.staged_sha256_hex, None);
+        assert!(!dir.join("vpsman-agent.next").exists());
+        let status: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(status["status"], "current");
+        assert_eq!(status["current_version"], current_version);
+        assert_eq!(status["candidate_version"], current_version);
 
         let _ = fs::remove_dir_all(dir);
     }

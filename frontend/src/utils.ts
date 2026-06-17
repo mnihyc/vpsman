@@ -82,7 +82,7 @@ export function getHeroCopy(view: ActiveView): string {
     case "Backups":
       return "Backup, restore, and migration workflows";
     case "Access":
-      return "Operator sessions, roles, and privileged unlock state";
+      return "Client identity, key lifecycle, gateway sessions, and privileged unlock state";
     case "System":
       return "Control-plane dashboard, suite configuration, and operator preferences";
     default:

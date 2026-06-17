@@ -9,6 +9,10 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import { type PrivilegeMaterial } from "../privilege";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
+  JobDispatchPreset,
+  JobDispatchPresetInput,
+} from "../jobDispatchPreset";
+import type {
   AgentView,
   AgentUpdateReleaseRecord,
   BulkResolveResponse,
@@ -25,6 +29,7 @@ import type {
   ProcessSupervisorInventoryRecord,
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
+  SuiteConfigResponse,
   UpsertCommandTemplateRequest,
   WsJobOutputEvent,
   WsTerminalOutputEvent,
@@ -103,6 +108,7 @@ export function JobHistoryPanel({
   fileTransferSources,
   jobs,
   commandTemplates,
+  dispatchPreset,
   lastJobOutputEvent,
   lastTerminalOutputEvent,
   loading,
@@ -118,12 +124,14 @@ export function JobHistoryPanel({
   onDownloadOutputStream,
   onDownloadFileForClient,
   onDownloadFileTransferSource,
+  onDispatchPresetApplied,
   onLoadJob,
   onLoadOutputs,
   onLoadOutputComparison,
   onLoadTerminalReplay,
   onLoadTargets,
   onOpenPrivilegeUnlock,
+  onOpenDispatchPreset,
   onPreviewArtifactCleanup,
   onRefresh,
   onResolveTargets,
@@ -131,12 +139,16 @@ export function JobHistoryPanel({
   onSelectSubpage,
   onSelectedJobDetailsOpened,
   onUploadFileTransferSource,
+  onDeleteCommandTemplate,
   onUpsertCommandTemplate,
   pendingSelectedJobId,
   privilegeMaterial,
   processSupervisorInventory,
   serverJobs,
   setPrivilegeMaterial,
+  suiteConfig,
+  suiteConfigError,
+  suiteConfigLoading,
   terminalSessions,
 }: {
   activeSubpage: string;
@@ -147,6 +159,7 @@ export function JobHistoryPanel({
   fileTransferSources: FileTransferSourceArtifactRecord[];
   jobs: JobHistoryRecord[];
   commandTemplates: CommandTemplateRecord[];
+  dispatchPreset?: JobDispatchPreset | null;
   lastJobOutputEvent: WsJobOutputEvent | null;
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
@@ -178,6 +191,7 @@ export function JobHistoryPanel({
   onDownloadTargetStatusArchive: (jobId: string) => Promise<Blob>;
   onDownloadFileBundle: (jobId: string, clientIds: string[]) => Promise<Blob>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
+  onDispatchPresetApplied?: () => void;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadOutputComparison: (
@@ -190,6 +204,7 @@ export function JobHistoryPanel({
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onOpenPrivilegeUnlock: () => void;
   onPreviewArtifactCleanup: (
     expression: string,
@@ -212,6 +227,7 @@ export function JobHistoryPanel({
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
   ) => Promise<FileTransferSourceArtifactRecord>;
+  onDeleteCommandTemplate: (templateId: string) => Promise<CommandTemplateRecord>;
   onUpsertCommandTemplate: (
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;
@@ -220,6 +236,9 @@ export function JobHistoryPanel({
   processSupervisorInventory: ProcessSupervisorInventoryRecord[];
   serverJobs: ServerJobRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  suiteConfig: SuiteConfigResponse | null;
+  suiteConfigError: string | null;
+  suiteConfigLoading: boolean;
   terminalSessions: TerminalSessionRecord[];
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -618,7 +637,9 @@ export function JobHistoryPanel({
           agents={agents}
           fileTransferSources={fileTransferSources}
           commandTemplates={commandTemplates}
+          dispatchPreset={dispatchPreset}
           terminalComposerAction={terminalComposerAction}
+          onDispatchPresetApplied={onDispatchPresetApplied}
           onCreateJob={onCreateJob}
           onDownloadFileTransferSource={onDownloadFileTransferSource}
           onDownloadOutputChunk={onDownloadOutputChunk}
@@ -628,6 +649,7 @@ export function JobHistoryPanel({
           onOpenJobDetails={openSubmittedJobDetails}
           onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onResolveTargets={onResolveTargets}
+          onDeleteCommandTemplate={onDeleteCommandTemplate}
           onUpsertCommandTemplate={onUpsertCommandTemplate}
           privilegeMaterial={privilegeMaterial}
           setPrivilegeMaterial={setPrivilegeMaterial}
@@ -670,8 +692,12 @@ export function JobHistoryPanel({
           <AgentUpdateReleasesPanel
             loading={loading}
             onCreateAgentUpdateRelease={onCreateAgentUpdateRelease}
+            onOpenDispatchPreset={onOpenDispatchPreset}
             onRefresh={onRefresh}
             releases={agentUpdateReleases}
+            suiteConfig={suiteConfig}
+            suiteConfigError={suiteConfigError}
+            suiteConfigLoading={suiteConfigLoading}
           />
         </div>
       )}
@@ -721,7 +747,9 @@ export function JobHistoryPanel({
             agents={agents}
             fileTransferSources={fileTransferSources}
             commandTemplates={commandTemplates}
+            dispatchPreset={dispatchPreset}
             terminalComposerAction={terminalComposerAction}
+            onDispatchPresetApplied={onDispatchPresetApplied}
             onCreateJob={onCreateJob}
             onDownloadFileTransferSource={onDownloadFileTransferSource}
             onDownloadOutputChunk={onDownloadOutputChunk}
@@ -731,6 +759,7 @@ export function JobHistoryPanel({
             onOpenJobDetails={openSubmittedJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onResolveTargets={onResolveTargets}
+            onDeleteCommandTemplate={onDeleteCommandTemplate}
             onUpsertCommandTemplate={onUpsertCommandTemplate}
             privilegeMaterial={privilegeMaterial}
             setPrivilegeMaterial={setPrivilegeMaterial}

@@ -122,7 +122,8 @@ pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
 pub(crate) use security::{
     generate_token, hash_operator_password, normalize_operator_scopes, token_hash,
-    verify_operator_password, ACCESS_TOKEN_TTL_SECS, REFRESH_TOKEN_TTL_SECS,
+    verify_operator_password, ACCESS_TOKEN_TTL_SECS, DEFAULT_REFRESH_TOKEN_TTL_SECS,
+    MAX_REFRESH_TOKEN_TTL_SECS, MIN_REFRESH_TOKEN_TTL_SECS,
 };
 pub(crate) use util::{output_stream_name, unix_now};
 
@@ -132,6 +133,7 @@ pub(crate) async fn test_auth_context_and_headers(state: &AppState) -> (AuthCont
         id: Uuid::new_v4(),
         username: format!("test-admin-{}", Uuid::new_v4()),
         password_hash: "test-only-session-issued-directly".to_string(),
+        status: "active".to_string(),
         role: "admin".to_string(),
         scopes: vec!["*".to_string()],
         preferences: OperatorPreferences::default(),
@@ -139,6 +141,10 @@ pub(crate) async fn test_auth_context_and_headers(state: &AppState) -> (AuthCont
         totp_secret_ciphertext_hex: None,
         totp_secret_nonce_hex: None,
         totp_secret_salt_hex: None,
+        session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        created_at: unix_now().to_string(),
+        disabled_at: None,
+        deleted_at: None,
     };
     if let Repository::Memory(memory) = &state.repo {
         memory.operators.write().await.push(operator.clone());
@@ -537,7 +543,8 @@ async fn main() -> Result<()> {
     args.apply_suite_config(&suite_config)
         .map_err(anyhow::Error::msg)?;
     info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = build_info::release_version(),
+        release_tag = ?build_info::release_tag(),
         server_build_number = build_info::server_build_number(),
         "api build metadata"
     );
@@ -610,7 +617,8 @@ async fn main() -> Result<()> {
                     "kind": "server.on_start",
                 },
                 "server": {
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": build_info::release_version(),
+                    "release_tag": build_info::release_tag(),
                     "server_build_number": build_info::server_build_number(),
                     "bind": args.bind.to_string(),
                 },

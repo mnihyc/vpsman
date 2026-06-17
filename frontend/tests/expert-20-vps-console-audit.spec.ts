@@ -22,13 +22,13 @@ async function selectScheduleRow(page: Page, scheduleName: string) {
     await checkbox.check();
   }
   await expect(
-    grid.getByRole("button", { name: /Selection/ }),
+    grid.getByRole("button", { name: /Action/ }),
   ).toBeEnabled();
 }
 
 async function chooseScheduleSelectionAction(page: Page, actionName: string) {
   const grid = page.getByLabel("Schedule records data grid");
-  await grid.getByRole("button", { name: /Selection/ }).click();
+  await grid.getByRole("button", { name: /Action/ }).click();
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
   const action = menu.getByRole("menuitem", {
@@ -243,7 +243,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   const selectionPanel = page.locator(".gridSelectionPanel");
   await expect(selectionPanel.getByText("2 selected VPSs")).toBeVisible();
   await expect(
-    selectionPanel.getByRole("button", { name: /Bulk execution/ }),
+    selectionPanel.getByRole("button", { name: /Open dispatch/ }),
   ).toBeVisible();
   await expect(
     selectionPanel.getByRole("button", { name: /Multi-file/ }),
@@ -266,7 +266,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
 
   const composer = page.locator(".commandComposer");
   await composer
-    .getByLabel("Saved command template")
+    .getByLabel("Template selector")
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
   await composer
     .getByLabel("Command argv")

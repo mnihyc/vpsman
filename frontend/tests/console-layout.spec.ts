@@ -7,6 +7,7 @@ import {
   sha256Hex,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
+import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
 import {
   openConsoleSubpage,
   unlockPrivilegeFromTop,
@@ -28,6 +29,34 @@ async function checkControl(locator: Locator) {
       input.click();
     }
   });
+}
+
+async function selectGridRow(
+  page: import("@playwright/test").Page,
+  title: string,
+  rowId: string,
+) {
+  const grid = page.getByLabel(`${title} data grid`);
+  await grid.getByLabel(`Select ${title} row ${rowId}`).check();
+}
+
+async function unselectGridRow(
+  page: import("@playwright/test").Page,
+  title: string,
+  rowId: string,
+) {
+  const grid = page.getByLabel(`${title} data grid`);
+  await grid.getByLabel(`Select ${title} row ${rowId}`).uncheck();
+}
+
+async function runGridAction(
+  page: import("@playwright/test").Page,
+  title: string,
+  action: string,
+) {
+  const grid = page.getByLabel(`${title} data grid`);
+  await grid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: action }).click();
 }
 
 async function chooseVpsBySearch(
@@ -325,7 +354,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   );
 
   await backupRow.getByLabel("Select VPS instance records row").check();
-  await fleetGrid.getByRole("button", { name: "Selection" }).click();
+  await fleetGrid.getByRole("button", { name: "Action" }).click();
   await expect(page.getByRole("menuitem", { name: "Review VPS deletion" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
@@ -336,7 +365,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
   ).toBeVisible();
 
-  await fleetGrid.getByRole("button", { name: "Selection" }).click();
+  await fleetGrid.getByRole("button", { name: "Action" }).click();
   await expect(page.getByRole("menuitem", { name: "Review VPS deletion" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   await activate(prompt.getByRole("button", { name: "Delete VPS" }));
@@ -612,7 +641,7 @@ test("supports interactive fleet data grid controls", async ({
 
   await coreRow.getByLabel("Select VPS instance records row").check();
   await expect(grid.getByText("1 selected", { exact: true })).toBeVisible();
-  await grid.getByRole("button", { name: "Selection" }).click();
+  await grid.getByRole("button", { name: "Action" }).click();
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
@@ -642,6 +671,73 @@ test("supports interactive fleet data grid controls", async ({
   ).toBeVisible();
 });
 
+test("opens manual update check dispatch from fleet selection", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "fleet grid action handoff is covered in desktop navigation",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  const coreRow = grid
+    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+    .first();
+  await checkControl(coreRow.getByLabel(/Select VPS instance records row/));
+  await grid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: "Check update" }).click();
+
+  await expect(
+    page
+      .locator(".consoleHeader")
+      .getByRole("heading", { name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+  ).toContainText("id:agent-fra-02");
+  await expect(
+    page.getByLabel("Agent update version manifest URL"),
+  ).toHaveValue(DEFAULT_UPDATE_VERSION_URL);
+  await expect(page.getByLabel("Timeout seconds")).toHaveValue("300");
+  await expect(page.getByText("Version manifest")).toBeVisible();
+});
+
+test("opens dispatch from fleet selection with selected VPS ids", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "fleet grid action handoff is covered in desktop navigation",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  const coreRow = grid
+    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+    .first();
+  await checkControl(coreRow.getByLabel(/Select VPS instance records row/));
+  await grid.getByRole("button", { name: "Action" }).click();
+  await expect(page.locator(".consoleMenuSeparator")).toHaveCount(5);
+  await page.getByRole("menuitem", { name: "Open dispatch" }).click();
+
+  await expect(
+    page
+      .locator(".consoleHeader")
+      .getByRole("heading", { name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Bulk target selector expression" }),
+  ).toContainText("id:agent-fra-02");
+  await expect(page.getByRole("button", { name: "Argv" })).toHaveClass(
+    /selected/,
+  );
+});
+
 test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.goto("/");
   await openConsoleSubpage(page, "Fleet", "Alert policies");
@@ -666,7 +762,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
     .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
     .first();
   await checkControl(policyRow.getByLabel("Select Alert policy rules row"));
-  await grid.getByRole("button", { name: "Selection" }).click();
+  await grid.getByRole("button", { name: "Action" }).click();
   await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Details" }).click();
   await expect(
@@ -800,6 +896,79 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
 });
 
+test("surfaces operator users and sessions under System", async ({ page }) => {
+  await page.goto("/");
+
+  await openConsoleSubpage(page, "System", "Users");
+  await expect(
+    page.getByRole("heading", { name: "System users", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Users", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("2 operator records")).toBeVisible();
+  await expect(page.getByText("365d")).toBeVisible();
+  await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
+  await runGridAction(page, "Users", "Edit selected");
+  await expect(page.getByLabel("Operator username")).toHaveValue("console-admin");
+  await activate(page.getByRole("button", { name: "Disable" }));
+  await expect(
+    page.getByLabel("Confirm admin user action"),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/targets or grants admin privileges/),
+  ).toBeVisible();
+  await activate(page.getByRole("button", { name: "Cancel" }));
+
+  await unselectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
+  await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000002");
+  await runGridAction(page, "Users", "Edit selected");
+  await expect(page.getByLabel("Operator username")).toHaveValue("noc-operator");
+  await expect(page.getByLabel("Operator password")).toHaveAttribute(
+    "title",
+    /Save does not read or send this field/,
+  );
+  await expect(page.getByLabel("Session refresh TTL days")).toHaveAttribute(
+    "title",
+    /Refresh-token\/session lifetime/,
+  );
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toHaveAttribute(
+    "title",
+    /never changes the password/,
+  );
+  await page.getByLabel("Operator password").fill("replacement-password-123");
+  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  const savePrompt = page.getByLabel("Confirm user action");
+  await expect(savePrompt).toBeVisible();
+  await expect(savePrompt).not.toContainText("replacement-password-123");
+  await activate(savePrompt.getByRole("button", { name: "Save user" }));
+  const operatorUpdate = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { operatorActions: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.operatorActions.at(-1);
+  });
+  expect(JSON.stringify(operatorUpdate)).not.toContain("replacement-password-123");
+  expect(operatorUpdate).toMatchObject({
+    action: "update",
+    operator_id: "99999999-aaaa-4bbb-8ccc-000000000002",
+  });
+
+  await openConsoleSubpage(page, "System", "Sessions");
+  await expect(
+    page.getByRole("heading", { name: "System sessions", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Sessions", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Authentication history", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("console-admin").first()).toBeVisible();
+  await expect(page.getByText("unknown-user")).toBeVisible();
+  await expect(page.getByText("invalid_credentials")).toBeVisible();
+});
+
 test("packs dashboard top VPS cards by label length", async ({
   page,
 }, testInfo) => {
@@ -896,7 +1065,7 @@ test("manages data-source preset assignments from the config view", async ({
   await expect(
     panel
       .locator(".sourceStatusSection")
-      .getByText("no server store, 1 releases, 1 external"),
+      .getByText("agent update registry, 1 releases, 1 external"),
   ).toBeVisible();
   await activeSourcesSearchField.selectOption("Preset");
   await activeSourcesSearch.click();
@@ -1422,11 +1591,11 @@ test("authors external adapter tunnel plans from the topology panel", async ({
     .locator(".gridBody [role=row]", { hasText: "sfo-fra-gre" })
     .first();
   await savedPlanRow.getByLabel("Select Tunnel plans row").check();
-  await planGrid.getByRole("button", { name: "Selection" }).click();
+  await planGrid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Disable plan" }).click();
   await expect(savedPlanRow.getByText("disabled")).toBeVisible();
   await savedPlanRow.getByLabel("Select Tunnel plans row").check();
-  await planGrid.getByRole("button", { name: "Selection" }).click();
+  await planGrid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Enable plan" }).click();
   await expect(savedPlanRow.getByText("enabled")).toBeVisible();
 

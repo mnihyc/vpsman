@@ -46,6 +46,70 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.role,
                 command.scopes,
                 command.password_env,
+                command.session_refresh_ttl_secs,
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorUpdate(command) => {
+            commands_auth::operator_update(
+                api_url,
+                token,
+                command.operator_id,
+                command.role,
+                command.scopes,
+                command.session_refresh_ttl_secs,
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorDisable(command) => {
+            commands_auth::operator_set_status(
+                api_url,
+                token,
+                command.operator_id,
+                "disable",
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorEnable(command) => {
+            commands_auth::operator_set_status(
+                api_url,
+                token,
+                command.operator_id,
+                "enable",
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorDelete(command) => {
+            commands_auth::operator_set_status(
+                api_url,
+                token,
+                command.operator_id,
+                "delete",
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorPasswordReset(command) => {
+            commands_auth::operator_password_reset(
+                api_url,
+                token,
+                command.operator_id,
+                command.password_env,
+                command.admin_risk_acknowledged,
+            )?;
+            Ok(None)
+        }
+        Command::OperatorTotpClear(command) => {
+            commands_auth::operator_set_status(
+                api_url,
+                token,
+                command.operator_id,
+                "totp-clear",
+                command.admin_risk_acknowledged,
             )?;
             Ok(None)
         }
@@ -55,6 +119,17 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::OperatorSessionRevoke(command) => {
             commands_auth::operator_session_revoke(api_url, token, command.session_id)?;
+            Ok(None)
+        }
+        Command::OperatorAuthEvents(command) => {
+            commands_auth::operator_auth_events(
+                api_url,
+                token,
+                command.limit,
+                command.operator_id,
+                command.username,
+                command.result,
+            )?;
             Ok(None)
         }
         Command::TotpSetup(command) => {

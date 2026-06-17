@@ -19,6 +19,10 @@ enables `update.unmanaged_enabled`. When enabled, the autonomous updater reads
 from the release, stages it, activates it, and restarts the agent according to
 local update settings.
 
+The release tag owns the shipped version. Release binaries embed the same
+tag-derived version that appears in `version.json`, so an agent reports
+`current` only when its embedded release version matches the manifest.
+
 Operators can enable or disable autonomous updates from the dashboard under
 Config -> Rules with the predefined updater rule templates. These templates are
 ordinary operator-managed records: they can be edited, cloned, or deleted.
@@ -54,7 +58,7 @@ sha256sum ./target/x86_64-unknown-linux-musl/release/vpsman-agent
 Record the external release metadata in the private API:
 
 ```sh
-cargo run -p vpsctl -- agent-update-release-publish \
+cargo run -p vpsctl -- agent-update-release-record \
   --name vpsman-agent \
   --version 0.1.0 \
   --channel stable \
@@ -67,7 +71,7 @@ cargo run -p vpsctl -- agent-update-release-publish \
 Add rollback metadata when the previous binary is also externally hosted:
 
 ```sh
-cargo run -p vpsctl -- agent-update-release-publish \
+cargo run -p vpsctl -- agent-update-release-record \
   --name vpsman-agent \
   --version 0.1.1 \
   --channel stable \
@@ -90,9 +94,26 @@ accepted only when the requested artifact SHA exists in the release registry.
 
 ## Dispatch A Direct Update Job
 
-Direct update jobs are privileged mutating jobs. They download from the supplied
-external HTTPS URL, verify SHA-256, stage the binary, and create local rollback
-material.
+The dashboard exposes this under Jobs -> Command dispatch -> Check update, and
+Fleet -> Instances -> Check update opens the same dispatch flow with the selected
+VPSs prefilled and the default GitHub manifest URL selected.
+
+Manifest-check jobs are privileged mutating jobs when activation is enabled. They
+read the supplied external `version.json`, use the explicit release asset URLs in
+that manifest, verify `SHA256SUMS`, stage the binary, and can activate/restart
+the agent in the same reviewed job:
+
+```sh
+cargo run -p vpsctl -- agent-update-check \
+  --version-url https://github.com/mnihyc/vpsman/releases/latest/download/version.json \
+  --tags edge \
+  --confirmed
+```
+
+Manual update jobs download from the supplied external HTTPS URL, verify
+SHA-256, stage the binary, and create local rollback material. Use the dashboard
+Manual update operation or the CLI when the operator wants to pin an exact
+artifact URL and digest instead of using the release manifest.
 
 ```sh
 cargo run -p vpsctl -- agent-update \

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::HeaderMap,
+    http::{header::USER_AGENT, HeaderMap},
     Json,
 };
 use uuid::Uuid;
@@ -11,12 +11,17 @@ use crate::{
     error::ApiError,
     model::{
         is_valid_operator_timezone, AuthResponse, BootstrapOperatorRequest, CreateOperatorRequest,
-        HistoryQuery, LoginRequest, OperatorPreferences, OperatorSessionView, OperatorView,
-        RefreshRequest, TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
-        TotpSetupResponse, TotpUpdateOutcome,
+        HistoryQuery, LoginRequest, OperatorAuthEventQuery, OperatorAuthEventView,
+        OperatorLifecycleRequest, OperatorPasswordResetRequest, OperatorPreferences,
+        OperatorSessionView, OperatorView, RefreshRequest, TotpConfirmRequest, TotpDisableRequest,
+        TotpSetupOutcome, TotpSetupRequest, TotpSetupResponse, TotpUpdateOutcome,
+        UpdateOperatorRequest,
     },
     repository_auth::OperatorLoginAttempt,
-    security::{normalize_operator_scopes, validate_operator_credentials, validate_operator_role},
+    security::{
+        normalize_operator_scopes, validate_operator_credentials, validate_operator_role,
+        DEFAULT_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS, MIN_REFRESH_TOKEN_TTL_SECS,
+    },
     state::AppState,
 };
 
@@ -40,6 +45,7 @@ pub(crate) async fn bootstrap_operator(
 pub(crate) async fn login_operator(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_operator_credentials(&request.username, &request.password)?;
@@ -48,6 +54,9 @@ pub(crate) async fn login_operator(
         .login_operator_with_throttle(
             &request,
             &peer.ip().to_string(),
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
             &state.operator_auth_throttle_config(),
         )
         .await?
@@ -306,6 +315,14 @@ pub(crate) async fn create_operator(
     validate_operator_credentials(&request.username, &request.password)?;
     validate_operator_role(&request.role)?;
     let _scopes = normalize_operator_scopes(&request.role, &request.scopes)?;
+    validate_session_refresh_ttl(
+        request
+            .session_refresh_ttl_secs
+            .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+    )?;
+    if request.role.trim() == "admin" && !request.admin_risk_acknowledged {
+        return Err(ApiError::bad_request("admin_risk_acknowledgement_required"));
+    }
     if state
         .repo
         .operator_by_username(&request.username)
@@ -315,6 +332,148 @@ pub(crate) async fn create_operator(
         return Err(ApiError::conflict("operator_username_exists"));
     }
     Ok(Json(state.repo.create_operator(&request, &operator).await?))
+}
+
+pub(crate) async fn update_operator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<UpdateOperatorRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
+    validate_operator_role(&request.role)?;
+    let _scopes = normalize_operator_scopes(&request.role, &request.scopes)?;
+    validate_session_refresh_ttl(request.session_refresh_ttl_secs)?;
+    let target = state
+        .repo
+        .operator_by_id(operator_id)
+        .await?
+        .filter(|operator| operator.status != "deleted")
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
+    require_admin_risk_if_needed(
+        &target.role,
+        Some(&request.role),
+        request.admin_risk_acknowledged,
+    )?;
+    state
+        .repo
+        .update_operator(operator_id, &request, &actor)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+}
+
+pub(crate) async fn disable_operator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<OperatorLifecycleRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    set_operator_lifecycle_status(state, headers, operator_id, "disabled", request).await
+}
+
+pub(crate) async fn enable_operator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<OperatorLifecycleRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    set_operator_lifecycle_status(state, headers, operator_id, "active", request).await
+}
+
+pub(crate) async fn delete_operator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<OperatorLifecycleRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    set_operator_lifecycle_status(state, headers, operator_id, "deleted", request).await
+}
+
+async fn set_operator_lifecycle_status(
+    state: AppState,
+    headers: HeaderMap,
+    operator_id: Uuid,
+    status: &str,
+    request: OperatorLifecycleRequest,
+) -> Result<Json<OperatorView>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
+    let target = state
+        .repo
+        .operator_by_id(operator_id)
+        .await?
+        .filter(|operator| operator.status != "deleted")
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
+    require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    state
+        .repo
+        .set_operator_status(operator_id, status, &actor)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+}
+
+pub(crate) async fn reset_operator_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<OperatorPasswordResetRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
+    validate_operator_credentials("operator", &request.password)?;
+    let target = state
+        .repo
+        .operator_by_id(operator_id)
+        .await?
+        .filter(|operator| operator.status != "deleted")
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
+    require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    state
+        .repo
+        .reset_operator_password(operator_id, &request.password, &actor)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+}
+
+pub(crate) async fn clear_operator_totp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operator_id): Path<Uuid>,
+    Json(request): Json<OperatorLifecycleRequest>,
+) -> Result<Json<OperatorView>, ApiError> {
+    let actor = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
+    let target = state
+        .repo
+        .operator_by_id(operator_id)
+        .await?
+        .filter(|operator| operator.status != "deleted")
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
+    require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    state
+        .repo
+        .clear_operator_totp(operator_id, &actor)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("operator_not_found"))
+}
+
+pub(crate) async fn list_operator_auth_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OperatorAuthEventQuery>,
+) -> Result<Json<Vec<OperatorAuthEventView>>, ApiError> {
+    let _operator = state.require_operator_role(&headers, "admin").await?;
+    if let Some(result) = query.result.as_deref() {
+        if !matches!(result.trim(), "success" | "failure" | "throttled") {
+            return Err(ApiError::bad_request("invalid_operator_auth_event_result"));
+        }
+    }
+    Ok(Json(state.repo.list_operator_auth_events(&query).await?))
 }
 
 pub(crate) async fn list_operator_sessions(
@@ -343,4 +502,34 @@ pub(crate) async fn revoke_operator_session(
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_session_not_found"))
+}
+
+fn validate_session_refresh_ttl(value: u64) -> Result<(), ApiError> {
+    if (MIN_REFRESH_TOKEN_TTL_SECS..=MAX_REFRESH_TOKEN_TTL_SECS).contains(&value) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("invalid_session_refresh_ttl_secs"))
+    }
+}
+
+fn require_confirmed(confirmed: bool) -> Result<(), ApiError> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("confirmation_required"))
+    }
+}
+
+fn require_admin_risk_if_needed(
+    current_role: &str,
+    requested_role: Option<&str>,
+    admin_risk_acknowledged: bool,
+) -> Result<(), ApiError> {
+    let touches_admin =
+        current_role.trim() == "admin" || requested_role.is_some_and(|role| role.trim() == "admin");
+    if touches_admin && !admin_risk_acknowledged {
+        Err(ApiError::bad_request("admin_risk_acknowledgement_required"))
+    } else {
+        Ok(())
+    }
 }

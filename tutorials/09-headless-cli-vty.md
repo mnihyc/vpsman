@@ -37,6 +37,8 @@ cargo run -p vpsctl -- --output json agents
 cargo run -p vpsctl -- --output json jobs --limit 20
 cargo run -p vpsctl -- --output json terminal-sessions --limit 20
 cargo run -p vpsctl -- --output json file-transfers --limit 20
+cargo run -p vpsctl -- --output json operators
+cargo run -p vpsctl -- --output json operator-auth-events --limit 20
 cargo run -p vpsctl -- --output pretty-json tunnel-plan \
   --name edge-a-b \
   --interface-name gre-ab \
@@ -98,9 +100,18 @@ VTY session and returns the prompt to `vpsman>`.
 agent-identity-upsert --client-id edge-01 --client-public-key-hex <hex> --confirmed
 client-key-revoke --client-id edge-01 --confirmed
 key-lifecycle-report
-key-lifecycle-report
 client-key-revocations
 client-key-revoke --client-id edge-01 --reason rebuilt --confirmed
+operators
+operator-create edge-operator operator VPSMAN_NEW_OPERATOR_PASSWORD
+operator-update --operator-id <uuid> --role operator --scopes fleet:read,jobs:read
+operator-disable <uuid>
+operator-enable <uuid>
+operator-password-reset <uuid> VPSMAN_NEW_OPERATOR_PASSWORD
+operator-totp-clear <uuid>
+operator-auth-events --limit 50
+operator-sessions --limit 50
+operator-session-revoke <session_uuid>
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action mute --muted-for-secs 14400 --reason maintenance --confirmed
 fleet-alert-policy-upsert --name edge-resource-alerts --scope-kind tag --scope-value edge --memory-available-warning-ratio 0.35 --memory-available-critical-ratio 0.15 --cpu-load-warning 1.5 --cpu-load-critical 3.0 --priority 25 --confirmed
 fleet-alert-notification-channel-upsert --name edge-audit --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind audit_log --target audit:fleet --cooldown-secs 3600 --confirmed
@@ -125,6 +136,8 @@ migration-run <restore_plan_uuid> --confirmed
 agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
 agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed
+agent-update-check --version-url https://github.com/mnihyc/vpsman/releases/latest/download/version.json tag:edge --confirmed
+agent-update --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> tag:edge --confirmed
 agent-update-activate --staged-sha256-hex <sha256> tag:edge --restart-agent --confirmed
 agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 ```
@@ -144,8 +157,8 @@ agent-update-rollback --rollback-sha256-hex <sha256> tag:edge --confirmed
 
 Custom headless operator tokens need the read scopes for the data they inspect.
 `fleet:read` covers metadata/status only. Add `jobs:read`, `terminal:read`,
-`integrations:read`, `templates:read`, `schedules:read`, `config:read`, and
-`network:read` when scripts read those sensitive surfaces.
+`integrations:read`, `templates:read`, `schedules:read`, `config:read`,
+`network:read`, and `backups:read` when scripts read those sensitive surfaces.
 
 Agent update staging, activation, and rollback use the same direct job model as
 other privileged commands. Activation and rollback need privilege unlock through

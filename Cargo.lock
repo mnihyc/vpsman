@@ -3166,6 +3166,7 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+ "vpsman-build-support",
 ]
 
 [[package]]
@@ -3197,6 +3198,7 @@ dependencies = [
  "sha2",
  "tokio",
  "uuid",
+ "vpsman-common",
 ]
 
 [[package]]

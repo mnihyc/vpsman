@@ -117,8 +117,8 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Jobs",
-    subpage: "Updates",
-    heading: "Agent updates",
+    subpage: "Update registry",
+    heading: "Update registry",
     id: "19-jobs-updates",
   },
   {
@@ -212,45 +212,51 @@ const allViews: ScreenshotEntry[] = [
   { view: "Access", heading: "Access control", id: "38-access-overview" },
   {
     view: "Access",
-    subpage: "Operators",
-    heading: "Operators",
-    id: "39-access-operators",
-  },
-  {
-    view: "Access",
     subpage: "VPS keys",
     heading: "Gateway agent identities",
-    id: "40-access-vps-keys",
+    id: "39-access-vps-keys",
   },
   {
     view: "Access",
     subpage: "Gateway",
     heading: "Gateway sessions",
-    id: "41-access-gateway",
+    id: "40-access-gateway",
   },
   {
     view: "Access",
     subpage: "Privilege unlock",
     heading: "Privilege unlock",
-    id: "42-access-privilege",
+    id: "41-access-privilege",
   },
   {
     view: "System",
     subpage: "Dashboard",
     heading: "System dashboard",
-    id: "43-system-dashboard",
+    id: "42-system-dashboard",
+  },
+  {
+    view: "System",
+    subpage: "Users",
+    heading: "System users",
+    id: "43-system-users",
+  },
+  {
+    view: "System",
+    subpage: "Sessions",
+    heading: "System sessions",
+    id: "44-system-sessions",
   },
   {
     view: "System",
     subpage: "Config",
     heading: "System config",
-    id: "44-system-config",
+    id: "45-system-config",
   },
   {
     view: "System",
     subpage: "Preferences",
     heading: "System preferences",
-    id: "45-system-preferences",
+    id: "46-system-preferences",
   },
 ];
 

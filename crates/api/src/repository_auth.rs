@@ -2,12 +2,14 @@ use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::error::ApiError;
 use crate::model::*;
-use crate::repository::{OperatorAuthThrottleRecord, Repository};
+use crate::repository::{MemoryState, OperatorAuthThrottleRecord, Repository};
 use crate::state::OperatorAuthThrottleConfig;
 use crate::{
     generate_token, hash_operator_password, normalize_operator_scopes, token_hash, unix_now,
-    verify_operator_password, ACCESS_TOKEN_TTL_SECS, REFRESH_TOKEN_TTL_SECS,
+    verify_operator_password, ACCESS_TOKEN_TTL_SECS, DEFAULT_REFRESH_TOKEN_TTL_SECS,
+    MAX_REFRESH_TOKEN_TTL_SECS, MIN_REFRESH_TOKEN_TTL_SECS,
 };
 
 #[derive(Debug)]
@@ -20,6 +22,8 @@ pub(crate) enum OperatorLoginAttempt {
 #[derive(Clone, Copy)]
 enum OperatorLoginFailureReason {
     UnknownUser,
+    Disabled,
+    Deleted,
     BadPassword,
     MissingTotp,
     MissingTotpSecret,
@@ -31,6 +35,8 @@ impl OperatorLoginFailureReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::UnknownUser => "unknown_user",
+            Self::Disabled => "operator_disabled",
+            Self::Deleted => "operator_deleted",
             Self::BadPassword => "bad_password",
             Self::MissingTotp => "missing_totp",
             Self::MissingTotpSecret => "missing_totp_secret",
@@ -64,10 +70,12 @@ impl Repository {
         &self,
         request: &BootstrapOperatorRequest,
     ) -> Result<AuthResponse> {
+        let now = unix_now().to_string();
         let operator = OperatorRecord {
             id: Uuid::new_v4(),
             username: request.username.trim().to_string(),
             password_hash: hash_operator_password(&request.password)?,
+            status: "active".to_string(),
             role: "admin".to_string(),
             scopes: normalize_operator_scopes("admin", &[])
                 .map_err(|error| anyhow::anyhow!(error.code))?,
@@ -76,6 +84,10 @@ impl Repository {
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
             totp_secret_salt_hex: None,
+            session_refresh_ttl_secs: DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: now,
+            disabled_at: None,
+            deleted_at: None,
         };
         match self {
             Self::Memory(memory) => {
@@ -101,19 +113,24 @@ impl Repository {
                 }
                 sqlx::query(
                     r#"
-                    INSERT INTO operators (id, username, password_hash, role, scopes, preferences)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO operators (
+                        id, username, password_hash, status, role, scopes,
+                        preferences, session_refresh_ttl_secs
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     "#,
                 )
                 .bind(operator.id)
                 .bind(&operator.username)
                 .bind(&operator.password_hash)
+                .bind(&operator.status)
                 .bind(&operator.role)
                 .bind(serde_json::json!(operator.scopes))
                 .bind(serde_json::json!(operator.preferences))
+                .bind(operator.session_refresh_ttl_secs as i64)
                 .execute(&mut *tx)
                 .await?;
-                let session = PreparedOperatorSession::new();
+                let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
                 insert_operator_session_in_tx(&mut tx, operator.id, &session).await?;
                 tx.commit().await?;
                 Ok(session.auth_response(operator.view()))
@@ -129,6 +146,9 @@ impl Repository {
         let Some(operator) = self.operator_by_username(&request.username).await? else {
             return Ok(None);
         };
+        if operator.status != "active" {
+            return Ok(None);
+        }
         if !verify_operator_password(&request.password, &operator.password_hash)? {
             return Ok(None);
         }
@@ -154,6 +174,7 @@ impl Repository {
         &self,
         request: &LoginRequest,
         remote_ip: &str,
+        user_agent: Option<&str>,
         throttle: &OperatorAuthThrottleConfig,
     ) -> Result<OperatorLoginAttempt> {
         let username_key = normalize_auth_throttle_username(&request.username);
@@ -162,10 +183,30 @@ impl Repository {
             .operator_auth_throttle_locked(&username_key, &ip_key)
             .await?
         {
+            self.record_operator_auth_event(
+                None,
+                request.username.trim(),
+                "throttled",
+                Some("operator_login_throttled"),
+                &ip_key,
+                user_agent,
+                None,
+            )
+            .await?;
             return Ok(OperatorLoginAttempt::Throttled);
         }
 
         let Some(operator) = self.operator_by_username(&request.username).await? else {
+            self.record_operator_auth_event(
+                None,
+                request.username.trim(),
+                "failure",
+                Some(OperatorLoginFailureReason::UnknownUser.as_str()),
+                &ip_key,
+                user_agent,
+                None,
+            )
+            .await?;
             self.record_operator_auth_failure(
                 &username_key,
                 &ip_key,
@@ -175,7 +216,37 @@ impl Repository {
             .await?;
             return Ok(OperatorLoginAttempt::InvalidCredentials);
         };
+        if operator.status != "active" {
+            let reason = if operator.status == "deleted" {
+                OperatorLoginFailureReason::Deleted
+            } else {
+                OperatorLoginFailureReason::Disabled
+            };
+            self.record_operator_auth_event(
+                Some(&operator),
+                request.username.trim(),
+                "failure",
+                Some(reason.as_str()),
+                &ip_key,
+                user_agent,
+                None,
+            )
+            .await?;
+            self.record_operator_auth_failure(&username_key, &ip_key, reason, throttle)
+                .await?;
+            return Ok(OperatorLoginAttempt::InvalidCredentials);
+        }
         if !verify_operator_password(&request.password, &operator.password_hash)? {
+            self.record_operator_auth_event(
+                Some(&operator),
+                request.username.trim(),
+                "failure",
+                Some(OperatorLoginFailureReason::BadPassword.as_str()),
+                &ip_key,
+                user_agent,
+                None,
+            )
+            .await?;
             self.record_operator_auth_failure(
                 &username_key,
                 &ip_key,
@@ -187,6 +258,16 @@ impl Repository {
         }
         if operator.totp_enabled {
             let Some(code) = request.totp_code.as_deref() else {
+                self.record_operator_auth_event(
+                    Some(&operator),
+                    request.username.trim(),
+                    "failure",
+                    Some(OperatorLoginFailureReason::MissingTotp.as_str()),
+                    &ip_key,
+                    user_agent,
+                    None,
+                )
+                .await?;
                 self.record_operator_auth_failure(
                     &username_key,
                     &ip_key,
@@ -197,6 +278,16 @@ impl Repository {
                 return Ok(OperatorLoginAttempt::InvalidCredentials);
             };
             let Some(secret) = operator.encrypted_totp_secret() else {
+                self.record_operator_auth_event(
+                    Some(&operator),
+                    request.username.trim(),
+                    "failure",
+                    Some(OperatorLoginFailureReason::MissingTotpSecret.as_str()),
+                    &ip_key,
+                    user_agent,
+                    None,
+                )
+                .await?;
                 self.record_operator_auth_failure(
                     &username_key,
                     &ip_key,
@@ -209,6 +300,16 @@ impl Repository {
             let secret = match crate::auth_totp::decrypt_totp_secret(&request.password, &secret) {
                 Ok(secret) => secret,
                 Err(_) => {
+                    self.record_operator_auth_event(
+                        Some(&operator),
+                        request.username.trim(),
+                        "failure",
+                        Some(OperatorLoginFailureReason::TotpDecryptFailed.as_str()),
+                        &ip_key,
+                        user_agent,
+                        None,
+                    )
+                    .await?;
                     self.record_operator_auth_failure(
                         &username_key,
                         &ip_key,
@@ -220,6 +321,16 @@ impl Repository {
                 }
             };
             if !crate::auth_totp::verify_totp_code(&secret, code, unix_now()) {
+                self.record_operator_auth_event(
+                    Some(&operator),
+                    request.username.trim(),
+                    "failure",
+                    Some(OperatorLoginFailureReason::BadTotp.as_str()),
+                    &ip_key,
+                    user_agent,
+                    None,
+                )
+                .await?;
                 self.record_operator_auth_failure(
                     &username_key,
                     &ip_key,
@@ -238,9 +349,18 @@ impl Repository {
             self.record_operator_auth_success_after_failures(&operator, &username_key, &ip_key)
                 .await?;
         }
-        Ok(OperatorLoginAttempt::Authenticated(Box::new(
-            self.issue_session(operator.view()).await?,
-        )))
+        let response = self.issue_session(operator.view()).await?;
+        self.record_operator_auth_event(
+            Some(&operator),
+            request.username.trim(),
+            "success",
+            None,
+            &ip_key,
+            user_agent,
+            None,
+        )
+        .await?;
+        Ok(OperatorLoginAttempt::Authenticated(Box::new(response)))
     }
 
     async fn operator_auth_throttle_locked(
@@ -470,6 +590,75 @@ impl Repository {
         }
     }
 
+    async fn record_operator_auth_event(
+        &self,
+        operator: Option<&OperatorRecord>,
+        attempted_username: &str,
+        result: &str,
+        reason: Option<&str>,
+        remote_ip: &str,
+        user_agent: Option<&str>,
+        session_id: Option<Uuid>,
+    ) -> Result<()> {
+        let action = match result {
+            "success" => "operator_auth.login_success",
+            "throttled" => "operator_auth.login_throttled",
+            _ => "operator_auth.login_failure",
+        };
+        let username = attempted_username.trim();
+        let normalized_username = if username.is_empty() {
+            "<empty>".to_string()
+        } else {
+            username.to_string()
+        };
+        let metadata = serde_json::json!({
+            "operator_id": operator.map(|operator| operator.id),
+            "username": normalized_username,
+            "result": result,
+            "reason": reason,
+            "remote_ip": remote_ip,
+            "user_agent": user_agent.unwrap_or(""),
+            "session_id": session_id,
+        });
+        match self {
+            Self::Memory(memory) => {
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: operator.map(|operator| operator.id),
+                    action: action.to_string(),
+                    target: operator
+                        .map(|operator| format!("operator:{}", operator.id))
+                        .unwrap_or_else(|| format!("operator-login:{normalized_username}")),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.map(|operator| operator.id))
+                .bind(action)
+                .bind(
+                    operator
+                        .map(|operator| format!("operator:{}", operator.id))
+                        .unwrap_or_else(|| format!("operator-login:{normalized_username}")),
+                )
+                .bind(metadata)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn refresh_operator_session(
         &self,
         refresh_token: &str,
@@ -494,6 +683,9 @@ impl Repository {
                 else {
                     return Ok(None);
                 };
+                if operator.status != "active" {
+                    return Ok(None);
+                }
                 self.issue_session(operator.view()).await.map(Some)
             }
             Self::Postgres(pool) => {
@@ -508,9 +700,21 @@ impl Repository {
                           AND revoked_at IS NULL
                         RETURNING operator_id
                     )
-                    SELECT o.id, o.username, o.role, o.scopes, o.preferences, o.totp_enabled
+                    SELECT
+                        o.id,
+                        o.username,
+                        o.status,
+                        o.role,
+                        o.scopes,
+                        o.preferences,
+                        o.totp_enabled,
+                        o.session_refresh_ttl_secs,
+                        o.created_at::text AS created_at,
+                        o.disabled_at::text AS disabled_at,
+                        o.deleted_at::text AS deleted_at
                     FROM revoked
                     JOIN operators o ON o.id = revoked.operator_id
+                    WHERE o.status = 'active'
                     "#,
                 )
                 .bind(&refresh_hash)
@@ -523,10 +727,18 @@ impl Repository {
                 let operator = OperatorView {
                     id: row.try_get("id")?,
                     username: row.try_get("username")?,
+                    status: row.try_get("status")?,
                     role: row.try_get("role")?,
                     scopes: parse_scopes(row.try_get("scopes")?),
                     preferences: parse_operator_preferences(row.try_get("preferences")?),
                     totp_enabled: row.try_get("totp_enabled")?,
+                    session_refresh_ttl_secs: row
+                        .try_get::<i64, _>("session_refresh_ttl_secs")?
+                        .try_into()
+                        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+                    created_at: row.try_get("created_at")?,
+                    disabled_at: row.try_get("disabled_at")?,
+                    deleted_at: row.try_get("deleted_at")?,
                 };
                 self.issue_session(operator).await.map(Some)
             }
@@ -558,6 +770,7 @@ impl Repository {
                     .await
                     .iter()
                     .find(|operator| operator.id == operator_id)
+                    .filter(|operator| operator.status == "active")
                     .map(|operator| AuthContext {
                         operator: operator.view(),
                         session_id,
@@ -570,15 +783,21 @@ impl Repository {
                         s.id AS session_id,
                         o.id AS operator_id,
                         o.username,
+                        o.status,
                         o.role,
                         o.scopes,
                         o.preferences,
-                        o.totp_enabled
+                        o.totp_enabled,
+                        o.session_refresh_ttl_secs,
+                        o.created_at::text AS created_at,
+                        o.disabled_at::text AS disabled_at,
+                        o.deleted_at::text AS deleted_at
                     FROM operator_sessions s
                     JOIN operators o ON o.id = s.operator_id
                     WHERE s.access_token_hash = $1
                       AND s.expires_at > now()
                       AND s.revoked_at IS NULL
+                      AND o.status = 'active'
                     "#,
                 )
                 .bind(&access_hash)
@@ -590,10 +809,18 @@ impl Repository {
                         operator: OperatorView {
                             id: row.try_get("operator_id")?,
                             username: row.try_get("username")?,
+                            status: row.try_get("status")?,
                             role: row.try_get("role")?,
                             scopes: parse_scopes(row.try_get("scopes")?),
                             preferences: parse_operator_preferences(row.try_get("preferences")?),
                             totp_enabled: row.try_get("totp_enabled")?,
+                            session_refresh_ttl_secs: row
+                                .try_get::<i64, _>("session_refresh_ttl_secs")?
+                                .try_into()
+                                .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+                            created_at: row.try_get("created_at")?,
+                            disabled_at: row.try_get("disabled_at")?,
+                            deleted_at: row.try_get("deleted_at")?,
                         },
                     })
                 })
@@ -618,13 +845,18 @@ impl Repository {
                         id,
                         username,
                         password_hash,
+                        status,
                         role,
                         scopes,
                         preferences,
                         totp_enabled,
                         totp_secret_ciphertext_hex,
                         totp_secret_nonce_hex,
-                        totp_secret_salt_hex
+                        totp_secret_salt_hex,
+                        session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
                     FROM operators
                     WHERE id = $1
                     "#,
@@ -637,6 +869,7 @@ impl Repository {
                         id: row.try_get("id")?,
                         username: row.try_get("username")?,
                         password_hash: row.try_get("password_hash")?,
+                        status: row.try_get("status")?,
                         role: row.try_get("role")?,
                         scopes: parse_scopes(row.try_get("scopes")?),
                         preferences: parse_operator_preferences(row.try_get("preferences")?),
@@ -644,6 +877,13 @@ impl Repository {
                         totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
                         totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
                         totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+                        session_refresh_ttl_secs: row
+                            .try_get::<i64, _>("session_refresh_ttl_secs")?
+                            .try_into()
+                            .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+                        created_at: row.try_get("created_at")?,
+                        disabled_at: row.try_get("disabled_at")?,
+                        deleted_at: row.try_get("deleted_at")?,
                     })
                 })
                 .transpose()
@@ -671,13 +911,18 @@ impl Repository {
                         id,
                         username,
                         password_hash,
+                        status,
                         role,
                         scopes,
                         preferences,
                         totp_enabled,
                         totp_secret_ciphertext_hex,
                         totp_secret_nonce_hex,
-                        totp_secret_salt_hex
+                        totp_secret_salt_hex,
+                        session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
                     FROM operators
                     WHERE username = $1
                     "#,
@@ -690,6 +935,7 @@ impl Repository {
                         id: row.try_get("id")?,
                         username: row.try_get("username")?,
                         password_hash: row.try_get("password_hash")?,
+                        status: row.try_get("status")?,
                         role: row.try_get("role")?,
                         scopes: parse_scopes(row.try_get("scopes")?),
                         preferences: parse_operator_preferences(row.try_get("preferences")?),
@@ -697,6 +943,13 @@ impl Repository {
                         totp_secret_ciphertext_hex: row.try_get("totp_secret_ciphertext_hex")?,
                         totp_secret_nonce_hex: row.try_get("totp_secret_nonce_hex")?,
                         totp_secret_salt_hex: row.try_get("totp_secret_salt_hex")?,
+                        session_refresh_ttl_secs: row
+                            .try_get::<i64, _>("session_refresh_ttl_secs")?
+                            .try_into()
+                            .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+                        created_at: row.try_get("created_at")?,
+                        disabled_at: row.try_get("disabled_at")?,
+                        deleted_at: row.try_get("deleted_at")?,
                     })
                 })
                 .transpose()
@@ -716,7 +969,18 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    SELECT id, username, role, scopes, preferences, totp_enabled
+                    SELECT
+                        id,
+                        username,
+                        status,
+                        role,
+                        scopes,
+                        preferences,
+                        totp_enabled,
+                        session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
                     FROM operators
                     ORDER BY created_at ASC, username ASC
                     "#,
@@ -728,10 +992,18 @@ impl Repository {
                         Ok(OperatorView {
                             id: row.try_get("id")?,
                             username: row.try_get("username")?,
+                            status: row.try_get("status")?,
                             role: row.try_get("role")?,
                             scopes: parse_scopes(row.try_get("scopes")?),
                             preferences: parse_operator_preferences(row.try_get("preferences")?),
                             totp_enabled: row.try_get("totp_enabled")?,
+                            session_refresh_ttl_secs: row
+                                .try_get::<i64, _>("session_refresh_ttl_secs")?
+                                .try_into()
+                                .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+                            created_at: row.try_get("created_at")?,
+                            disabled_at: row.try_get("disabled_at")?,
+                            deleted_at: row.try_get("deleted_at")?,
                         })
                     })
                     .collect()
@@ -748,10 +1020,18 @@ impl Repository {
         let role = request.role.trim().to_string();
         let scopes = normalize_operator_scopes(&role, &request.scopes)
             .map_err(|error| anyhow::anyhow!(error.code))?;
+        let session_refresh_ttl_secs = normalize_session_refresh_ttl(
+            request
+                .session_refresh_ttl_secs
+                .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+        )
+        .map_err(|error| anyhow::anyhow!(error.code))?;
+        let now = unix_now().to_string();
         let operator = OperatorRecord {
             id: Uuid::new_v4(),
             username,
             password_hash: hash_operator_password(&request.password)?,
+            status: "active".to_string(),
             role,
             scopes,
             preferences: crate::model::OperatorPreferences::default(),
@@ -759,12 +1039,17 @@ impl Repository {
             totp_secret_ciphertext_hex: None,
             totp_secret_nonce_hex: None,
             totp_secret_salt_hex: None,
+            session_refresh_ttl_secs,
+            created_at: now,
+            disabled_at: None,
+            deleted_at: None,
         };
         let metadata = serde_json::json!({
             "operator_id": operator.id,
             "username": operator.username,
             "role": operator.role,
             "scopes": operator.scopes,
+            "session_refresh_ttl_secs": operator.session_refresh_ttl_secs,
             "created_by_operator_id": actor.operator.id,
             "created_by_operator_username": actor.operator.username,
             "session_id": actor.session_id,
@@ -795,16 +1080,21 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 sqlx::query(
                     r#"
-                    INSERT INTO operators (id, username, password_hash, role, scopes, preferences)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO operators (
+                        id, username, password_hash, status, role, scopes,
+                        preferences, session_refresh_ttl_secs
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     "#,
                 )
                 .bind(operator.id)
                 .bind(&operator.username)
                 .bind(&operator.password_hash)
+                .bind(&operator.status)
                 .bind(&operator.role)
                 .bind(serde_json::json!(operator.scopes))
                 .bind(serde_json::json!(operator.preferences))
+                .bind(operator.session_refresh_ttl_secs as i64)
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
@@ -826,6 +1116,369 @@ impl Repository {
             }
         }
         Ok(operator.view())
+    }
+
+    pub(crate) async fn update_operator(
+        &self,
+        operator_id: Uuid,
+        request: &UpdateOperatorRequest,
+        actor: &AuthContext,
+    ) -> Result<Option<OperatorView>> {
+        let role = request.role.trim().to_string();
+        let scopes = normalize_operator_scopes(&role, &request.scopes)
+            .map_err(|error| anyhow::anyhow!(error.code))?;
+        let session_refresh_ttl_secs =
+            normalize_session_refresh_ttl(request.session_refresh_ttl_secs)
+                .map_err(|error| anyhow::anyhow!(error.code))?;
+        let metadata = serde_json::json!({
+            "operator_id": operator_id,
+            "role": role,
+            "scopes": scopes,
+            "session_refresh_ttl_secs": session_refresh_ttl_secs,
+            "updated_by_operator_id": actor.operator.id,
+            "updated_by_operator_username": actor.operator.username,
+            "session_id": actor.session_id,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let mut operators = memory.operators.write().await;
+                let Some(operator) = operators
+                    .iter_mut()
+                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
+                else {
+                    return Ok(None);
+                };
+                operator.role = role;
+                operator.scopes = scopes;
+                operator.session_refresh_ttl_secs = session_refresh_ttl_secs;
+                let view = operator.view();
+                drop(operators);
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor.operator.id),
+                    action: "operator.updated".to_string(),
+                    target: format!("operator:{operator_id}"),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET role = $2,
+                        scopes = $3,
+                        session_refresh_ttl_secs = $4
+                    WHERE id = $1 AND status <> 'deleted'
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    "#,
+                )
+                .bind(operator_id)
+                .bind(&role)
+                .bind(serde_json::json!(scopes))
+                .bind(session_refresh_ttl_secs as i64)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                sqlx::query(audit_insert_sql())
+                    .bind(Uuid::new_v4())
+                    .bind(actor.operator.id)
+                    .bind("operator.updated")
+                    .bind(format!("operator:{operator_id}"))
+                    .bind(metadata)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(Some(operator_view_from_row(&row)?))
+            }
+        }
+    }
+
+    pub(crate) async fn set_operator_status(
+        &self,
+        operator_id: Uuid,
+        status: &str,
+        actor: &AuthContext,
+    ) -> Result<Option<OperatorView>> {
+        let status = status.trim();
+        if !matches!(status, "active" | "disabled" | "deleted") {
+            anyhow::bail!("invalid_operator_status");
+        }
+        let action = match status {
+            "active" => "operator.enabled",
+            "disabled" => "operator.disabled",
+            "deleted" => "operator.deleted",
+            _ => unreachable!(),
+        };
+        let metadata = serde_json::json!({
+            "operator_id": operator_id,
+            "status": status,
+            "updated_by_operator_id": actor.operator.id,
+            "updated_by_operator_username": actor.operator.username,
+            "session_id": actor.session_id,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let mut operators = memory.operators.write().await;
+                let Some(operator) = operators.iter_mut().find(|operator| {
+                    operator.id == operator_id
+                        && operator.status != "deleted"
+                        && (status != "active" || operator.status == "disabled")
+                }) else {
+                    return Ok(None);
+                };
+                operator.status = status.to_string();
+                if status == "active" {
+                    operator.disabled_at = None;
+                } else if status == "disabled" {
+                    operator.disabled_at = Some(now.clone());
+                } else {
+                    operator.disabled_at = Some(now.clone());
+                    operator.deleted_at = Some(now.clone());
+                }
+                let view = operator.view();
+                drop(operators);
+                if status != "active" {
+                    revoke_memory_operator_sessions(memory, operator_id).await;
+                }
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor.operator.id),
+                    action: action.to_string(),
+                    target: format!("operator:{operator_id}"),
+                    command_hash: None,
+                    metadata,
+                    created_at: now,
+                });
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET status = $2,
+                        disabled_at = CASE
+                            WHEN $2 = 'active' THEN NULL
+                            WHEN disabled_at IS NULL THEN now()
+                            ELSE disabled_at
+                        END,
+                        deleted_at = CASE
+                            WHEN $2 = 'deleted' AND deleted_at IS NULL THEN now()
+                            ELSE deleted_at
+                        END
+                    WHERE id = $1
+                      AND status <> 'deleted'
+                      AND ($2 <> 'active' OR status = 'disabled')
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    "#,
+                )
+                .bind(operator_id)
+                .bind(status)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                if status != "active" {
+                    sqlx::query(
+                        "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
+                    )
+                    .bind(operator_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                sqlx::query(audit_insert_sql())
+                    .bind(Uuid::new_v4())
+                    .bind(actor.operator.id)
+                    .bind(action)
+                    .bind(format!("operator:{operator_id}"))
+                    .bind(metadata)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(Some(operator_view_from_row(&row)?))
+            }
+        }
+    }
+
+    pub(crate) async fn reset_operator_password(
+        &self,
+        operator_id: Uuid,
+        password: &str,
+        actor: &AuthContext,
+    ) -> Result<Option<OperatorView>> {
+        let password_hash = hash_operator_password(password)?;
+        let metadata = serde_json::json!({
+            "operator_id": operator_id,
+            "reset_by_operator_id": actor.operator.id,
+            "reset_by_operator_username": actor.operator.username,
+            "session_id": actor.session_id,
+            "sessions_revoked": true,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let mut operators = memory.operators.write().await;
+                let Some(operator) = operators
+                    .iter_mut()
+                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
+                else {
+                    return Ok(None);
+                };
+                operator.password_hash = password_hash;
+                let view = operator.view();
+                drop(operators);
+                revoke_memory_operator_sessions(memory, operator_id).await;
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor.operator.id),
+                    action: "operator.password_reset".to_string(),
+                    target: format!("operator:{operator_id}"),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET password_hash = $2
+                    WHERE id = $1 AND status <> 'deleted'
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    "#,
+                )
+                .bind(operator_id)
+                .bind(password_hash)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                sqlx::query(
+                    "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
+                )
+                .bind(operator_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(audit_insert_sql())
+                    .bind(Uuid::new_v4())
+                    .bind(actor.operator.id)
+                    .bind("operator.password_reset")
+                    .bind(format!("operator:{operator_id}"))
+                    .bind(metadata)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(Some(operator_view_from_row(&row)?))
+            }
+        }
+    }
+
+    pub(crate) async fn clear_operator_totp(
+        &self,
+        operator_id: Uuid,
+        actor: &AuthContext,
+    ) -> Result<Option<OperatorView>> {
+        let metadata = serde_json::json!({
+            "operator_id": operator_id,
+            "cleared_by_operator_id": actor.operator.id,
+            "cleared_by_operator_username": actor.operator.username,
+            "session_id": actor.session_id,
+            "sessions_revoked": true,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let mut operators = memory.operators.write().await;
+                let Some(operator) = operators
+                    .iter_mut()
+                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
+                else {
+                    return Ok(None);
+                };
+                operator.totp_enabled = false;
+                operator.totp_secret_ciphertext_hex = None;
+                operator.totp_secret_nonce_hex = None;
+                operator.totp_secret_salt_hex = None;
+                let view = operator.view();
+                drop(operators);
+                revoke_memory_operator_sessions(memory, operator_id).await;
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(actor.operator.id),
+                    action: "operator.totp_cleared".to_string(),
+                    target: format!("operator:{operator_id}"),
+                    command_hash: None,
+                    metadata,
+                    created_at: unix_now().to_string(),
+                });
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE operators
+                    SET totp_enabled = false,
+                        totp_secret_ciphertext_hex = NULL,
+                        totp_secret_nonce_hex = NULL,
+                        totp_secret_salt_hex = NULL
+                    WHERE id = $1 AND status <> 'deleted'
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
+                    "#,
+                )
+                .bind(operator_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                sqlx::query(
+                    "UPDATE operator_sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE operator_id = $1",
+                )
+                .bind(operator_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(audit_insert_sql())
+                    .bind(Uuid::new_v4())
+                    .bind(actor.operator.id)
+                    .bind("operator.totp_cleared")
+                    .bind(format!("operator:{operator_id}"))
+                    .bind(metadata)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok(Some(operator_view_from_row(&row)?))
+            }
+        }
     }
 
     pub(crate) async fn update_operator_preferences(
@@ -870,7 +1523,12 @@ impl Repository {
                     UPDATE operators
                     SET preferences = $2
                     WHERE id = $1
-                    RETURNING id, username, role, scopes, preferences, totp_enabled
+                    RETURNING
+                        id, username, status, role, scopes, preferences,
+                        totp_enabled, session_refresh_ttl_secs,
+                        created_at::text AS created_at,
+                        disabled_at::text AS disabled_at,
+                        deleted_at::text AS deleted_at
                     "#,
                 )
                 .bind(actor.operator.id)
@@ -896,14 +1554,86 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(OperatorView {
-                    id: row.try_get("id")?,
-                    username: row.try_get("username")?,
-                    role: row.try_get("role")?,
-                    scopes: parse_scopes(row.try_get("scopes")?),
-                    preferences: parse_operator_preferences(row.try_get("preferences")?),
-                    totp_enabled: row.try_get("totp_enabled")?,
-                })
+                Ok(operator_view_from_row(&row)?)
+            }
+        }
+    }
+
+    pub(crate) async fn list_operator_auth_events(
+        &self,
+        query: &OperatorAuthEventQuery,
+    ) -> Result<Vec<OperatorAuthEventView>> {
+        let limit = i64::from(query.limit.unwrap_or(100)).clamp(1, 200);
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory
+                    .audits
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|audit| is_operator_auth_event_action(&audit.action))
+                    .filter_map(|audit| operator_auth_event_from_audit(audit).ok())
+                    .filter(|event| {
+                        query
+                            .operator_id
+                            .is_none_or(|operator_id| event.operator_id == Some(operator_id))
+                    })
+                    .filter(|event| {
+                        query
+                            .username
+                            .as_ref()
+                            .is_none_or(|username| event.username == username.trim())
+                    })
+                    .filter(|event| {
+                        query
+                            .result
+                            .as_ref()
+                            .is_none_or(|result| event.result == result.trim())
+                    })
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+                rows.truncate(limit as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let operator_id = query.operator_id.map(|id| id.to_string());
+                let rows = sqlx::query(
+                    r#"
+                    SELECT id, metadata, created_at::text AS created_at
+                    FROM audit_logs
+                    WHERE action IN (
+                        'operator_auth.login_success',
+                        'operator_auth.login_failure',
+                        'operator_auth.login_throttled'
+                    )
+                      AND ($2::text IS NULL OR metadata->>'operator_id' = $2)
+                      AND ($3::text IS NULL OR metadata->>'username' = $3)
+                      AND ($4::text IS NULL OR metadata->>'result' = $4)
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit)
+                .bind(operator_id)
+                .bind(
+                    query
+                        .username
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                )
+                .bind(
+                    query
+                        .result
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                )
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| operator_auth_event_from_row(&row))
+                    .collect()
             }
         }
     }
@@ -1057,7 +1787,7 @@ impl Repository {
     }
 
     pub(crate) async fn issue_session(&self, operator: OperatorView) -> Result<AuthResponse> {
-        let session = PreparedOperatorSession::new();
+        let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
 
         match self {
             Self::Memory(memory) => {
@@ -1081,6 +1811,109 @@ impl Repository {
     }
 }
 
+fn normalize_session_refresh_ttl(value: u64) -> std::result::Result<u64, ApiError> {
+    if (MIN_REFRESH_TOKEN_TTL_SECS..=MAX_REFRESH_TOKEN_TTL_SECS).contains(&value) {
+        Ok(value)
+    } else {
+        Err(ApiError::bad_request("invalid_session_refresh_ttl_secs"))
+    }
+}
+
+fn audit_insert_sql() -> &'static str {
+    r#"
+    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+    VALUES ($1, $2, $3, $4, NULL, $5)
+    "#
+}
+
+fn operator_view_from_row(row: &sqlx::postgres::PgRow) -> Result<OperatorView> {
+    Ok(OperatorView {
+        id: row.try_get("id")?,
+        username: row.try_get("username")?,
+        status: row.try_get("status")?,
+        role: row.try_get("role")?,
+        scopes: parse_scopes(row.try_get("scopes")?),
+        preferences: parse_operator_preferences(row.try_get("preferences")?),
+        totp_enabled: row.try_get("totp_enabled")?,
+        session_refresh_ttl_secs: row
+            .try_get::<i64, _>("session_refresh_ttl_secs")?
+            .try_into()
+            .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
+        created_at: row.try_get("created_at")?,
+        disabled_at: row.try_get("disabled_at")?,
+        deleted_at: row.try_get("deleted_at")?,
+    })
+}
+
+async fn revoke_memory_operator_sessions(memory: &MemoryState, operator_id: Uuid) {
+    for session in memory.sessions.write().await.iter_mut() {
+        if session.operator_id == operator_id {
+            session.revoked = true;
+        }
+    }
+}
+
+fn is_operator_auth_event_action(action: &str) -> bool {
+    matches!(
+        action,
+        "operator_auth.login_success"
+            | "operator_auth.login_failure"
+            | "operator_auth.login_throttled"
+    )
+}
+
+fn operator_auth_event_from_audit(audit: &AuditLogView) -> Result<OperatorAuthEventView> {
+    if !is_operator_auth_event_action(&audit.action) {
+        anyhow::bail!("not operator auth event");
+    }
+    Ok(OperatorAuthEventView {
+        id: audit.id,
+        operator_id: json_uuid(&audit.metadata, "operator_id"),
+        username: json_string(&audit.metadata, "username").unwrap_or_default(),
+        result: json_string(&audit.metadata, "result").unwrap_or_else(|| {
+            if audit.action == "operator_auth.login_success" {
+                "success".to_string()
+            } else if audit.action == "operator_auth.login_throttled" {
+                "throttled".to_string()
+            } else {
+                "failure".to_string()
+            }
+        }),
+        reason: json_string(&audit.metadata, "reason"),
+        remote_ip: json_string(&audit.metadata, "remote_ip"),
+        user_agent: json_string(&audit.metadata, "user_agent"),
+        session_id: json_uuid(&audit.metadata, "session_id"),
+        created_at: audit.created_at.clone(),
+    })
+}
+
+fn operator_auth_event_from_row(row: &sqlx::postgres::PgRow) -> Result<OperatorAuthEventView> {
+    let metadata: serde_json::Value = row.try_get("metadata")?;
+    Ok(OperatorAuthEventView {
+        id: row.try_get("id")?,
+        operator_id: json_uuid(&metadata, "operator_id"),
+        username: json_string(&metadata, "username").unwrap_or_default(),
+        result: json_string(&metadata, "result").unwrap_or_else(|| "failure".to_string()),
+        reason: json_string(&metadata, "reason"),
+        remote_ip: json_string(&metadata, "remote_ip"),
+        user_agent: json_string(&metadata, "user_agent"),
+        session_id: json_uuid(&metadata, "session_id"),
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn json_uuid(value: &serde_json::Value, key: &str) -> Option<Uuid> {
+    json_string(value, key).and_then(|value| Uuid::parse_str(&value).ok())
+}
+
 struct PreparedOperatorSession {
     access_token: String,
     refresh_token: String,
@@ -1093,13 +1926,15 @@ struct PreparedOperatorSession {
 }
 
 impl PreparedOperatorSession {
-    fn new() -> Self {
+    fn new(refresh_ttl_secs: u64) -> Self {
         let access_token = generate_token();
         let refresh_token = generate_token();
         let session_id = Uuid::new_v4();
         let created_unix = unix_now();
         let expires_unix = created_unix.saturating_add(ACCESS_TOKEN_TTL_SECS);
-        let refresh_expires_unix = created_unix.saturating_add(REFRESH_TOKEN_TTL_SECS);
+        let refresh_ttl_secs =
+            refresh_ttl_secs.clamp(MIN_REFRESH_TOKEN_TTL_SECS, MAX_REFRESH_TOKEN_TTL_SECS);
+        let refresh_expires_unix = created_unix.saturating_add(refresh_ttl_secs);
         let access_hash = token_hash(&access_token);
         let refresh_hash = token_hash(&refresh_token);
 
@@ -1121,7 +1956,7 @@ impl PreparedOperatorSession {
             access_token: self.access_token,
             refresh_token: self.refresh_token,
             expires_in_secs: ACCESS_TOKEN_TTL_SECS,
-            refresh_expires_in_secs: REFRESH_TOKEN_TTL_SECS,
+            refresh_expires_in_secs: operator.session_refresh_ttl_secs,
             operator,
         }
     }

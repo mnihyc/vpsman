@@ -13,12 +13,13 @@ use crate::cli_access::{
     FleetAlertNotificationProcessCommand, FleetAlertNotificationsCommand,
     FleetAlertPoliciesCommand, FleetAlertPolicyUpsertCommand, FleetAlertStateUpdateCommand,
     FleetAlertStatesCommand, FleetAlertsCommand, LimitCommand, LoginCommand, NameCommand,
-    OperatorCreateCommand, OperatorSessionRevokeCommand, OperatorSessionsCommand, RefreshCommand,
-    ScheduleCreateCommand, ScheduleDeferCommand, ScheduleMutationCommand, ScheduleUpdateCommand,
-    TelemetryNetworkRatesCommand, TelemetryRollupsCommand, TelemetryTunnelsCommand,
-    TotpConfirmCommand, TotpPasswordCommand,
+    OperatorAuthEventsCommand, OperatorCreateCommand, OperatorLifecycleCommand,
+    OperatorPasswordResetCommand, OperatorSessionRevokeCommand, OperatorSessionsCommand,
+    OperatorUpdateCommand, RefreshCommand, ScheduleCreateCommand, ScheduleDeferCommand,
+    ScheduleMutationCommand, ScheduleUpdateCommand, TelemetryNetworkRatesCommand,
+    TelemetryRollupsCommand, TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
 };
-use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleasePublishArgs};
+use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleaseRecordArgs};
 use crate::commands_network::{
     TunnelAllocateCommand, TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand,
     TunnelProbeCommand, TunnelPromoteAdapterCommand, TunnelRollbackCommand, TunnelSpeedTestCommand,
@@ -34,7 +35,12 @@ use crate::output::OutputMode;
 #[command(
     name = "vpsctl",
     about = "CLI and VTY shell for vpsman",
-    version = concat!(env!("CARGO_PKG_VERSION"), "+cli.", env!("VPSMAN_CLI_BUILD_NUMBER"))
+    version = concat!(
+        env!("VPSMAN_RELEASE_VERSION"),
+        " (cli build ",
+        env!("VPSMAN_CLI_BUILD_NUMBER"),
+        ")"
+    )
 )]
 pub(crate) struct Args {
     #[arg(long, env = "VPSMAN_API_URL", default_value = "http://127.0.0.1:8080")]
@@ -63,8 +69,15 @@ pub(crate) enum Command {
     Me,
     Operators,
     OperatorCreate(OperatorCreateCommand),
+    OperatorUpdate(OperatorUpdateCommand),
+    OperatorDisable(OperatorLifecycleCommand),
+    OperatorEnable(OperatorLifecycleCommand),
+    OperatorDelete(OperatorLifecycleCommand),
+    OperatorPasswordReset(OperatorPasswordResetCommand),
+    OperatorTotpClear(OperatorLifecycleCommand),
     OperatorSessions(OperatorSessionsCommand),
     OperatorSessionRevoke(OperatorSessionRevokeCommand),
+    OperatorAuthEvents(OperatorAuthEventsCommand),
     TotpSetup(TotpPasswordCommand),
     TotpConfirm(TotpConfirmCommand),
     TotpDisable(TotpConfirmCommand),
@@ -504,7 +517,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
-    AgentUpdateReleasePublish(AgentUpdateReleasePublishArgs),
+    AgentUpdateReleaseRecord(AgentUpdateReleaseRecordArgs),
     AgentUpdateReleaseLatest(AgentUpdateReleaseLatestArgs),
     AgentUpdateReleases {
         #[arg(long, default_value_t = 25)]

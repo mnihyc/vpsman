@@ -25,12 +25,20 @@ import {
 } from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
+import type {
+  JobDispatchPreset,
+  JobDispatchPresetInput,
+} from "./jobDispatchPreset";
 
 function getScopedHeroTitle(view: ActiveView, subpage: string): string {
   if (view === "System") {
     switch (subpage) {
       case "config":
         return "System config";
+      case "users":
+        return "System users";
+      case "sessions":
+        return "System sessions";
       case "operator":
         return "System preferences";
       default:
@@ -48,7 +56,7 @@ function getScopedHeroTitle(view: ActiveView, subpage: string): string {
     case "multi_files":
       return "Multi-file actions";
     case "updates":
-      return "Agent updates";
+      return "Update registry";
     case "transfers":
       return "File transfer history";
     case "terminal":
@@ -73,6 +81,8 @@ export function App() {
   const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(
     null,
   );
+  const [jobDispatchPreset, setJobDispatchPreset] =
+    useState<JobDispatchPreset | null>(null);
   const [privilegeMaterial, setPrivilegeMaterial] =
     useState<PrivilegeMaterial | null>(null);
   const dashboard = useDashboardData(activeView);
@@ -167,6 +177,14 @@ export function App() {
     selectView("Jobs", "history");
   }
 
+  function openJobDispatchPreset(preset: JobDispatchPresetInput) {
+    setJobDispatchPreset({
+      ...preset,
+      requestId: crypto.randomUUID(),
+    });
+    selectView("Jobs", "dispatch");
+  }
+
   function openPrivilegeUnlock() {
     selectView("Access", "privilege");
   }
@@ -259,6 +277,7 @@ export function App() {
                 onLoadJobOutputs={dashboard.loadJobOutputs}
                 onLoadJobTargets={dashboard.loadJobTargets}
                 onNavigatePanel={selectView}
+                onOpenJobDispatchPreset={openJobDispatchPreset}
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRenderDataSourceHotConfig={
@@ -370,6 +389,7 @@ export function App() {
                 agentUpdateReleases={dashboard.agentUpdateReleases}
                 jobs={dashboard.jobs}
                 commandTemplates={dashboard.commandTemplates}
+                dispatchPreset={jobDispatchPreset}
                 fileTransfers={dashboard.fileTransfers}
                 fileTransferSources={dashboard.fileTransferSources}
                 lastJobOutputEvent={dashboard.lastJobOutputEvent}
@@ -390,6 +410,7 @@ export function App() {
                 onDownloadFileTransferSource={
                   dashboard.downloadFileTransferSource
                 }
+                onDispatchPresetApplied={() => setJobDispatchPreset(null)}
                 onSaveFileTransferHandoff={dashboard.saveFileTransferHandoff}
                 onLoadJob={dashboard.loadJob}
                 onLoadOutputs={dashboard.loadJobOutputs}
@@ -397,12 +418,14 @@ export function App() {
                 onLoadTargets={dashboard.loadJobTargets}
                 onLoadTerminalReplay={dashboard.loadTerminalReplay}
                 onCancelServerJob={dashboard.cancelServerJob}
+                onOpenDispatchPreset={openJobDispatchPreset}
                 onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}
                 onPreviewArtifactCleanup={dashboard.previewArtifactCleanup}
                 onRefresh={dashboard.loadJobs}
                 onResolveTargets={dashboard.resolveJobTargets}
                 onSelectSubpage={selectSubpage}
                 onUploadFileTransferSource={dashboard.uploadFileTransferSource}
+                onDeleteCommandTemplate={dashboard.deleteCommandTemplate}
                 onUpsertCommandTemplate={dashboard.upsertCommandTemplate}
                 pendingSelectedJobId={pendingJobDetailId}
                 privilegeMaterial={privilegeMaterial}
@@ -411,6 +434,9 @@ export function App() {
                 }
                 serverJobs={dashboard.serverJobs}
                 setPrivilegeMaterial={setPrivilegeMaterial}
+                suiteConfig={dashboard.suiteConfig}
+                suiteConfigError={dashboard.suiteConfigError}
+                suiteConfigLoading={dashboard.suiteConfigLoading}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 terminalSessions={dashboard.terminalSessions}
               />
@@ -534,18 +560,14 @@ export function App() {
                 onClearSession={dashboard.clearSession}
                 onConfirmTotp={dashboard.confirmTotp}
                 onUpsertAgentIdentity={dashboard.upsertAgentIdentity}
-                onCreateOperator={dashboard.createOperator}
                 onDisableTotp={dashboard.disableTotp}
                 onRefresh={dashboard.loadCurrentOperator}
                 onRevokeClientKey={dashboard.revokeClientKey}
-                onRevokeOperatorSession={dashboard.revokeOperatorSession}
                 onSetupTotp={dashboard.setupTotp}
                 operator={dashboard.operator}
                 privilegeMaterial={privilegeMaterial}
                 clientKeyRevocations={dashboard.clientKeyRevocations}
                 keyLifecycleReport={dashboard.keyLifecycleReport}
-                operatorSessions={dashboard.operatorSessions}
-                operators={dashboard.operators}
                 sessionVaultAvailable={dashboard.authVaultAvailable}
                 setPrivilegeMaterial={setPrivilegeMaterial}
                 wsState={dashboard.wsState}
@@ -564,11 +586,20 @@ export function App() {
                 }
                 onDashboardRefresh={() => void dashboard.loadSystemDashboard()}
                 onDashboardWindowChange={dashboard.setSystemDashboardWindow}
+                onClearOperatorTotp={dashboard.clearOperatorTotp}
+                onCreateOperator={dashboard.createOperator}
                 onLoadSuiteConfig={() => void dashboard.loadSuiteConfig()}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
+                onResetOperatorPassword={dashboard.resetOperatorPassword}
+                onRevokeOperatorSession={dashboard.revokeOperatorSession}
+                onSetOperatorStatus={dashboard.setOperatorStatus}
+                onUpdateOperator={dashboard.updateOperator}
                 onUpdateSuiteConfig={dashboard.updateSuiteConfig}
                 onValidateSuiteConfig={dashboard.validateSuiteConfig}
                 operator={dashboard.operator}
+                operatorAuthEvents={dashboard.operatorAuthEvents}
+                operatorSessions={dashboard.operatorSessions}
+                operators={dashboard.operators}
                 privilegeMaterial={privilegeMaterial}
                 suiteConfig={dashboard.suiteConfig}
                 suiteConfigError={dashboard.suiteConfigError}

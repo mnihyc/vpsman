@@ -6,10 +6,13 @@ use vpsman_common::payload_hash;
 
 use crate::error::ApiError;
 
-pub(crate) const ACCESS_TOKEN_TTL_SECS: u64 = 15 * 60;
-pub(crate) const REFRESH_TOKEN_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+pub(crate) const ACCESS_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+pub(crate) const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 365 * 24 * 60 * 60;
+pub(crate) const MIN_REFRESH_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+pub(crate) const MAX_REFRESH_TOKEN_TTL_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 pub(crate) const SCOPE_FLEET_READ: &str = "fleet:read";
 pub(crate) const SCOPE_JOBS_READ: &str = "jobs:read";
+pub(crate) const SCOPE_BACKUPS_READ: &str = "backups:read";
 pub(crate) const SCOPE_TERMINAL_READ: &str = "terminal:read";
 pub(crate) const SCOPE_INTEGRATIONS_READ: &str = "integrations:read";
 pub(crate) const SCOPE_TEMPLATES_READ: &str = "templates:read";
@@ -55,6 +58,7 @@ pub(crate) fn default_operator_scopes(role: &str) -> Vec<String> {
         "operator" => vec![
             SCOPE_FLEET_READ.to_string(),
             SCOPE_JOBS_READ.to_string(),
+            SCOPE_BACKUPS_READ.to_string(),
             SCOPE_TERMINAL_READ.to_string(),
             SCOPE_INTEGRATIONS_READ.to_string(),
             SCOPE_TEMPLATES_READ.to_string(),

@@ -3,14 +3,22 @@ CREATE TABLE operators (
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL DEFAULT 'active',
     role TEXT NOT NULL,
     scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
     totp_secret_ciphertext_hex TEXT,
     totp_secret_nonce_hex TEXT,
     totp_secret_salt_hex TEXT,
     preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+    session_refresh_ttl_secs BIGINT NOT NULL DEFAULT 31536000,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
     CONSTRAINT operators_scopes_json_array CHECK (jsonb_typeof(scopes) = 'array'),
+    CONSTRAINT operators_status_check CHECK (status IN ('active', 'disabled', 'deleted')),
+    CONSTRAINT operators_session_refresh_ttl_check CHECK (
+        session_refresh_ttl_secs BETWEEN 86400 AND 315360000
+    ),
     CONSTRAINT operators_totp_secret_hex CHECK (
         (
             totp_secret_ciphertext_hex IS NULL

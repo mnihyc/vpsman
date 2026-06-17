@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentUpdateReleaseRecord,
@@ -100,7 +100,7 @@ export function useJobsData(
       if (fileTransferSourcesResult.status === "fulfilled") setFileTransferSources(fileTransferSourcesResult.value);
       if (terminalSessionsResult.status === "fulfilled") setTerminalSessions(terminalSessionsResult.value);
       if (serverJobsResult.status === "fulfilled") setServerJobs(serverJobsResult.value);
-      if (commandTemplatesResult.status === "fulfilled") setCommandTemplates(commandTemplatesResult.value);
+      if (commandTemplatesResult.status === "fulfilled") setCommandTemplates(sortCommandTemplates(commandTemplatesResult.value));
       const firstFailure = settledResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (firstFailure) {
         setJobsError(firstFailure.reason instanceof Error ? firstFailure.reason.message : "Job history partially unavailable");
@@ -119,7 +119,7 @@ export function useJobsData(
         setAgentUpdateReleases([]);
         return;
       }
-      setJobsError(error instanceof Error ? error.message : "Agent update releases unavailable");
+      setJobsError(error instanceof Error ? error.message : "Agent update registry unavailable");
     }
   }, [apiToken, onUnauthorized]);
 
@@ -275,8 +275,21 @@ export function useJobsData(
       const response = await apiPost<CommandTemplateRecord>("/api/v1/command-templates", apiToken, request);
       setCommandTemplates((current) => {
         const withoutTemplate = current.filter((template) => template.id !== response.id);
-        return [response, ...withoutTemplate].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+        return sortCommandTemplates([response, ...withoutTemplate]);
       });
+      void onAuditChanged();
+      return response;
+    },
+    [apiToken, onAuditChanged],
+  );
+
+  const deleteCommandTemplate = useCallback(
+    async (templateId: string) => {
+      const response = await apiDelete<CommandTemplateRecord>(
+        `/api/v1/command-templates/${encodeURIComponent(templateId)}`,
+        apiToken,
+      );
+      setCommandTemplates((current) => current.filter((template) => template.id !== response.id));
       void onAuditChanged();
       return response;
     },
@@ -577,6 +590,19 @@ export function useJobsData(
     loadServerJobs,
     loadTerminalReplay,
     loadTerminalSessions,
+    deleteCommandTemplate,
     upsertCommandTemplate,
   };
+}
+
+function sortCommandTemplates(templates: CommandTemplateRecord[]): CommandTemplateRecord[] {
+  return [...templates].sort((left, right) => {
+    if (left.built_in !== right.built_in) {
+      return left.built_in ? -1 : 1;
+    }
+    if (left.built_in) {
+      return left.name.localeCompare(right.name);
+    }
+    return right.updated_at.localeCompare(left.updated_at) || left.name.localeCompare(right.name);
+  });
 }

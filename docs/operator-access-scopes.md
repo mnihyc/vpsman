@@ -16,10 +16,12 @@ role receives the scopes needed for normal daily operation. The default
 - `jobs:read`: durable job output payloads, output archives, file-download
   payloads, output chunks, output comparison previews, file-transfer session
   records, file-transfer source artifacts, and file-transfer handoff downloads.
+- `backups:read`: backup requests, backup policies, restore plans, encrypted
+  backup artifact metadata/downloads, and backup-artifact history exports.
 - `terminal:read`: terminal session records and retained PTY replay bytes.
 - `integrations:read`: webhook rules, webhook dry runs, webhook deliveries,
   alert notification channels, and alert notification deliveries.
-- `templates:read`: saved command templates and their operation payloads.
+- `templates:read`: built-in and user-defined command templates and their operation payloads.
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
 - `config:read`: data-source preset definitions, preset assignments,
@@ -49,3 +51,19 @@ fleet:read,jobs:read
 
 A normal non-admin operator typically uses the default role scopes rather than
 a custom list.
+
+## User And Session Management
+
+The dashboard manages operator accounts under System > Users and active bearer
+sessions plus login history under System > Sessions. Access remains focused on
+gateway identities, client key lifecycle, browser session state, and privilege
+unlock material.
+
+Operator usernames are immutable. Disabling or deleting an operator blocks
+login, revokes that operator's sessions, preserves audit history, and prevents
+the username from being reused.
+
+Each operator has an explicit refresh/session TTL. The default is 365 days; the
+access token lifetime is one day. Admin-targeted changes and changes that grant
+the admin role require an explicit admin-risk acknowledgement in the dashboard,
+CLI, VTY, and API payload.

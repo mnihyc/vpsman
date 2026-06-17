@@ -41,7 +41,7 @@ pub(crate) struct AgentUpdateCheckOptions {
     pub(crate) force_unprivileged: bool,
 }
 
-pub(crate) struct AgentUpdateReleasePublishOptions {
+pub(crate) struct AgentUpdateReleaseRecordOptions {
     pub(crate) name: String,
     pub(crate) version: String,
     pub(crate) channel: String,
@@ -281,14 +281,14 @@ pub(crate) fn agent_update_check(
     Ok(())
 }
 
-pub(crate) fn agent_update_release_publish(
+pub(crate) fn agent_update_release_record(
     api_url: &str,
     token: Option<&str>,
-    options: AgentUpdateReleasePublishOptions,
+    options: AgentUpdateReleaseRecordOptions,
 ) -> Result<()> {
     anyhow::ensure!(
         options.confirmed,
-        "agent-update-release-publish requires --confirmed because it records update metadata"
+        "agent-update-release-record requires --confirmed because it records update metadata"
     );
     let sha256_hex = validate_sha256_arg(&options.sha256_hex, "--sha256-hex")?;
     validate_update_input(&options.artifact_url, &sha256_hex)?;

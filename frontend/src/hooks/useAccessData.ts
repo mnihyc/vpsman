@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   GatewaySessionRecord,
+  OperatorAuthEventRecord,
   OperatorPreferences,
   OperatorSessionRecord,
   OperatorView,
@@ -20,6 +21,9 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [operatorSessions, setOperatorSessions] = useState<
     OperatorSessionRecord[]
   >([]);
+  const [operatorAuthEvents, setOperatorAuthEvents] = useState<
+    OperatorAuthEventRecord[]
+  >([]);
   const [clientKeyRevocations, setClientKeyRevocations] = useState<
     ClientKeyRevocationView[]
   >([]);
@@ -37,6 +41,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     setOperator(null);
     setOperators([]);
     setOperatorSessions([]);
+    setOperatorAuthEvents([]);
     setClientKeyRevocations([]);
     setKeyLifecycleReport(null);
     setGatewaySessions([]);
@@ -98,6 +103,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         gatewaySessionsResult,
         operatorsResult,
         operatorSessionsResult,
+        operatorAuthEventsResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
       ] = await Promise.allSettled([
@@ -111,6 +117,12 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         nextOperator.role === "admin"
           ? apiGet<OperatorSessionRecord[]>(
               "/api/v1/operator-sessions?limit=200",
+              apiToken,
+            )
+          : Promise.resolve([]),
+        nextOperator.role === "admin"
+          ? apiGet<OperatorAuthEventRecord[]>(
+              "/api/v1/operator-auth-events?limit=200",
               apiToken,
             )
           : Promise.resolve([]),
@@ -132,6 +144,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         gatewaySessionsResult,
         operatorsResult,
         operatorSessionsResult,
+        operatorAuthEventsResult,
         clientKeyRevocationsResult,
         keyLifecycleReportResult,
       ].some(
@@ -150,6 +163,9 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       setOperators(settledValue(operatorsResult, [], "operators", failures));
       setOperatorSessions(
         settledValue(operatorSessionsResult, [], "operator sessions", failures),
+      );
+      setOperatorAuthEvents(
+        settledValue(operatorAuthEventsResult, [], "auth history", failures),
       );
       setClientKeyRevocations(
         settledValue(
@@ -188,6 +204,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       role: string,
       password: string,
       scopes: string[],
+      sessionRefreshTtlSecs: number,
+      adminRiskAcknowledged: boolean,
     ) => {
       setAccessError(null);
       try {
@@ -196,6 +214,8 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           role,
           password,
           scopes,
+          session_refresh_ttl_secs: sessionRefreshTtlSecs,
+          admin_risk_acknowledged: adminRiskAcknowledged,
         });
         await loadCurrentOperator();
       } catch (error) {
@@ -261,6 +281,142 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
         }
         setAccessError(
           error instanceof Error ? error.message : "Session revoke failed",
+        );
+        throw error;
+      }
+    },
+    [apiToken, loadCurrentOperator, onUnauthorized],
+  );
+
+  const updateOperator = useCallback(
+    async (
+      operatorId: string,
+      role: string,
+      scopes: string[],
+      sessionRefreshTtlSecs: number,
+      adminRiskAcknowledged: boolean,
+    ) => {
+      setAccessError(null);
+      try {
+        await apiPut<OperatorView>(
+          `/api/v1/operators/${encodeURIComponent(operatorId)}`,
+          apiToken,
+          {
+            role,
+            scopes,
+            session_refresh_ttl_secs: sessionRefreshTtlSecs,
+            confirmed: true,
+            admin_risk_acknowledged: adminRiskAcknowledged,
+          },
+        );
+        await loadCurrentOperator();
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setAccessError("Operator login required");
+          return;
+        }
+        setAccessError(
+          error instanceof Error ? error.message : "Operator update failed",
+        );
+        throw error;
+      }
+    },
+    [apiToken, loadCurrentOperator, onUnauthorized],
+  );
+
+  const setOperatorStatus = useCallback(
+    async (
+      operatorId: string,
+      status: "active" | "disabled" | "deleted",
+      adminRiskAcknowledged: boolean,
+    ) => {
+      setAccessError(null);
+      const action =
+        status === "active" ? "enable" : status === "disabled" ? "disable" : "delete";
+      try {
+        await apiPost<OperatorView>(
+          `/api/v1/operators/${encodeURIComponent(operatorId)}/${action}`,
+          apiToken,
+          {
+            confirmed: true,
+            admin_risk_acknowledged: adminRiskAcknowledged,
+          },
+        );
+        await loadCurrentOperator();
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setAccessError("Operator login required");
+          return;
+        }
+        setAccessError(
+          error instanceof Error ? error.message : "Operator status change failed",
+        );
+        throw error;
+      }
+    },
+    [apiToken, loadCurrentOperator, onUnauthorized],
+  );
+
+  const resetOperatorPassword = useCallback(
+    async (
+      operatorId: string,
+      password: string,
+      adminRiskAcknowledged: boolean,
+    ) => {
+      setAccessError(null);
+      try {
+        await apiPost<OperatorView>(
+          `/api/v1/operators/${encodeURIComponent(operatorId)}/password-reset`,
+          apiToken,
+          {
+            password,
+            confirmed: true,
+            admin_risk_acknowledged: adminRiskAcknowledged,
+          },
+        );
+        await loadCurrentOperator();
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setAccessError("Operator login required");
+          return;
+        }
+        setAccessError(
+          error instanceof Error ? error.message : "Password reset failed",
+        );
+        throw error;
+      }
+    },
+    [apiToken, loadCurrentOperator, onUnauthorized],
+  );
+
+  const clearOperatorTotp = useCallback(
+    async (operatorId: string, adminRiskAcknowledged: boolean) => {
+      setAccessError(null);
+      try {
+        await apiPost<OperatorView>(
+          `/api/v1/operators/${encodeURIComponent(operatorId)}/totp-clear`,
+          apiToken,
+          {
+            confirmed: true,
+            admin_risk_acknowledged: adminRiskAcknowledged,
+          },
+        );
+        await loadCurrentOperator();
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          resetAccessRecords();
+          setAccessError("Operator login required");
+          return;
+        }
+        setAccessError(
+          error instanceof Error ? error.message : "TOTP clear failed",
         );
         throw error;
       }
@@ -408,6 +564,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     accessLoading,
     clearOperator,
     clientKeyRevocations,
+    clearOperatorTotp,
     createOperator,
     upsertAgentIdentity,
     confirmTotp,
@@ -417,14 +574,18 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     loadCurrentOperatorProfile,
     loadCurrentOperator,
     operator,
+    operatorAuthEvents,
     operators,
     operatorSessions,
     preferencesError,
     preferencesSaving,
     revokeClientKey,
     revokeOperatorSession,
+    resetOperatorPassword,
     setAuthenticatedOperator,
+    setOperatorStatus,
     setupTotp,
+    updateOperator,
     updateOperatorPreferences,
   };
 }

@@ -13,6 +13,7 @@ use crate::{
         HistoryRetentionPruneDomainView, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
         HistoryRetentionPruneResponse, UpsertHistoryRetentionPolicyRequest,
     },
+    security::{operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ},
     state::AppState,
     unix_now,
     util::limit_or_default,
@@ -22,7 +23,9 @@ pub(crate) async fn list_history_retention_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<HistoryRetentionPolicyView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
     Ok(Json(state.repo.list_history_retention_policies().await?))
 }
 
@@ -211,9 +214,15 @@ pub(crate) async fn export_history(
     headers: HeaderMap,
     Query(query): Query<HistoryExportQuery>,
 ) -> Result<Json<HistoryExportView>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    let limit = limit_or_default(query.limit);
     let selected = parse_history_domains(query.domains.as_deref())?;
+    let operator = state.require_operator(&headers).await?;
+    for domain in &selected {
+        let required_scope = history_export_scope(*domain);
+        if !operator_has_scope(&operator.operator.scopes, required_scope) {
+            return Err(ApiError::forbidden("operator_scope_insufficient"));
+        }
+    }
+    let limit = limit_or_default(query.limit);
     let policies = state.repo.list_history_retention_policies().await?;
     let mut exported_domains = Vec::new();
     let mut data = Map::new();
@@ -320,4 +329,16 @@ fn parse_history_domains(value: Option<&str>) -> Result<Vec<HistoryDomain>, ApiE
 
 fn parse_history_domain(value: &str) -> Result<HistoryDomain, ApiError> {
     HistoryDomain::from_str(value).ok_or_else(|| ApiError::bad_request("invalid_history_domain"))
+}
+
+fn history_export_scope(domain: HistoryDomain) -> &'static str {
+    match domain {
+        HistoryDomain::JobOutputs => SCOPE_JOBS_READ,
+        HistoryDomain::BackupArtifacts => SCOPE_BACKUPS_READ,
+        HistoryDomain::AuditLogs
+        | HistoryDomain::SystemMetricRollups
+        | HistoryDomain::TelemetryRollups
+        | HistoryDomain::NetworkObservations
+        | HistoryDomain::TopologyHistory => SCOPE_FLEET_READ,
+    }
 }

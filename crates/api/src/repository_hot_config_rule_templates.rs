@@ -359,7 +359,7 @@ fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
 
 fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
     vec![
-        builtin_template(
+        predefined_template(
             "11111111-1111-4111-8111-111111111111",
             "Telemetry source",
             "telemetry",
@@ -374,7 +374,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[telemetry]\nsource = {{source}}\nproc_root = {{proc_root}}\nsys_class_net_dir = {{sys_class_net_dir}}\n",
         ),
-        builtin_template(
+        predefined_template(
             "22222222-2222-4222-8222-222222222222",
             "Execution policy",
             "execution",
@@ -388,7 +388,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[execution]\nenvironment_policy = {{environment_policy}}\npty_policy = {{pty_policy}}\n",
         ),
-        builtin_template(
+        predefined_template(
             "33333333-3333-4333-8333-333333333333",
             "Runtime tunnel adapter",
             "network",
@@ -403,7 +403,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[network]\napply_enabled = {{apply_enabled}}\nruntime_reconcile_enabled = {{runtime_reconcile_enabled}}\nruntime_command_timeout_secs = {{runtime_command_timeout_secs}}\n",
         ),
-        builtin_template(
+        predefined_template(
             "55555555-5555-4555-8555-555555555555",
             "Autonomous updater enabled",
             "update",
@@ -420,7 +420,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[update]\nunmanaged_enabled = true\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
         ),
-        builtin_template(
+        predefined_template(
             "66666666-6666-4666-8666-666666666666",
             "Autonomous updater disabled",
             "update",
@@ -437,7 +437,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[update]\nunmanaged_enabled = false\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
         ),
-        builtin_template(
+        predefined_template(
             "44444444-4444-4444-8444-444444444444",
             "Routing daemon adapter",
             "network",
@@ -459,7 +459,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
     ]
 }
 
-fn builtin_template(
+fn predefined_template(
     id: &str,
     name: &str,
     category: &str,
@@ -469,7 +469,7 @@ fn builtin_template(
     raw_generator_body: &str,
 ) -> HotConfigRuleTemplateView {
     HotConfigRuleTemplateView {
-        id: Uuid::parse_str(id).expect("built-in rule template UUID must parse"),
+        id: Uuid::parse_str(id).expect("predefined rule template UUID must parse"),
         name: name.to_string(),
         category: category.to_string(),
         domain: domain.to_string(),

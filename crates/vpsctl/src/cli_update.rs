@@ -1,7 +1,7 @@
 use clap::Args;
 
 #[derive(Debug, Args)]
-pub(crate) struct AgentUpdateReleasePublishArgs {
+pub(crate) struct AgentUpdateReleaseRecordArgs {
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long)]

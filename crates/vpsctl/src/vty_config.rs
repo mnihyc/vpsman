@@ -47,6 +47,17 @@ pub(crate) struct VtyAgentUpdateRequest {
 }
 
 #[derive(Debug)]
+pub(crate) struct VtyAgentUpdateCheckRequest {
+    version_url: Option<String>,
+    activate: bool,
+    restart_agent: bool,
+    selection: VtyJobSelection,
+    timeout_secs: u64,
+    privilege_ttl_secs: u64,
+    force_unprivileged: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct VtyAgentUpdateActivateRequest {
     staged_sha256_hex: String,
     restart_agent: bool,
@@ -291,6 +302,92 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
     Ok(VtyAgentUpdateRequest {
         artifact_url,
         sha256_hex: sha256_hex.to_ascii_lowercase(),
+        selection,
+        timeout_secs,
+        privilege_ttl_secs,
+        force_unprivileged,
+    })
+}
+
+pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUpdateCheckRequest> {
+    let mut version_url = None;
+    let mut activate = true;
+    let mut restart_agent = true;
+    let mut timeout_secs = 300_u64;
+    let mut privilege_ttl_secs = 300_u64;
+    let mut force_unprivileged = false;
+    let mut target_tokens = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--version-url" => {
+                version_url = Some(
+                    tokens
+                        .get(index + 1)
+                        .context("--version-url requires a URL")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            "--activate" => {
+                activate = true;
+                index += 1;
+            }
+            "--no-activate" => {
+                activate = false;
+                restart_agent = false;
+                index += 1;
+            }
+            "--restart-agent" => {
+                restart_agent = true;
+                index += 1;
+            }
+            "--no-restart-agent" => {
+                restart_agent = false;
+                index += 1;
+            }
+            "--timeout" => {
+                timeout_secs = tokens
+                    .get(index + 1)
+                    .context("--timeout requires a value")?
+                    .parse()
+                    .context("--timeout must be an integer")?;
+                index += 2;
+            }
+            "--privilege-ttl" => {
+                privilege_ttl_secs = tokens
+                    .get(index + 1)
+                    .context("--privilege-ttl requires a value")?
+                    .parse()
+                    .context("--privilege-ttl must be an integer")?;
+                index += 2;
+            }
+            "--force-unprivileged" => {
+                force_unprivileged = true;
+                index += 1;
+            }
+            value if value.starts_with("--") && value != "--confirmed" => {
+                anyhow::bail!("unknown agent-update-check flag {value}");
+            }
+            value => {
+                target_tokens.push(value);
+                index += 1;
+            }
+        }
+    }
+    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-check")?;
+    if let Some(version_url) = version_url.as_deref() {
+        validate_update_check_version_url(version_url)?;
+    }
+    let selection = VtyJobSelection::parse(&target_tokens)?;
+    anyhow::ensure!(
+        selection.confirmed,
+        "agent-update-check requires --confirmed because it may stage and activate a replacement binary"
+    );
+    Ok(VtyAgentUpdateCheckRequest {
+        version_url,
+        activate,
+        restart_agent,
         selection,
         timeout_secs,
         privilege_ttl_secs,
@@ -558,6 +655,31 @@ pub(crate) fn submit_vty_agent_update(
     )
 }
 
+pub(crate) fn submit_vty_agent_update_check(
+    api_url: &str,
+    token: Option<&str>,
+    password: &str,
+    salt_hex: &str,
+    request: VtyAgentUpdateCheckRequest,
+) -> Result<String> {
+    submit_vty_config_operation(
+        api_url,
+        token,
+        password,
+        salt_hex,
+        "agent_update_check",
+        JobCommand::AgentUpdateCheck {
+            version_url: request.version_url,
+            activate: request.activate,
+            restart_agent: request.restart_agent,
+        },
+        request.selection,
+        request.timeout_secs,
+        request.privilege_ttl_secs,
+        request.force_unprivileged,
+    )
+}
+
 pub(crate) fn submit_vty_agent_update_activate(
     api_url: &str,
     token: Option<&str>,
@@ -617,6 +739,17 @@ fn validate_config_dispatch_bounds(
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
         "{command} --privilege-ttl must be between 15 and 300"
+    );
+    Ok(())
+}
+
+fn validate_update_check_version_url(version_url: &str) -> Result<()> {
+    anyhow::ensure!(
+        version_url.starts_with("https://")
+            || version_url.starts_with("http://localhost")
+            || version_url.starts_with("http://127.0.0.1")
+            || version_url.starts_with("file://"),
+        "agent-update-check --version-url must use https://, localhost http://, or file://"
     );
     Ok(())
 }
@@ -725,8 +858,9 @@ fn submit_vty_config_operation(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_rollback,
-        parse_vty_data_source_hot_config_apply, parse_vty_hot_config,
+        parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_check,
+        parse_vty_agent_update_rollback, parse_vty_data_source_hot_config_apply,
+        parse_vty_hot_config,
     };
 
     #[test]
@@ -816,6 +950,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_update_check_request() {
+        let request = parse_vty_agent_update_check(&[
+            "--version-url",
+            "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+            "tag:edge",
+            "--timeout",
+            "300",
+            "--privilege-ttl",
+            "120",
+            "--force-unprivileged",
+            "--confirmed",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            request.version_url,
+            Some(
+                "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+                    .to_string()
+            )
+        );
+        assert!(request.activate);
+        assert!(request.restart_agent);
+        assert_eq!(request.selection.tags, vec!["edge"]);
+        assert_eq!(request.timeout_secs, 300);
+        assert_eq!(request.privilege_ttl_secs, 120);
+        assert!(request.force_unprivileged);
+
+        let no_activate = parse_vty_agent_update_check(&[
+            "--version-url",
+            "file:///tmp/version.json",
+            "id:edge-a",
+            "--no-activate",
+            "--confirmed",
+        ])
+        .unwrap();
+        assert!(!no_activate.activate);
+        assert!(!no_activate.restart_agent);
+    }
+
+    #[test]
     fn parses_agent_update_activation_and_rollback_requests() {
         let activate = parse_vty_agent_update_activate(&[
             "--staged-sha256-hex",
@@ -888,6 +1063,13 @@ mod tests {
             "http://updates.example/vpsman-agent",
             "--sha256-hex",
             &"ab".repeat(32),
+            "tag:edge",
+            "--confirmed",
+        ])
+        .is_err());
+        assert!(parse_vty_agent_update_check(&[
+            "--version-url",
+            "http://updates.example/version.json",
             "tag:edge",
             "--confirmed",
         ])

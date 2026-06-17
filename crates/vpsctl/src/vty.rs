@@ -67,12 +67,195 @@ use crate::vty_update_releases::{
 };
 use anyhow::Result;
 
+const VTY_COMMAND_HELP: &str = r#"Commands
+
+Core:
+  health | summary | agents
+  gateway-sessions [--limit <1-200>]
+  telemetry-rollups | telemetry-network-rates | telemetry-tunnels
+  enable | disable | show privilege | show capabilities | show degraded-policy
+
+Access:
+  operators | operator-create | operator-update | operator-disable | operator-enable
+  operator-delete | operator-password-reset | operator-totp-clear
+  operator-sessions | operator-session-revoke | operator-auth-events
+  totp-setup | totp-confirm | totp-disable
+  agent-identity-upsert | client-key-revocations | client-key-revoke | key-lifecycle-report
+
+Fleet and integrations:
+  tags | tag-create | agent-tag
+  fleet-alerts | fleet-alert-export | fleet-alert-states | fleet-alert-state-update
+  fleet-alert-policies | fleet-alert-policy-upsert
+  fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
+  fleet-alert-notifications | fleet-alert-notification-dispatch | fleet-alert-notification-process
+  data-source-presets | data-source-preset-create | data-source-preset-clone
+  data-source-preset-diff | data-source-preset-test | data-source-preset-update
+  data-source-status | data-source-assignments | data-source-preset-assign
+  data-source-hot-config | data-source-hot-config-apply
+
+Jobs and schedules:
+  jobs | job-create | job-shell | job-targets | job-target-status-download
+  job-outputs | job-follow | job-output-download
+  schedules | schedule-create
+  server-jobs | artifact-cleanup-preview | artifact-cleanup-create | server-job-cancel
+
+Files, terminals, and processes:
+  file-pull | file-push
+  file-transfer-upload (--source <file>|--source-artifact-id <uuid>)
+    --path <remote-abs> <target ...> --confirmed
+  file-transfer-download --path <remote-abs> --destination <local> <target ...>
+    --confirmed
+  file-transfers | file-transfer-handoff | file-transfer-sources
+  file-transfer-source-upload | file-transfer-source-download
+  terminal-open | terminal-input | terminal-poll | terminal-resize | terminal-close
+  terminal-sessions | terminal-replay | terminal-follow
+  user-sessions | process-list | process-start | process-stop | process-restart
+  process-status | process-logs | process-supervisor-inventory
+
+Agent updates:
+  agent-update-check [--version-url <https-url>] <target ...> [--no-activate]
+    [--no-restart-agent] [--timeout <1-3600>] [--privilege-ttl <15-300>]
+    [--force-unprivileged] --confirmed
+  agent-update --artifact-url <https-url> --sha256-hex <sha256> <target ...>
+    [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged]
+    --confirmed
+  agent-update-activate --staged-sha256-hex <sha256> <target ...>
+    [--restart-agent] [--timeout <1-3600>] [--privilege-ttl <15-300>]
+    [--force-unprivileged] --confirmed
+  agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...>
+    [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged]
+    --confirmed
+  agent-update-releases | agent-update-release-latest | agent-update-release-record
+
+Backups, restores, and migrations:
+  backups | backup-policies | backup-artifacts | backup-policy-upsert
+  backup-policy-prune | backup-request | backup-run
+  backup-artifact-record | backup-artifact-upload | backup-artifact-upload-chunked
+  backup-artifact-handoff
+  restore-plans | restore-plan | restore-run | restore-rollback
+  migration-links | migration-link | migration-run
+
+Network and topology:
+  tunnel-plans | tunnel-plan | tunnel-allocate | tunnel-promote-telemetry
+  tunnel-promote-adapter | tunnel-apply | tunnel-ospf-cost-update
+  tunnel-rollback | tunnel-status | tunnel-probe | tunnel-speed-test
+  network-observations | network-trends | network-ospf-recommendations
+  network-ospf-update-plans | topology-graph
+
+Audit and history:
+  audit | history-retention | history-retention-upsert
+  history-retention-prune | history-export
+
+Targets:
+  bulk-resolve <target ...>
+  id:<client-id> | name:<display-name> | tag:<name>
+  Bare target tokens are treated as tags.
+"#;
+
+const PRIVILEGE_UNLOCK_REQUIRED: &str = concat!(
+    "privilege unlock is required; run enable after setting ",
+    "VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
+);
+
+const TARGET_SELECTION_USAGE: &str =
+    "targets: id:<client-id> name:<display-name> tag:<name>; bare targets are tags";
+
+const FILE_TRANSFERS_USAGE: &str = concat!(
+    "usage: file-transfers [--limit <1-200>] [--client-id <id>] ",
+    "[--session-id <uuid>]\n",
+    "       file-transfer-handoff --client-id <id> --session-id <uuid> ",
+    "[--output-file <file>] --confirmed\n",
+    "       file-transfer-sources [--limit <1-200>]\n",
+    "       file-transfer-source-upload --source <file> [--name <name>] --confirmed\n",
+    "       file-transfer-source-download --artifact-id <uuid> --output-file <file>"
+);
+
+const TERMINAL_SESSIONS_USAGE: &str = concat!(
+    "usage: terminal-sessions [--limit <1-200>] [--client-id <id>] ",
+    "[--session-id <uuid>]\n",
+    "       terminal-replay --client-id <id> --session-id <uuid> ",
+    "[--from-seq <n>] [--limit <1-1000>] [--max-bytes <1-4194304>] ",
+    "[--output-file <file>] [--metadata-only]\n",
+    "       terminal-follow --client-id <id> --session-id <uuid> [--from-seq <n>] ",
+    "[--interval-ms <250-10000>] [--max-polls <1-1000>] [--json]"
+);
+
+const SCHEDULE_CREATE_USAGE: &str = concat!(
+    "usage: schedule-create <name> <cron_min> <cron_hour> <cron_dom> ",
+    "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...>"
+);
+
+const TERMINAL_COMMAND_USAGE: &str = concat!(
+    "usage: terminal-open --argv </abs/bin,arg> <target ...> [--session-id <uuid>] ",
+    "[--cols <20-240>] [--rows <5-120>] [--confirmed]\n",
+    "usage: terminal-input --session-id <uuid> --input-seq <n> ",
+    "(--text <text>|--data-base64 <b64>) <target ...>\n",
+    "usage: terminal-poll --session-id <uuid> [--replay-from-seq <n>] <target ...>\n",
+    "usage: terminal-resize --session-id <uuid> --cols <20-240> ",
+    "--rows <5-120> <target ...>\n",
+    "usage: terminal-close --session-id <uuid> <target ...> [--reason <text>]"
+);
+
+const FILE_PUSH_USAGE: &str = concat!(
+    "usage: file-push --source <local-file> --path <remote-abs> <target ...> ",
+    "[--mode <0644>] [--timeout <1-3600>] --confirmed"
+);
+
+const FILE_TRANSFER_UPLOAD_USAGE: &str = concat!(
+    "usage: file-transfer-upload (--source <local-file>|--source-artifact-id <uuid>) ",
+    "--path <remote-abs> <target ...> [--mode <0644>] [--session-id <uuid>] ",
+    "[--resume-token <token>] [--chunk-size-bytes <1-65536>] ",
+    "[--rate-limit-kbps <0-1000000>] ",
+    "[--multi-target-policy same-offset|independent-offsets] ",
+    "[--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
+);
+
+const FILE_TRANSFER_DOWNLOAD_USAGE: &str = concat!(
+    "usage: file-transfer-download --path <remote-abs> ",
+    "--destination <local-file-or-dir> <target ...> [--session-id <uuid>] ",
+    "[--resume-token <token>] [--chunk-size-bytes <1-65536>] ",
+    "[--rate-limit-kbps <0-1000000>] ",
+    "[--multi-target-policy single-target|per-target-files] ",
+    "[--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
+);
+
+const HOT_CONFIG_USAGE: &str = concat!(
+    "usage: hot-config --config-file <path> <target ...> ",
+    "[--timeout <1-3600>] [--privilege-ttl <15-300>] ",
+    "[--force-unprivileged] --confirmed"
+);
+
+const DATA_SOURCE_HOT_CONFIG_USAGE: &str = concat!(
+    "usage: data-source-hot-config-apply --client-id <id> ",
+    "[--timeout <1-3600>] [--privilege-ttl <15-300>] ",
+    "[--force-unprivileged] --confirmed"
+);
+
+const RESTORE_RUN_USAGE: &str = concat!(
+    "usage: restore-run <backup_uuid> <target_client_id> [--artifact-file <path>] ",
+    "[--private-key-env <env>] [--path <abs>] [--include-config] ",
+    "[--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] ",
+    "--confirmed"
+);
+
+const RESTORE_ROLLBACK_USAGE: &str = concat!(
+    "usage: restore-rollback <restore_job_uuid> <target_client_id> ",
+    "[--timeout <1-3600>] [--force-unprivileged] --confirmed"
+);
+
+const MIGRATION_RUN_USAGE: &str = concat!(
+    "usage: migration-run <restore_plan_uuid> [--artifact-file <path>] ",
+    "[--private-key-env <env>] [--note <text>] [--timeout <1-3600>] ",
+    "[--force-unprivileged] --confirmed"
+);
+
+fn render_vty_help() -> String {
+    format!("{VTY_COMMAND_HELP}\n{}", vty_privilege_help())
+}
+
 pub(crate) fn run_vty(api_url: &str) -> Result<()> {
     println!("vpsman VTY connected to {api_url}");
-    println!(
-        "Commands: health, summary, agents, fleet-alerts, fleet-alert-export, fleet-alert-states, fleet-alert-state-update, fleet-alert-policies, fleet-alert-policy-upsert, fleet-alert-notification-channels, fleet-alert-notification-channel-upsert, fleet-alert-notifications, fleet-alert-notification-dispatch, fleet-alert-notification-process, operators, operator-create, operator-sessions, operator-session-revoke, totp-setup, totp-confirm, totp-disable, agent-identity-upsert, client-key-revocations, client-key-revoke, key-lifecycle-report, gateway-sessions, telemetry-rollups, telemetry-network-rates, telemetry-tunnels, tags, tag-create, agent-tag, data-source-presets, data-source-preset-create, data-source-preset-clone, data-source-preset-diff, data-source-preset-test, data-source-preset-update, data-source-status, data-source-assignments, data-source-hot-config, data-source-hot-config-apply, data-source-preset-assign, jobs, schedules, schedule-create, job-create, job-shell, terminal-open, terminal-input, terminal-poll, terminal-resize, terminal-close, terminal-sessions, terminal-replay, terminal-follow, file-pull, file-push, file-transfer-upload, file-transfer-download, file-transfers, file-transfer-handoff, file-transfer-sources, file-transfer-source-upload, file-transfer-source-download, user-sessions, hot-config, agent-update, agent-update-activate, agent-update-rollback, agent-update-releases, agent-update-release-record, process-list, process-start, process-stop, process-restart, process-status, process-logs, process-supervisor-inventory, job-targets, job-target-status-download, job-outputs, job-follow, job-output-download, backups, backup-policies, backup-artifacts, backup-policy-upsert, backup-policy-prune, backup-request, backup-run, backup-artifact-record, backup-artifact-upload, backup-artifact-upload-chunked, backup-artifact-handoff, restore-plans, restore-plan, restore-run, restore-rollback, migration-links, migration-link, migration-run, tunnel-plans, tunnel-plan, tunnel-allocate, tunnel-promote-telemetry, tunnel-promote-adapter, tunnel-apply, tunnel-ospf-cost-update, tunnel-rollback, tunnel-status, tunnel-probe, tunnel-speed-test, network-observations, network-trends, network-ospf-recommendations, network-ospf-update-plans, topology-graph, audit, history-retention, history-retention-upsert, history-retention-prune, history-export, bulk-resolve, enable, exit"
-    );
-    println!("{}", vty_privilege_help());
+    println!("{}", render_vty_help());
     let stdin = io::stdin();
     let mut privilege_context = VtyPrivilegeContext::default();
     let token = std::env::var("VPSMAN_API_TOKEN").ok();
@@ -114,9 +297,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     Ok(output) => println!("{output}"),
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: file-transfers [--limit <1-200>] [--client-id <id>] [--session-id <uuid>] | file-transfer-handoff --client-id <id> --session-id <uuid> [--output-file <file>] --confirmed | file-transfer-sources [--limit <1-200>] | file-transfer-source-upload --source <file> [--name <name>] --confirmed | file-transfer-source-download --artifact-id <uuid> --output-file <file>"
-                        );
+                        println!("{FILE_TRANSFERS_USAGE}");
                     }
                 }
             }
@@ -125,9 +306,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     Ok(output) => println!("{output}"),
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: terminal-sessions [--limit <1-200>] [--client-id <id>] [--session-id <uuid>] | terminal-replay --client-id <id> --session-id <uuid> [--from-seq <n>] [--limit <1-1000>] [--max-bytes <1-4194304>] [--output-file <file>] [--metadata-only] | terminal-follow --client-id <id> --session-id <uuid> [--from-seq <n>] [--interval-ms <250-10000>] [--max-polls <1-1000>] [--json]"
-                        );
+                        println!("{TERMINAL_SESSIONS_USAGE}");
                     }
                 }
             }
@@ -162,7 +341,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("schedule-create ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if parts.len() < 8 {
-                    println!("usage: schedule-create <name> <cron_min> <cron_hour> <cron_dom> <cron_mon> <cron_dow> <command> [schedule policy flags] <target ...>");
+                    println!("{SCHEDULE_CREATE_USAGE}");
                     continue;
                 }
                 let cron_expr = parts[2..7].join(" ");
@@ -215,13 +394,11 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     println!(
                         "usage: job-create <command> <target ...> [--pty --destructive --confirmed]"
                     );
-                    println!("targets: id:<client-id> name:<display-name> tag:<name>; bare targets are tags");
+                    println!("{TARGET_SELECTION_USAGE}");
                     continue;
                 }
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let pty = parts.contains(&"--pty");
@@ -253,13 +430,11 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 let body = command.trim_start_matches("job-shell ").trim();
                 let Some((script, target_text)) = body.split_once(" -- ") else {
                     println!("usage: job-shell <shell-script> -- <target ...>");
-                    println!("targets: id:<client-id> name:<display-name> tag:<name>; bare targets are tags");
+                    println!("{TARGET_SELECTION_USAGE}");
                     continue;
                 };
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let target_parts = target_text.split_whitespace().collect::<Vec<_>>();
@@ -283,9 +458,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             }
             command if is_vty_terminal_command(command) => {
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 match submit_vty_terminal_command(
@@ -297,28 +470,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     Ok(response) => println!("{response}"),
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: terminal-open --argv </abs/bin,arg> <target ...> [--session-id <uuid>] [--cols <20-240>] [--rows <5-120>] [--confirmed]"
-                        );
-                        println!(
-                            "usage: terminal-input --session-id <uuid> --input-seq <n> (--text <text>|--data-base64 <b64>) <target ...>"
-                        );
-                        println!(
-                            "usage: terminal-poll --session-id <uuid> [--replay-from-seq <n>] <target ...>"
-                        );
-                        println!(
-                            "usage: terminal-resize --session-id <uuid> --cols <20-240> --rows <5-120> <target ...>"
-                        );
-                        println!("usage: terminal-close --session-id <uuid> <target ...> [--reason <text>]");
+                        println!("{TERMINAL_COMMAND_USAGE}");
                     }
                 }
             }
             command if command.starts_with("file-pull ") || command.starts_with("file-push ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = if parts[0] == "file-pull" {
@@ -337,9 +496,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                         Ok(request) => request,
                         Err(error) => {
                             println!("usage error: {error}");
-                            println!(
-                                "usage: file-push --source <local-file> --path <remote-abs> <target ...> [--mode <0644>] [--timeout <1-3600>] --confirmed"
-                            );
+                            println!("{FILE_PUSH_USAGE}");
                             continue;
                         }
                     }
@@ -360,18 +517,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("file-transfer-upload ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_file_transfer_upload(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: file-transfer-upload (--source <local-file>|--source-artifact-id <uuid>) --path <remote-abs> <target ...> [--mode <0644>] [--session-id <uuid>] [--resume-token <token>] [--chunk-size-bytes <1-65536>] [--rate-limit-kbps <0-1000000>] [--multi-target-policy same-offset|independent-offsets] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
-                        );
+                        println!("{FILE_TRANSFER_UPLOAD_USAGE}");
                         continue;
                     }
                 };
@@ -388,18 +541,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("file-transfer-download ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_file_transfer_download(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: file-transfer-download --path <remote-abs> --destination <local-file-or-dir> <target ...> [--session-id <uuid>] [--resume-token <token>] [--chunk-size-bytes <1-65536>] [--rate-limit-kbps <0-1000000>] [--multi-target-policy single-target|per-target-files] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
-                        );
+                        println!("{FILE_TRANSFER_DOWNLOAD_USAGE}");
                         continue;
                     }
                 };
@@ -416,18 +565,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("hot-config ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_hot_config(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: hot-config --config-file <path> <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
-                        );
+                        println!("{HOT_CONFIG_USAGE}");
                         continue;
                     }
                 };
@@ -445,18 +590,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("data-source-hot-config-apply ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_data_source_hot_config_apply(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: data-source-hot-config-apply --client-id <id> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
-                        );
+                        println!("{DATA_SOURCE_HOT_CONFIG_USAGE}");
                         continue;
                     }
                 };
@@ -485,9 +626,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("user-sessions ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_user_sessions(&parts[1..]) {
@@ -520,9 +659,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     continue;
                 }
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_process_list(&parts[1..]) {
@@ -565,9 +702,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_process_supervisor(parts[0], &parts[1..]) {
@@ -615,9 +750,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("backup-request ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_backup_request(&parts[1..]) {
@@ -641,9 +774,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("backup-run ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_backup_run(&parts[1..]) {
@@ -717,9 +848,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("restore-plan ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_restore_plan(&parts[1..]) {
@@ -743,18 +872,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("restore-run ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_restore_run(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: restore-run <backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed"
-                        );
+                        println!("{RESTORE_RUN_USAGE}");
                         continue;
                     }
                 };
@@ -766,18 +891,14 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             command if command.starts_with("restore-rollback ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
-                    println!(
-                        "privilege unlock is required; run enable after setting VPSMAN_SUPER_PASSWORD and VPSMAN_SUPER_SALT_HEX"
-                    );
+                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
                 let request = match parse_vty_restore_rollback(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed"
-                        );
+                        println!("{RESTORE_ROLLBACK_USAGE}");
                         continue;
                     }
                 };
@@ -818,9 +939,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!(
-                            "usage: migration-run <restore_plan_uuid> [--artifact-file <path>] [--private-key-env <env>] [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed"
-                        );
+                        println!("{MIGRATION_RUN_USAGE}");
                         continue;
                     }
                 };
@@ -852,7 +971,8 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 Ok(context) => {
                     privilege_context = context;
                     println!(
-                        "privileged mode enabled locally; privilege assertions will be generated without sending the super password"
+                        "privileged mode enabled locally; privilege assertions will be \
+                         generated without sending the super password"
                     );
                 }
                 Err(error) => {
@@ -863,22 +983,15 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
             "disable" => {
                 privilege_context = VtyPrivilegeContext::default();
                 println!(
-                        "privileged mode disabled; local privilege unlock material cleared for this VTY session"
-                    );
+                    "privileged mode disabled; local privilege unlock material cleared for this \
+                     VTY session"
+                );
             }
             "show privilege" => println!("{}", render_vty_privilege_status(&privilege_context)),
             "show capabilities" => println!("{}", render_vty_capabilities()),
             "show degraded-policy" => println!("{}", render_vty_degraded_policy()),
             "exit" | "quit" => break,
-            "help" | "?" => {
-                println!("{}", vty_privilege_help());
-                println!(
-                    "health | summary | agents | fleet-alerts [filters] | fleet-alert-export [filters] | fleet-alert-states [--state open|acknowledged|muted|escalated] | fleet-alert-state-update --alert-id <id> --action acknowledge|mute|escalate|clear [--muted-for-secs <secs>] [--reason <text>] --confirmed | fleet-alert-policies [--limit <1-1000>] [--enabled true|false] [--scope-kind global|provider|tag|client] [--scope-value <value>] | fleet-alert-policy-upsert --name <name> --scope-kind global|provider|tag|client [--scope-value <value>] [resource threshold flags] [--priority <n>] [--enabled true|false] [--notes <text>] --confirmed | fleet-alert-notification-channels [--limit <1-1000>] [--enabled true|false] [--scope-kind global|provider|tag|client] [--scope-value <value>] [--delivery-kind <kind>] | fleet-alert-notification-channel-upsert --name <name> --scope-kind global|provider|tag|client [--scope-value <value>] [--min-severity critical|warning|info] [--categories a,b] [--operator-states open,escalated] --delivery-kind <kind> --target <target> [--cooldown-secs <secs>] [--enabled true|false] [--notes <text>] --confirmed | fleet-alert-notifications [--limit <1-1000>] [--channel-id <uuid>] [--alert-id <id>] [--status <status>] | fleet-alert-notification-dispatch [filters] [--include-muted] [--dry-run|--confirmed] | fleet-alert-notification-process [--limit <1-200>] [--status queued|failed] [--delivery-kind <kind>] [--dry-run|--confirmed] | operators | operator-create <username> <admin|operator|viewer> <password_env> [scope,scope] | operator-sessions [--limit <1-200>] | operator-session-revoke <session_uuid> | totp-setup [password_env] | totp-confirm [password_env] [code_env] | totp-disable [password_env] [code_env] | gateway-sessions [--limit <1-200>] | telemetry-rollups [--limit <1-200>] [--client-id <id>] [--bucket-secs <60-86400>] | telemetry-network-rates [--limit <1-5000>] [--client-id <id>] [--interface <name>] [--bucket-secs <60-86400>] | telemetry-tunnels [--limit <1-200>] [--client-id <id>] [--interface <name>] | tags | tag-create <name> | agent-tag <client_id> <tag> | data-source-presets [--domain <domain>] | data-source-preset-create --domain <domain> --name <name> [--scope shared|vps_local] [--owner-client-id <client>] [--description <text>] [--definition-json <json>] | data-source-preset-clone --source-preset-id <uuid> --name <name> [--description <text>] | data-source-preset-diff --preset-id <uuid> [--description <text>|--clear-description] [--definition-json <json>] | data-source-preset-test --preset-id <uuid> [--definition-json <json>] | data-source-preset-update --preset-id <uuid> [--description <text>|--clear-description] [--definition-json <json>] [--confirmed] | data-source-status [--client-id <id>] [--domain <domain>] | data-source-assignments [--client-id <id>] [--domain <domain>] | data-source-hot-config --client-id <id> [--format toml|json] | data-source-hot-config-apply --client-id <id> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed | data-source-preset-assign --domain <domain> --preset-id <uuid> [--client <id>] [--tag <tag>] [--confirmed] | jobs | schedules | schedule-create <name> <cron_min> <cron_hour> <cron_dom> <cron_mon> <cron_dow> <command> [--catch-up-policy skip_missed|run_once|run_all_limited] [--catch-up-limit <1-25>] [--retry-delay-secs <1-86400>] [--max-failures <1-100>] <target ...> | job-create <command> <id:<id>|name:<display>|tag:<name>|tag ...> [--destructive --confirmed] | job-shell <shell-script> -- <id:<id>|name:<display>|tag:<name>|tag ...> | file-pull --path <remote-abs> <target ...> [--timeout <1-3600>] [--confirmed] | file-push --source <local-file> --path <remote-abs> <target ...> [--mode <0644>] [--timeout <1-3600>] --confirmed | file-transfer-upload (--source <local-file>|--source-artifact-id <uuid>) --path <remote-abs> <target ...> [--mode <0644>] [--session-id <uuid>] [--resume-token <token>] [--chunk-size-bytes <1-65536>] [--rate-limit-kbps <0-1000000>] [--multi-target-policy same-offset|independent-offsets] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed | file-transfer-download --path <remote-abs> --destination <local-file-or-dir> <target ...> [--session-id <uuid>] [--resume-token <token>] [--chunk-size-bytes <1-65536>] [--rate-limit-kbps <0-1000000>] [--multi-target-policy single-target|per-target-files] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed | file-transfers [--limit <1-200>] [--client-id <id>] [--session-id <uuid>] | file-transfer-handoff --client-id <id> --session-id <uuid> [--output-file <file>] --confirmed | file-transfer-sources [--limit <1-200>] | file-transfer-source-upload --source <file> [--name <name>] --confirmed | file-transfer-source-download --artifact-id <uuid> --output-file <file> | user-sessions <target ...> [--timeout <1-3600>] [--confirmed] | hot-config --config-file <path> <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed | agent-update --artifact-url <https-url> --sha256-hex <sha256> <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed | agent-update-activate --staged-sha256-hex <sha256> <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed | agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...> [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged] --confirmed | agent-update-releases [--limit <1-200>] | agent-update-release-latest [--name <name>] [--channel stable] | agent-update-release-record --name <name> --version <version> --artifact-url <https-url> --sha256-hex <sha256> [--rollback-artifact-url <https-url> --rollback-sha256-hex <sha256>] [--channel stable] [--size-bytes <n>] [--rollback-size-bytes <n>] [--note <text>] --confirmed | process-list <target ...> [--limit <1-512>] [--confirmed] | process-start <name> --argv <abs> [--argv arg ...] <target ...> [--cwd <abs>] [--env KEY=VALUE] [--confirmed] | process-stop <name> <target ...> [--confirmed] | process-restart <name> <target ...> [--confirmed] | process-status [--name <name>] <target ...> [--confirmed] | process-logs <name> <target ...> [--max-bytes <n>] [--confirmed] | process-supervisor-inventory [--limit <1-200>] | job-targets <job_uuid> | job-target-status-download <job_uuid> <output_file> | job-outputs <job_uuid> | job-follow <job_uuid> [--interval-ms <100-10000>] [--max-polls <1-10000>] [--json] | job-output-download <job_uuid> <client_id> --seq <seq> <output_file> | backups | backup-policies | backup-artifacts | backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target ...> --confirmed | backup-policy-prune [--schedule-id <uuid>] [--dry-run] [--metadata-only true|false] [--confirmed] | backup-request <client_id> [--path <abs>] [--include-config] [--confirmed] | backup-run [--path <abs>] [--include-config] <target ...> [--timeout <1-3600>] --confirmed | backup-artifact-record <backup_uuid> --object-key <key> --sha256-hex <sha256> --size-bytes <n> --confirmed | backup-artifact-upload <backup_uuid> --object-key <key> --artifact-file <path> --confirmed | backup-artifact-upload-chunked <backup_uuid> --object-key <key> --artifact-file <path> [--chunk-size-bytes <1-4194304>] --confirmed | backup-artifact-handoff <backup_uuid> [--job-id <job_uuid>] --confirmed | restore-plans | restore-plan <backup_uuid> <target_client_id> [--path <abs>] [--include-config] [--destination-root <abs>] [--confirmed] | restore-run <backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed | restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed | migration-links | migration-link <restore_plan_uuid> [--note <text>] --confirmed | migration-run <restore_plan_uuid> [--artifact-file <path>] [--private-key-env <env>] [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed | tunnel-plans | tunnel-plan --name <name> --interface-name <ifname> --kind <gre|ipip|sit|fou|openvpn|wireguard|tun_tap|custom> --left-client-id <id> --right-client-id <id> --left-underlay <ip> --right-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] --bandwidth <10m|100m|1000m> --latency-ms <ms> [--runtime-manager <agent|observed|adapter>] [--runtime-cleanup-argv <abs,arg>] [--fou-port <1-65535>] [--fou-peer-port <1-65535>] [--fou-ipproto <1-255>] [--save] | tunnel-allocate [--ipv4-pool-cidr <cidr>] [--ipv6-pool-cidr <cidr>] [--reserved-address <ip>] [--include-ipv4=true|false|--no-ipv4] [--include-ipv6|--include-ipv6=true|false] | tunnel-promote-telemetry --client-id <id> --interface <ifname> --peer-client-id <id> --local-underlay <ip> --peer-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] [--side <left|right>] [--bandwidth <10m|100m|1000m>] | tunnel-promote-adapter --plan-id <uuid> --runtime-status-argv <abs,arg> [--runtime-startup-argv <abs,arg>] [--runtime-stop-argv <abs,arg>] [--runtime-cleanup-argv <abs,arg>] [--fou-port <1-65535>] [--fou-peer-port <1-65535>] [--fou-ipproto <1-255>] --confirmed | tunnel-apply --plan-file <plan.json> --side <left|right> [--backend <ifupdown|netplan|systemd-networkd>] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed | tunnel-ospf-cost-update --plan-file <plan.json> --side <left|right> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed | tunnel-rollback --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed | tunnel-status --plan-file <plan.json> --side <left|right> [--timeout <1-3600>] [--privilege-ttl <15-300>] | tunnel-probe --plan-file <plan.json> --side <left|right> [--count <1-20>] [--interval-ms <200-10000>] [--timeout <1-3600>] [--privilege-ttl <15-300>] | tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <15-300>] | network-observations [--limit <1-200>] | network-trends [--limit <1-200>] | network-ospf-recommendations [--limit <1-200>] | network-ospf-update-plans [--limit <1-200>] | topology-graph [--limit <1-200>] | audit | history-retention | history-retention-upsert --domain <domain> [--retention-days <1-3650>] [--prune-limit <1-100000>] [--metadata-only true|false] --confirmed | history-retention-prune [--domain <domain>] [--dry-run] [--metadata-only true|false] [--confirmed] | history-export [--domains audit_logs,job_outputs] [--limit <1-200>] | bulk-resolve [tag ...] | enable | exit"
-                );
-                println!(
-                    "server-jobs [--limit <1-200>] | artifact-cleanup-preview --expression <expr> | artifact-cleanup-create --expression <expr> --preview-hash <sha256> --confirmed | server-job-cancel --job-id <uuid>"
-                )
-            }
+            "help" | "?" => println!("{}", render_vty_help()),
             other => println!("unknown command: {other}"),
         }
     }

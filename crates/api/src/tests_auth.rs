@@ -5,9 +5,9 @@ use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 
 use crate::model_command_templates::{CommandTemplateQuery, JobOutputComparisonQuery};
 use crate::security::{
-    default_operator_scopes, SCOPE_CONFIG_READ, SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ,
-    SCOPE_JOBS_READ, SCOPE_NETWORK_READ, SCOPE_SCHEDULES_READ, SCOPE_TEMPLATES_READ,
-    SCOPE_TERMINAL_READ,
+    default_operator_scopes, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
+    SCOPE_INTEGRATIONS_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ, SCOPE_SCHEDULES_READ,
+    SCOPE_TEMPLATES_READ, SCOPE_TERMINAL_READ,
 };
 
 #[test]
@@ -172,6 +172,7 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
                 totp_code: None,
             },
             "203.0.113.10",
+            None,
             &throttle,
         )
         .await
@@ -186,6 +187,7 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
                 totp_code: None,
             },
             "203.0.113.10",
+            None,
             &throttle,
         )
         .await
@@ -202,6 +204,7 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
                     totp_code: None,
                 },
                 "203.0.113.10",
+                None,
                 &throttle,
             )
             .await
@@ -217,6 +220,7 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
                 totp_code: None,
             },
             "203.0.113.10",
+            None,
             &throttle,
         )
         .await
@@ -242,6 +246,7 @@ async fn login_route_returns_too_many_requests_after_configured_failures() {
         let error = routes_auth::login_operator(
             axum::extract::State(state.clone()),
             axum::extract::ConnectInfo(peer),
+            HeaderMap::new(),
             axum::Json(LoginRequest {
                 username: "missing-operator".to_string(),
                 password: "valid-shaped-password-123".to_string(),
@@ -257,6 +262,7 @@ async fn login_route_returns_too_many_requests_after_configured_failures() {
     let error = routes_auth::login_operator(
         axum::extract::State(state),
         axum::extract::ConnectInfo(peer),
+        HeaderMap::new(),
         axum::Json(LoginRequest {
             username: "missing-operator".to_string(),
             password: "valid-shaped-password-123".to_string(),
@@ -280,6 +286,7 @@ async fn login_route_ip_throttle_spans_unknown_usernames() {
         let error = routes_auth::login_operator(
             axum::extract::State(state.clone()),
             axum::extract::ConnectInfo(peer),
+            HeaderMap::new(),
             axum::Json(LoginRequest {
                 username: format!("missing-operator-{index}"),
                 password: "valid-shaped-password-123".to_string(),
@@ -295,6 +302,7 @@ async fn login_route_ip_throttle_spans_unknown_usernames() {
     let error = routes_auth::login_operator(
         axum::extract::State(state.clone()),
         axum::extract::ConnectInfo(peer),
+        HeaderMap::new(),
         axum::Json(LoginRequest {
             username: "different-missing-operator".to_string(),
             password: "valid-shaped-password-123".to_string(),
@@ -312,6 +320,7 @@ async fn login_route_ip_throttle_spans_unknown_usernames() {
     let error = routes_auth::login_operator(
         axum::extract::State(state),
         axum::extract::ConnectInfo(other_peer),
+        HeaderMap::new(),
         axum::Json(LoginRequest {
             username: "different-missing-operator".to_string(),
             password: "valid-shaped-password-123".to_string(),
@@ -376,6 +385,7 @@ async fn missing_totp_counts_toward_login_throttle() {
                 totp_code: None,
             },
             "203.0.113.23",
+            None,
             &throttle,
         )
         .await
@@ -390,6 +400,7 @@ async fn missing_totp_counts_toward_login_throttle() {
                 totp_code: Some(code),
             },
             "203.0.113.23",
+            None,
             &throttle,
         )
         .await
@@ -420,6 +431,7 @@ fn default_operator_scopes_keep_viewers_out_of_sensitive_reads() {
     for expected in [
         SCOPE_FLEET_READ,
         SCOPE_JOBS_READ,
+        SCOPE_BACKUPS_READ,
         SCOPE_TERMINAL_READ,
         SCOPE_INTEGRATIONS_READ,
         SCOPE_TEMPLATES_READ,
@@ -515,6 +527,84 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
             viewer_headers.clone(),
             axum::extract::Path(job_id),
             axum::extract::Query(JobOutputComparisonQuery { mode: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: None,
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("job_outputs".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("backup_artifacts".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_backups::list_backup_requests(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_backups::list_backup_artifacts(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_backups::list_backup_policies(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_backups::download_backup_artifact(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_restores::list_restore_plans(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
         )
         .await,
     );
@@ -727,6 +817,8 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     let (fleet_token, _) = issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
     let (_, jobs_headers) =
         issue_test_operator_headers(&state, "operator", &[SCOPE_JOBS_READ]).await;
+    let (_, backups_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_BACKUPS_READ]).await;
     let (_, terminal_headers) =
         issue_test_operator_headers(&state, "operator", &[SCOPE_TERMINAL_READ]).await;
     let (_, integrations_headers) =
@@ -746,6 +838,54 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
             axum::extract::State(state.clone()),
             jobs_headers.clone(),
             axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            jobs_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("job_outputs".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            backups_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("backup_artifacts".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            {
+                let mut fleet_headers = HeaderMap::new();
+                fleet_headers.insert(
+                    AUTHORIZATION,
+                    format!("Bearer {fleet_token}")
+                        .parse()
+                        .expect("test bearer header"),
+                );
+                fleet_headers
+            },
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("audit_logs".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
         )
         .await,
     );
@@ -872,6 +1012,45 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         .await,
     );
     assert_not_scope_forbidden(
+        routes_backups::list_backup_requests(
+            axum::extract::State(state.clone()),
+            backups_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_backups::list_backup_artifacts(
+            axum::extract::State(state.clone()),
+            backups_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_backups::list_backup_policies(
+            axum::extract::State(state.clone()),
+            backups_headers.clone(),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_backups::download_backup_artifact(
+            axum::extract::State(state.clone()),
+            backups_headers.clone(),
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_restores::list_restore_plans(
+            axum::extract::State(state.clone()),
+            backups_headers,
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
         routes_network::list_tunnel_plans(axum::extract::State(state), network_headers).await,
     );
 }
@@ -887,6 +1066,11 @@ async fn admin_can_create_sanitized_operator_record() {
             scopes: vec!["*".to_string()],
             preferences: crate::model::OperatorPreferences::default(),
             totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
         },
         session_id: Uuid::new_v4(),
     };
@@ -896,6 +1080,8 @@ async fn admin_can_create_sanitized_operator_record() {
             password: "viewer-password-123".to_string(),
             role: "viewer".to_string(),
             scopes: Vec::new(),
+            session_refresh_ttl_secs: None,
+            admin_risk_acknowledged: false,
         },
         &admin,
     )
@@ -911,6 +1097,156 @@ async fn admin_can_create_sanitized_operator_record() {
     assert!(!serde_json::to_string(&audits[0].metadata)
         .unwrap()
         .contains("viewer-password-123"));
+}
+
+#[tokio::test]
+async fn admin_user_routes_require_admin_risk_acknowledgement() {
+    let state = memory_test_state();
+    let (_admin, headers) = crate::test_auth_context_and_headers(&state).await;
+
+    let error = routes_auth::create_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(CreateOperatorRequest {
+            username: "second-admin".to_string(),
+            password: "second-admin-password-123".to_string(),
+            role: "admin".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: None,
+            admin_risk_acknowledged: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "admin_risk_acknowledgement_required");
+
+    let created = routes_auth::create_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(CreateOperatorRequest {
+            username: "second-admin".to_string(),
+            password: "second-admin-password-123".to_string(),
+            role: "admin".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: Some(crate::DEFAULT_REFRESH_TOKEN_TTL_SECS),
+            admin_risk_acknowledged: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(created.role, "admin");
+
+    let error = routes_auth::disable_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "admin_risk_acknowledgement_required");
+
+    let disabled = routes_auth::disable_operator(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(created.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(disabled.status, "disabled");
+    assert!(disabled.disabled_at.is_some());
+}
+
+#[tokio::test]
+async fn disabled_and_deleted_operators_cannot_login_and_deleted_usernames_remain_reserved() {
+    let repo = Repository::Memory(MemoryState::default());
+    let admin_auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let admin = AuthContext {
+        operator: admin_auth.operator.clone(),
+        session_id: Uuid::new_v4(),
+    };
+    let created = repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "ops-a".to_string(),
+                password: "ops-password-123".to_string(),
+                role: "operator".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: Some(86_400),
+                admin_risk_acknowledged: false,
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+    let login = repo
+        .login_operator(&LoginRequest {
+            username: "ops-a".to_string(),
+            password: "ops-password-123".to_string(),
+            totp_code: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(login.refresh_expires_in_secs, 86_400);
+
+    let disabled = repo
+        .set_operator_status(created.id, "disabled", &admin)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(disabled.status, "disabled");
+    assert!(repo
+        .authenticate_access_token(&login.access_token)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo
+        .login_operator(&LoginRequest {
+            username: "ops-a".to_string(),
+            password: "ops-password-123".to_string(),
+            totp_code: None,
+        })
+        .await
+        .unwrap()
+        .is_none());
+
+    let deleted = repo
+        .set_operator_status(created.id, "deleted", &admin)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted.status, "deleted");
+    assert!(deleted.deleted_at.is_some());
+    assert!(repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "ops-a".to_string(),
+                password: "new-ops-password-123".to_string(),
+                role: "operator".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                admin_risk_acknowledged: false,
+            },
+            &admin,
+        )
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -1546,6 +1882,11 @@ async fn issue_test_operator_headers(
         totp_secret_ciphertext_hex: None,
         totp_secret_nonce_hex: None,
         totp_secret_salt_hex: None,
+        status: "active".to_string(),
+        session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        created_at: crate::unix_now().to_string(),
+        disabled_at: None,
+        deleted_at: None,
     };
     if let Repository::Memory(memory) = &state.repo {
         memory.operators.write().await.push(operator.clone());
