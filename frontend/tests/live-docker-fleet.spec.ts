@@ -167,7 +167,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await selectGridRow(firstRow);
   await selectGridRow(secondRow);
   await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
-  await firstRow.getByLabel("Expand VPS instance records row").click();
+  await clickGridRowControl(firstRow, "Expand VPS instance records row");
   const firstDetail = grid
     .locator(".gridExpandedRow", { hasText: "df-alpha-US-01" })
     .first();
@@ -462,10 +462,33 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
 }
 
 async function selectGridRow(row: Locator) {
-  const checkbox = row.getByLabel("Select VPS instance records row");
-  await checkbox.scrollIntoViewIfNeeded();
-  await checkbox.check({ timeout: 10_000 });
+  const checkbox = await retryGridRowControl(row, "Select VPS instance records row", (control) =>
+    control.check({ timeout: 10_000 }),
+  );
   await expect(checkbox).toBeChecked({ timeout: 5000 });
+}
+
+async function clickGridRowControl(row: Locator, label: string) {
+  await retryGridRowControl(row, label, (control) => control.click({ timeout: 10_000 }));
+}
+
+async function retryGridRowControl<T>(
+  row: Locator,
+  label: string,
+  action: (control: Locator) => Promise<T>,
+): Promise<Locator> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const control = row.getByLabel(label).first();
+    try {
+      await action(control);
+      return control;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError;
 }
 
 async function exerciseExpressionWebhooks(page: Page, projectName: string) {

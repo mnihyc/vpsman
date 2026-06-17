@@ -148,7 +148,7 @@ async fn audit_list_query_sorts_searches_and_offsets_memory_rows() {
 }
 
 #[tokio::test]
-async fn history_retention_object_prune_partial_error_keeps_failed_metadata() {
+async fn history_retention_object_prune_partial_error_prunes_metadata_before_delete_failure() {
     let repo = Repository::Memory(MemoryState::default());
     let object_root = std::env::temp_dir().join(format!(
         "vpsman-api-history-prune-partial-{}",
@@ -214,14 +214,16 @@ async fn history_retention_object_prune_partial_error_keeps_failed_metadata() {
     assert_eq!(domain.domain, "job_outputs");
     assert_eq!(domain.status, "partial_error");
     assert_eq!(domain.matched_rows, 2);
-    assert_eq!(domain.pruned_rows, 1);
-    assert_eq!(domain.object_keys, vec![missing_ok_key]);
+    assert_eq!(domain.pruned_rows, 2);
+    assert_eq!(
+        domain.object_keys,
+        vec![missing_ok_key, delete_fails_key.clone()]
+    );
     assert_eq!(domain.object_delete_errors.len(), 1);
     assert!(domain.object_delete_errors[0].contains(&delete_fails_key));
     if let Repository::Memory(memory) = &repo {
         let outputs = memory.job_outputs.read().await;
-        assert_eq!(outputs.len(), 2);
-        assert!(outputs.iter().any(|output| output.job_id == failed_job));
+        assert_eq!(outputs.len(), 1);
         assert!(outputs.iter().any(|output| output.job_id == retained_job));
     }
 
@@ -300,7 +302,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: Some(store),
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

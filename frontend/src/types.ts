@@ -1358,7 +1358,6 @@ export type AgentUpdateReleaseRecord = {
   artifact_url_sha256_hex: string | null;
   artifact_object_key: string | null;
   artifact_download_path: string | null;
-  artifact_download_url: string | null;
   rollback_artifact_sha256_hex: string | null;
   rollback_artifact_signature_provided: boolean;
   rollback_artifact_signature_sha256_hex: string | null;
@@ -1366,7 +1365,6 @@ export type AgentUpdateReleaseRecord = {
   rollback_artifact_url_sha256_hex: string | null;
   rollback_artifact_object_key: string | null;
   rollback_artifact_download_path: string | null;
-  rollback_artifact_download_url: string | null;
   rollback_size_bytes: number | null;
   size_bytes: number | null;
   notes: string | null;
@@ -1412,7 +1410,6 @@ export type StreamedAgentUpdateArtifactRecord = {
   artifact_signing_key_sha256_hex: string;
   artifact_object_key: string;
   artifact_download_path: string;
-  artifact_download_url: string | null;
   size_bytes: number;
 };
 
@@ -1677,7 +1674,7 @@ export type JobOperation =
       limit?: number;
       show_hidden?: boolean;
     }
-  | { type: "file_read_text"; path: string; max_bytes?: number }
+  | { type: "file_read_text"; path: string; max_bytes?: number; follow_symlinks?: boolean }
   | {
       type: "file_write_text";
       path: string;
@@ -1694,6 +1691,7 @@ export type JobOperation =
       path: string;
       mode: number;
       recursive?: boolean;
+      follow_symlinks?: boolean;
       policy?: FileActionPolicy;
     }
   | {
@@ -1714,6 +1712,7 @@ export type JobOperation =
       path: string;
       mode: number;
       recursive?: boolean;
+      follow_symlinks?: boolean;
       policy?: FileActionPolicy;
     }
   | {
@@ -1733,10 +1732,11 @@ export type JobOperation =
       new_path: string;
       overwrite?: boolean;
       recursive?: boolean;
+      follow_symlinks?: boolean;
       policy?: FileActionPolicy;
     }
-  | { type: "file_download"; path: string; max_bytes?: number }
-  | { type: "file_archive_tar"; path: string; max_bytes?: number }
+  | { type: "file_download"; path: string; max_bytes?: number; follow_symlinks?: boolean }
+  | { type: "file_archive_tar"; path: string; max_bytes?: number; follow_symlinks?: boolean }
   | { type: "user_sessions" }
   | { type: "process_list"; limit: number }
   | {

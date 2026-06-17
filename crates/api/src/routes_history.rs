@@ -113,20 +113,23 @@ pub(crate) async fn prune_history_retention(
                     object_delete_attempted = true;
                     if let Some(store) = state.backup_object_store.as_ref() {
                         for candidate in &candidates {
+                            let rows = state
+                                .repo
+                                .prune_history_retention_object_candidate(candidate)
+                                .await?;
+                            pruned_rows += rows;
+                            if rows == 0 {
+                                continue;
+                            }
                             if let Some(object_key) = candidate.object_key() {
+                                object_keys.push(object_key.to_string());
                                 match store.delete_confirmed(object_key).await {
-                                    Ok(()) => object_keys.push(object_key.to_string()),
+                                    Ok(()) => {}
                                     Err(error) => {
                                         object_delete_errors.push(format!("{object_key}: {error}"));
                                         break;
                                     }
                                 }
-                            }
-                            if object_delete_errors.is_empty() {
-                                pruned_rows += state
-                                    .repo
-                                    .prune_history_retention_object_candidate(candidate)
-                                    .await?;
                             }
                         }
                     }

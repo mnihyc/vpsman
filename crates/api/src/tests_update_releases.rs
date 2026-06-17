@@ -133,7 +133,6 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -183,7 +182,6 @@ async fn uploaded_agent_update_artifact_is_hosted_and_sanitized() {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -290,7 +288,7 @@ async fn release_registry_records_sanitized_rollback_bundle_metadata() {
 }
 
 #[tokio::test]
-async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
+async fn uploaded_release_can_host_rollback_bundle_and_internal_paths() {
     let repo = Repository::Memory(MemoryState::default());
     let signing_key = SigningKey::from_bytes(&[31_u8; 32]);
     let rollback_key = SigningKey::from_bytes(&[32_u8; 32]);
@@ -324,7 +322,6 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
-        update_artifact_public_base_url: Some("https://updates.example".to_string()),
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -344,17 +341,8 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
     .unwrap();
 
     assert_eq!(
-        release.artifact_download_url.as_deref(),
-        Some(
-            format!("https://updates.example/api/v1/agent-update-artifacts/{sha256_hex}").as_str()
-        )
-    );
-    assert_eq!(
-        release.rollback_artifact_download_url.as_deref(),
-        Some(
-            format!("https://updates.example/api/v1/agent-update-artifacts/{rollback_sha256_hex}")
-                .as_str()
-        )
+        release.artifact_download_path.as_deref(),
+        Some(format!("/api/v1/agent-update-artifacts/{sha256_hex}").as_str())
     );
     assert_eq!(
         release.rollback_artifact_sha256_hex.as_deref(),
@@ -376,7 +364,10 @@ async fn uploaded_release_can_host_rollback_bundle_and_public_urls() {
     .unwrap()
     .0;
     assert_eq!(latest.version, "2.2.0");
-    assert!(latest.rollback_artifact_download_url.is_some());
+    assert_eq!(
+        latest.rollback_artifact_download_path.as_deref(),
+        Some(format!("/api/v1/agent-update-artifacts/{rollback_sha256_hex}").as_str())
+    );
 
     let response = routes_update_releases::download_agent_update_artifact(
         State(state),
@@ -405,7 +396,6 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_object_store: Some(BackupObjectStore::filesystem(store_root).unwrap()),
-        update_artifact_public_base_url: Some("https://updates.example".to_string()),
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -442,7 +432,10 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(streamed.artifact_sha256_hex, sha256_hex);
     assert_eq!(streamed.size_bytes, artifact.len() as i64);
-    assert!(streamed.artifact_download_url.is_some());
+    assert_eq!(
+        streamed.artifact_download_path,
+        format!("/api/v1/agent-update-artifacts/{sha256_hex}")
+    );
 
     let mut rollback_headers = crate::test_auth_headers(&state).await;
     rollback_headers.insert(
@@ -489,8 +482,14 @@ async fn streamed_artifacts_can_record_hosted_release_with_rollback() {
         release.rollback_artifact_sha256_hex.as_deref(),
         Some(rollback_sha256_hex.as_str())
     );
-    assert!(release.artifact_download_url.is_some());
-    assert!(release.rollback_artifact_download_url.is_some());
+    assert_eq!(
+        release.artifact_download_path.as_deref(),
+        Some(format!("/api/v1/agent-update-artifacts/{sha256_hex}").as_str())
+    );
+    assert_eq!(
+        release.rollback_artifact_download_path.as_deref(),
+        Some(format!("/api/v1/agent-update-artifacts/{rollback_sha256_hex}").as_str())
+    );
 
     let response = routes_update_releases::download_agent_update_artifact(
         State(state),
@@ -529,7 +528,6 @@ async fn release_policy_rejects_disallowed_channels_and_untrusted_keys() {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: UpdateReleasePolicy::new(
             vec!["stable".to_string()],
             vec![hex::encode(trusted_key.verifying_key().to_bytes())],
@@ -581,7 +579,7 @@ fn update_object_store_builds_explicit_s3_store_and_rejects_partial_config() {
     args.update_object_secret_key = Some("secret".to_string());
     args.update_object_create_bucket = true;
 
-    let store = build_update_object_store(&args).unwrap().unwrap();
+    let store = build_update_object_store(&args).unwrap();
     assert_eq!(store.kind(), "s3");
 
     let mut partial = test_args();
@@ -597,7 +595,7 @@ fn update_object_store_uses_filesystem_fallback_when_only_directory_is_configure
     args.update_object_store_dir =
         Some(std::env::temp_dir().join(format!("vpsman-update-fs-{}", Uuid::new_v4())));
 
-    let store = build_update_object_store(&args).unwrap().unwrap();
+    let store = build_update_object_store(&args).unwrap();
     assert_eq!(store.kind(), "filesystem");
 }
 
@@ -617,8 +615,8 @@ fn object_store_prefers_filesystem_directory_over_explicit_s3_config() {
     args.update_object_access_key = Some("access".to_string());
     args.update_object_secret_key = Some("secret".to_string());
 
-    let backup_store = build_backup_object_store(&args).unwrap().unwrap();
-    let update_store = build_update_object_store(&args).unwrap().unwrap();
+    let backup_store = build_backup_object_store(&args).unwrap();
+    let update_store = build_update_object_store(&args).unwrap();
 
     assert_eq!(backup_store.kind(), "filesystem");
     assert_eq!(update_store.kind(), "filesystem");
@@ -688,7 +686,6 @@ fn test_args() -> Args {
         update_object_secret_key: None,
         update_object_region: "us-east-1".to_string(),
         update_object_create_bucket: false,
-        update_artifact_public_base_url: None,
         agent_update_allowed_channels: Vec::new(),
         agent_update_trusted_signing_keys_hex: Vec::new(),
         object_endpoint: None,

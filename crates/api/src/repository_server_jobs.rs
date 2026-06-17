@@ -296,7 +296,7 @@ impl Repository {
                         seq,
                         created_at::text AS created_at
                     FROM server_artifacts
-                    WHERE status = 'active'
+                    WHERE status IN ('active', 'deleting')
                     ORDER BY created_at DESC, object_key ASC
                     LIMIT 10000
                     "#,

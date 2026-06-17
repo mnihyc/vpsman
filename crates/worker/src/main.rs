@@ -28,6 +28,9 @@ use vpsman_server_core::{
     JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
 };
 
+const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
+const DEFAULT_UPDATE_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/updates";
+
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
@@ -213,14 +216,22 @@ struct WorkerRuntimeConfig {
     webhook_rule_config: WebhookRuleWorkerConfig,
     backup_policy_prune_config: BackupPolicyRetentionPruneConfig,
     schedule_dispatch_config: ScheduleDispatchConfig,
-    artifact_object_store: Option<BackupObjectStore>,
+    backup_object_store: BackupObjectStore,
+    update_object_store: BackupObjectStore,
+}
+
+#[derive(Clone, Copy)]
+struct ArtifactObjectStores<'a> {
+    backup: &'a BackupObjectStore,
+    update: &'a BackupObjectStore,
 }
 
 impl WorkerRuntimeConfig {
     fn from_args(args: &Args) -> Result<Self> {
-        let artifact_object_store = build_artifact_object_store(args)?;
-        let backup_policy_prune_object_store =
-            build_backup_policy_prune_object_store(args)?.or_else(|| artifact_object_store.clone());
+        let backup_object_store = build_backup_object_store(args)?;
+        let update_object_store = build_update_object_store(args)?;
+        let backup_policy_prune_object_store = build_backup_policy_prune_object_store(args)?
+            .or_else(|| Some(backup_object_store.clone()));
         Ok(Self {
             tick_secs: args.tick_secs.max(1),
             worker_lease_secs: args.worker_lease_secs,
@@ -250,7 +261,8 @@ impl WorkerRuntimeConfig {
                 args.schedule_command_timeout_secs,
                 args.require_registered_agent_updates,
             ),
-            artifact_object_store,
+            backup_object_store,
+            update_object_store,
         })
     }
 }
@@ -381,26 +393,17 @@ impl Args {
             config
                 .worker
                 .backup_policy_prune_object_store_dir
-                .as_deref()
-                .or(config.storage.object_store_dir.as_deref()),
+                .as_deref(),
         );
         apply_opt_path(
             &mut self.backup_object_store_dir,
             "VPSMAN_BACKUP_OBJECT_STORE_DIR",
-            config
-                .storage
-                .backup_object_store_dir
-                .as_deref()
-                .or(config.storage.object_store_dir.as_deref()),
+            config.storage.backup_object_store_dir.as_deref(),
         );
         apply_opt_path(
             &mut self.update_object_store_dir,
             "VPSMAN_UPDATE_OBJECT_STORE_DIR",
-            config
-                .storage
-                .update_object_store_dir
-                .as_deref()
-                .or(config.storage.object_store_dir.as_deref()),
+            config.storage.update_object_store_dir.as_deref(),
         );
         apply_opt_string(
             &mut self.object_endpoint,
@@ -477,10 +480,6 @@ impl Args {
     }
 }
 
-fn build_artifact_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
-    Ok(build_backup_object_store(args)?.or(build_update_object_store(args)?))
-}
-
 fn build_backup_policy_prune_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
     args.backup_policy_prune_object_store_dir
         .clone()
@@ -489,7 +488,7 @@ fn build_backup_policy_prune_object_store(args: &Args) -> Result<Option<BackupOb
         .transpose()
 }
 
-fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+fn build_backup_object_store(args: &Args) -> Result<BackupObjectStore> {
     if let Some(store) = args
         .backup_object_store_dir
         .clone()
@@ -497,10 +496,10 @@ fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         .map(BackupObjectStore::filesystem)
         .transpose()?
     {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
-    build_s3_object_store(
+    if let Some(store) = build_s3_object_store(
         &args.object_endpoint,
         &args.object_bucket,
         &args.object_access_key,
@@ -508,10 +507,14 @@ fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         &args.object_region,
         args.object_create_bucket,
         "S3 object storage requires VPSMAN_OBJECT_ENDPOINT, VPSMAN_OBJECT_BUCKET, VPSMAN_OBJECT_ACCESS_KEY, and VPSMAN_OBJECT_SECRET_KEY",
-    )
+    )? {
+        return Ok(store);
+    }
+
+    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_BACKUP_OBJECT_STORE_DIR))
 }
 
-fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+fn build_update_object_store(args: &Args) -> Result<BackupObjectStore> {
     if let Some(store) = args
         .update_object_store_dir
         .clone()
@@ -519,10 +522,10 @@ fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         .map(BackupObjectStore::filesystem)
         .transpose()?
     {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
-    build_s3_object_store(
+    if let Some(store) = build_s3_object_store(
         &args.update_object_endpoint,
         &args.update_object_bucket,
         &args.update_object_access_key,
@@ -530,7 +533,11 @@ fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         &args.update_object_region,
         args.update_object_create_bucket,
         "S3 update object storage requires VPSMAN_UPDATE_OBJECT_ENDPOINT, VPSMAN_UPDATE_OBJECT_BUCKET, VPSMAN_UPDATE_OBJECT_ACCESS_KEY, and VPSMAN_UPDATE_OBJECT_SECRET_KEY",
-    )
+    )? {
+        return Ok(store);
+    }
+
+    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_UPDATE_OBJECT_STORE_DIR))
 }
 
 fn build_s3_object_store(
@@ -717,7 +724,10 @@ async fn main() -> Result<()> {
         .await?;
         let artifact_cleanup = process_artifact_cleanup_jobs_if_leader(
             &pool,
-            runtime_config.artifact_object_store.as_ref(),
+            ArtifactObjectStores {
+                backup: &runtime_config.backup_object_store,
+                update: &runtime_config.update_object_store,
+            },
             &worker_id,
             runtime_config.worker_lease_secs,
         )
@@ -889,7 +899,10 @@ async fn main() -> Result<()> {
         }
         match process_artifact_cleanup_jobs_if_leader(
             &pool,
-            runtime_config.artifact_object_store.as_ref(),
+            ArtifactObjectStores {
+                backup: &runtime_config.backup_object_store,
+                update: &runtime_config.update_object_store,
+            },
             &worker_id,
             runtime_config.worker_lease_secs,
         )
@@ -1157,7 +1170,7 @@ struct ArtifactCleanupCandidate {
 
 async fn process_artifact_cleanup_jobs_if_leader(
     pool: &PgPool,
-    object_store: Option<&BackupObjectStore>,
+    object_stores: ArtifactObjectStores<'_>,
     worker_id: &str,
     lease_secs: i32,
 ) -> Result<ArtifactCleanupRun> {
@@ -1168,17 +1181,17 @@ async fn process_artifact_cleanup_jobs_if_leader(
         );
         return Ok(ArtifactCleanupRun::default());
     }
-    process_artifact_cleanup_jobs(pool, object_store).await
+    process_artifact_cleanup_jobs(pool, object_stores).await
 }
 
 async fn process_artifact_cleanup_jobs(
     pool: &PgPool,
-    object_store: Option<&BackupObjectStore>,
+    object_stores: ArtifactObjectStores<'_>,
 ) -> Result<ArtifactCleanupRun> {
     let Some(job) = claim_artifact_cleanup_job(pool).await? else {
         return Ok(ArtifactCleanupRun::default());
     };
-    let result = run_artifact_cleanup_job(pool, object_store, &job).await;
+    let result = run_artifact_cleanup_job(pool, object_stores, &job).await;
     match result {
         Ok(run) => {
             sqlx::query(
@@ -1265,11 +1278,9 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
 
 async fn run_artifact_cleanup_job(
     pool: &PgPool,
-    object_store: Option<&BackupObjectStore>,
+    object_stores: ArtifactObjectStores<'_>,
     job: &ArtifactCleanupJob,
 ) -> Result<ArtifactCleanupRun> {
-    let object_store =
-        object_store.context("artifact cleanup requires configured artifact object store")?;
     let parsed = parse_expression(&job.expression).map_err(|error| anyhow::anyhow!(error))?;
     let candidates = artifact_cleanup_candidates(pool).await?;
     let mut run = ArtifactCleanupRun::default();
@@ -1278,7 +1289,7 @@ async fn run_artifact_cleanup_job(
         .filter(|candidate| artifact_cleanup_candidate_matches(candidate, parsed.as_ref()))
         .take(1000)
     {
-        match apply_artifact_cleanup_candidate(pool, object_store, candidate).await? {
+        match apply_artifact_cleanup_candidate(pool, object_stores, candidate).await? {
             ArtifactCleanupDisposition::Deleted => {
                 run.deleted_rows += 1;
                 run.deleted_bytes += candidate.size_bytes;
@@ -1299,22 +1310,22 @@ enum ArtifactCleanupDisposition {
 
 async fn apply_artifact_cleanup_candidate(
     pool: &PgPool,
-    object_store: &BackupObjectStore,
+    object_stores: ArtifactObjectStores<'_>,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
     match candidate.domain.as_str() {
-        "job_output" => delete_job_output_artifact(pool, object_store, candidate).await,
+        "job_output" => delete_job_output_artifact(pool, object_stores.backup, candidate).await,
         "file_transfer_handoff" => {
-            delete_unreferenced_server_artifact(pool, object_store, candidate).await
+            delete_unreferenced_server_artifact(pool, object_stores.backup, candidate).await
         }
         "file_transfer_source" => {
-            delete_file_transfer_source_artifact(pool, object_store, candidate).await
+            delete_file_transfer_source_artifact(pool, object_stores.backup, candidate).await
         }
         "agent_update" => {
             if agent_update_artifact_is_referenced(pool, &candidate.object_key).await? {
                 tombstone_server_artifact(pool, candidate.id).await
             } else {
-                delete_unreferenced_server_artifact(pool, object_store, candidate).await
+                delete_unreferenced_server_artifact(pool, object_stores.update, candidate).await
             }
         }
         "backup_artifact" => {
@@ -1327,7 +1338,7 @@ async fn apply_artifact_cleanup_candidate(
             {
                 tombstone_server_artifact(pool, candidate.id).await
             } else {
-                delete_backup_artifact(pool, object_store, candidate).await
+                delete_backup_artifact(pool, object_stores.backup, candidate).await
             }
         }
         _ => tombstone_server_artifact(pool, candidate.id).await,
@@ -1339,8 +1350,19 @@ async fn delete_job_output_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    if candidate.status == "deleting" {
+        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+        let mut tx = pool.begin().await?;
+        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+        tx.commit().await?;
+        return Ok(ArtifactCleanupDisposition::Deleted);
+    }
+
     let mut tx = pool.begin().await?;
+    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
+        tx.rollback().await?;
+        return Ok(ArtifactCleanupDisposition::Tombstoned);
+    }
     sqlx::query(
         r#"
         UPDATE job_outputs
@@ -1351,6 +1373,9 @@ async fn delete_job_output_artifact(
     .bind(&candidate.object_key)
     .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
@@ -1361,6 +1386,20 @@ async fn delete_unreferenced_server_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
+    if candidate.status == "deleting" {
+        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+        let mut tx = pool.begin().await?;
+        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+        tx.commit().await?;
+        return Ok(ArtifactCleanupDisposition::Deleted);
+    }
+
+    let mut tx = pool.begin().await?;
+    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
+        tx.rollback().await?;
+        return Ok(ArtifactCleanupDisposition::Tombstoned);
+    }
+    tx.commit().await?;
     delete_object_key_confirmed(object_store, &candidate.object_key).await?;
     let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
@@ -1373,8 +1412,19 @@ async fn delete_file_transfer_source_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    if candidate.status == "deleting" {
+        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+        let mut tx = pool.begin().await?;
+        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+        tx.commit().await?;
+        return Ok(ArtifactCleanupDisposition::Deleted);
+    }
+
     let mut tx = pool.begin().await?;
+    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
+        tx.rollback().await?;
+        return Ok(ArtifactCleanupDisposition::Tombstoned);
+    }
     sqlx::query(
         r#"
         DELETE FROM file_transfer_source_artifacts
@@ -1384,6 +1434,9 @@ async fn delete_file_transfer_source_artifact(
     .bind(&candidate.object_key)
     .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
@@ -1394,8 +1447,19 @@ async fn delete_backup_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    if candidate.status == "deleting" {
+        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+        let mut tx = pool.begin().await?;
+        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
+        tx.commit().await?;
+        return Ok(ArtifactCleanupDisposition::Deleted);
+    }
+
     let mut tx = pool.begin().await?;
+    if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
+        tx.rollback().await?;
+        return Ok(ArtifactCleanupDisposition::Tombstoned);
+    }
     if let Some(backup_artifact_id) = candidate.backup_artifact_id {
         sqlx::query(
             r#"
@@ -1417,9 +1481,30 @@ async fn delete_backup_artifact(
         .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
+    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
+}
+
+async fn mark_server_artifact_deleting(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    artifact_id: Uuid,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleting'
+        WHERE id = $1
+          AND status = 'active'
+        "#,
+    )
+    .bind(artifact_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 async fn mark_server_artifact_deleted(
@@ -1431,6 +1516,7 @@ async fn mark_server_artifact_deleted(
         UPDATE server_artifacts
         SET status = 'deleted', deleted_at = now()
         WHERE id = $1
+          AND status IN ('active', 'deleting')
         "#,
     )
     .bind(artifact_id)
@@ -1448,6 +1534,7 @@ async fn tombstone_server_artifact(
         UPDATE server_artifacts
         SET status = 'tombstoned', tombstoned_at = now()
         WHERE id = $1
+          AND status IN ('active', 'deleting')
         "#,
     )
     .bind(artifact_id)
@@ -1513,7 +1600,7 @@ async fn artifact_cleanup_candidates(pool: &PgPool) -> Result<Vec<ArtifactCleanu
             backup_artifact_id,
             created_at::text AS created_at
         FROM server_artifacts
-        WHERE status = 'active'
+        WHERE status IN ('active', 'deleting')
         ORDER BY created_at DESC, object_key ASC
         LIMIT 10000
         "#,
@@ -2660,13 +2747,8 @@ mod schedule_tests {
                     .map(BackupObjectStore::kind),
                 Some("filesystem")
             );
-            assert_eq!(
-                runtime
-                    .artifact_object_store
-                    .as_ref()
-                    .map(BackupObjectStore::kind),
-                Some("filesystem")
-            );
+            assert_eq!(runtime.backup_object_store.kind(), "filesystem");
+            assert_eq!(runtime.update_object_store.kind(), "filesystem");
 
             std::fs::write(
                 &path,
@@ -2732,7 +2814,8 @@ mod schedule_tests {
                     .map(BackupObjectStore::kind),
                 Some("filesystem")
             );
-            assert!(runtime.artifact_object_store.is_none());
+            assert_eq!(runtime.backup_object_store.kind(), "filesystem");
+            assert_eq!(runtime.update_object_store.kind(), "filesystem");
         });
     }
 
@@ -2853,7 +2936,8 @@ backup_policy_prune_enabled = {backup_policy_prune_enabled}
 backup_policy_prune_object_store_dir = "{object_store_dir}"
 
 [storage]
-object_store_dir = "{object_store_dir}"
+backup_object_store_dir = "{object_store_dir}/backups"
+update_object_store_dir = "{object_store_dir}/updates"
 "#
         )
     }

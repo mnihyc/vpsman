@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io,
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -32,6 +32,8 @@ use crate::supervisor_validation::{
 
 const DEFAULT_STATE_ROOT: &str = "/var/lib/vpsman/supervisor";
 const MAX_LOG_TAIL_BYTES: u32 = 512 * 1024;
+const SUPERVISOR_LOG_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+const SUPERVISOR_LOG_ROTATE_FILES: usize = 3;
 const MONITOR_IDLE_SLEEP_SECS: u64 = 1;
 
 static PROCESS_MONITORS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
@@ -90,6 +92,7 @@ pub(crate) async fn reconcile_supervised_processes_on_start() -> Result<serde_js
 pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_json::Value> {
     fs::create_dir_all(records_dir(root))?;
     fs::create_dir_all(logs_dir(root))?;
+    rotate_supervisor_logs(root)?;
     let mut records = Vec::new();
     let mut running = 0_u64;
     let mut restarted = 0_u64;
@@ -160,6 +163,7 @@ pub(crate) fn execute_blocking(
 ) -> Result<Vec<CommandOutput>> {
     fs::create_dir_all(records_dir(root))?;
     fs::create_dir_all(logs_dir(root))?;
+    rotate_supervisor_logs(root)?;
     match command {
         JobCommand::ProcessStart {
             name,
@@ -181,7 +185,7 @@ pub(crate) fn execute_blocking(
                 }
             }
             let record = start_process(root, name, argv, cwd, env, policy, limits)?;
-            save_record(root, &record)?;
+            save_newly_started_record(root, &record)?;
             ensure_restart_monitor(root, name);
             Ok(status_outputs(job_id, "process_start", &record))
         }
@@ -215,7 +219,7 @@ pub(crate) fn execute_blocking(
                 &record.policy,
                 &record.limits,
             )?;
-            save_record(root, &record)?;
+            save_newly_started_record(root, &record)?;
             ensure_restart_monitor(root, name);
             Ok(status_outputs_with_cleanup(
                 job_id,
@@ -296,6 +300,8 @@ fn start_process(
 ) -> Result<ProcessRecord> {
     let stdout_log = logs_dir(root).join(format!("{name}.stdout.log"));
     let stderr_log = logs_dir(root).join(format!("{name}.stderr.log"));
+    rotate_log_file(&stdout_log)?;
+    rotate_log_file(&stderr_log)?;
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -488,6 +494,7 @@ fn maybe_restart_record(root: &Path, mut record: ProcessRecord) -> Result<Proces
     restarted.last_exit_code = last_exit_code;
     restarted.last_exit_unix = last_exit_unix;
     restarted.last_restart_unix = Some(now);
+    save_newly_started_record(root, &restarted)?;
     Ok(restarted)
 }
 
@@ -535,6 +542,9 @@ fn ensure_restart_monitor(root: &Path, name: &str) {
 fn run_restart_monitor(root: &Path, name: &str) {
     loop {
         std::thread::sleep(monitor_sleep(root, name));
+        if rotate_supervisor_logs(root).is_err() {
+            break;
+        }
         let Ok(Some(record)) = load_record(root, name) else {
             break;
         };
@@ -695,12 +705,25 @@ fn push_tail_output(
 }
 
 fn tail_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
-    let data = fs::read(path).unwrap_or_default();
-    if data.len() <= max_bytes {
-        Ok(data)
-    } else {
-        Ok(data[data.len() - max_bytes..].to_vec())
-    }
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to open {}", path.display()))
+        }
+    };
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len();
+    let read_len = file_len.min(max_bytes as u64);
+    file.seek(SeekFrom::Start(file_len.saturating_sub(read_len)))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut data = Vec::with_capacity(read_len as usize);
+    file.take(read_len)
+        .read_to_end(&mut data)
+        .with_context(|| format!("failed to read log tail {}", path.display()))?;
+    Ok(data)
 }
 
 fn apply_process_limits_in_child(limits: &ProcessResourceLimits) -> io::Result<()> {
@@ -766,8 +789,147 @@ fn load_record(root: &Path, name: &str) -> Result<Option<ProcessRecord>> {
 
 fn save_record(root: &Path, record: &ProcessRecord) -> Result<()> {
     let path = record_path(root, &record.name);
-    fs::write(path, serde_json::to_vec_pretty(record)?)?;
+    let parent = records_dir(root);
+    fs::create_dir_all(&parent)?;
+    let tmp_path = path.with_file_name(format!(
+        "{}.json.tmp.{}.{}",
+        record.name,
+        std::process::id(),
+        unique_time_suffix()
+    ));
+    let bytes = serde_json::to_vec_pretty(record)?;
+    {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to fsync {}", tmp_path.display()))?;
+    }
+    if let Err(error) = fs::rename(&tmp_path, &path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error)
+            .with_context(|| format!("failed to replace process record {}", path.display()));
+    }
+    sync_parent_dir(&parent)?;
     Ok(())
+}
+
+fn save_newly_started_record(root: &Path, record: &ProcessRecord) -> Result<()> {
+    if let Err(error) = save_record(root, record) {
+        let _ = stop_record(record);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn rotate_supervisor_logs(root: &Path) -> Result<()> {
+    for record in load_all_records(root)? {
+        rotate_log_file(Path::new(&record.stdout_log))?;
+        rotate_log_file(Path::new(&record.stderr_log))?;
+    }
+    Ok(())
+}
+
+fn rotate_log_file(path: &Path) -> Result<()> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to stat {}", path.display()))
+        }
+    };
+    if metadata.len() <= SUPERVISOR_LOG_ROTATE_BYTES {
+        return Ok(());
+    }
+
+    for index in (1..=SUPERVISOR_LOG_ROTATE_FILES).rev() {
+        let source = rotated_log_path(path, index);
+        let target = rotated_log_path(path, index + 1);
+        if index == SUPERVISOR_LOG_ROTATE_FILES {
+            let _ = fs::remove_file(&source);
+        } else if source.exists() {
+            if target.exists() {
+                fs::remove_file(&target).with_context(|| {
+                    format!("failed to remove old rotated log {}", target.display())
+                })?;
+            }
+            fs::rename(&source, &target).with_context(|| {
+                format!(
+                    "failed to rotate supervisor log {} to {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let file_len = file.metadata()?.len();
+    let keep_bytes = SUPERVISOR_LOG_ROTATE_BYTES.min(file_len);
+    file.seek(SeekFrom::Start(file_len.saturating_sub(keep_bytes)))?;
+    let mut tail = Vec::with_capacity(usize::try_from(keep_bytes).unwrap_or(0));
+    file.read_to_end(&mut tail)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    let first_rotation = rotated_log_path(path, 1);
+    let tmp_rotation = first_rotation.with_extension(format!(
+        "{}.tmp.{}.{}",
+        first_rotation
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("log"),
+        std::process::id(),
+        unique_time_suffix()
+    ));
+    {
+        let mut rotated = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_rotation)
+            .with_context(|| format!("failed to create {}", tmp_rotation.display()))?;
+        rotated
+            .write_all(&tail)
+            .with_context(|| format!("failed to write {}", tmp_rotation.display()))?;
+        rotated
+            .sync_all()
+            .with_context(|| format!("failed to fsync {}", tmp_rotation.display()))?;
+    }
+    fs::rename(&tmp_rotation, &first_rotation).with_context(|| {
+        format!(
+            "failed to install rotated supervisor log {}",
+            first_rotation.display()
+        )
+    })?;
+
+    file.set_len(0)
+        .with_context(|| format!("failed to truncate {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_parent_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.to_string_lossy(), index))
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .with_context(|| format!("failed to open directory {}", path.display()))?;
+    dir.sync_all()
+        .with_context(|| format!("failed to fsync directory {}", path.display()))
 }
 
 fn record_path(root: &Path, name: &str) -> PathBuf {
@@ -793,4 +955,33 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn unique_time_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_file_reads_only_requested_suffix() {
+        let path = std::env::temp_dir().join(format!(
+            "vpsman-supervisor-tail-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        let data = (0..4096)
+            .map(|value| b'a' + (value % 26) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&path, &data).unwrap();
+
+        let tail = tail_file(&path, 37).unwrap();
+
+        assert_eq!(tail, data[data.len() - 37..]);
+        let _ = fs::remove_file(path);
+    }
 }

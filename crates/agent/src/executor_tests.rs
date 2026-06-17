@@ -15,8 +15,8 @@ mod tests {
     use vpsman_common::{
         payload_hash, AgentConfig, AgentExecutionConfig, AgentExecutionEnvironmentPolicy,
         AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy, AgentProcessInventorySource,
-        AgentUserSessionsSource, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk,
-        JobCommand, OutputStream, RuntimeTunnelCommand,
+        AgentUserSessionsSource, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
+        FilePushChunk, JobCommand, OutputStream, RuntimeTunnelCommand,
     };
 
     #[tokio::test]
@@ -797,6 +797,7 @@ mod tests {
             &JobCommand::FileDownload {
                 path: path.to_string_lossy().to_string(),
                 max_bytes: 1024,
+                follow_symlinks: false,
             },
             5,
         )
@@ -831,6 +832,7 @@ mod tests {
             &JobCommand::FileDownload {
                 path: dir.to_string_lossy().to_string(),
                 max_bytes: 1024 * 1024,
+                follow_symlinks: false,
             },
             5,
         )
@@ -869,6 +871,148 @@ mod tests {
             .map(|entry| entry.unwrap().path().unwrap().to_string_lossy().to_string())
             .collect();
         assert!(names.iter().any(|name| name.ends_with("nested/app.conf")));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_copy_overwrites_regular_file_without_temp_leak() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-copy-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let source = dir.join("source.txt");
+        let destination = dir.join("destination.txt");
+        tokio::fs::write(&source, b"new copied contents")
+            .await
+            .unwrap();
+        tokio::fs::write(&destination, b"old contents")
+            .await
+            .unwrap();
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileCopy {
+                path: source.to_string_lossy().to_string(),
+                new_path: destination.to_string_lossy().to_string(),
+                overwrite: true,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&destination).await.unwrap(),
+            b"new copied contents"
+        );
+        let status = status_payload(&outputs);
+        assert_eq!(status["type"], "file_copy");
+        assert_eq!(status["status"], "copied");
+        assert_eq!(status["overwrite"], true);
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vpsman-copy-"),
+                "temporary copy file leaked: {:?}",
+                entry.path()
+            );
+        }
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_copy_rejects_destination_symlink_without_following_target() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-copy-symlink-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let source = dir.join("source.txt");
+        let link_target = dir.join("target.txt");
+        let destination_link = dir.join("destination-link.txt");
+        tokio::fs::write(&source, b"new copied contents")
+            .await
+            .unwrap();
+        tokio::fs::write(&link_target, b"protected target")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&link_target, &destination_link).unwrap();
+
+        let error = execute_job_command(
+            job_id,
+            &JobCommand::FileCopy {
+                path: source.to_string_lossy().to_string(),
+                new_path: destination_link.to_string_lossy().to_string(),
+                overwrite: true,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            },
+            5,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("copy destination is a symlink"));
+        assert_eq!(
+            tokio::fs::read(&link_target).await.unwrap(),
+            b"protected target"
+        );
+        assert!(tokio::fs::symlink_metadata(&destination_link)
+            .await
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_copy_can_explicitly_follow_destination_symlink_target() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-file-copy-follow-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let source = dir.join("source.txt");
+        let link_target = dir.join("target.txt");
+        let destination_link = dir.join("destination-link.txt");
+        tokio::fs::write(&source, b"new copied contents")
+            .await
+            .unwrap();
+        tokio::fs::write(&link_target, b"old target").await.unwrap();
+        std::os::unix::fs::symlink(&link_target, &destination_link).unwrap();
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileCopy {
+                path: source.to_string_lossy().to_string(),
+                new_path: destination_link.to_string_lossy().to_string(),
+                overwrite: true,
+                recursive: false,
+                follow_symlinks: true,
+                policy: FileActionPolicy::Fail,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&link_target).await.unwrap(),
+            b"new copied contents"
+        );
+        assert!(tokio::fs::symlink_metadata(&destination_link)
+            .await
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let status = status_payload(&outputs);
+        assert_eq!(status["type"], "file_copy");
+        assert_eq!(status["follow_symlinks"], true);
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

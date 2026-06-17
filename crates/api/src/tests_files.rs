@@ -169,6 +169,7 @@ fn rejects_root_mutating_file_operations() {
             new_path: "/".to_string(),
             overwrite: true,
             recursive: true,
+            follow_symlinks: false,
             policy: FileActionPolicy::Fail,
         },
     ];
@@ -312,7 +313,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         gateway: GatewayDispatchClient::default(),
         backup_object_store: Some(store),
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: usize::MAX,

@@ -577,7 +577,6 @@ fn agent_update_release_from_row(row: sqlx::postgres::PgRow) -> Result<AgentUpda
         artifact_url_sha256_hex: row.try_get("artifact_url_sha256_hex")?,
         artifact_object_key: row.try_get("artifact_object_key")?,
         artifact_download_path: row.try_get("artifact_download_path")?,
-        artifact_download_url: None,
         rollback_artifact_sha256_hex: row.try_get("rollback_artifact_sha256_hex")?,
         rollback_artifact_signature_provided: row
             .try_get("rollback_artifact_signature_provided")?,
@@ -588,7 +587,6 @@ fn agent_update_release_from_row(row: sqlx::postgres::PgRow) -> Result<AgentUpda
         rollback_artifact_url_sha256_hex: row.try_get("rollback_artifact_url_sha256_hex")?,
         rollback_artifact_object_key: row.try_get("rollback_artifact_object_key")?,
         rollback_artifact_download_path: row.try_get("rollback_artifact_download_path")?,
-        rollback_artifact_download_url: None,
         rollback_size_bytes: row.try_get("rollback_size_bytes")?,
         size_bytes: row.try_get("size_bytes")?,
         notes: row.try_get("notes")?,
@@ -633,7 +631,6 @@ fn agent_update_release_view(
             .map(|url| payload_hash(url.as_bytes())),
         artifact_object_key: None,
         artifact_download_path: None,
-        artifact_download_url: None,
         rollback_artifact_sha256_hex: request
             .rollback_artifact_sha256_hex
             .as_deref()
@@ -661,7 +658,6 @@ fn agent_update_release_view(
             .map(|url| payload_hash(url.as_bytes())),
         rollback_artifact_object_key: None,
         rollback_artifact_download_path: None,
-        rollback_artifact_download_url: None,
         rollback_size_bytes: request.rollback_size_bytes,
         size_bytes: request.size_bytes,
         notes: request.notes.as_deref().map(str::trim).and_then(|notes| {
@@ -708,7 +704,6 @@ fn uploaded_agent_update_release_view(
         artifact_url_sha256_hex: None,
         artifact_object_key: Some(artifacts.primary.artifact_object_key.clone()),
         artifact_download_path: Some(artifacts.primary.artifact_download_path.clone()),
-        artifact_download_url: None,
         rollback_artifact_sha256_hex: artifacts
             .rollback
             .as_ref()
@@ -735,7 +730,6 @@ fn uploaded_agent_update_release_view(
             .rollback
             .as_ref()
             .map(|artifact| artifact.artifact_download_path.clone()),
-        rollback_artifact_download_url: None,
         rollback_size_bytes: artifacts
             .rollback
             .as_ref()

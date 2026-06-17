@@ -2462,6 +2462,8 @@ pub enum JobCommand {
         path: String,
         #[serde(default = "default_file_read_max_bytes")]
         max_bytes: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlinks: bool,
     },
     FileWriteText {
         path: String,
@@ -2504,6 +2506,8 @@ pub enum JobCommand {
         mode: u32,
         #[serde(default)]
         recursive: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlinks: bool,
         #[serde(default)]
         policy: FileActionPolicy,
     },
@@ -2531,6 +2535,8 @@ pub enum JobCommand {
         overwrite: bool,
         #[serde(default)]
         recursive: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlinks: bool,
         #[serde(default)]
         policy: FileActionPolicy,
     },
@@ -2538,11 +2544,15 @@ pub enum JobCommand {
         path: String,
         #[serde(default = "default_file_download_max_bytes")]
         max_bytes: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlinks: bool,
     },
     FileArchiveTar {
         path: String,
         #[serde(default = "default_file_archive_max_bytes")]
         max_bytes: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlinks: bool,
     },
     UserSessions,
     ProcessList {

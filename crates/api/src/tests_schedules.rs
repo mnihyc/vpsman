@@ -57,7 +57,6 @@ fn schedule_test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: None,
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,

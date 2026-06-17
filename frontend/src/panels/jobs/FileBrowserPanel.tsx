@@ -258,7 +258,12 @@ export function FileBrowserPanel({
     const normalized = normalizeAbsolutePath(path);
     await runPanelAction(setPending, setActionError, async () => {
       const { outputs } = await runFileJob(
-        { type: "file_read_text", path: normalized, max_bytes: FILE_BROWSER_TEXT_LIMIT_BYTES },
+        {
+          type: "file_read_text",
+          path: normalized,
+          max_bytes: FILE_BROWSER_TEXT_LIMIT_BYTES,
+          follow_symlinks: false,
+        },
         { expectedType: "file_read_text" },
       );
       const status = parseFileReadTextStatus(outputs);
@@ -423,7 +428,14 @@ export function FileBrowserPanel({
         return;
       }
       confirmOperation(
-        { type: "file_chmod", path: selectedPath, mode: parseMode(chmodMode), recursive, policy: "fail" },
+        {
+          type: "file_chmod",
+          path: selectedPath,
+          mode: parseMode(chmodMode),
+          recursive,
+          follow_symlinks: false,
+          policy: "fail",
+        },
         "Change mode",
         `Apply mode ${chmodMode} to ${selectedPath}${recursive ? " recursively" : ""}.`,
         parentPath(selectedPath),
@@ -468,7 +480,15 @@ export function FileBrowserPanel({
     const destination = joinPath(destinationFolder, fileName(browserClipboard.path));
     const operation: JobOperation =
       browserClipboard.intent === "copy"
-        ? { type: "file_copy", path: browserClipboard.path, new_path: destination, recursive: true, overwrite: false, policy: "fail" }
+        ? {
+            type: "file_copy",
+            path: browserClipboard.path,
+            new_path: destination,
+            recursive: true,
+            follow_symlinks: false,
+            overwrite: false,
+            policy: "fail",
+          }
         : { type: "file_rename", path: browserClipboard.path, new_path: destination, overwrite: false, policy: "fail" };
     confirmOperation(
       operation,
@@ -519,6 +539,7 @@ export function FileBrowserPanel({
         type: "file_download",
         path,
         max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
+        follow_symlinks: false,
       };
       const { outputs } = await runFileJob(operation, {
         expectedType: operation.type,

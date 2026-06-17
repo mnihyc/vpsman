@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -26,6 +26,41 @@ use crate::file_pull::{
 };
 
 const FILE_DOWNLOAD_MANIFEST_ENTRY_LIMIT: usize = 4096;
+
+struct LimitedVecWriter<'a> {
+    inner: &'a mut Vec<u8>,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl<'a> LimitedVecWriter<'a> {
+    fn new(inner: &'a mut Vec<u8>, max_bytes: u64) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+        }
+    }
+}
+
+impl Write for LimitedVecWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let next = self
+            .written
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| io::Error::other("archive size overflow"))?;
+        if next > self.max_bytes {
+            return Err(io::Error::other("archive exceeds configured byte limit"));
+        }
+        self.inner.extend_from_slice(buf);
+        self.written = next;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FileDownloadSessionMetadata {
@@ -84,18 +119,15 @@ pub(crate) async fn execute_file_download(
     job_id: uuid::Uuid,
     path: &str,
     max_bytes: u64,
+    follow_symlinks: bool,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     cancel_token.check("file_download")?;
     validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let max_bytes = max_bytes.clamp(1, MAX_DIRECT_FILE_DOWNLOAD_BYTES);
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
+    let metadata = path_metadata_for_follow(Path::new(path), follow_symlinks)
         .with_context(|| format!("failed to stat download source {path}"))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("file download source is a symlink");
-    }
     if metadata.is_file() {
         return execute_regular_file_download(
             job_id,
@@ -108,9 +140,59 @@ pub(crate) async fn execute_file_download(
         .await;
     }
     if metadata.is_dir() {
-        return execute_directory_download(job_id, path, max_bytes, output_tx, cancel_token).await;
+        return execute_directory_download(
+            job_id,
+            path,
+            max_bytes,
+            follow_symlinks,
+            output_tx,
+            cancel_token,
+        )
+        .await;
     }
     anyhow::bail!("file download source is not a regular file or directory");
+}
+
+fn path_metadata_for_follow(path: &Path, follow_symlinks: bool) -> Result<std::fs::Metadata> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        if follow_symlinks {
+            return std::fs::metadata(path).with_context(|| {
+                format!(
+                    "symlink does not resolve to a readable target {}",
+                    path.display()
+                )
+            });
+        }
+        anyhow::bail!("download source is a symlink; set follow_symlinks to use the target");
+    }
+    Ok(metadata)
+}
+
+fn read_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open download source {}", path.display()))?;
+    let mut data = Vec::with_capacity((max_bytes.min(16 * 1024)) as usize);
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read download source {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("file download size overflow")?;
+        if total > max_bytes {
+            anyhow::bail!(
+                "file download source exceeds limit while reading: {total} > {max_bytes} bytes"
+            );
+        }
+        data.extend_from_slice(&buffer[..read]);
+    }
+    Ok(data)
 }
 
 async fn execute_regular_file_download(
@@ -127,7 +209,7 @@ async fn execute_regular_file_download(
     }
     let filename = download_filename(path, false);
     if let Some(sender) = output_tx {
-        let summary = stream_file_payload(job_id, path, sender, cancel_token).await?;
+        let summary = stream_file_payload(job_id, path, max_bytes, sender, cancel_token).await?;
         return file_download_status(
             job_id,
             path,
@@ -143,9 +225,12 @@ async fn execute_regular_file_download(
     }
 
     cancel_token.check("file_download")?;
-    let data = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("failed to read download source {path}"))?;
+    let data = tokio::task::spawn_blocking({
+        let path = PathBuf::from(path);
+        move || read_file_bounded(&path, max_bytes)
+    })
+    .await
+    .context("file download read worker failed")??;
     cancel_token.check("file_download")?;
     let mut outputs = chunked_output(job_id, OutputStream::Stdout, &data);
     outputs.push(file_download_status_output(
@@ -167,6 +252,7 @@ async fn execute_directory_download(
     job_id: uuid::Uuid,
     path: &str,
     max_bytes: u64,
+    follow_symlinks: bool,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
@@ -174,7 +260,7 @@ async fn execute_directory_download(
     let source = PathBuf::from(path);
     let worker_token = cancel_token.clone();
     let artifact = tokio::task::spawn_blocking(move || {
-        build_directory_download_artifact(&source, max_bytes, &worker_token)
+        build_directory_download_artifact(&source, max_bytes, follow_symlinks, &worker_token)
     })
     .await
     .context("file download archive worker failed")??;
@@ -223,6 +309,7 @@ async fn execute_directory_download(
 async fn stream_file_payload(
     job_id: uuid::Uuid,
     path: &str,
+    max_bytes: u64,
     output_tx: mpsc::Sender<CommandOutput>,
     cancel_token: CommandCancelToken,
 ) -> Result<crate::file_pull::StreamedPayloadSummary> {
@@ -242,7 +329,14 @@ async fn stream_file_payload(
         if read == 0 {
             break;
         }
-        size_bytes += read as u64;
+        size_bytes = size_bytes
+            .checked_add(read as u64)
+            .context("file download size overflow")?;
+        if size_bytes > max_bytes {
+            anyhow::bail!(
+                "file download source exceeds limit while reading: {size_bytes} > {max_bytes} bytes"
+            );
+        }
         chunk_count += 1;
         hasher.update(&buffer[..read]);
         output_tx
@@ -345,25 +439,35 @@ fn file_download_status_output(
 fn build_directory_download_artifact(
     source: &Path,
     max_bytes: u64,
+    follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
 ) -> Result<DirectoryDownloadArtifact> {
     cancel_token.check("file_download")?;
-    let metadata = std::fs::symlink_metadata(source)
+    let metadata = path_metadata_for_follow(source, follow_symlinks)
         .with_context(|| format!("failed to stat download source {}", source.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if !metadata.is_dir() {
         anyhow::bail!("file download archive source is not a directory");
     }
-    let manifest = build_directory_manifest(source, max_bytes, cancel_token)?;
+    let manifest = build_directory_manifest(source, max_bytes, follow_symlinks, cancel_token)?;
     let mut archive = Vec::new();
     {
         cancel_token.check("file_download")?;
-        let mut builder = tar::Builder::new(&mut archive);
+        let mut writer = LimitedVecWriter::new(&mut archive, max_bytes);
+        let mut builder = tar::Builder::new(&mut writer);
+        builder.follow_symlinks(follow_symlinks);
         let name = source
             .file_name()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| OsStr::new("root"));
         let archive_name = PathBuf::from(Path::new(name));
-        append_tar_path_checked(&mut builder, &archive_name, source, &metadata, cancel_token)?;
+        append_tar_path_checked(
+            &mut builder,
+            &archive_name,
+            source,
+            &metadata,
+            follow_symlinks,
+            cancel_token,
+        )?;
         builder.finish().context("failed to finish tar archive")?;
     }
     if archive.len() as u64 > max_bytes {
@@ -377,6 +481,7 @@ fn append_tar_path_checked<W: Write>(
     archive_path: &Path,
     fs_path: &Path,
     metadata: &std::fs::Metadata,
+    follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
 ) -> Result<()> {
     cancel_token.check("file_download")?;
@@ -393,9 +498,22 @@ fn append_tar_path_checked<W: Write>(
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path)
                 .with_context(|| format!("failed to stat {}", path.display()))?;
+            let metadata = if metadata.file_type().is_symlink() && follow_symlinks {
+                std::fs::metadata(&path)
+                    .with_context(|| format!("failed to follow {}", path.display()))?
+            } else {
+                metadata
+            };
             let file_name = entry.file_name();
             let child_archive_path = archive_path.join(Path::new(&file_name));
-            append_tar_path_checked(builder, &child_archive_path, &path, &metadata, cancel_token)?;
+            append_tar_path_checked(
+                builder,
+                &child_archive_path,
+                &path,
+                &metadata,
+                follow_symlinks,
+                cancel_token,
+            )?;
         }
         return Ok(());
     }
@@ -408,10 +526,18 @@ fn append_tar_path_checked<W: Write>(
 fn build_directory_manifest(
     source: &Path,
     max_bytes: u64,
+    follow_symlinks: bool,
     cancel_token: &CommandCancelToken,
 ) -> Result<FileDownloadManifestSummary> {
     let mut builder = FileDownloadManifestBuilder::new();
-    collect_manifest_entries(source, source, max_bytes, &mut builder, cancel_token)?;
+    collect_manifest_entries(
+        source,
+        source,
+        max_bytes,
+        follow_symlinks,
+        &mut builder,
+        cancel_token,
+    )?;
     Ok(builder.finish())
 }
 
@@ -459,6 +585,7 @@ fn collect_manifest_entries(
     root: &Path,
     current: &Path,
     max_bytes: u64,
+    follow_symlinks: bool,
     builder: &mut FileDownloadManifestBuilder,
     cancel_token: &CommandCancelToken,
 ) -> Result<()> {
@@ -470,10 +597,17 @@ fn collect_manifest_entries(
     for entry in entries {
         cancel_token.check("file_download")?;
         let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)
+        let link_metadata = std::fs::symlink_metadata(&path)
             .with_context(|| format!("failed to stat {}", path.display()))?;
+        let is_symlink = link_metadata.file_type().is_symlink();
+        let metadata = if is_symlink && follow_symlinks {
+            std::fs::metadata(&path)
+                .with_context(|| format!("failed to follow {}", path.display()))?
+        } else {
+            link_metadata
+        };
         let relative_path = manifest_relative_path(root, &path);
-        if metadata.file_type().is_symlink() {
+        if is_symlink && !follow_symlinks {
             builder.symlink_count = builder.symlink_count.saturating_add(1);
             let symlink_target = std::fs::read_link(&path)
                 .ok()
@@ -496,7 +630,14 @@ fn collect_manifest_entries(
                 sha256_hex: None,
                 symlink_target: None,
             });
-            collect_manifest_entries(root, &path, max_bytes, builder, cancel_token)?;
+            collect_manifest_entries(
+                root,
+                &path,
+                max_bytes,
+                follow_symlinks,
+                builder,
+                cancel_token,
+            )?;
             continue;
         }
         if metadata.is_file() {
@@ -512,7 +653,7 @@ fn collect_manifest_entries(
                 path: relative_path,
                 kind: "file",
                 size_bytes: Some(metadata.len()),
-                sha256_hex: Some(hash_sync_file(&path)?),
+                sha256_hex: Some(hash_sync_file(&path, max_bytes)?),
                 symlink_target: None,
             });
             continue;
@@ -568,17 +709,24 @@ fn hash_manifest_field(hasher: &mut Sha256, value: &str) {
     hasher.update([0]);
 }
 
-fn hash_sync_file(path: &Path) -> Result<String> {
+fn hash_sync_file(path: &Path, max_bytes: u64) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("failed to open download source {}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut total = 0_u64;
     loop {
         let read = file
             .read(&mut buffer)
             .with_context(|| format!("failed to read download source {}", path.display()))?;
         if read == 0 {
             break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("download source size overflow")?;
+        if total > max_bytes {
+            anyhow::bail!("download source exceeds limit while hashing: {total} > {max_bytes}");
         }
         hasher.update(&buffer[..read]);
     }
@@ -633,6 +781,7 @@ pub(crate) async fn execute_file_transfer_download_start(
     }
     let sha256_hex = hash_file(
         Path::new(path),
+        MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
         &cancel_token,
         "file_transfer_download_start",
     )
@@ -782,6 +931,7 @@ async fn read_file_chunk(path: &Path, offset: u64, size: usize) -> Result<Vec<u8
 
 async fn hash_file(
     path: &Path,
+    max_bytes: u64,
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
 ) -> Result<String> {
@@ -790,11 +940,20 @@ async fn hash_file(
         .with_context(|| format!("failed to open download source {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
+    let mut total = 0_u64;
     loop {
         cancel_token.check(operation_type)?;
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("file transfer download hash size overflow")?;
+        if total > max_bytes {
+            anyhow::bail!(
+                "file transfer download source exceeds limit while hashing: {total} > {max_bytes}"
+            );
         }
         hasher.update(&buffer[..read]);
     }
@@ -906,8 +1065,12 @@ mod tests {
         let cancel_token = CommandCancelToken::default();
         cancel_token.cancel("operator canceled".to_string());
 
-        let result =
-            build_directory_download_artifact(&root, MAX_DIRECT_FILE_DOWNLOAD_BYTES, &cancel_token);
+        let result = build_directory_download_artifact(
+            &root,
+            MAX_DIRECT_FILE_DOWNLOAD_BYTES,
+            false,
+            &cancel_token,
+        );
 
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(nested.join("keep.txt")).unwrap(), "keep");

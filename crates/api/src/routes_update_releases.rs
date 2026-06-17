@@ -44,10 +44,7 @@ pub(crate) async fn list_agent_update_releases(
     let releases = state
         .repo
         .list_agent_update_releases(limit_or_default(query.limit))
-        .await?
-        .into_iter()
-        .map(|release| state.enrich_agent_update_release_urls(release))
-        .collect();
+        .await?;
     Ok(Json(releases))
 }
 
@@ -82,7 +79,7 @@ pub(crate) async fn latest_agent_update_release(
         .into_iter()
         .find(|release| release.name == query.name.trim() && release.channel == channel)
         .ok_or_else(|| ApiError::not_found("agent_update_release_not_found"))?;
-    Ok(Json(state.enrich_agent_update_release_urls(release)))
+    Ok(Json(release))
 }
 
 pub(crate) async fn create_agent_update_release(
@@ -115,10 +112,7 @@ pub(crate) async fn create_agent_update_release(
                 ApiError::from(error)
             }
         })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(state.enrich_agent_update_release_urls(release)),
-    ))
+    Ok((StatusCode::CREATED, Json(release)))
 }
 
 pub(crate) async fn upload_agent_update_artifact(
@@ -163,10 +157,7 @@ pub(crate) async fn upload_agent_update_artifact(
                 ApiError::from(error)
             }
         })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(state.enrich_agent_update_release_urls(release)),
-    ))
+    Ok((StatusCode::CREATED, Json(release)))
 }
 
 pub(crate) async fn stream_agent_update_artifact(
@@ -232,7 +223,6 @@ pub(crate) async fn stream_agent_update_artifact(
             &operator,
         )
         .await?;
-    let artifact_download_url = state.public_update_artifact_url(&uploaded.artifact_download_path);
     Ok((
         StatusCode::CREATED,
         Json(StreamedAgentUpdateArtifactView {
@@ -242,7 +232,6 @@ pub(crate) async fn stream_agent_update_artifact(
             artifact_signing_key_sha256_hex,
             artifact_object_key: uploaded.artifact_object_key,
             artifact_download_path: uploaded.artifact_download_path,
-            artifact_download_url,
             size_bytes: uploaded.size_bytes,
         }),
     ))
@@ -292,10 +281,7 @@ pub(crate) async fn create_hosted_agent_update_release(
                 ApiError::from(error)
             }
         })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(state.enrich_agent_update_release_urls(release)),
-    ))
+    Ok((StatusCode::CREATED, Json(release)))
 }
 
 pub(crate) async fn download_agent_update_artifact(

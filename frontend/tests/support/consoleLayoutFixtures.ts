@@ -686,7 +686,8 @@ dispatcher_batch = 128
 dispatcher_in_flight = 64
 
 [storage]
-object_store_dir = "/var/lib/vpsman/objects"
+backup_object_store_dir = "/var/lib/vpsman/objects/backups"
+update_object_store_dir = "/var/lib/vpsman/objects/updates"
 
 [timeout]
 dispatch_ack_secs = 30
@@ -754,7 +755,6 @@ const suiteConfigValidation = {
   restart_required_fields: [
     "api.bind",
     "api.gateway_control_url",
-    "api.update_artifact_public_base_url",
     "gateway.bind",
     "gateway.control_bind",
     "gateway.api_url",
@@ -763,7 +763,6 @@ const suiteConfigValidation = {
     "database.postgres_url",
     "database.migrations_dir",
     "secrets.*",
-    "storage.object_store_dir",
     "storage.backup_object_store_dir",
     "storage.update_object_store_dir",
     "storage.object_endpoint",

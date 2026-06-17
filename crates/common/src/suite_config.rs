@@ -21,7 +21,6 @@ pub struct SuiteConfig {
 pub struct SuiteApiConfig {
     pub bind: Option<String>,
     pub gateway_control_url: Option<String>,
-    pub update_artifact_public_base_url: Option<String>,
     pub require_registered_agent_updates: Option<bool>,
     pub job_output_artifact_min_bytes: Option<usize>,
     pub artifact_max_bytes: Option<usize>,
@@ -86,7 +85,6 @@ pub struct SuiteDatabaseConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteStorageConfig {
-    pub object_store_dir: Option<String>,
     pub backup_object_store_dir: Option<String>,
     pub update_object_store_dir: Option<String>,
     pub object_endpoint: Option<String>,
@@ -293,7 +291,6 @@ impl SuiteConfig {
             restart_required_fields: vec![
                 "api.bind".to_string(),
                 "api.gateway_control_url".to_string(),
-                "api.update_artifact_public_base_url".to_string(),
                 "gateway.bind".to_string(),
                 "gateway.control_bind".to_string(),
                 "gateway.api_url".to_string(),
@@ -306,7 +303,6 @@ impl SuiteConfig {
                 "database.postgres_url".to_string(),
                 "database.migrations_dir".to_string(),
                 "secrets.*".to_string(),
-                "storage.object_store_dir".to_string(),
                 "storage.backup_object_store_dir".to_string(),
                 "storage.update_object_store_dir".to_string(),
                 "storage.object_endpoint".to_string(),

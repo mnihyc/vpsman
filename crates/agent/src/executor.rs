@@ -315,12 +315,23 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::FileArchiveTar { .. } => {
             execute_file_browser_command(job_id, command, timeout_secs, cancel_token).await
         }
-        JobCommand::FileDownload { path, max_bytes } => {
+        JobCommand::FileDownload {
+            path,
+            max_bytes,
+            follow_symlinks,
+        } => {
             let timeout_secs = timeout_secs.max(1);
             let timeout_cancel_token = cancel_token.clone();
             match time::timeout(
                 Duration::from_secs(timeout_secs),
-                execute_file_download(job_id, path, *max_bytes, output_tx, cancel_token),
+                execute_file_download(
+                    job_id,
+                    path,
+                    *max_bytes,
+                    *follow_symlinks,
+                    output_tx,
+                    cancel_token,
+                ),
             )
             .await
             {

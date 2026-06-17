@@ -187,7 +187,7 @@ CREATE TABLE server_artifacts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     tombstoned_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ,
-    CONSTRAINT server_artifacts_status_check CHECK (status IN ('active', 'tombstoned', 'deleted')),
+    CONSTRAINT server_artifacts_status_check CHECK (status IN ('active', 'deleting', 'tombstoned', 'deleted')),
     CONSTRAINT server_artifacts_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
 );
 

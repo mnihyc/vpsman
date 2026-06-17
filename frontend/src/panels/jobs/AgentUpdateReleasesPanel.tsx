@@ -325,7 +325,7 @@ export function AgentUpdateReleasesPanel({
           { label: "Artifact", value: (release) => release.artifact_sha256_hex },
           { label: "Rollback", value: (release) => release.rollback_artifact_sha256_hex },
           { label: "Signature", value: (release) => release.artifact_signature_sha256_hex },
-          { label: "Source", value: (release) => `${release.artifact_download_url ?? ""} ${release.artifact_download_path ?? ""}` },
+          { label: "Source", value: (release) => release.artifact_download_path ?? "" },
         ]}
         itemLabel="releases"
         items={releases}
@@ -365,10 +365,9 @@ export function AgentUpdateReleasesPanel({
                 </span>
                 <span className="monoValue">{release.artifact_signature_sha256_hex ? shortHash(release.artifact_signature_sha256_hex) : "unsigned"}</span>
                 <span className="monoValue">
-                  {release.artifact_download_url ??
-                    release.artifact_download_path ??
+                  {release.artifact_download_path ??
                     (release.artifact_url_sha256_hex ? shortHash(release.artifact_url_sha256_hex) : "not stored")}
-                  {release.rollback_artifact_download_url && <small>{release.rollback_artifact_download_url}</small>}
+                  {release.rollback_artifact_download_path && <small>{release.rollback_artifact_download_path}</small>}
                 </span>
                 <span>{formatTime(release.created_at)}</span>
               </div>

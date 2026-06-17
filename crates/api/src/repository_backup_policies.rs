@@ -179,9 +179,7 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
-                prune_postgres_backup_policy_candidate_metadata(pool, candidate)
-                    .await
-                    .map(|rows| rows.rows_affected() as i64)
+                prune_postgres_backup_policy_candidate_metadata(pool, candidate).await
             }
         }
     }
@@ -548,11 +546,16 @@ async fn list_postgres_backup_policy_prune_candidates(
 async fn prune_postgres_backup_policy_candidate_metadata(
     pool: &sqlx::PgPool,
     candidate: &BackupPolicyPruneCandidate,
-) -> Result<sqlx::postgres::PgQueryResult> {
-    let result = sqlx::query(
+) -> Result<i64> {
+    let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
         WITH doomed AS (
-            SELECT $1::uuid AS request_id, $2::uuid AS artifact_id
+            SELECT
+                $1::uuid AS request_id,
+                artifact.id AS artifact_id,
+                artifact.object_key
+            FROM backup_artifacts artifact
+            WHERE artifact.id = $2
         ),
         cleared_requests AS (
             UPDATE backup_requests request
@@ -562,17 +565,29 @@ async fn prune_postgres_backup_policy_candidate_metadata(
             WHERE request.id = doomed.request_id
               AND request.artifact_id = doomed.artifact_id
             RETURNING request.id
+        ),
+        deleted_artifacts AS (
+            DELETE FROM backup_artifacts artifact
+            USING doomed
+            WHERE artifact.id = doomed.artifact_id
+            RETURNING artifact.object_key
+        ),
+        marked_artifacts AS (
+            UPDATE server_artifacts artifact
+            SET status = 'deleting'
+            FROM deleted_artifacts deleted
+            WHERE artifact.object_key = deleted.object_key
+              AND artifact.status = 'active'
+            RETURNING artifact.id
         )
-        DELETE FROM backup_artifacts artifact
-        USING doomed
-        WHERE artifact.id = doomed.artifact_id
+        SELECT count(*)::bigint FROM deleted_artifacts
         "#,
     )
     .bind(candidate.request_id)
     .bind(candidate.artifact_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(result)
+    Ok(pruned_rows)
 }
 
 async fn prune_postgres_backup_policy_candidates_metadata(
@@ -587,11 +602,19 @@ async fn prune_postgres_backup_policy_candidates_metadata(
         .iter()
         .map(|candidate| candidate.artifact_id)
         .collect::<Vec<_>>();
-    let result = sqlx::query(
+    let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
-        WITH doomed AS (
+        WITH selected AS (
             SELECT *
             FROM unnest($1::uuid[], $2::uuid[]) AS doomed(request_id, artifact_id)
+        ),
+        doomed AS (
+            SELECT
+                selected.request_id,
+                artifact.id AS artifact_id,
+                artifact.object_key
+            FROM selected
+            JOIN backup_artifacts artifact ON artifact.id = selected.artifact_id
         ),
         cleared_requests AS (
             UPDATE backup_requests request
@@ -601,17 +624,29 @@ async fn prune_postgres_backup_policy_candidates_metadata(
             WHERE request.id = doomed.request_id
               AND request.artifact_id = doomed.artifact_id
             RETURNING request.id
+        ),
+        deleted_artifacts AS (
+            DELETE FROM backup_artifacts artifact
+            USING doomed
+            WHERE artifact.id = doomed.artifact_id
+            RETURNING artifact.object_key
+        ),
+        marked_artifacts AS (
+            UPDATE server_artifacts artifact
+            SET status = 'deleting'
+            FROM deleted_artifacts deleted
+            WHERE artifact.object_key = deleted.object_key
+              AND artifact.status = 'active'
+            RETURNING artifact.id
         )
-        DELETE FROM backup_artifacts artifact
-        USING doomed
-        WHERE artifact.id = doomed.artifact_id
+        SELECT count(*)::bigint FROM deleted_artifacts
         "#,
     )
     .bind(request_ids)
     .bind(artifact_ids)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(result.rows_affected() as i64)
+    Ok(pruned_rows)
 }
 
 fn backup_policy_view(

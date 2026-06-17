@@ -163,6 +163,7 @@ export function MultiFileActionsPanel({
         type: "file_download",
         path: normalizedPath,
         max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
+        follow_symlinks: false,
       };
     }
     if (action === "upload_file") {
@@ -188,7 +189,14 @@ export function MultiFileActionsPanel({
       };
     }
     if (action === "chmod") {
-      return { type: "file_chmod", path: normalizedPath, mode: parseMode(mode), recursive, policy };
+      return {
+        type: "file_chmod",
+        path: normalizedPath,
+        mode: parseMode(mode),
+        recursive,
+        follow_symlinks: false,
+        policy,
+      };
     }
     if (action === "delete") {
       return { type: "file_delete", path: normalizedPath, recursive, policy };
@@ -203,6 +211,7 @@ export function MultiFileActionsPanel({
         new_path: normalizeAbsolutePath(newPath),
         overwrite,
         recursive,
+        follow_symlinks: false,
         policy,
       };
     }

@@ -616,7 +616,8 @@ function SystemConfigPanel({
                   <ConfigNumber path="capacity.dispatcher_in_flight" label="Dispatcher in-flight" parsed={parsedDraft} onChange={updateField} />
                 </ConfigGroup>
                 <ConfigGroup title="Storage" description="Object-store locations and optional S3 buckets.">
-                  <ConfigText path="storage.object_store_dir" label="Object store dir" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="storage.backup_object_store_dir" label="Backup object store dir" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigText path="storage.update_object_store_dir" label="Update object store dir" parsed={parsedDraft} onChange={updateField} />
                   <ConfigText path="storage.object_endpoint" label="Object endpoint" parsed={parsedDraft} onChange={updateField} />
                   <ConfigText path="storage.object_bucket" label="Object bucket" parsed={parsedDraft} onChange={updateField} />
                   <ConfigText path="storage.update_object_bucket" label="Update object bucket" parsed={parsedDraft} onChange={updateField} />

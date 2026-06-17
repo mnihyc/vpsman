@@ -16,7 +16,6 @@ pub(crate) struct AgentUpdateReleaseView {
     pub(crate) artifact_url_sha256_hex: Option<String>,
     pub(crate) artifact_object_key: Option<String>,
     pub(crate) artifact_download_path: Option<String>,
-    pub(crate) artifact_download_url: Option<String>,
     pub(crate) rollback_artifact_sha256_hex: Option<String>,
     pub(crate) rollback_artifact_signature_provided: bool,
     pub(crate) rollback_artifact_signature_sha256_hex: Option<String>,
@@ -24,7 +23,6 @@ pub(crate) struct AgentUpdateReleaseView {
     pub(crate) rollback_artifact_url_sha256_hex: Option<String>,
     pub(crate) rollback_artifact_object_key: Option<String>,
     pub(crate) rollback_artifact_download_path: Option<String>,
-    pub(crate) rollback_artifact_download_url: Option<String>,
     pub(crate) rollback_size_bytes: Option<i64>,
     pub(crate) size_bytes: Option<i64>,
     pub(crate) notes: Option<String>,
@@ -85,7 +83,6 @@ pub(crate) struct StreamedAgentUpdateArtifactView {
     pub(crate) artifact_signing_key_sha256_hex: String,
     pub(crate) artifact_object_key: String,
     pub(crate) artifact_download_path: String,
-    pub(crate) artifact_download_url: Option<String>,
     pub(crate) size_bytes: i64,
 }
 

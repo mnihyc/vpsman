@@ -661,7 +661,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 }
 
 #[tokio::test]
-async fn backup_policy_prune_partial_error_keeps_failed_metadata() {
+async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure() {
     let repo = Repository::Memory(MemoryState::default());
     let object_root = std::env::temp_dir().join(format!(
         "vpsman-api-backup-policy-prune-partial-{}",
@@ -746,15 +746,15 @@ async fn backup_policy_prune_partial_error_keeps_failed_metadata() {
     let policy_result = &pruned.policies[0];
     assert_eq!(policy_result.status, "partial_error");
     assert_eq!(policy_result.matched_rows, 2);
-    assert_eq!(policy_result.pruned_rows, 1);
-    assert_eq!(policy_result.object_keys, vec![missing_ok.clone()]);
+    assert_eq!(policy_result.pruned_rows, 2);
+    assert_eq!(
+        policy_result.object_keys,
+        vec![missing_ok.clone(), delete_fails.clone()]
+    );
     assert_eq!(policy_result.object_delete_errors.len(), 1);
     assert!(policy_result.object_delete_errors[0].contains(&delete_fails));
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
-    assert_eq!(artifacts.len(), 2);
-    assert!(artifacts
-        .iter()
-        .any(|artifact| artifact.object_key == delete_fails));
+    assert_eq!(artifacts.len(), 1);
     assert!(artifacts
         .iter()
         .any(|artifact| artifact.object_key == retained));
@@ -764,7 +764,7 @@ async fn backup_policy_prune_partial_error_keeps_failed_metadata() {
             .iter()
             .filter(|backup| backup.artifact_id.is_some())
             .count(),
-        2
+        1
     );
 
     let _ = tokio::fs::remove_dir_all(object_root).await;
@@ -1460,7 +1460,6 @@ fn test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: None,
         update_object_store: None,
-        update_artifact_public_base_url: None,
         update_release_policy: Default::default(),
         fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
@@ -1482,7 +1481,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
     AppState {
         backup_object_store: Some(store),
         update_object_store: None,
-        update_artifact_public_base_url: None,
         ..test_state(repo)
     }
 }

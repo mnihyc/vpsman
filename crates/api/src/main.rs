@@ -117,6 +117,9 @@ use tokio::{sync::broadcast, time};
 use tracing::info;
 use vpsman_common::{read_secret_file_ref, SuiteConfig};
 
+const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
+const DEFAULT_UPDATE_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/updates";
+
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;
 pub(crate) use security::{
@@ -247,8 +250,6 @@ struct Args {
         default_value_t = false
     )]
     update_object_create_bucket: bool,
-    #[arg(long, env = "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL")]
-    update_artifact_public_base_url: Option<String>,
     #[arg(
         long,
         env = "VPSMAN_AGENT_UPDATE_ALLOWED_CHANNELS",
@@ -391,20 +392,12 @@ impl Args {
         apply_opt_path(
             &mut self.backup_object_store_dir,
             "VPSMAN_BACKUP_OBJECT_STORE_DIR",
-            config
-                .storage
-                .backup_object_store_dir
-                .as_deref()
-                .or(config.storage.object_store_dir.as_deref()),
+            config.storage.backup_object_store_dir.as_deref(),
         );
         apply_opt_path(
             &mut self.update_object_store_dir,
             "VPSMAN_UPDATE_OBJECT_STORE_DIR",
-            config
-                .storage
-                .update_object_store_dir
-                .as_deref()
-                .or(config.storage.object_store_dir.as_deref()),
+            config.storage.update_object_store_dir.as_deref(),
         );
         apply_opt_string(
             &mut self.object_endpoint,
@@ -445,11 +438,6 @@ impl Args {
             &mut self.update_object_create_bucket,
             "VPSMAN_UPDATE_OBJECT_CREATE_BUCKET",
             config.storage.update_object_create_bucket,
-        );
-        apply_opt_string(
-            &mut self.update_artifact_public_base_url,
-            "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL",
-            config.api.update_artifact_public_base_url.as_deref(),
         );
         if env_absent("VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES") {
             if let Some(value) = config.api.job_output_artifact_min_bytes {
@@ -631,21 +619,13 @@ async fn main() -> Result<()> {
             ),
         },
     );
-    let backup_configured_object_store = build_backup_object_store(&args)?;
-    let update_configured_object_store = build_update_object_store(&args)?;
-    let artifact_object_store = backup_configured_object_store
-        .or(update_configured_object_store)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "artifact object storage must be configured with VPSMAN_BACKUP_OBJECT_STORE_DIR or VPSMAN_OBJECT_* S3 settings"
-            )
-        })?;
+    let backup_object_store = build_backup_object_store(&args)?;
+    let update_object_store = build_update_object_store(&args)?;
     info!(
-        kind = artifact_object_store.kind(),
-        "artifact object store enabled for backups, transfers, job outputs, and hosted updates"
+        backup_kind = backup_object_store.kind(),
+        update_kind = update_object_store.kind(),
+        "object stores enabled for backup/general artifacts and hosted updates"
     );
-    let update_artifact_public_base_url =
-        parse_public_update_artifact_base_url(args.update_artifact_public_base_url.as_deref())?;
     let update_release_policy = UpdateReleasePolicy::new(
         args.agent_update_allowed_channels.clone(),
         args.agent_update_trusted_signing_keys_hex.clone(),
@@ -668,9 +648,8 @@ async fn main() -> Result<()> {
         events,
         internal_token: Some(internal_token),
         gateway,
-        backup_object_store: Some(artifact_object_store.clone()),
-        update_object_store: Some(artifact_object_store),
-        update_artifact_public_base_url,
+        backup_object_store: Some(backup_object_store),
+        update_object_store: Some(update_object_store),
         update_release_policy,
         fleet_alert_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
@@ -761,7 +740,7 @@ fn forbidden_api_privilege_env_var(mut present: impl FnMut(&str) -> bool) -> Opt
     FORBIDDEN_ENV.iter().copied().find(|name| present(name))
 }
 
-fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+fn build_backup_object_store(args: &Args) -> Result<BackupObjectStore> {
     if let Some(store) = args
         .backup_object_store_dir
         .clone()
@@ -769,7 +748,7 @@ fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         .map(BackupObjectStore::filesystem)
         .transpose()?
     {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
     if let Some(store) = build_s3_object_store(
@@ -781,13 +760,13 @@ fn build_backup_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         args.object_create_bucket,
         "S3 object storage requires VPSMAN_OBJECT_ENDPOINT, VPSMAN_OBJECT_BUCKET, VPSMAN_OBJECT_ACCESS_KEY, and VPSMAN_OBJECT_SECRET_KEY",
     )? {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
-    Ok(None)
+    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_BACKUP_OBJECT_STORE_DIR))
 }
 
-fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
+fn build_update_object_store(args: &Args) -> Result<BackupObjectStore> {
     if let Some(store) = args
         .update_object_store_dir
         .clone()
@@ -795,7 +774,7 @@ fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         .map(BackupObjectStore::filesystem)
         .transpose()?
     {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
     if let Some(store) = build_s3_object_store(
@@ -807,25 +786,10 @@ fn build_update_object_store(args: &Args) -> Result<Option<BackupObjectStore>> {
         args.update_object_create_bucket,
         "S3 update object storage requires VPSMAN_UPDATE_OBJECT_ENDPOINT, VPSMAN_UPDATE_OBJECT_BUCKET, VPSMAN_UPDATE_OBJECT_ACCESS_KEY, and VPSMAN_UPDATE_OBJECT_SECRET_KEY",
     )? {
-        return Ok(Some(store));
+        return Ok(store);
     }
 
-    Ok(None)
-}
-
-fn parse_public_update_artifact_base_url(value: Option<&str>) -> Result<Option<String>> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        value.starts_with("https://"),
-        "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL must start with https://"
-    );
-    anyhow::ensure!(
-        !value.as_bytes().contains(&0),
-        "VPSMAN_UPDATE_ARTIFACT_PUBLIC_BASE_URL contains a NUL byte"
-    );
-    Ok(Some(value.trim_end_matches('/').to_string()))
+    BackupObjectStore::filesystem(PathBuf::from(DEFAULT_UPDATE_OBJECT_STORE_DIR))
 }
 
 fn build_s3_object_store(

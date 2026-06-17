@@ -211,7 +211,9 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             limit,
             show_hidden: _,
         } => validate_file_list_dir(path, *limit),
-        JobCommand::FileReadText { path, max_bytes } => validate_file_read_text(path, *max_bytes),
+        JobCommand::FileReadText {
+            path, max_bytes, ..
+        } => validate_file_read_text(path, *max_bytes),
         JobCommand::FileWriteText {
             path,
             mode,
@@ -250,6 +252,7 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             path,
             mode,
             recursive: _,
+            follow_symlinks: _,
             policy: _,
         } => validate_file_chmod(path, *mode),
         JobCommand::FileChown {
@@ -276,12 +279,15 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             new_path,
             overwrite: _,
             recursive: _,
+            follow_symlinks: _,
             policy: _,
         } => validate_file_copy(path, new_path),
-        JobCommand::FileDownload { path, max_bytes } => validate_file_download(path, *max_bytes),
-        JobCommand::FileArchiveTar { path, max_bytes } => {
-            validate_file_archive_tar(path, *max_bytes)
-        }
+        JobCommand::FileDownload {
+            path, max_bytes, ..
+        } => validate_file_download(path, *max_bytes),
+        JobCommand::FileArchiveTar {
+            path, max_bytes, ..
+        } => validate_file_archive_tar(path, *max_bytes),
         _ => return None,
     })
 }

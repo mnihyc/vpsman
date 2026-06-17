@@ -767,32 +767,46 @@ async fn prune_postgres_history_retention_object_candidate(
     pool: &sqlx::PgPool,
     candidate: &HistoryRetentionObjectCandidate,
 ) -> Result<i64> {
-    let result = match candidate {
+    match candidate {
         HistoryRetentionObjectCandidate::JobOutput {
             job_id,
             client_id,
             seq,
             ..
-        } => {
-            sqlx::query(
-                r#"
-                DELETE FROM job_outputs
-                WHERE job_id = $1
-                  AND client_id = $2
-                  AND seq = $3
+        } => sqlx::query_scalar::<_, i64>(
+            r#"
+                WITH deleted_outputs AS (
+                    DELETE FROM job_outputs
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND seq = $3
+                    RETURNING object_key
+                ),
+                marked_artifacts AS (
+                    UPDATE server_artifacts artifact
+                    SET status = 'deleting'
+                    FROM deleted_outputs deleted
+                    WHERE deleted.object_key IS NOT NULL
+                      AND artifact.object_key = deleted.object_key
+                      AND artifact.status = 'active'
+                    RETURNING artifact.id
+                )
+                SELECT count(*)::bigint FROM deleted_outputs
                 "#,
-            )
-            .bind(job_id)
-            .bind(client_id)
-            .bind(seq)
-            .execute(pool)
-            .await?
-        }
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(seq)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into),
         HistoryRetentionObjectCandidate::BackupArtifact { artifact_id, .. } => {
-            sqlx::query(
+            sqlx::query_scalar::<_, i64>(
                 r#"
                 WITH doomed AS (
-                    SELECT $1::uuid AS artifact_id
+                    SELECT artifact.id AS artifact_id, artifact.object_key
+                    FROM backup_artifacts artifact
+                    WHERE artifact.id = $1
                 ),
                 cleared_requests AS (
                     UPDATE backup_requests request
@@ -801,18 +815,30 @@ async fn prune_postgres_history_retention_object_candidate(
                     FROM doomed
                     WHERE request.artifact_id = doomed.artifact_id
                     RETURNING request.id
+                ),
+                deleted_artifacts AS (
+                    DELETE FROM backup_artifacts artifact
+                    USING doomed
+                    WHERE artifact.id = doomed.artifact_id
+                    RETURNING artifact.object_key
+                ),
+                marked_artifacts AS (
+                    UPDATE server_artifacts artifact
+                    SET status = 'deleting'
+                    FROM deleted_artifacts deleted
+                    WHERE artifact.object_key = deleted.object_key
+                      AND artifact.status = 'active'
+                    RETURNING artifact.id
                 )
-                DELETE FROM backup_artifacts artifact
-                USING doomed
-                WHERE artifact.id = doomed.artifact_id
+                SELECT count(*)::bigint FROM deleted_artifacts
                 "#,
             )
             .bind(artifact_id)
-            .execute(pool)
-            .await?
+            .fetch_one(pool)
+            .await
+            .map_err(Into::into)
         }
-    };
-    Ok(result.rows_affected() as i64)
+    }
 }
 
 async fn prune_postgres_history_domain(

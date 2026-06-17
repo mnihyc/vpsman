@@ -43,7 +43,7 @@ backup_policy_prune_limit = 50
 backup_policy_prune_dry_run = false
 backup_policy_prune_include_disabled = false
 backup_policy_prune_delete_objects = false
-backup_policy_prune_object_store_dir = "/var/lib/vpsman/objects"
+backup_policy_prune_object_store_dir = "/var/lib/vpsman/objects/backups"
 schedule_command_timeout_secs = 30
 require_registered_agent_updates = false
 
@@ -52,7 +52,8 @@ postgres_url = "postgres://vpsman:vpsman@postgres:5432/vpsman"
 migrations_dir = "/opt/vpsman/migrations"
 
 [storage]
-object_store_dir = "/var/lib/vpsman/objects"
+backup_object_store_dir = "/var/lib/vpsman/objects/backups"
+update_object_store_dir = "/var/lib/vpsman/objects/updates"
 object_region = "us-east-1"
 object_create_bucket = false
 update_object_region = "us-east-1"

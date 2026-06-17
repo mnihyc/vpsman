@@ -376,6 +376,7 @@ mod tests {
         let command = JobCommand::FileDownload {
             path: "/tmp/a".to_string(),
             max_bytes: 1,
+            follow_symlinks: false,
         };
         assert_eq!(job_command_type_label(&command), "file_download");
         assert_eq!(

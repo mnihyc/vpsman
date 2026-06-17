@@ -139,14 +139,17 @@ pub(crate) async fn prune_backup_policies(
                 object_delete_attempted = true;
                 if let Some(store) = state.backup_object_store.as_ref() {
                     for candidate in &candidates {
+                        let rows = state
+                            .repo
+                            .prune_backup_policy_candidate_metadata(candidate)
+                            .await?;
+                        pruned_rows += rows;
+                        if rows == 0 {
+                            continue;
+                        }
+                        object_keys.push(candidate.object_key.clone());
                         match store.delete_confirmed(&candidate.object_key).await {
-                            Ok(()) => {
-                                pruned_rows += state
-                                    .repo
-                                    .prune_backup_policy_candidate_metadata(candidate)
-                                    .await?;
-                                object_keys.push(candidate.object_key.clone());
-                            }
+                            Ok(()) => {}
                             Err(error) => {
                                 object_delete_errors
                                     .push(format!("{}: {error}", candidate.object_key));

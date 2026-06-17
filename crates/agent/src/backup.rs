@@ -1,4 +1,9 @@
-use std::{os::unix::fs::PermissionsExt, path::Path, time::UNIX_EPOCH};
+use std::{
+    io::{self, Write},
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    time::UNIX_EPOCH,
+};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -10,6 +15,7 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
+    io::AsyncReadExt,
     sync::mpsc,
     time::{self, Duration},
 };
@@ -25,6 +31,47 @@ pub(crate) const BACKUP_ARTIFACT_FORMAT: &str = "vpsman.backup_artifact.v1";
 pub(crate) const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
 pub(crate) const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_PATHS: usize = 64;
+
+struct LimitedVecWriter {
+    inner: Vec<u8>,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl LimitedVecWriter {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            inner: Vec::new(),
+            written: 0,
+            max_bytes,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.inner
+    }
+}
+
+impl Write for LimitedVecWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let next = self
+            .written
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| io::Error::other("backup archive size overflow"))?;
+        if next > self.max_bytes {
+            return Err(io::Error::other(
+                "backup archive exceeds configured plaintext byte limit",
+            ));
+        }
+        self.inner.extend_from_slice(buf);
+        self.written = next;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct BackupArchive {
@@ -152,7 +199,7 @@ async fn create_encrypted_backup(
         created_unix,
         files: files.iter().map(|file| file.entry.clone()).collect(),
     };
-    let plaintext = encode_backup_tar_archive(&archive, &files)
+    let plaintext = encode_backup_tar_archive(&archive, &files, config.backup.max_plaintext_bytes)
         .context("failed to encode backup tar archive")?;
     cancel_token.check("backup")?;
     if plaintext.len() as u64 > config.backup.max_plaintext_bytes {
@@ -290,19 +337,18 @@ async fn read_backup_file(
     if !metadata.is_file() {
         anyhow::bail!("backup path is not a regular file: {}", path.display());
     }
-    *total_bytes = total_bytes
-        .checked_add(metadata.len())
-        .context("backup size overflow")?;
-    if *total_bytes > max_plaintext_bytes {
+    let remaining = max_plaintext_bytes.saturating_sub(*total_bytes);
+    if metadata.len() > remaining {
         anyhow::bail!(
             "backup scope exceeds plaintext limit: {} > {} bytes",
-            *total_bytes,
+            (*total_bytes).saturating_add(metadata.len()),
             max_plaintext_bytes
         );
     }
-    let data = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("failed to read backup path {}", path.display()))?;
+    let data = read_backup_file_bounded(path, remaining).await?;
+    *total_bytes = total_bytes
+        .checked_add(data.len() as u64)
+        .context("backup size overflow")?;
     cancel_token.check("backup")?;
     let mtime_unix = metadata
         .modified()
@@ -326,8 +372,9 @@ async fn read_backup_file(
 fn encode_backup_tar_archive(
     archive: &BackupArchive,
     files: &[BackupFilePayload],
+    max_plaintext_bytes: u64,
 ) -> Result<Vec<u8>> {
-    let mut builder = tar::Builder::new(Vec::new());
+    let mut builder = tar::Builder::new(LimitedVecWriter::new(max_plaintext_bytes));
     let manifest =
         serde_json::to_vec(archive).context("failed to encode backup archive manifest")?;
     append_tar_bytes(
@@ -349,13 +396,40 @@ fn encode_backup_tar_archive(
     builder
         .finish()
         .context("failed to finish backup tar archive")?;
-    builder
+    Ok(builder
         .into_inner()
-        .context("failed to collect backup tar archive")
+        .context("failed to collect backup tar archive")?
+        .into_inner())
 }
 
-fn append_tar_bytes(
-    builder: &mut tar::Builder<Vec<u8>>,
+async fn read_backup_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open backup path {}", path.display()))?;
+    let mut data = Vec::with_capacity((max_bytes.min(16 * 1024)) as usize);
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read backup path {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("backup file size overflow")?;
+        if total > max_bytes {
+            anyhow::bail!("backup file exceeds remaining plaintext limit while reading");
+        }
+        data.extend_from_slice(&buffer[..read]);
+    }
+    Ok(data)
+}
+
+fn append_tar_bytes<W: Write>(
+    builder: &mut tar::Builder<W>,
     path: &str,
     mode: u32,
     mtime_unix: u64,

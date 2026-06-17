@@ -11,10 +11,11 @@ use crate::{
     fleet_alerts::FleetAlertPolicy,
     gateway_client::GatewayDispatchClient,
     model::{
-        AgentUpdateReleaseView, AuthContext, BackupArtifactView, BackupRequestView,
-        MigrationLinkView, NetworkObservationTrendView, NetworkOspfRecommendationView,
-        RestorePlanView, TunnelPlanView, WsEvent,
+        AuthContext, BackupArtifactView, BackupRequestView, MigrationLinkView,
+        NetworkObservationTrendView, NetworkOspfRecommendationView, RestorePlanView,
+        TunnelPlanView, WsEvent,
     },
+    model_agent_updates::AgentUpdateReleaseView,
     model_data_sources::DataSourceStatusView,
     object_store::BackupObjectStore,
     repository::Repository,
@@ -33,7 +34,6 @@ pub(crate) struct AppState {
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
     pub(crate) update_object_store: Option<BackupObjectStore>,
-    pub(crate) update_artifact_public_base_url: Option<String>,
     pub(crate) update_release_policy: UpdateReleasePolicy,
     pub(crate) fleet_alert_policy: FleetAlertPolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
@@ -317,24 +317,6 @@ impl UpdateReleasePolicy {
 }
 
 impl AppState {
-    pub(crate) fn enrich_agent_update_release_urls(
-        &self,
-        mut release: AgentUpdateReleaseView,
-    ) -> AgentUpdateReleaseView {
-        if let Some(path) = release.artifact_download_path.as_deref() {
-            release.artifact_download_url = self.public_update_artifact_url(path);
-        }
-        if let Some(path) = release.rollback_artifact_download_path.as_deref() {
-            release.rollback_artifact_download_url = self.public_update_artifact_url(path);
-        }
-        release
-    }
-
-    pub(crate) fn public_update_artifact_url(&self, path: &str) -> Option<String> {
-        let base = self.update_artifact_public_base_url.as_deref()?;
-        Some(format!("{}{}", base.trim_end_matches('/'), path))
-    }
-
     pub(crate) async fn list_data_source_status(
         &self,
         client_id: Option<&str>,

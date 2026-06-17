@@ -81,7 +81,8 @@ docker compose up -d
 Persistent runtime data stays in checkout-local paths:
 
 - PostgreSQL: `deploy/runtime/postgres/data`
-- local object storage: `deploy/runtime/data`
+- local object storage: `deploy/runtime/data/objects/backups` and
+  `deploy/runtime/data/objects/updates`
 
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.

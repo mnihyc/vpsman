@@ -168,11 +168,13 @@ async fn prune_backup_policy(
             .as_ref()
             .expect("object store checked before pruning");
         for candidate in &candidates {
+            let rows = prune_backup_policy_rows(pool, std::slice::from_ref(candidate)).await?;
+            pruned_rows += rows;
+            if rows == 0 {
+                continue;
+            }
             match object_store.delete_confirmed(&candidate.object_key).await {
-                Ok(()) => {
-                    pruned_rows +=
-                        prune_backup_policy_rows(pool, std::slice::from_ref(candidate)).await?;
-                }
+                Ok(()) => {}
                 Err(error) => {
                     object_delete_errors.push(format!("{}: {error}", candidate.object_key));
                     break;
@@ -232,11 +234,19 @@ async fn prune_backup_policy_rows(
         .iter()
         .map(|candidate| candidate.artifact_id)
         .collect::<Vec<_>>();
-    let result = sqlx::query(
+    let pruned_rows = sqlx::query_scalar::<_, i64>(
         r#"
-        WITH doomed AS (
+        WITH selected AS (
             SELECT *
             FROM unnest($1::uuid[], $2::uuid[]) AS doomed(request_id, artifact_id)
+        ),
+        doomed AS (
+            SELECT
+                selected.request_id,
+                artifact.id AS artifact_id,
+                artifact.object_key
+            FROM selected
+            JOIN backup_artifacts artifact ON artifact.id = selected.artifact_id
         ),
         cleared_requests AS (
             UPDATE backup_requests request
@@ -246,17 +256,29 @@ async fn prune_backup_policy_rows(
             WHERE request.id = doomed.request_id
               AND request.artifact_id = doomed.artifact_id
             RETURNING request.id
+        ),
+        deleted_artifacts AS (
+            DELETE FROM backup_artifacts artifact
+            USING doomed
+            WHERE artifact.id = doomed.artifact_id
+            RETURNING artifact.object_key
+        ),
+        marked_artifacts AS (
+            UPDATE server_artifacts artifact
+            SET status = 'deleting'
+            FROM deleted_artifacts deleted
+            WHERE artifact.object_key = deleted.object_key
+              AND artifact.status = 'active'
+            RETURNING artifact.id
         )
-        DELETE FROM backup_artifacts artifact
-        USING doomed
-        WHERE artifact.id = doomed.artifact_id
+        SELECT count(*)::bigint FROM deleted_artifacts
         "#,
     )
     .bind(request_ids)
     .bind(artifact_ids)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(result.rows_affected() as i64)
+    Ok(pruned_rows)
 }
 
 async fn insert_prune_audit(
