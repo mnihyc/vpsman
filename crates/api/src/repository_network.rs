@@ -474,6 +474,10 @@ impl Repository {
         if job_status != "completed" {
             return Ok(());
         }
+        if let Some(update) = tunnel_plan_ospf_cost_update(job_id, operation) {
+            self.record_tunnel_plan_ospf_cost_update(&update).await?;
+            return Ok(());
+        }
         let Some(update) = tunnel_plan_status_update(job_id, operation) else {
             return Ok(());
         };
@@ -599,6 +603,134 @@ impl Repository {
                 .bind(format!("tunnel_plan:{plan_id}"))
                 .bind(tunnel_plan_state_metadata(&update, status.as_str()))
                 .bind(job_id.to_string())
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_tunnel_plan_ospf_cost_update(
+        &self,
+        update: &TunnelPlanOspfCostUpdate,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let Some((plan_id, status, result)) = ({
+                    let mut plans = memory.tunnel_plans.write().await;
+                    let Some(plan) = plans
+                        .iter_mut()
+                        .find(|plan| plan.name == update.plan_name && plan.deleted_at.is_none())
+                    else {
+                        return Ok(());
+                    };
+                    let result = if plan.recommended_ospf_cost
+                        == i32::from(update.recommended_ospf_cost)
+                    {
+                        "idempotent"
+                    } else if plan.recommended_ospf_cost == i32::from(update.current_ospf_cost) {
+                        plan.recommended_ospf_cost = i32::from(update.recommended_ospf_cost);
+                        plan.plan = update.plan.clone();
+                        plan.updated_at = now.clone();
+                        "updated"
+                    } else {
+                        "stale_ignored"
+                    };
+                    Some((plan.id, plan.status.clone(), result))
+                }) else {
+                    return Ok(());
+                };
+                let mut audits = memory.audits.write().await;
+                let job_id_string = update.job_id.to_string();
+                if !audits.iter().any(|audit| {
+                    audit.action == "network.tunnel_plan_ospf_cost_updated"
+                        && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
+                }) {
+                    audits.push(tunnel_plan_ospf_cost_audit(
+                        plan_id,
+                        update,
+                        status.as_str(),
+                        result,
+                        now,
+                    ));
+                }
+            }
+            Self::Postgres(pool) => {
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE tunnel_plans
+                    SET
+                        recommended_ospf_cost = $2,
+                        plan = $3,
+                        updated_at = now()
+                    WHERE name = $1
+                      AND deleted_at IS NULL
+                      AND recommended_ospf_cost = $4
+                    RETURNING id, status
+                    "#,
+                )
+                .bind(update.plan_name.as_str())
+                .bind(i32::from(update.recommended_ospf_cost))
+                .bind(SqlJson(&update.plan))
+                .bind(i32::from(update.current_ospf_cost))
+                .fetch_optional(pool)
+                .await?;
+                let (plan_id, status, result) = if let Some(row) = updated {
+                    (
+                        row.try_get::<Uuid, _>("id")?,
+                        row.try_get::<String, _>("status")?,
+                        "updated",
+                    )
+                } else {
+                    let Some(row) = sqlx::query(
+                        r#"
+                        SELECT id, status, recommended_ospf_cost
+                        FROM tunnel_plans
+                        WHERE name = $1 AND deleted_at IS NULL
+                        "#,
+                    )
+                    .bind(update.plan_name.as_str())
+                    .fetch_optional(pool)
+                    .await?
+                    else {
+                        return Ok(());
+                    };
+                    let current: i32 = row.try_get("recommended_ospf_cost")?;
+                    let result = if current == i32::from(update.recommended_ospf_cost) {
+                        "idempotent"
+                    } else {
+                        "stale_ignored"
+                    };
+                    (
+                        row.try_get::<Uuid, _>("id")?,
+                        row.try_get::<String, _>("status")?,
+                        result,
+                    )
+                };
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    SELECT $1, NULL, 'network.tunnel_plan_ospf_cost_updated', $2, NULL, $3
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM audit_logs
+                        WHERE action = 'network.tunnel_plan_ospf_cost_updated'
+                          AND target = $2
+                          AND metadata->>'job_id' = $4
+                    )
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(format!("tunnel_plan:{plan_id}"))
+                .bind(tunnel_plan_ospf_cost_metadata(
+                    update,
+                    status.as_str(),
+                    result,
+                ))
+                .bind(update.job_id.to_string())
                 .execute(pool)
                 .await?;
             }
@@ -793,6 +925,15 @@ struct TunnelPlanStatusUpdate {
     job_id: Uuid,
 }
 
+struct TunnelPlanOspfCostUpdate {
+    plan_name: String,
+    side: TunnelEndpointSide,
+    plan: TunnelPlan,
+    current_ospf_cost: u16,
+    recommended_ospf_cost: u16,
+    job_id: Uuid,
+}
+
 fn repair_can_record_tunnel_execution(
     plan: &TunnelPlanView,
     update: &TunnelPlanStatusUpdate,
@@ -805,6 +946,29 @@ fn repair_can_record_tunnel_execution(
         TunnelPlanExecutionKind::Rollback => plan
             .last_rollback_job_id
             .is_none_or(|last_job_id| last_job_id == job_id),
+    }
+}
+
+fn tunnel_plan_ospf_cost_update(
+    job_id: Uuid,
+    operation: &JobCommand,
+) -> Option<TunnelPlanOspfCostUpdate> {
+    match operation {
+        JobCommand::NetworkOspfCostUpdate {
+            plan,
+            side,
+            current_ospf_cost,
+            recommended_ospf_cost,
+            ..
+        } => Some(TunnelPlanOspfCostUpdate {
+            plan_name: plan.name.clone(),
+            side: *side,
+            plan: (**plan).clone(),
+            current_ospf_cost: *current_ospf_cost,
+            recommended_ospf_cost: *recommended_ospf_cost,
+            job_id,
+        }),
+        _ => None,
     }
 }
 
@@ -835,6 +999,40 @@ fn tunnel_plan_status_update(
         }),
         _ => None,
     }
+}
+
+fn tunnel_plan_ospf_cost_audit(
+    plan_id: Uuid,
+    update: &TunnelPlanOspfCostUpdate,
+    aggregate_status: &str,
+    result: &str,
+    created_at: String,
+) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        action: "network.tunnel_plan_ospf_cost_updated".to_string(),
+        target: format!("tunnel_plan:{plan_id}"),
+        command_hash: None,
+        metadata: tunnel_plan_ospf_cost_metadata(update, aggregate_status, result),
+        created_at,
+    }
+}
+
+fn tunnel_plan_ospf_cost_metadata(
+    update: &TunnelPlanOspfCostUpdate,
+    aggregate_status: &str,
+    result: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": update.job_id,
+        "plan_name": &update.plan_name,
+        "side": side_name(update.side),
+        "current_ospf_cost": update.current_ospf_cost,
+        "recommended_ospf_cost": update.recommended_ospf_cost,
+        "aggregate_status": aggregate_status,
+        "result": result,
+    })
 }
 
 fn aggregate_tunnel_plan_status<'a>(

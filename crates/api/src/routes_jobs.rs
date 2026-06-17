@@ -759,7 +759,7 @@ fn busy_update_skip_outcome(
         "status": TARGET_STATUS_SKIPPED,
         "client_id": skip.client_id,
         "command_type": crate::job_request::job_command_type_label(command),
-        "reason": "target_has_another_active_job",
+        "reason": "busy_agent_active_jobs",
         "hint": "update command was not dispatched because the client already has another active job target",
     });
     Ok(TargetDispatchOutcome {
@@ -768,7 +768,8 @@ fn busy_update_skip_outcome(
         #[cfg(test)]
         command_version: None,
         accepted: true,
-        message: "target has another active job; update skipped".to_string(),
+        message: "busy_agent_active_jobs: target has another active job; update skipped"
+            .to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

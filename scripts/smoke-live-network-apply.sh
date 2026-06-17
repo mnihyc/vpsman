@@ -43,6 +43,7 @@ adapter_script="$SMOKE_TMPDIR/runtime-adapter.sh"
 adapter_plan_file="$SMOKE_TMPDIR/runtime-adapter-plan.json"
 adapter_apply_status_file="$SMOKE_TMPDIR/runtime-adapter-apply-status.json"
 adapter_rollback_status_file="$SMOKE_TMPDIR/runtime-adapter-rollback-status.json"
+ospf_update_status_file="$SMOKE_TMPDIR/ospf-cost-update-status.json"
 network_root="$SMOKE_TMPDIR/network-root"
 ifupdown_file="$network_root/etc/network/interfaces.d/vpsman-tunnels"
 bird2_file="$network_root/etc/bird/vpsman-ospf.conf"
@@ -53,6 +54,9 @@ rollback_status_file="$SMOKE_TMPDIR/rollback-status.json"
 adapter_plan_id=""
 adapter_apply_job_id=""
 adapter_rollback_job_id=""
+ospf_update_job_id=""
+ospf_current_cost=""
+ospf_recommended_cost=""
 mkdir -p "$(dirname "$ifupdown_file")" "$(dirname "$bird2_file")"
 printf '# unmanaged ifupdown\n' >"$expected_ifupdown"
 printf '# unmanaged bird2\n' >"$expected_bird2"
@@ -210,6 +214,7 @@ assert_outputs_redacted() {
   decoded_outputs="$(
     for job_id in \
       "$apply_job_id" \
+      "${ospf_update_job_id:-}" \
       "$rollback_job_id" \
       "${adapter_apply_job_id:-}" \
       "${adapter_rollback_job_id:-}"; do
@@ -255,6 +260,68 @@ assert_apply_evidence() {
   while IFS= read -r backup_path; do
     [[ -f "$backup_path" ]]
   done < <(jq -r '.applied_files[].backup_path' "$apply_status_file")
+}
+
+assert_ospf_cost_update_persisted() {
+  local audits_json
+  assert_job_completed "$ospf_update_job_id" "network_ospf_cost_update"
+  status_output_for_job "$ospf_update_job_id" "$ospf_update_status_file"
+  jq -e \
+    --arg client "$client_id" \
+    --arg peer "$peer_client_id" \
+    --argjson current_cost "$ospf_current_cost" \
+    --argjson recommended_cost "$ospf_recommended_cost" '
+      .type == "network_ospf_cost_update"
+        and .plan == "live-apply"
+        and .interface == "vpsap0"
+        and .side == "left"
+        and .client_id == $client
+        and .peer_client_id == $peer
+        and .current_ospf_cost == $current_cost
+        and .recommended_ospf_cost == $recommended_cost
+        and .rollback_mode == "apply_previous_cost"
+        and ([.applied_files[] | select(
+          .changed == true
+          and (.backup_path != null)
+          and (.sha256_hex | test("^[0-9a-f]{64}$"))
+        )] | length == 1)
+        and (.validation | length == 0)
+        and (.reload | length == 0)
+    ' "$ospf_update_status_file" >/dev/null
+  audits_json="$(api_get "/api/v1/audit?limit=100")"
+  jq -e --arg job_id "$ospf_update_job_id" '
+    any(.[]; .action == "network.tunnel_plan_ospf_cost_updated"
+      and .metadata.job_id == $job_id
+      and .metadata.result == "updated")
+  ' <<<"$audits_json" >/dev/null
+}
+
+assert_ospf_cost_update_evidence() {
+  local plans_json
+  assert_ospf_cost_update_persisted
+  grep -q "cost $ospf_recommended_cost;" "$bird2_file"
+  if grep -q "cost $ospf_current_cost;" "$bird2_file"; then
+    echo "old OSPF cost remained after cost update" >&2
+    cat "$bird2_file" >&2
+    exit 1
+  fi
+  plans_json="$(api_get "/api/v1/tunnel-plans")"
+  if ! jq -e \
+    --arg apply_job_id "$apply_job_id" \
+    --argjson recommended_cost "$ospf_recommended_cost" '
+      .[] | select(.name == "live-apply")
+      | .recommended_ospf_cost == $recommended_cost
+        and .plan.recommended_ospf_cost == $recommended_cost
+        and .left_status == "applied"
+        and .right_status == "planned"
+        and .status == "partially_applied"
+        and .last_apply_job_id == $apply_job_id
+        and .last_rollback_job_id == null
+    ' <<<"$plans_json" >/dev/null; then
+    echo "unexpected tunnel plan state after OSPF cost update" >&2
+    printf '%s\n' "$plans_json" >&2
+    exit 1
+  fi
 }
 
 assert_rollback_evidence() {
@@ -644,6 +711,28 @@ grep -q '# unmanaged bird2' "$bird2_file"
 assert_apply_evidence
 assert_tunnel_plan_after_apply
 
+ospf_current_cost="$(jq -r '.recommended_ospf_cost' "$network_plan_file")"
+ospf_recommended_cost="$((ospf_current_cost + 9))"
+ospf_update_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" tunnel-ospf-cost-update \
+    --plan-file "$network_plan_file" \
+    --side left \
+    --current-ospf-cost "$ospf_current_cost" \
+    --recommended-ospf-cost "$ospf_recommended_cost" \
+    --super-salt-hex "$super_salt_hex" \
+    --timeout-secs 10 \
+    --force-unprivileged \
+    --confirmed)"
+ospf_update_job_id="$(jq -r '.job_id' <<<"$ospf_update_json")"
+smoke_assert_job_create_queued "$ospf_update_json" 1
+smoke_wait_api_job_status "$api_url" "$ospf_update_job_id" completed 45 >/dev/null
+assert_ospf_cost_update_evidence
+jq --argjson recommended_cost "$ospf_recommended_cost" \
+  '.recommended_ospf_cost = $recommended_cost' \
+  "$network_plan_file" >"$network_plan_file.tmp"
+mv "$network_plan_file.tmp" "$network_plan_file"
+
 rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" tunnel-rollback \
@@ -764,6 +853,7 @@ stop_api
 start_api "restart"
 api_get "/api/v1/auth/me" | jq -e '.username == "network-apply-smoke"' >/dev/null
 assert_apply_evidence
+assert_ospf_cost_update_persisted
 assert_rollback_evidence
 assert_tunnel_plan_after_rollback
 assert_adapter_promotion_evidence
@@ -778,6 +868,7 @@ jq -n \
   --arg client_id "$client_id" \
   --arg peer_client_id "$peer_client_id" \
   --arg apply_job_id "$apply_job_id" \
+  --arg ospf_update_job_id "$ospf_update_job_id" \
   --arg rollback_job_id "$rollback_job_id" \
   --arg adapter_plan_id "$adapter_plan_id" \
   --arg adapter_apply_job_id "$adapter_apply_job_id" \
@@ -796,6 +887,7 @@ jq -n \
     client_id: $client_id,
     peer_client_id: $peer_client_id,
     apply_job_id: $apply_job_id,
+    ospf_update_job_id: $ospf_update_job_id,
     rollback_job_id: $rollback_job_id,
     adapter_plan_id: $adapter_plan_id,
     adapter_apply_job_id: $adapter_apply_job_id,

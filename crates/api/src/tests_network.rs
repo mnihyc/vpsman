@@ -484,6 +484,108 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
 }
 
 #[tokio::test]
+async fn completed_ospf_cost_update_syncs_canonical_tunnel_plan_cost_only() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+        },
+        session_id: Uuid::nil(),
+    };
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    repo.record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+
+    let current_ospf_cost = plan.recommended_ospf_cost;
+    let recommended_ospf_cost = current_ospf_cost + 10;
+    let mut proposed_plan = plan.clone();
+    proposed_plan.recommended_ospf_cost = recommended_ospf_cost;
+    let endpoint = render_tunnel_endpoint_config(&proposed_plan, TunnelEndpointSide::Left).unwrap();
+    let operation = JobCommand::NetworkOspfCostUpdate {
+        plan: Box::new(proposed_plan.clone()),
+        side: TunnelEndpointSide::Left,
+        current_ospf_cost,
+        recommended_ospf_cost,
+        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
+    };
+    let job_id = Uuid::new_v4();
+
+    repo.record_tunnel_plan_execution(job_id, &operation, "failed")
+        .await
+        .unwrap();
+    let plans = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(plans[0].recommended_ospf_cost, i32::from(current_ospf_cost));
+    assert_eq!(plans[0].plan.recommended_ospf_cost, current_ospf_cost);
+
+    repo.record_tunnel_plan_execution(job_id, &operation, "completed")
+        .await
+        .unwrap();
+    repo.record_tunnel_plan_execution(job_id, &operation, "completed")
+        .await
+        .unwrap();
+    let plans = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(
+        plans[0].recommended_ospf_cost,
+        i32::from(recommended_ospf_cost)
+    );
+    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
+    assert_eq!(plans[0].left_status, "planned");
+    assert_eq!(plans[0].right_status, "planned");
+    assert_eq!(plans[0].status, "planned");
+    assert_eq!(plans[0].last_apply_job_id, None);
+    assert_eq!(plans[0].last_rollback_job_id, None);
+
+    let stale_job_id = Uuid::new_v4();
+    let stale_recommended = recommended_ospf_cost + 10;
+    let mut stale_plan = proposed_plan;
+    stale_plan.recommended_ospf_cost = stale_recommended;
+    let stale_endpoint =
+        render_tunnel_endpoint_config(&stale_plan, TunnelEndpointSide::Left).unwrap();
+    let stale_operation = JobCommand::NetworkOspfCostUpdate {
+        plan: Box::new(stale_plan),
+        side: TunnelEndpointSide::Left,
+        current_ospf_cost,
+        recommended_ospf_cost: stale_recommended,
+        bird2_sha256_hex: payload_hash(stale_endpoint.bird2_interface_snippet.as_bytes()),
+    };
+    repo.record_tunnel_plan_execution(stale_job_id, &stale_operation, "completed")
+        .await
+        .unwrap();
+    let plans = repo.list_tunnel_plans().await.unwrap();
+    assert_eq!(
+        plans[0].recommended_ospf_cost,
+        i32::from(recommended_ospf_cost)
+    );
+    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
+
+    let job_id_string = job_id.to_string();
+    let stale_job_id_string = stale_job_id.to_string();
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|audit| {
+                audit.action == "network.tunnel_plan_ospf_cost_updated"
+                    && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
+            })
+            .count(),
+        1
+    );
+    assert!(audits.iter().any(|audit| {
+        audit.action == "network.tunnel_plan_ospf_cost_updated"
+            && audit.metadata["job_id"].as_str() == Some(stale_job_id_string.as_str())
+            && audit.metadata["result"].as_str() == Some("stale_ignored")
+    }));
+}
+
+#[tokio::test]
 async fn completed_network_job_refresh_repairs_missing_tunnel_plan_execution_once() {
     let memory = MemoryState::default();
     let repo = Repository::Memory(memory.clone());

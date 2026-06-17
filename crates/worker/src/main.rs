@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+    str::FromStr,
+    time::Duration,
+};
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
@@ -1858,6 +1863,23 @@ struct ScheduleDueWebhookEvent<'a> {
     run_count: i64,
 }
 
+#[derive(Clone, Debug)]
+struct ScheduleTargetAvailability {
+    capabilities: Vec<TargetCapability>,
+    unavailable_targets: Vec<String>,
+    missing_targets: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ScheduleTargetSkip {
+    client_id: String,
+    output_type: &'static str,
+    reason: &'static str,
+    hint: &'static str,
+    message: &'static str,
+    accepted: bool,
+}
+
 async fn materialize_due_schedule(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schedule: &DueSchedule,
@@ -1889,22 +1911,54 @@ async fn materialize_due_schedule(
     {
         bail!("registered agent update release missing");
     }
-    let target_capabilities = load_schedule_target_capabilities(tx, &targets).await?;
+    let target_availability = load_schedule_target_capabilities(tx, &targets).await?;
+    let available_targets = available_schedule_targets(&targets, &target_availability);
     let timeout_secs = effective_schedule_timeout_secs(
         dispatch_config.timeout_secs,
-        &targets,
-        &target_capabilities,
+        &available_targets,
+        &target_availability.capabilities,
     );
-    let (dispatch_targets, capability_skips) =
-        split_targets_by_capability(&operation, &targets, &target_capabilities, false);
+    let (dispatch_targets, capability_skips) = split_targets_by_capability(
+        &operation,
+        &available_targets,
+        &target_availability.capabilities,
+        false,
+    );
     let operation_type = schedule
         .operation
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let job_id = Uuid::new_v4();
-    let no_dispatchable_targets =
-        targets.is_empty() || (dispatch_targets.is_empty() && !capability_skips.is_empty());
+    let busy_update_skips =
+        load_schedule_busy_update_skips(tx, &operation, &dispatch_targets).await?;
+    let busy_update_skip_set = busy_update_skips
+        .iter()
+        .map(|skip| skip.client_id.as_str())
+        .collect::<HashSet<_>>();
+    let dispatch_targets_after_precomplete = dispatch_targets
+        .iter()
+        .filter(|client_id| !busy_update_skip_set.contains(client_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unavailable_skips = target_availability
+        .unavailable_targets
+        .iter()
+        .cloned()
+        .map(unavailable_schedule_target_skip)
+        .collect::<Vec<_>>();
+    let busy_update_target_skips = busy_update_skips.clone();
+    let schedule_target_skips = unavailable_skips
+        .iter()
+        .chain(busy_update_target_skips.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let materialized_targets = materialized_schedule_targets(
+        &targets,
+        &available_targets,
+        &target_availability.unavailable_targets,
+    );
+    let no_dispatchable_targets = dispatch_targets_after_precomplete.is_empty();
     let status = if no_dispatchable_targets {
         JOB_STATUS_SKIPPED
     } else {
@@ -1943,7 +1997,7 @@ async fn materialize_due_schedule(
     .bind(schedule.actor_id)
     .bind(&command_type)
     .bind(status)
-    .bind(targets.len() as i32)
+    .bind(materialized_targets.len() as i32)
     .bind(&command_hash)
     .bind(SqlJson(&schedule.operation))
     .bind(schedule.id)
@@ -1953,11 +2007,14 @@ async fn materialize_due_schedule(
     .execute(&mut **tx)
     .await?;
 
-    for client_id in &targets {
+    for client_id in &materialized_targets {
         let skip = capability_skips
             .iter()
             .find(|skip| skip.client_id == *client_id);
-        let target_status = if skip.is_some() {
+        let schedule_skip = schedule_target_skips
+            .iter()
+            .find(|skip| skip.client_id == *client_id);
+        let target_status = if skip.is_some() || schedule_skip.is_some() {
             TARGET_STATUS_SKIPPED
         } else {
             TARGET_STATUS_QUEUED
@@ -1987,13 +2044,21 @@ async fn materialize_due_schedule(
         .bind(job_id)
         .bind(client_id)
         .bind(target_status)
-        .bind(skip.map(|skip| skip.failure.message))
-        .bind(skip.map(|_| 0_i32))
+        .bind(
+            skip.map(|skip| skip.failure.message)
+                .or_else(|| schedule_skip.map(|skip| skip.message)),
+        )
+        .bind(if skip.is_some() || schedule_skip.is_some() {
+            Some(0_i32)
+        } else {
+            None
+        })
         .execute(&mut **tx)
         .await?;
     }
 
     record_schedule_capability_skip_outputs(tx, job_id, &operation, &capability_skips).await?;
+    record_schedule_target_skip_outputs(tx, job_id, &operation, &schedule_target_skips).await?;
 
     sqlx::query(
         r#"
@@ -2018,6 +2083,10 @@ async fn materialize_due_schedule(
         "operation_type": operation_type,
         "job_id": job_id,
         "fixed_targets": &targets,
+        "materialized_targets": &materialized_targets,
+        "unavailable_fixed_targets": &target_availability.unavailable_targets,
+        "missing_fixed_targets": &target_availability.missing_targets,
+        "busy_update_targets": busy_update_skips.iter().map(|skip| &skip.client_id).collect::<Vec<_>>(),
         "selector_expression": &schedule.selector_expression,
         "catch_up_policy": &schedule.catch_up_policy,
         "catch_up_run_index": run_index + 1,
@@ -2069,7 +2138,7 @@ async fn materialize_due_schedule(
             job_id,
             command_type: &command_type,
             job_status: status,
-            targets: &targets,
+            targets: &materialized_targets,
             run_index,
             run_count,
         },
@@ -2082,50 +2151,158 @@ async fn materialize_due_schedule(
             job_id,
             &command_type,
             status,
-            &targets,
+            &materialized_targets,
         )
         .await?;
     }
 
-    Ok(!dispatch_targets.is_empty())
+    Ok(!dispatch_targets_after_precomplete.is_empty())
 }
 
 async fn load_schedule_target_capabilities(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     targets: &[String],
-) -> Result<Vec<TargetCapability>> {
+) -> Result<ScheduleTargetAvailability> {
     if targets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ScheduleTargetAvailability {
+            capabilities: Vec::new(),
+            unavailable_targets: Vec::new(),
+            missing_targets: Vec::new(),
+        });
     }
     let rows = sqlx::query(
         r#"
-        SELECT id, capabilities
+        SELECT id, capabilities, hidden_at IS NOT NULL AS hidden, status
         FROM clients
-        WHERE hidden_at IS NULL
-          AND id = ANY($1)
+        WHERE id = ANY($1)
         "#,
     )
     .bind(targets.to_vec())
     .fetch_all(&mut **tx)
     .await?;
-    let mut capabilities = Vec::with_capacity(rows.len());
+    let mut present_targets = HashSet::with_capacity(rows.len());
+    let mut capabilities = Vec::new();
+    let mut unavailable_targets = Vec::new();
     for row in rows {
         let client_id: String = row.try_get("id")?;
-        let snapshot: SqlJson<AgentCapabilitySnapshot> = row.try_get("capabilities")?;
-        capabilities.push(TargetCapability {
-            client_id,
-            capabilities: snapshot.0,
-        });
-    }
-    for target in targets {
-        if !capabilities
-            .iter()
-            .any(|capability| capability.client_id == *target)
-        {
-            bail!("fixed_target_not_found");
+        let hidden: bool = row.try_get("hidden")?;
+        let status: String = row.try_get("status")?;
+        present_targets.insert(client_id.clone());
+        if hidden || matches!(status.as_str(), "deleted" | "revoked") {
+            unavailable_targets.push(client_id);
+        } else {
+            let snapshot: SqlJson<AgentCapabilitySnapshot> = row.try_get("capabilities")?;
+            capabilities.push(TargetCapability {
+                client_id,
+                capabilities: snapshot.0,
+            });
         }
     }
-    Ok(capabilities)
+    let missing_targets = targets
+        .iter()
+        .filter(|target| !present_targets.contains(target.as_str()))
+        .cloned()
+        .collect();
+    Ok(ScheduleTargetAvailability {
+        capabilities,
+        unavailable_targets,
+        missing_targets,
+    })
+}
+
+fn available_schedule_targets(
+    targets: &[String],
+    availability: &ScheduleTargetAvailability,
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter(|client_id| {
+            availability
+                .capabilities
+                .iter()
+                .any(|capability| capability.client_id == **client_id)
+        })
+        .cloned()
+        .collect()
+}
+
+fn materialized_schedule_targets(
+    targets: &[String],
+    available_targets: &[String],
+    unavailable_targets: &[String],
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter(|client_id| {
+            available_targets.iter().any(|target| target == *client_id)
+                || unavailable_targets
+                    .iter()
+                    .any(|target| target == *client_id)
+        })
+        .cloned()
+        .collect()
+}
+
+async fn load_schedule_busy_update_skips(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &JobCommand,
+    dispatch_targets: &[String],
+) -> Result<Vec<ScheduleTargetSkip>> {
+    if !is_update_lifecycle_command(command) || dispatch_targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT client_id
+        FROM job_targets
+        WHERE client_id = ANY($1::text[])
+          AND completed_at IS NULL
+          AND status IN ('queued', 'dispatching', 'running')
+        "#,
+    )
+    .bind(dispatch_targets.to_vec())
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("client_id"))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(busy_update_schedule_target_skip)
+        .collect())
+}
+
+fn is_update_lifecycle_command(command: &JobCommand) -> bool {
+    matches!(
+        command,
+        JobCommand::UpdateAgent { .. }
+            | JobCommand::AgentUpdateActivate { .. }
+            | JobCommand::AgentUpdateRollback { .. }
+            | JobCommand::AgentUpdateCheck { .. }
+    )
+}
+
+fn unavailable_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "schedule_target_skipped",
+        reason: "fixed_target_unavailable",
+        hint:
+            "fixed schedule target is hidden, deleted, revoked, or no longer available for dispatch",
+        message: "fixed_target_unavailable: schedule target skipped",
+        accepted: false,
+    }
+}
+
+fn busy_update_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "busy_update_skipped",
+        reason: "busy_agent_active_jobs",
+        hint: "update command was not dispatched because the client already has another active job target",
+        message: "busy_agent_active_jobs: target has another active job; update skipped",
+        accepted: true,
+    }
 }
 
 fn effective_schedule_timeout_secs(
@@ -2250,6 +2427,80 @@ async fn record_schedule_capability_skip_outputs(
             "exit_code": 0,
             "accepted": false,
             "message": skip.failure.message,
+        }))
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn record_schedule_target_skip_outputs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    command: &JobCommand,
+    skips: &[ScheduleTargetSkip],
+) -> Result<()> {
+    for skip in skips {
+        let status = serde_json::json!({
+            "type": skip.output_type,
+            "status": TARGET_STATUS_SKIPPED,
+            "client_id": skip.client_id,
+            "command_type": job_command_type_label(command),
+            "reason": skip.reason,
+            "hint": skip.hint,
+        });
+        let data = serde_json::to_vec(&status)?;
+        sqlx::query(
+            r#"
+            INSERT INTO job_outputs (
+                job_id,
+                client_id,
+                seq,
+                stream,
+                data,
+                storage,
+                object_key,
+                data_sha256_hex,
+                data_size_bytes,
+                exit_code,
+                done
+            )
+            VALUES ($1, $2, 0, 'status', $3, 'inline', NULL, $4, $5, 0, TRUE)
+            ON CONFLICT (job_id, client_id, seq)
+            DO UPDATE SET
+                stream = EXCLUDED.stream,
+                data = EXCLUDED.data,
+                storage = EXCLUDED.storage,
+                object_key = EXCLUDED.object_key,
+                data_sha256_hex = EXCLUDED.data_sha256_hex,
+                data_size_bytes = EXCLUDED.data_size_bytes,
+                exit_code = EXCLUDED.exit_code,
+                done = EXCLUDED.done
+            "#,
+        )
+        .bind(job_id)
+        .bind(&skip.client_id)
+        .bind(&data)
+        .bind(payload_hash(&data))
+        .bind(data.len() as i64)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("client:{}", skip.client_id))
+        .bind(serde_json::json!({
+            "job_id": job_id,
+            "status": TARGET_STATUS_SKIPPED,
+            "exit_code": 0,
+            "accepted": skip.accepted,
+            "message": skip.message,
         }))
         .execute(&mut **tx)
         .await?;
@@ -2570,6 +2821,8 @@ fn truncate_schedule_error(error: &str) -> String {
 #[cfg(test)]
 mod schedule_tests {
     use super::*;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::{path::Path, str::FromStr};
 
     fn schedule_with_policy(policy: &str, limit: i32) -> DueSchedule {
         DueSchedule {
@@ -2686,6 +2939,184 @@ mod schedule_tests {
             ..VpsMetadata::default()
         });
         assert!(expression_matches(&context, &expression));
+    }
+
+    #[tokio::test]
+    async fn postgres_due_schedule_skips_unavailable_fixed_targets() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        insert_worker_client(&db.pool, "edge-b", "deleted", true).await;
+        insert_worker_client(&db.pool, "edge-c", "online", false).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "missing-target-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["edge-a", "edge-b", "edge-c"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert_eq!(
+            targets,
+            vec![
+                ("edge-a".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+                (
+                    "edge-b".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some("fixed_target_unavailable: schedule target skipped".to_string())
+                ),
+                ("edge-c".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+            ]
+        );
+        let output = job_status_output(&db.pool, job_id, "edge-b").await;
+        assert_eq!(output["type"], "schedule_target_skipped");
+        assert_eq!(output["reason"], "fixed_target_unavailable");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_due_schedule_with_all_unavailable_targets_is_skipped() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "deleted", true).await;
+        insert_worker_client(&db.pool, "edge-b", "revoked", false).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "all-unavailable-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["edge-a", "edge-b"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_SKIPPED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert!(targets
+            .iter()
+            .all(|(_, status, _)| status == TARGET_STATUS_SKIPPED));
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_scheduled_update_skips_busy_targets() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        insert_worker_client(&db.pool, "edge-b", "online", false).await;
+        insert_active_worker_target(&db.pool, "edge-a").await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "busy-update-schedule",
+            serde_json::json!({
+                "type": "agent_update",
+                "artifact_url": "https://updates.example.invalid/agent",
+                "sha256_hex": "a".repeat(64),
+            }),
+            &["edge-a", "edge-b"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    "edge-a".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some(
+                        "busy_agent_active_jobs: target has another active job; update skipped"
+                            .to_string()
+                    )
+                ),
+                ("edge-b".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+            ]
+        );
+        let output = job_status_output(&db.pool, job_id, "edge-a").await;
+        assert_eq!(output["type"], "busy_update_skipped");
+        assert_eq!(output["reason"], "busy_agent_active_jobs");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_scheduled_update_all_busy_targets_is_skipped() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        insert_worker_client(&db.pool, "edge-b", "online", false).await;
+        insert_active_worker_target(&db.pool, "edge-a").await;
+        insert_active_worker_target(&db.pool, "edge-b").await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "all-busy-update-schedule",
+            serde_json::json!({
+                "type": "agent_update_check",
+            }),
+            &["edge-a", "edge-b"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, _, last_error) = schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_SKIPPED));
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert!(targets
+            .iter()
+            .all(|(_, status, _)| status == TARGET_STATUS_SKIPPED));
+        db.cleanup().await;
     }
 
     #[test]
@@ -2830,6 +3261,240 @@ mod schedule_tests {
         let mut default_false = false;
         apply_bool_default(&mut default_false, env_name, Some(true));
         assert!(default_false);
+    }
+
+    struct PgWorkerTestDb {
+        pool: PgPool,
+        admin_pool: PgPool,
+        db_name: String,
+    }
+
+    impl PgWorkerTestDb {
+        async fn maybe_new() -> Option<Self> {
+            let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
+                Ok(value) if !value.trim().is_empty() => value,
+                _ => {
+                    eprintln!("skipping worker Postgres test: VPSMAN_TEST_POSTGRES_URL is unset");
+                    return None;
+                }
+            };
+            Some(
+                Self::new(&base_url)
+                    .await
+                    .expect("failed to create worker test database"),
+            )
+        }
+
+        async fn new(base_url: &str) -> anyhow::Result<Self> {
+            let base_options = PgConnectOptions::from_str(base_url)?;
+            let admin_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(base_options.clone().database("postgres"))
+                .await?;
+            let db_name = format!("vpsman_worker_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE {}", quote_ident(&db_name)))
+                .execute(&admin_pool)
+                .await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(base_options.database(&db_name))
+                .await?;
+            let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
+            migrator.run(&pool).await?;
+            Ok(Self {
+                pool,
+                admin_pool,
+                db_name,
+            })
+        }
+
+        async fn cleanup(self) {
+            let Self {
+                pool,
+                admin_pool,
+                db_name,
+            } = self;
+            pool.close().await;
+            let _ = sqlx::query(
+                r#"
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = $1
+                  AND pid <> pg_backend_pid()
+                "#,
+            )
+            .bind(&db_name)
+            .execute(&admin_pool)
+            .await;
+            let _ = sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS {}",
+                quote_ident(&db_name)
+            ))
+            .execute(&admin_pool)
+            .await;
+            admin_pool.close().await;
+        }
+    }
+
+    fn quote_ident(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+
+    fn workspace_migrations_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("migrations")
+    }
+
+    async fn insert_worker_client(pool: &PgPool, client_id: &str, status: &str, hidden: bool) {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (
+                id, display_name, public_key, status, internal_build_number,
+                process_incarnation_id, capabilities, hidden_at
+            )
+            VALUES ($1, $1, decode('', 'hex'), $2, 1, $3, $4, CASE WHEN $5 THEN now() ELSE NULL END)
+            "#,
+        )
+        .bind(client_id)
+        .bind(status)
+        .bind(Uuid::new_v4())
+        .bind(SqlJson(AgentCapabilitySnapshot::default()))
+        .bind(hidden)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_worker_schedule(
+        pool: &PgPool,
+        name: &str,
+        operation: serde_json::Value,
+        targets: &[&str],
+    ) -> Uuid {
+        let schedule_id = Uuid::new_v4();
+        let target_client_ids = targets
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        sqlx::query(
+            r#"
+            INSERT INTO schedules (
+                id, name, operation, selector_expression, target_client_ids,
+                cron_expr, next_run_at, catch_up_policy, catch_up_limit
+            )
+            VALUES ($1, $2, $3, 'id:*', $4, '* * * * *', now() - interval '60 seconds', 'skip_missed', 1)
+            "#,
+        )
+        .bind(schedule_id)
+        .bind(name)
+        .bind(SqlJson(operation))
+        .bind(target_client_ids)
+        .execute(pool)
+        .await
+        .unwrap();
+        schedule_id
+    }
+
+    async fn insert_active_worker_target(pool: &PgPool, client_id: &str) {
+        let job_id = Uuid::new_v4();
+        let operation = JobCommand::Shell {
+            argv: vec!["sleep".to_string(), "60".to_string()],
+            pty: false,
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (
+                id, command_type, privileged, status, target_count, payload_hash,
+                operation, request_fingerprint, timeout_secs
+            )
+            VALUES ($1, 'shell', TRUE, 'running', 1, $2, $3, $4, 60)
+            "#,
+        )
+        .bind(job_id)
+        .bind(format!("hash-{job_id}"))
+        .bind(SqlJson(operation))
+        .bind(format!("fingerprint-{job_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO job_targets (job_id, client_id, status, started_at)
+            VALUES ($1, $2, 'running', now())
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn schedule_result(
+        pool: &PgPool,
+        schedule_id: Uuid,
+    ) -> (Uuid, Option<String>, i32, Option<String>) {
+        let row = sqlx::query(
+            r#"
+            SELECT last_job_id, last_job_status, failure_count, last_error
+            FROM schedules
+            WHERE id = $1
+            "#,
+        )
+        .bind(schedule_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (
+            row.try_get::<Option<Uuid>, _>("last_job_id")
+                .unwrap()
+                .unwrap(),
+            row.try_get("last_job_status").unwrap(),
+            row.try_get("failure_count").unwrap(),
+            row.try_get("last_error").unwrap(),
+        )
+    }
+
+    async fn job_targets(pool: &PgPool, job_id: Uuid) -> Vec<(String, String, Option<String>)> {
+        sqlx::query(
+            r#"
+            SELECT client_id, status, message
+            FROM job_targets
+            WHERE job_id = $1
+            ORDER BY client_id ASC
+            "#,
+        )
+        .bind(job_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.try_get("client_id").unwrap(),
+                row.try_get("status").unwrap(),
+                row.try_get("message").unwrap(),
+            )
+        })
+        .collect()
+    }
+
+    async fn job_status_output(pool: &PgPool, job_id: Uuid, client_id: &str) -> serde_json::Value {
+        let data: Vec<u8> = sqlx::query_scalar(
+            r#"
+            SELECT data
+            FROM job_outputs
+            WHERE job_id = $1 AND client_id = $2 AND seq = 0
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        serde_json::from_slice(&data).unwrap()
     }
 
     const WORKER_HOT_RELOAD_ENV: &[&str] = &[

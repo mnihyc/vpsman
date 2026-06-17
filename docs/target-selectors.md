@@ -20,11 +20,13 @@ safety, while schedule create/update keeps valid selector syntax when the audit
 selector is present so Target update can resolve it later.
 
 Schedules follow the same rule. A schedule stores both the audit selector and a
-fixed target snapshot. Due runs use the saved snapshot. If tags, display names,
-or other selector inputs later drift, the operator can choose Target update.
-That review action resolves the audit selector on the backend, opens a privilege
-confirmation only when the resolved set differs from the saved fixed target
-snapshot, and then saves the replacement snapshot.
+fixed target snapshot. Due runs use the saved snapshot. If a saved target is
+later hidden, deleted, revoked, or otherwise unavailable, that target is recorded
+as skipped for the run and the remaining available targets still materialize.
+If tags, display names, or other selector inputs later drift, the operator can
+choose Target update. That review action resolves the audit selector on the
+backend, opens a privilege confirmation only when the resolved set differs from
+the saved fixed target snapshot, and then saves the replacement snapshot.
 
 This keeps human review as the authority for bulk work: changing tags never
 silently changes the targets of an already-created job or schedule.

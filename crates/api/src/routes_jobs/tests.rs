@@ -99,6 +99,32 @@ fn gateway_failed_status_output_sets_target_message_from_agent_reason() {
 }
 
 #[test]
+fn busy_update_skip_uses_shared_reason_code() {
+    let job_id = Uuid::new_v4();
+    let outcome = busy_update_skip_outcome(
+        job_id,
+        &BusyUpdateSkip {
+            client_id: "client-a".to_string(),
+        },
+        &JobCommand::AgentUpdateCheck {
+            version_url: None,
+            activate: false,
+            restart_agent: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.status, TARGET_STATUS_SKIPPED);
+    assert_eq!(
+        outcome.message,
+        "busy_agent_active_jobs: target has another active job; update skipped"
+    );
+    let status: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
+    assert_eq!(status["type"], "busy_update_skipped");
+    assert_eq!(status["reason"], "busy_agent_active_jobs");
+}
+
+#[test]
 fn gateway_done_output_without_exit_code_maps_to_failed() {
     let job_id = Uuid::new_v4();
     let outcome = target_outcome_from_gateway(GatewayCommandDispatchResult {
