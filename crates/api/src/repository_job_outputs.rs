@@ -5,13 +5,15 @@ use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
-use vpsman_server_core::{INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES};
+use vpsman_server_core::{
+    target_status_is_active, INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES,
+};
 
 use crate::model::{
     AuditLogView, JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView,
 };
 use crate::object_store::BackupObjectStore;
-use crate::repository::Repository;
+use crate::repository::{MemoryState, Repository};
 use crate::{output_stream_name, unix_now};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
@@ -91,82 +93,6 @@ impl Repository {
                             created_at: row.try_get("created_at")?,
                         })
                     })
-                    .collect()
-            }
-        }
-    }
-
-    pub(crate) async fn list_existing_job_output_seqs(
-        &self,
-        job_id: Uuid,
-        client_id: &str,
-        seqs: &[i32],
-    ) -> Result<Vec<i32>> {
-        let requested = seqs
-            .iter()
-            .copied()
-            .filter(|seq| *seq >= 0)
-            .collect::<BTreeSet<_>>();
-        if requested.is_empty() {
-            return Ok(Vec::new());
-        }
-        match self {
-            Self::Memory(memory) => {
-                let terminal_targets = memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|target| {
-                        target.job_id == job_id
-                            && target.client_id == client_id
-                            && target.completed_at.is_some()
-                    })
-                    .map(|target| (target.job_id, target.client_id.clone()))
-                    .collect::<BTreeSet<_>>();
-                let existing = memory
-                    .job_outputs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
-                    .filter(|output| {
-                        !output.done
-                            || terminal_targets.contains(&(job_id, output.client_id.clone()))
-                    })
-                    .map(|output| output.seq)
-                    .collect::<BTreeSet<_>>();
-                Ok(requested
-                    .into_iter()
-                    .filter(|seq| existing.contains(seq))
-                    .collect())
-            }
-            Self::Postgres(pool) => {
-                let requested = requested.into_iter().collect::<Vec<_>>();
-                let rows = sqlx::query(
-                    r#"
-                    SELECT output.seq
-                    FROM job_outputs output
-                    LEFT JOIN job_targets target
-                      ON target.job_id = output.job_id
-                     AND target.client_id = output.client_id
-                    WHERE output.job_id = $1
-                      AND output.client_id = $2
-                      AND output.seq = ANY($3::int4[])
-                      AND (
-                        output.done = FALSE
-                        OR target.completed_at IS NOT NULL
-                      )
-                    ORDER BY output.seq
-                    "#,
-                )
-                .bind(job_id)
-                .bind(client_id)
-                .bind(&requested)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| row.try_get("seq").map_err(Into::into))
                     .collect()
             }
         }
@@ -346,7 +272,7 @@ impl Repository {
             return Ok(());
         }
         let _ = self
-            .record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
+            .record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config, false)
             .await?;
         Ok(())
     }
@@ -368,11 +294,13 @@ impl Repository {
                 std::slice::from_ref(output),
                 received_at,
                 config,
+                false,
             )
             .await?;
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_job_output_chunk_checked_with_config(
         &self,
         job_id: Uuid,
@@ -390,9 +318,129 @@ impl Repository {
                 std::slice::from_ref(output),
                 received_at,
                 config,
+                false,
             )
             .await?;
         Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
+    }
+
+    pub(crate) async fn record_active_job_output_chunk_checked_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        received_at: Option<String>,
+        config: JobOutputPersistConfig<'_>,
+    ) -> Result<JobOutputWriteResult> {
+        let mut results = self
+            .record_job_outputs_starting_at(
+                job_id,
+                client_id,
+                seq,
+                std::slice::from_ref(output),
+                received_at,
+                config,
+                true,
+            )
+            .await?;
+        Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
+    }
+
+    pub(crate) async fn classify_existing_job_output_chunk_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        config: JobOutputPersistConfig<'_>,
+    ) -> Result<Option<JobOutputWriteResult>> {
+        let expected = expected_stored_job_output(job_id, client_id, seq, output, config)?;
+        match self {
+            Self::Memory(memory) => {
+                let stored = memory.job_outputs.read().await;
+                let Some(existing) = stored.iter().find(|existing| {
+                    existing.job_id == job_id
+                        && existing.client_id == client_id
+                        && existing.seq == seq
+                }) else {
+                    return Ok(None);
+                };
+                if job_output_view_matches_stored(existing, &expected) {
+                    Ok(Some(JobOutputWriteResult::DuplicateIdentical))
+                } else {
+                    Ok(Some(JobOutputWriteResult::DuplicateConflict))
+                }
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        stream,
+                        data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        exit_code,
+                        done
+                    FROM job_outputs
+                    WHERE job_id = $1 AND client_id = $2 AND seq = $3
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(seq)
+                .fetch_optional(pool)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                if job_output_row_matches_stored(&row, &expected) {
+                    Ok(Some(JobOutputWriteResult::DuplicateIdentical))
+                } else {
+                    Ok(Some(JobOutputWriteResult::DuplicateConflict))
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn record_job_output_sequence_conflict_audit(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(job_output_conflict_audit(job_id, client_id, seq));
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, NULL, 'job.output_conflict_ignored', $2, NULL, $3)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(format!("client:{client_id}"))
+                .bind(serde_json::json!({
+                    "job_id": job_id,
+                    "client_id": client_id,
+                    "seq": seq,
+                    "reason": "output sequence already persisted with different content",
+                }))
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn record_job_outputs_checked_with_config(
@@ -402,7 +450,7 @@ impl Repository {
         outputs: &[CommandOutput],
         config: JobOutputPersistConfig<'_>,
     ) -> Result<Vec<JobOutputWriteResult>> {
-        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config)
+        self.record_job_outputs_starting_at(job_id, client_id, 0, outputs, None, config, false)
             .await
     }
 
@@ -560,6 +608,7 @@ impl Repository {
         outputs: &[CommandOutput],
         received_at: Option<String>,
         config: JobOutputPersistConfig<'_>,
+        require_active_target: bool,
     ) -> Result<Vec<JobOutputWriteResult>> {
         if outputs.is_empty() {
             return Ok(Vec::new());
@@ -577,6 +626,9 @@ impl Repository {
         let write_results: Vec<JobOutputWriteResult>;
         let result = match self {
             Self::Memory(memory) => {
+                if require_active_target {
+                    ensure_memory_job_output_target_active(memory, job_id, client_id).await?;
+                }
                 let mut stored = memory.job_outputs.write().await;
                 let mut planned_results = Vec::with_capacity(persisted.len());
                 let mut has_conflict = false;
@@ -632,6 +684,9 @@ impl Repository {
                     .bind(lock_b)
                     .execute(&mut *tx)
                     .await?;
+                if require_active_target {
+                    ensure_job_output_target_active_in_tx(&mut tx, job_id, client_id).await?;
+                }
                 let mut planned_results = Vec::with_capacity(persisted.len());
                 let mut has_conflict = false;
                 let mut conflict_outputs = Vec::new();
@@ -902,6 +957,111 @@ fn job_output_row_matches_stored(row: &sqlx::postgres::PgRow, output: &StoredJob
         && data_size_bytes == output.artifact_size_bytes
         && exit_code == output.exit_code
         && done == output.done
+}
+
+async fn ensure_memory_job_output_target_active(
+    memory: &MemoryState,
+    job_id: Uuid,
+    client_id: &str,
+) -> Result<()> {
+    let targets = memory.job_targets.read().await;
+    let Some(target) = targets
+        .iter()
+        .find(|target| target.job_id == job_id && target.client_id == client_id)
+    else {
+        anyhow::bail!("job_target_not_found");
+    };
+    if target.completed_at.is_some() || !target_status_is_active(&target.status) {
+        anyhow::bail!("job_target_not_active");
+    }
+    Ok(())
+}
+
+async fn ensure_job_output_target_active_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT status, completed_at::text AS completed_at
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        anyhow::bail!("job_target_not_found");
+    };
+    let status: String = row.try_get("status")?;
+    let completed_at: Option<String> = row.try_get("completed_at")?;
+    if completed_at.is_some() || !target_status_is_active(&status) {
+        anyhow::bail!("job_target_not_active");
+    }
+    Ok(())
+}
+
+fn expected_stored_job_output(
+    job_id: Uuid,
+    client_id: &str,
+    seq: i32,
+    output: &CommandOutput,
+    config: JobOutputPersistConfig<'_>,
+) -> Result<StoredJobOutput> {
+    let stream = output_stream_name(output.stream).to_string();
+    if output.stream == OutputStream::Status && output.data.len() > STATUS_OUTPUT_MAX_BYTES {
+        anyhow::bail!(
+            "status output exceeds max bytes: {} > {}",
+            output.data.len(),
+            STATUS_OUTPUT_MAX_BYTES
+        );
+    }
+    if should_externalize_output(output, &config) {
+        let sha256_hex = payload_hash(&output.data);
+        let object_key = job_output_object_key(job_id, client_id, seq, &stream, &sha256_hex);
+        Ok(StoredJobOutput {
+            job_id,
+            client_id: client_id.to_string(),
+            seq,
+            stream,
+            data: output
+                .data
+                .iter()
+                .copied()
+                .take(INLINE_OUTPUT_PREVIEW_BYTES)
+                .collect(),
+            storage: "object_store".to_string(),
+            artifact_object_key: Some(object_key),
+            created_artifact_object_key: None,
+            artifact_sha256_hex: Some(sha256_hex),
+            artifact_size_bytes: Some(output.data.len() as i64),
+            exit_code: output.exit_code,
+            done: output.done,
+            received_at: String::new(),
+            created_at: String::new(),
+        })
+    } else {
+        Ok(StoredJobOutput {
+            job_id,
+            client_id: client_id.to_string(),
+            seq,
+            stream,
+            data: output.data.clone(),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            created_artifact_object_key: None,
+            artifact_sha256_hex: Some(payload_hash(&output.data)),
+            artifact_size_bytes: Some(output.data.len() as i64),
+            exit_code: output.exit_code,
+            done: output.done,
+            received_at: String::new(),
+            created_at: String::new(),
+        })
+    }
 }
 
 fn job_output_conflict_audit(job_id: Uuid, client_id: &str, seq: i32) -> AuditLogView {

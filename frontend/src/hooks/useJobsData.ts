@@ -528,7 +528,7 @@ export function useJobsData(
         const response = await apiPost<ServerJobRecord>(
           `/api/v1/server-jobs/${encodeURIComponent(jobId)}/cancel`,
           apiToken,
-          {},
+          { confirmed: true },
         );
         await loadServerJobs();
         void onAuditChanged();

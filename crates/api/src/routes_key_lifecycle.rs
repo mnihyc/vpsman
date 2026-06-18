@@ -10,6 +10,7 @@ use crate::{
         AgentIdentityView, ClientKeyRevocationView, CreateClientKeyRevocationRequest, HistoryQuery,
         KeyLifecycleReportView, UpsertAgentIdentityRequest, WsEvent,
     },
+    privilege::{verify_privilege_intent, DbPrivilegeIntent},
     state::AppState,
     util::limit_or_default,
 };
@@ -23,6 +24,26 @@ pub(crate) async fn upsert_agent_identity(
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_agent_identity_request(&request)?;
+    let client_id = request
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("client_id_required"))?;
+    let targets = vec![client_id.to_string()];
+    let action = if request.replace_existing_key {
+        "agent_identity.rotate"
+    } else {
+        "agent_identity.import"
+    };
+    let intent = DbPrivilegeIntent::new(action, client_id, None, &targets, true, None);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    state.repo.preflight_agent_identity_upsert(&request).await?;
+    if request.replace_existing_key {
+        state
+            .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
+            .await?;
+    }
     let view = state
         .repo
         .upsert_agent_identity(&request, &operator)
@@ -67,6 +88,13 @@ pub(crate) async fn revoke_current_client_key(
     {
         return Err(ApiError::not_found("client_public_key_not_found"));
     }
+    let targets = vec![client_id.clone()];
+    let intent =
+        DbPrivilegeIntent::new("client_key.revoke", &client_id, None, &targets, true, None);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    state
+        .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
+        .await?;
     let record = state
         .repo
         .revoke_current_client_key(&client_id, &request, &operator)
@@ -92,12 +120,12 @@ fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Resu
             "agent_identity_confirmation_required",
         ));
     }
+    let Some(client_id) = request.client_id.as_deref() else {
+        return Err(ApiError::bad_request("client_id_required"));
+    };
+    validate_client_id(client_id)?;
     validate_fixed_hex32(&request.client_public_key_hex, "client_public_key_hex")?;
     if request.replace_existing_key {
-        let Some(client_id) = request.client_id.as_deref() else {
-            return Err(ApiError::bad_request("client_id_required_for_key_rotation"));
-        };
-        validate_client_id(client_id)?;
         if request.display_name.is_some() {
             return Err(ApiError::bad_request(
                 "display_name_not_allowed_during_key_rotation",
@@ -109,9 +137,6 @@ fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Resu
             ));
         }
     } else {
-        if let Some(client_id) = request.client_id.as_deref() {
-            validate_client_id(client_id)?;
-        }
         if let Some(display_name) = request.display_name.as_deref() {
             validate_optional_display_name(display_name)?;
         }

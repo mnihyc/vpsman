@@ -5,6 +5,7 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
@@ -72,6 +73,15 @@ const runtimeManagers: RuntimeTunnelManager[] = [
 ];
 
 type AutomationRow = ReturnType<typeof buildAutomationRows>[number];
+type TunnelPlanSaveSnapshot = {
+  draftKey: string;
+  request: CreateTunnelPlanRequest;
+};
+type TunnelPlanToggleSnapshot = {
+  enabled: boolean;
+  planIds: string[];
+  planNames: string[];
+};
 
 export function TopologyPanel({
   activeSubpage,
@@ -157,6 +167,7 @@ export function TopologyPanel({
     latency_ms: 20,
     packet_loss_ratio: 0,
     preference: 1,
+    confirmed: false,
   });
   const [reservedText, setReservedText] = useState("");
   const [runtimeStartupArgv, setRuntimeStartupArgv] = useState("");
@@ -182,6 +193,8 @@ export function TopologyPanel({
   const [automationBulkPending, setAutomationBulkPending] = useState(false);
   const [automationBulkStatus, setAutomationBulkStatus] = useState<string | null>(null);
   const [tunnelPlanTogglePending, setTunnelPlanTogglePending] = useState(false);
+  const [tunnelPlanSaveSnapshot, setTunnelPlanSaveSnapshot] = useState<TunnelPlanSaveSnapshot | null>(null);
+  const [tunnelPlanToggleSnapshot, setTunnelPlanToggleSnapshot] = useState<TunnelPlanToggleSnapshot | null>(null);
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const automationRows = useMemo(
@@ -393,42 +406,104 @@ export function TopologyPanel({
     form.right_underlay.trim() &&
     hasAddressSource(form);
   const status = actionError ?? error ?? (loading ? "Loading" : `${tunnelPlans.length} plans`);
+  const tunnelPlanDraftKey = useMemo(
+    () =>
+      JSON.stringify({
+        form,
+        reservedText,
+        runtimeStartupArgv,
+        runtimeStopArgv,
+        runtimeCleanupArgv,
+        runtimeRestartArgv,
+        runtimeStatusArgv,
+        runtimeTrafficArgv,
+        trafficIngressKbps,
+        trafficEgressKbps,
+        trafficBurstKb,
+        trafficLimitEnabled,
+        fouPort,
+        fouPeerPort,
+        fouIpproto,
+        topologyVersion,
+        topologyDesiredText,
+        topologyStaleText,
+        topologyRoutesText,
+        topologyStaleRoutesText,
+      }),
+    [
+      form,
+      reservedText,
+      runtimeStartupArgv,
+      runtimeStopArgv,
+      runtimeCleanupArgv,
+      runtimeRestartArgv,
+      runtimeStatusArgv,
+      runtimeTrafficArgv,
+      trafficIngressKbps,
+      trafficEgressKbps,
+      trafficBurstKb,
+      trafficLimitEnabled,
+      fouPort,
+      fouPeerPort,
+      fouIpproto,
+      topologyVersion,
+      topologyDesiredText,
+      topologyStaleText,
+      topologyRoutesText,
+      topologyStaleRoutesText,
+    ],
+  );
 
   async function submitPlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
-      if (!ready) {
-        throw new Error("Tunnel plan is incomplete");
-      }
-      await onCreateTunnelPlan({
-        ...form,
-        reserved_addresses: splitReserved(reservedText),
-        ipv4_tunnel: completePairOrNull(form.ipv4_tunnel ?? null),
-        ipv6_address_pool_cidr: form.ipv6_address_pool_cidr?.trim() || null,
-        ipv6_tunnel: completePairOrNull(form.ipv6_tunnel ?? null),
-        runtime_control: buildRuntimeControl(runtimeManager, {
-          startup: runtimeStartupArgv,
-          stop: runtimeStopArgv,
-          cleanup: runtimeCleanupArgv,
-          restart: runtimeRestartArgv,
-          status: runtimeStatusArgv,
-          traffic: trafficLimitEnabled ? runtimeTrafficArgv : "",
-          ingressKbps: trafficLimitEnabled ? trafficIngressKbps : "",
-          egressKbps: trafficLimitEnabled ? trafficEgressKbps : "",
-          burstKb: trafficLimitEnabled ? trafficBurstKb : "",
-          fouPort: form.kind === "fou" ? fouPort : "",
-          fouPeerPort: form.kind === "fou" ? fouPeerPort : "",
-          fouIpproto: form.kind === "fou" ? fouIpproto : "",
-        }),
-        runtime_topology: buildRuntimeTopology({
-          version: topologyVersion,
-          desiredText: topologyDesiredText,
-          staleText: topologyStaleText,
-          routesText: topologyRoutesText,
-          staleRoutesText: topologyStaleRoutesText,
-        }),
-      });
+    setActionError(null);
+    if (!ready) {
+      setActionError("Tunnel plan is incomplete");
+      return;
+    }
+    setTunnelPlanSaveSnapshot({
+      draftKey: tunnelPlanDraftKey,
+      request: buildTunnelPlanSaveRequest(),
     });
+  }
+
+  async function executeTunnelPlanSave(snapshot: TunnelPlanSaveSnapshot) {
+    await runPanelAction(setPending, setActionError, async () => {
+      await onCreateTunnelPlan(snapshot.request);
+      setTunnelPlanSaveSnapshot(null);
+    });
+  }
+
+  function buildTunnelPlanSaveRequest(): CreateTunnelPlanRequest {
+    return {
+      ...form,
+      reserved_addresses: splitReserved(reservedText),
+      ipv4_tunnel: completePairOrNull(form.ipv4_tunnel ?? null),
+      ipv6_address_pool_cidr: form.ipv6_address_pool_cidr?.trim() || null,
+      ipv6_tunnel: completePairOrNull(form.ipv6_tunnel ?? null),
+      runtime_control: buildRuntimeControl(runtimeManager, {
+        startup: runtimeStartupArgv,
+        stop: runtimeStopArgv,
+        cleanup: runtimeCleanupArgv,
+        restart: runtimeRestartArgv,
+        status: runtimeStatusArgv,
+        traffic: trafficLimitEnabled ? runtimeTrafficArgv : "",
+        ingressKbps: trafficLimitEnabled ? trafficIngressKbps : "",
+        egressKbps: trafficLimitEnabled ? trafficEgressKbps : "",
+        burstKb: trafficLimitEnabled ? trafficBurstKb : "",
+        fouPort: form.kind === "fou" ? fouPort : "",
+        fouPeerPort: form.kind === "fou" ? fouPeerPort : "",
+        fouIpproto: form.kind === "fou" ? fouIpproto : "",
+      }),
+      runtime_topology: buildRuntimeTopology({
+        version: topologyVersion,
+        desiredText: topologyDesiredText,
+        staleText: topologyStaleText,
+        routesText: topologyRoutesText,
+        staleRoutesText: topologyStaleRoutesText,
+      }),
+      confirmed: true,
+    };
   }
 
   async function allocateEndpoints() {
@@ -482,6 +557,61 @@ export function TopologyPanel({
         <OspfCostModelNote />
       </section>
       )}
+      <ConfirmationPrompt
+        confirmLabel="Save plan"
+        detail="Save the reviewed tunnel plan as canonical topology state."
+        error={actionError}
+        items={[
+          { label: "Name", value: tunnelPlanSaveSnapshot?.request.name ?? "-" },
+          { label: "Kind", value: tunnelPlanSaveSnapshot?.request.kind ?? "-" },
+          {
+            label: "Endpoints",
+            value: tunnelPlanSaveSnapshot
+              ? `${clientLabel(tunnelPlanSaveSnapshot.request.left_client_id)} / ${clientLabel(tunnelPlanSaveSnapshot.request.right_client_id)}`
+              : "-",
+          },
+          {
+            label: "Runtime",
+            value: tunnelPlanSaveSnapshot
+              ? runtimeManagerLabel(tunnelPlanSaveSnapshot.request.runtime_control?.manager)
+              : "-",
+          },
+        ]}
+        onCancel={() => setTunnelPlanSaveSnapshot(null)}
+        onConfirm={() => {
+          if (tunnelPlanSaveSnapshot) {
+            void executeTunnelPlanSave(tunnelPlanSaveSnapshot);
+          }
+        }}
+        open={Boolean(tunnelPlanSaveSnapshot && tunnelPlanSaveSnapshot.draftKey === tunnelPlanDraftKey)}
+        pending={pending}
+        title="Confirm tunnel plan save"
+      />
+      <ConfirmationPrompt
+        confirmLabel={tunnelPlanToggleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
+        detail="Apply the reviewed lifecycle change to the selected tunnel plans."
+        error={actionError}
+        items={[
+          { label: "Action", value: tunnelPlanToggleSnapshot?.enabled ? "Enable" : "Disable" },
+          { label: "Plans", value: tunnelPlanToggleSnapshot?.planIds.length ?? 0 },
+          {
+            label: "Names",
+            value: tunnelPlanToggleSnapshot
+              ? tunnelPlanToggleSnapshot.planNames.slice(0, 4).join(", ") +
+                (tunnelPlanToggleSnapshot.planNames.length > 4 ? " ..." : "")
+              : "-",
+          },
+        ]}
+        onCancel={() => setTunnelPlanToggleSnapshot(null)}
+        onConfirm={() => {
+          if (tunnelPlanToggleSnapshot) {
+            void executeTunnelPlanToggle(tunnelPlanToggleSnapshot);
+          }
+        }}
+        open={Boolean(tunnelPlanToggleSnapshot)}
+        pending={tunnelPlanTogglePending}
+        title="Confirm tunnel plan lifecycle"
+      />
 
       {(topologySubpage === "graph" || topologySubpage === "plans" || topologySubpage === "ospf") && (
         <section className="fleetPanel">
@@ -973,13 +1103,23 @@ export function TopologyPanel({
     });
   }
 
-  async function setTunnelPlanEnabledForRows(rows: TunnelPlanRecord[], enabled: boolean) {
+  function setTunnelPlanEnabledForRows(rows: TunnelPlanRecord[], enabled: boolean) {
     const targets = rows.filter((plan) => plan.enabled !== enabled);
     if (targets.length === 0) {
       return;
     }
+    setActionError(null);
+    setTunnelPlanToggleSnapshot({
+      enabled,
+      planIds: targets.map((plan) => plan.id),
+      planNames: targets.map((plan) => plan.name),
+    });
+  }
+
+  async function executeTunnelPlanToggle(snapshot: TunnelPlanToggleSnapshot) {
     await runPanelAction(setTunnelPlanTogglePending, setActionError, async () => {
-      await onSetTunnelPlanEnabled(targets.map((plan) => plan.id), enabled);
+      await onSetTunnelPlanEnabled(snapshot.planIds, snapshot.enabled);
+      setTunnelPlanToggleSnapshot(null);
     });
   }
 

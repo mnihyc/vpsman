@@ -7,7 +7,7 @@ import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { dataSourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
+import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../privilege";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
@@ -17,6 +17,7 @@ import type {
   AgentView,
   AssignDataSourcePresetRequest,
   AssignDataSourcePresetResponse,
+  BulkResolveResponse,
   CloneDataSourcePresetRequest,
   CreateJobRequest,
   CreateJobResponse,
@@ -64,6 +65,35 @@ const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
 const DATA_SOURCE_SELECTOR_STORAGE_KEY = "vpsman.dataSources.assignmentSelectorExpression";
 type DataSourceConfirmationAction = "assignment" | "apply" | "lifecycle-update";
 
+type DataSourceAssignmentSnapshot = {
+  domain: string;
+  presetId: string;
+  presetName: string;
+  selectorExpression: string;
+  targetClientIds: string[];
+  targets: AgentView[];
+  assignments: AssignDataSourcePresetResponse["assignments"];
+};
+
+type DataSourceApplySnapshot = {
+  clientId: string;
+  clientLabel: string;
+  operation: JobOperation;
+  payloadHashHex: string;
+  privilegeAssertion: PrivilegeAssertion;
+  rendered: DataSourceHotConfigResponse;
+  selectorExpression: string;
+  timeoutSecs: number;
+};
+
+type DataSourceLifecycleUpdateSnapshot = {
+  assignedClientCount: number;
+  description: string | null;
+  definition: JsonValue;
+  presetId: string;
+  presetName: string;
+};
+
 export function DataSourcePresetPanel({
   activeSubpage,
   agents,
@@ -76,6 +106,7 @@ export function DataSourcePresetPanel({
   onDiffPreset,
   onOpenPrivilegeUnlock,
   onRenderHotConfig,
+  onResolveBulk,
   onTestPreset,
   onUpdatePreset,
   privilegeMaterial,
@@ -93,6 +124,7 @@ export function DataSourcePresetPanel({
   onDiffPreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
   onOpenPrivilegeUnlock: () => void;
   onRenderHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
+  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onTestPreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
   onUpdatePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -127,6 +159,11 @@ export function DataSourcePresetPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [pendingConfirmation, setPendingConfirmation] = useState<DataSourceConfirmationAction | null>(null);
+  const [assignmentSnapshot, setAssignmentSnapshot] =
+    useState<DataSourceAssignmentSnapshot | null>(null);
+  const [applySnapshot, setApplySnapshot] = useState<DataSourceApplySnapshot | null>(null);
+  const [lifecycleUpdateSnapshot, setLifecycleUpdateSnapshot] =
+    useState<DataSourceLifecycleUpdateSnapshot | null>(null);
 
   const assignablePresets = useMemo(
     () => presets.filter((preset) => preset.domain === assignDomain),
@@ -188,6 +225,7 @@ export function DataSourcePresetPanel({
     setLastDiff(null);
     setLastTest(null);
     setLastUpdate(null);
+    clearLifecycleUpdateConfirmation();
   }, [lifecyclePreset?.id]);
 
   useEffect(() => {
@@ -211,26 +249,60 @@ export function DataSourcePresetPanel({
     });
   }
 
-  function submitAssignment(event: FormEvent<HTMLFormElement>) {
+  async function submitAssignment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPendingConfirmation("assignment");
-  }
-
-  async function executeAssignment() {
     await runPanelAction(setPending, setActionError, async () => {
       if (assignmentSelectorParse.error) {
         throw new Error(`Invalid target expression: ${assignmentSelectorParse.error}`);
       }
-      if (assignmentTargetCount === 0) {
-        throw new Error("Add at least one matching VPS target");
+      const selectorExpression = assignmentSelectorExpression.trim();
+      if (!selectorExpression) {
+        throw new Error("Add at least one target selector");
+      }
+      if (!effectivePresetId) {
+        throw new Error("Select a preset");
+      }
+      const resolved = await onResolveBulk(selectorExpression);
+      const targetClientIds = resolved.targets.map((target) => target.id);
+      if (!targetClientIds.length) {
+        throw new Error("Data-source assignment confirmation resolved no VPSs");
+      }
+      const preview = await onAssignPreset({
+        confirmed: false,
+        domain: assignDomain,
+        preset_id: effectivePresetId,
+        selector_expression: selectorExpression,
+        target_client_ids: targetClientIds,
+      });
+      setLastAssignment(preview);
+      setAssignmentSnapshot({
+        assignments: preview.assignments,
+        domain: assignDomain,
+        presetId: effectivePresetId,
+        presetName: preview.preset.name,
+        selectorExpression,
+        targetClientIds,
+        targets: resolved.targets,
+      });
+      setPendingConfirmation("assignment");
+    });
+  }
+
+  async function executeAssignment() {
+    await runPanelAction(setPending, setActionError, async () => {
+      const snapshot = assignmentSnapshot;
+      if (!snapshot) {
+        throw new Error("Data-source assignment confirmation snapshot is missing; review the assignment again");
       }
       const response = await onAssignPreset({
         confirmed: true,
-        domain: assignDomain,
-        preset_id: effectivePresetId,
-        selector_expression: assignmentSelectorExpression.trim(),
+        domain: snapshot.domain,
+        preset_id: snapshot.presetId,
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: snapshot.targetClientIds,
       });
       setLastAssignment(response);
+      setAssignmentSnapshot(null);
     });
   }
 
@@ -239,10 +311,33 @@ export function DataSourcePresetPanel({
     await runPanelAction(setPending, setActionError, async () => {
       setRenderedHotConfig(await onRenderHotConfig(renderClientId));
       setLastApplyJob(null);
+      clearApplyConfirmation();
     });
   }
 
-  async function applyRenderedHotConfig() {
+  async function applyRenderedHotConfig(snapshot: DataSourceApplySnapshot) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const response = await onCreateJob({
+        argv: [],
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: [snapshot.clientId],
+        command: "data_source_config_patch",
+        confirmed: true,
+        destructive: false,
+        force_unprivileged: false,
+        operation: snapshot.operation,
+        privileged: true,
+        privilege_assertion: snapshot.privilegeAssertion,
+        timeout_secs: snapshot.timeoutSecs,
+      });
+      setRenderedHotConfig(snapshot.rendered);
+      setLastApplyJob(response);
+      setLastApplyPayloadHash(snapshot.payloadHashHex);
+      setApplySnapshot(null);
+    });
+  }
+
+  async function confirmApplyRenderedHotConfig() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!renderClientId) {
         throw new Error("Select a VPS before applying a data-source patch");
@@ -267,27 +362,22 @@ export function DataSourcePresetPanel({
         selectorExpression,
         timeoutSecs,
       });
-      const response = await onCreateJob({
-        argv: [],
-            selector_expression: selectorExpression,
-        target_client_ids: [renderClientId],
-        command: "data_source_config_patch",
-        confirmed: true,
-        destructive: false,
-        force_unprivileged: false,
-        operation,
-        privileged: true,
-        privilege_assertion: built.privilegeAssertion,
-        timeout_secs: timeoutSecs,
-      });
       setRenderedHotConfig(rendered);
-      setLastApplyJob(response);
-      setLastApplyPayloadHash(built.payloadHashHex);
+      setApplySnapshot({
+        clientId: renderClientId,
+        clientLabel:
+          agents.find((agent) => agent.id === renderClientId)
+            ? formatVpsName(agents.find((agent) => agent.id === renderClientId) as AgentView, vpsNameDisplayMode)
+            : renderClientId,
+        operation,
+        payloadHashHex: built.payloadHashHex,
+        privilegeAssertion: built.privilegeAssertion,
+        rendered,
+        selectorExpression,
+        timeoutSecs,
+      });
+      setPendingConfirmation("apply");
     });
-  }
-
-  function confirmApplyRenderedHotConfig() {
-    setPendingConfirmation("apply");
   }
 
   async function diffLifecyclePreset() {
@@ -339,22 +429,30 @@ export function DataSourcePresetPanel({
   }
 
   function updateLifecyclePreset() {
-    setPendingConfirmation("lifecycle-update");
-  }
-
-  async function executeLifecyclePresetUpdate() {
     if (!lifecyclePreset || lifecyclePreset.built_in) {
       return;
     }
+    setLifecycleUpdateSnapshot({
+      assignedClientCount: lifecyclePreset.assigned_client_count,
+      description: lifecycleDescription.trim() || null,
+      definition: parseDefinition(lifecycleDefinitionText),
+      presetId: lifecyclePreset.id,
+      presetName: lifecyclePreset.name,
+    });
+    setPendingConfirmation("lifecycle-update");
+  }
+
+  async function executeLifecyclePresetUpdate(snapshot: DataSourceLifecycleUpdateSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
-      const response = await onUpdatePreset(lifecyclePreset.id, {
+      const response = await onUpdatePreset(snapshot.presetId, {
         confirmed: true,
-        definition: parseDefinition(lifecycleDefinitionText),
-        description: lifecycleDescription.trim() || null,
+        definition: snapshot.definition,
+        description: snapshot.description,
       });
       setLastUpdate(response);
       setLastDiff(response.diff);
       setLastTest(null);
+      setLifecycleUpdateSnapshot(null);
     });
   }
 
@@ -365,11 +463,23 @@ export function DataSourcePresetPanel({
     }
     setPendingConfirmation(null);
     if (action === "assignment") {
+      if (!assignmentSnapshot) {
+        setActionError("Data-source assignment confirmation snapshot is missing; review the assignment again");
+        return;
+      }
       await executeAssignment();
     } else if (action === "apply") {
-      await applyRenderedHotConfig();
+      if (!applySnapshot) {
+        setActionError("Data-source apply confirmation snapshot is missing; review the apply again");
+        return;
+      }
+      await applyRenderedHotConfig(applySnapshot);
     } else {
-      await executeLifecyclePresetUpdate();
+      if (!lifecycleUpdateSnapshot) {
+        setActionError("Data-source update confirmation snapshot is missing; review the update again");
+        return;
+      }
+      await executeLifecyclePresetUpdate(lifecycleUpdateSnapshot);
     }
   }
 
@@ -388,30 +498,62 @@ export function DataSourcePresetPanel({
   const dataSourceConfirmationItems =
     pendingConfirmation === "assignment"
       ? [
-          { label: "Domain", value: assignDomain },
-          { label: "Preset", value: effectivePresetId ? shortId(effectivePresetId) : "none" },
-          { label: "Targets", value: `${assignmentTargetCount}/${agents.length}` },
+          { label: "Domain", value: assignmentSnapshot?.domain ?? assignDomain },
+          {
+            label: "Preset",
+            value:
+              assignmentSnapshot?.presetName ??
+              (effectivePresetId ? shortId(effectivePresetId) : "none"),
+          },
+          {
+            label: "Targets",
+            value: assignmentSnapshot
+              ? `${assignmentSnapshot.targetClientIds.length} resolved and frozen`
+              : `${assignmentTargetCount}/${agents.length}`,
+          },
+          {
+            label: "Preview",
+            value: assignmentSnapshot
+              ? assignmentSnapshot.targets
+                  .slice(0, 4)
+                  .map((target) => formatVpsName(target, vpsNameDisplayMode))
+                  .join(", ") +
+                (assignmentSnapshot.targets.length > 4
+                  ? `, +${assignmentSnapshot.targets.length - 4} more`
+                  : "")
+              : "Review assignment to freeze targets",
+          },
         ]
       : pendingConfirmation === "apply"
         ? [
             {
               label: "VPS",
-              value: agents.find((agent) => agent.id === renderClientId)
-                ? formatVpsName(agents.find((agent) => agent.id === renderClientId) as AgentView, vpsNameDisplayMode)
-                : renderClientId || "none",
+              value: applySnapshot?.clientLabel ?? "none",
             },
-            { label: "Timeout", value: `${clampInteger(applyTimeoutSecs, 1, 3600)}s` },
-            { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+            { label: "Timeout", value: `${applySnapshot?.timeoutSecs ?? 0}s` },
+            { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
           ]
         : [
-            { label: "Preset", value: lifecyclePreset?.name ?? "none" },
-            { label: "Assigned", value: `${lifecyclePreset?.assigned_client_count ?? 0} VPSs` },
+            { label: "Preset", value: lifecycleUpdateSnapshot?.presetName ?? "none" },
+            { label: "Assigned", value: `${lifecycleUpdateSnapshot?.assignedClientCount ?? 0} VPSs` },
           ];
+
+  function clearApplyConfirmation() {
+    setApplySnapshot(null);
+    setPendingConfirmation((current) => (current === "apply" ? null : current));
+  }
+
+  function clearLifecycleUpdateConfirmation() {
+    setLifecycleUpdateSnapshot(null);
+    setPendingConfirmation((current) => (current === "lifecycle-update" ? null : current));
+  }
 
   function changeAssignDomain(domain: string) {
     setAssignDomain(domain);
     setAssignPresetId("");
     setLastAssignment(null);
+    setAssignmentSnapshot(null);
+    setPendingConfirmation((current) => (current === "assignment" ? null : current));
   }
 
   return (
@@ -429,7 +571,16 @@ export function DataSourcePresetPanel({
           confirmLabel="Confirm"
           detail={dataSourceConfirmationDetail}
           items={dataSourceConfirmationItems}
-          onCancel={() => setPendingConfirmation(null)}
+          onCancel={() => {
+            if (pendingConfirmation === "assignment") {
+              setAssignmentSnapshot(null);
+            } else if (pendingConfirmation === "apply") {
+              setApplySnapshot(null);
+            } else if (pendingConfirmation === "lifecycle-update") {
+              setLifecycleUpdateSnapshot(null);
+            }
+            setPendingConfirmation(null);
+          }}
           onConfirm={() => void confirmDataSourceAction()}
           open={pendingConfirmation !== null}
           pending={pending}
@@ -525,7 +676,15 @@ export function DataSourcePresetPanel({
             </label>
             <label>
               <span>Preset</span>
-              <select aria-label="Preset" onChange={(event) => setAssignPresetId(event.target.value)} value={effectivePresetId}>
+              <select
+                aria-label="Preset"
+                onChange={(event) => {
+                  setAssignPresetId(event.target.value);
+                  setAssignmentSnapshot(null);
+                  setPendingConfirmation((current) => (current === "assignment" ? null : current));
+                }}
+                value={effectivePresetId}
+              >
                 {assignablePresets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
                     {preset.name}
@@ -546,7 +705,11 @@ export function DataSourcePresetPanel({
               agents={agents}
               ariaLabel="Data-source assignment target expression"
               className="targetExpressionBar"
-              onChange={setAssignmentSelectorExpression}
+              onChange={(value) => {
+                setAssignmentSelectorExpression(value);
+                setAssignmentSnapshot(null);
+                setPendingConfirmation((current) => (current === "assignment" ? null : current));
+              }}
               placeholder="id:edge-a || provider:alpha && country:us"
               showMatchCount
               value={assignmentSelectorExpression}
@@ -569,7 +732,7 @@ export function DataSourcePresetPanel({
               disabled={
                 pending ||
                 !effectivePresetId ||
-                assignmentTargetCount === 0 ||
+                !assignmentSelectorExpression.trim() ||
                 Boolean(assignmentSelectorParse.error)
               }
               type="submit"
@@ -589,7 +752,11 @@ export function DataSourcePresetPanel({
             <VpsCombobox
               agents={agents}
               ariaLabel="Hot-config preview VPS"
-              onChange={setRenderClientId}
+              onChange={(value) => {
+                setRenderClientId(value);
+                setRenderedHotConfig(null);
+                clearApplyConfirmation();
+              }}
               placeholder="Search review VPS"
               value={renderClientId}
             />
@@ -613,7 +780,10 @@ export function DataSourcePresetPanel({
                 aria-label="Data-source apply timeout"
                 min={1}
                 max={3600}
-                onChange={(event) => setApplyTimeoutSecs(Number(event.target.value))}
+                onChange={(event) => {
+                  setApplyTimeoutSecs(Number(event.target.value));
+                  clearApplyConfirmation();
+                }}
                 type="number"
                 value={applyTimeoutSecs}
               />
@@ -623,7 +793,10 @@ export function DataSourcePresetPanel({
             labelPrefix="Data-source"
             lastPayloadHash={lastApplyPayloadHash}
             onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            onPrivilegeMaterialChange={(material) => {
+              setPrivilegeMaterial(material);
+              clearApplyConfirmation();
+            }}
             privilegeMaterial={privilegeMaterial}
             unlockRedirectLabel="Unlock data-source privilege"
           />
@@ -631,7 +804,7 @@ export function DataSourcePresetPanel({
             <button
               className="secondaryAction"
               disabled={pending || !renderClientId || !privilegeMaterial}
-              onClick={confirmApplyRenderedHotConfig}
+              onClick={() => void confirmApplyRenderedHotConfig()}
               type="button"
             >
               Review apply
@@ -674,7 +847,10 @@ export function DataSourcePresetPanel({
             <span>Description</span>
             <input
               aria-label="Lifecycle preset description"
-              onChange={(event) => setLifecycleDescription(event.target.value)}
+              onChange={(event) => {
+                setLifecycleDescription(event.target.value);
+                clearLifecycleUpdateConfirmation();
+              }}
               placeholder="description"
               value={lifecycleDescription}
             />
@@ -683,7 +859,10 @@ export function DataSourcePresetPanel({
             <span>Definition JSON</span>
             <textarea
               aria-label="Lifecycle preset definition JSON"
-              onChange={(event) => setLifecycleDefinitionText(event.target.value)}
+              onChange={(event) => {
+                setLifecycleDefinitionText(event.target.value);
+                clearLifecycleUpdateConfirmation();
+              }}
               value={lifecycleDefinitionText}
             />
           </label>

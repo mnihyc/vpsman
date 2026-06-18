@@ -131,12 +131,17 @@ export function MultiFileActionsPanel({
     setActionMessage(null);
   }
 
+  function clearPendingConfirmation() {
+    setPendingConfirmation(null);
+  }
+
   async function refreshPreview() {
     await runPanelAction(setPending, setActionError, async () => {
       const next = await onResolveTargets({
         selector_expression: selectorExpression.trim(),
       });
       setPreview(next);
+      clearPendingConfirmation();
       localStorage.setItem(SELECTOR_STORAGE_KEY, selectorExpression.trim());
       setActionMessage(`${next.target_count} VPSs resolved`);
     });
@@ -144,9 +149,9 @@ export function MultiFileActionsPanel({
 
   async function prepareBulkOperation() {
     await runPanelAction(setPending, setActionError, async () => {
-      const resolved = preview ?? (await onResolveTargets({
+      const resolved = await onResolveTargets({
         selector_expression: selectorExpression.trim(),
-      }));
+      });
       setPreview(resolved);
       if (resolved.targets.length === 0) {
         throw new Error("No VPSs match the selector");
@@ -354,6 +359,8 @@ export function MultiFileActionsPanel({
               ariaLabel="Multi file target selector"
               onChange={(value) => {
                 setSelectorExpression(value);
+                setPreview(null);
+                clearPendingConfirmation();
                 localStorage.setItem(SELECTOR_STORAGE_KEY, value);
               }}
               placeholder="id:* && provider:example"
@@ -363,11 +370,17 @@ export function MultiFileActionsPanel({
             />
           </label>
           <div className="multiFilePrimaryActions">
-            <button className={action === "download_files" ? "primaryAction" : "secondaryAction"} onClick={() => setAction("download_files")} type="button">
+            <button className={action === "download_files" ? "primaryAction" : "secondaryAction"} onClick={() => {
+              setAction("download_files");
+              clearPendingConfirmation();
+            }} type="button">
               <Download size={14} />
               <span>Download files</span>
             </button>
-            <button className={action === "upload_file" ? "primaryAction" : "secondaryAction"} onClick={() => setAction("upload_file")} type="button">
+            <button className={action === "upload_file" ? "primaryAction" : "secondaryAction"} onClick={() => {
+              setAction("upload_file");
+              clearPendingConfirmation();
+            }} type="button">
               <Upload size={14} />
               <span>Upload files</span>
             </button>
@@ -377,7 +390,10 @@ export function MultiFileActionsPanel({
               <span>{action === "upload_file" ? "Destination path" : "Path"}</span>
               <input
                 aria-label={action === "upload_file" ? "Bulk file destination path" : "Bulk file path"}
-                onChange={(event) => setPath(event.target.value)}
+                onChange={(event) => {
+                  setPath(event.target.value);
+                  clearPendingConfirmation();
+                }}
                 value={path}
               />
             </label>
@@ -392,30 +408,67 @@ export function MultiFileActionsPanel({
             <div className="bulkTransferGrid">
               <label className="wideField">
                 <span>Source file</span>
-                <input aria-label="Bulk upload file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} type="file" />
+                <input
+                  aria-label="Bulk upload file"
+                  onChange={(event) => {
+                    setUploadFile(event.target.files?.[0] ?? null);
+                    clearPendingConfirmation();
+                  }}
+                  type="file"
+                />
               </label>
               <label>
                 <span>Mode</span>
-                <input onChange={(event) => setUploadMode(event.target.value)} value={uploadMode} />
+                <input
+                  onChange={(event) => {
+                    setUploadMode(event.target.value);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadMode}
+                />
               </label>
               <label>
                 <span>Existing file</span>
-                <select onChange={(event) => setUploadExistingPolicy(event.target.value as FileExistingPolicy)} value={uploadExistingPolicy}>
+                <select
+                  onChange={(event) => {
+                    setUploadExistingPolicy(event.target.value as FileExistingPolicy);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadExistingPolicy}
+                >
                   <option value="skip">Skip</option>
                   <option value="replace">Replace</option>
                 </select>
               </label>
               <label>
                 <span>Owner</span>
-                <input onChange={(event) => setUploadOwner(event.target.value)} value={uploadOwner} />
+                <input
+                  onChange={(event) => {
+                    setUploadOwner(event.target.value);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadOwner}
+                />
               </label>
               <label>
                 <span>Group</span>
-                <input onChange={(event) => setUploadGroup(event.target.value)} value={uploadGroup} />
+                <input
+                  onChange={(event) => {
+                    setUploadGroup(event.target.value);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadGroup}
+                />
               </label>
               <label>
                 <span>Missing owner/group</span>
-                <select onChange={(event) => setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy)} value={uploadOwnershipPolicy}>
+                <select
+                  onChange={(event) => {
+                    setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadOwnershipPolicy}
+                >
                   <option value="fail">Fail</option>
                   <option value="ignore">Ignore chown</option>
                 </select>
@@ -426,7 +479,10 @@ export function MultiFileActionsPanel({
             <summary>Advanced actions</summary>
             <label>
               <span>Action</span>
-              <select onChange={(event) => setAction(event.target.value as MultiFileAction)} value={isAdvancedAction(action) ? action : ""}>
+              <select onChange={(event) => {
+                setAction(event.target.value as MultiFileAction);
+                clearPendingConfirmation();
+              }} value={isAdvancedAction(action) ? action : ""}>
                 <option disabled value="">Choose action</option>
                 <option value="copy">Copy</option>
                 <option value="rename">Move</option>
@@ -441,7 +497,13 @@ export function MultiFileActionsPanel({
           {usesFileActionPolicy(action) && (
             <label>
               <span>Policy</span>
-              <select onChange={(event) => setPolicy(event.target.value as FileActionPolicy)} value={policy}>
+              <select
+                onChange={(event) => {
+                  setPolicy(event.target.value as FileActionPolicy);
+                  clearPendingConfirmation();
+                }}
+                value={policy}
+              >
                 <option value="fail">Strict: fail on conflict</option>
                 <option value="ensure">Converge: accept already-correct state</option>
                 <option value="ignore">Skip missing/conflicting targets</option>
@@ -451,28 +513,59 @@ export function MultiFileActionsPanel({
           {(action === "copy" || action === "rename") && (
             <label>
               <span>{action === "copy" ? "Destination path" : "New path"}</span>
-              <input onChange={(event) => setNewPath(event.target.value)} placeholder="/etc/app.conf.next" value={newPath} />
+              <input
+                onChange={(event) => {
+                  setNewPath(event.target.value);
+                  clearPendingConfirmation();
+                }}
+                placeholder="/etc/app.conf.next"
+                value={newPath}
+              />
             </label>
           )}
           {(action === "chmod" || action === "mkdir" || action === "write_text") && (
             <label>
               <span>Mode</span>
-              <input onChange={(event) => setMode(event.target.value)} value={mode} />
+              <input
+                onChange={(event) => {
+                  setMode(event.target.value);
+                  clearPendingConfirmation();
+                }}
+                value={mode}
+              />
             </label>
           )}
           {action === "chown" && (
             <div className="bulkTransferGrid">
               <label>
                 <span>Owner</span>
-                <input onChange={(event) => setUploadOwner(event.target.value)} value={uploadOwner} />
+                <input
+                  onChange={(event) => {
+                    setUploadOwner(event.target.value);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadOwner}
+                />
               </label>
               <label>
                 <span>Group</span>
-                <input onChange={(event) => setUploadGroup(event.target.value)} value={uploadGroup} />
+                <input
+                  onChange={(event) => {
+                    setUploadGroup(event.target.value);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadGroup}
+                />
               </label>
               <label>
                 <span>Missing owner/group</span>
-                <select onChange={(event) => setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy)} value={uploadOwnershipPolicy}>
+                <select
+                  onChange={(event) => {
+                    setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
+                    clearPendingConfirmation();
+                  }}
+                  value={uploadOwnershipPolicy}
+                >
                   <option value="fail">Fail</option>
                   <option value="ignore">Ignore chown</option>
                 </select>
@@ -482,20 +575,41 @@ export function MultiFileActionsPanel({
           {action === "write_text" && (
             <label>
               <span>Content</span>
-              <textarea onChange={(event) => setContent(event.target.value)} rows={8} value={content} />
+              <textarea
+                onChange={(event) => {
+                  setContent(event.target.value);
+                  clearPendingConfirmation();
+                }}
+                rows={8}
+                value={content}
+              />
             </label>
           )}
           {(action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir" || action === "rename") && (
             <div className="multiFileGrid">
               {(action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir") && (
                 <label className="inlineCheck actionCheck">
-                  <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
+                  <input
+                    checked={recursive}
+                    onChange={(event) => {
+                      setRecursive(event.target.checked);
+                      clearPendingConfirmation();
+                    }}
+                    type="checkbox"
+                  />
                   <span>{action === "mkdir" ? "Create missing parents" : "Recursive"}</span>
                 </label>
               )}
               {(action === "copy" || action === "rename") && (
                 <label className="inlineCheck actionCheck">
-                  <input checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} type="checkbox" />
+                  <input
+                    checked={overwrite}
+                    onChange={(event) => {
+                      setOverwrite(event.target.checked);
+                      clearPendingConfirmation();
+                    }}
+                    type="checkbox"
+                  />
                   <span>Overwrite destination</span>
                 </label>
               )}

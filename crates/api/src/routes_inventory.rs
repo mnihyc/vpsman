@@ -9,6 +9,7 @@ use axum::{
 use crate::{
     data_source_builtin_presets::DATA_SOURCE_DOMAINS,
     error::ApiError,
+    job_request::{fixed_target_selection, normalized_target_client_ids},
     model::{
         AgentView, AssignDataSourcePresetRequest, AssignTagRequest, BulkResolveRequest,
         BulkResolveResponse, BulkTagMutationRequest, CloneDataSourcePresetRequest,
@@ -90,7 +91,14 @@ pub(crate) async fn delete_agent(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    validate_client_id(&client_id)?;
     validate_delete_agent_request(&request)?;
+    let targets = vec![client_id.clone()];
+    let intent = DbPrivilegeIntent::new("agent.delete", &client_id, None, &targets, true, None);
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    state
+        .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
+        .await?;
     let response = state
         .repo
         .delete_agent(&client_id, &request, &operator)
@@ -446,12 +454,19 @@ pub(crate) async fn render_data_source_hot_config(
 pub(crate) async fn assign_data_source_preset(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<AssignDataSourcePresetRequest>,
+    Json(mut request): Json<AssignDataSourcePresetRequest>,
 ) -> Result<Json<crate::model::AssignDataSourcePresetResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_assign_data_source_preset(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    verified_fixed_target_ids(
+        &state,
+        &request.target_client_ids,
+        "data_source_assignment_targets_not_found",
+    )
+    .await?;
     Ok(Json(
         state
             .repo
@@ -480,7 +495,7 @@ pub(crate) async fn create_tag(
     }
     validate_persisted_tag_name(&request.name)?;
     let targets = Vec::<String>::new();
-    let intent = DbPrivilegeIntent::new("tag.create", &request.name, None, &targets, true);
+    let intent = DbPrivilegeIntent::new("tag.create", &request.name, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     Ok(Json(state.repo.create_tag(request).await?))
 }
@@ -488,24 +503,21 @@ pub(crate) async fn create_tag(
 pub(crate) async fn bulk_mutate_tags(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<BulkTagMutationRequest>,
+    Json(mut request): Json<BulkTagMutationRequest>,
 ) -> Result<Json<TagMutationResponse>, ApiError> {
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_persisted_tag_name(&request.tag)?;
     validate_bulk_selector_expression(&request.selector_expression)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    let fixed_targets = verified_fixed_target_ids(
+        &state,
+        &request.target_client_ids,
+        "tag_fixed_targets_not_found",
+    )
+    .await?;
     if request.confirmed {
-        let resolved_targets = state
-            .repo
-            .resolve_bulk_targets(&BulkResolveRequest {
-                selector_expression: request.selector_expression.clone(),
-            })
-            .await?
-            .targets
-            .into_iter()
-            .map(|agent| agent.id)
-            .collect::<Vec<_>>();
         let action = match request.action {
             crate::model::BulkTagMutationAction::Add => "tag.bulk_add",
             crate::model::BulkTagMutationAction::Remove => "tag.bulk_remove",
@@ -514,8 +526,9 @@ pub(crate) async fn bulk_mutate_tags(
             action,
             &request.tag,
             Some(&request.selector_expression),
-            &resolved_targets,
+            &fixed_targets,
             request.confirmed,
+            None,
         );
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
@@ -546,7 +559,8 @@ pub(crate) async fn delete_tag(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let intent = DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true);
+        let intent =
+            DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true, None);
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
     Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
@@ -676,6 +690,30 @@ fn validate_assign_data_source_preset(
     Ok(())
 }
 
+async fn verified_fixed_target_ids(
+    state: &AppState,
+    target_client_ids: &[String],
+    error_code: &'static str,
+) -> Result<Vec<String>, ApiError> {
+    let target_client_ids = normalized_target_client_ids(target_client_ids)?;
+    let resolved = state
+        .repo
+        .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
+        .await?
+        .targets
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let missing = target_client_ids
+        .iter()
+        .filter(|client_id| !resolved.iter().any(|resolved_id| resolved_id == *client_id))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(ApiError::conflict(error_code));
+    }
+    Ok(target_client_ids)
+}
+
 fn validate_optional_domain(domain: Option<&str>) -> Result<(), ApiError> {
     if let Some(domain) = domain {
         validate_domain(domain)?;
@@ -795,7 +833,7 @@ pub(crate) async fn assign_agent_tag(
     validate_persisted_tag_name(&request.tag)?;
     if request.confirmed {
         let targets = vec![client_id.clone()];
-        let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true);
+        let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true, None);
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
     Ok(Json(

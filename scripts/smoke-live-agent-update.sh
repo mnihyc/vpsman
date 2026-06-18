@@ -276,21 +276,21 @@ assert_single_target_completed() {
   ' <<<"$targets_json" >/dev/null
 }
 
-wait_update_heartbeat_verified() {
+wait_update_heartbeat_observed() {
   local activation_job_id="$1"
   local deadline=$((SECONDS + 35))
   until api_get "/api/v1/audit?limit=80" | jq -e \
     --arg client "$client_id" \
     --arg activation_job "$activation_job_id" \
     --arg sha "$artifact_sha" '
-      any(.[]; .action == "agent_update.heartbeat_verified"
+      any(.[]; .action == "agent_update.heartbeat_observed"
         and .target == ("client:" + $client)
         and .metadata.activation_job_id == $activation_job
         and .metadata.artifact_sha256_hex == $sha)
     ' >/dev/null; do
     if (( SECONDS >= deadline )); then
       api_get "/api/v1/audit?limit=80" >&2 || true
-      smoke_dump_logs "agent update heartbeat was not recorded" \
+      smoke_dump_logs "agent update heartbeat was not observed" \
         "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$SMOKE_TMPDIR"/agent-*.log
       exit 1
     fi
@@ -444,7 +444,7 @@ stop_agent
 sleep 1
 start_agent "activated"
 wait_agent_online
-wait_update_heartbeat_verified "$activate_job_id"
+wait_update_heartbeat_observed "$activate_job_id"
 
 rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \

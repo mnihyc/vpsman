@@ -5,6 +5,7 @@ use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 use vpsman_common::SuiteConfig;
+use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
 
 use crate::{
     error::ApiError,
@@ -152,6 +153,31 @@ impl AppState {
                 .max(config.dispatch_ack_secs)
                 .clamp(1, 3600),
         ));
+    }
+
+    pub(crate) async fn disconnect_gateway_session_for_lifecycle(
+        &self,
+        client_id: &str,
+        reason: &str,
+    ) -> Result<(), ApiError> {
+        if !self.gateway.configured() {
+            #[cfg(test)]
+            if self.gateway.test_privilege_auto_approves() {
+                return Ok(());
+            }
+            return Err(ApiError::conflict("gateway_control_url_missing"));
+        }
+        self.refresh_gateway_dispatch_timeouts();
+        let result = self
+            .gateway
+            .disconnect_session(client_id, reason)
+            .await
+            .map_err(|_| ApiError::conflict("gateway_session_disconnect_failed"))?;
+        if result.accepted {
+            Ok(())
+        } else {
+            Err(ApiError::conflict("gateway_session_disconnect_failed"))
+        }
     }
 
     pub(crate) fn job_output_artifact_min_bytes(&self) -> usize {
@@ -480,6 +506,40 @@ impl AppState {
 
     pub(crate) fn publish(&self, event: WsEvent) {
         let _ = self.events.send(event);
+    }
+
+    pub(crate) async fn terminal_job_status_after_refresh(
+        &self,
+        job_id: uuid::Uuid,
+        refreshed: Option<String>,
+    ) -> Result<Option<String>> {
+        if let Some(status) = refreshed {
+            return Ok(Some(status));
+        }
+        let Some(job) = self.repo.get_job(job_id).await? else {
+            return Ok(None);
+        };
+        if job.completed_at.is_some()
+            && !matches!(job.status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING)
+        {
+            Ok(Some(job.status))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) async fn publish_job_finished_after_refresh(
+        &self,
+        job_id: uuid::Uuid,
+        refreshed: Option<String>,
+    ) -> Result<()> {
+        if let Some(status) = self
+            .terminal_job_status_after_refresh(job_id, refreshed)
+            .await?
+        {
+            self.publish(WsEvent::JobFinished { job_id, status });
+        }
+        Ok(())
     }
 
     pub(crate) async fn fleet_snapshot(&self) -> Result<WsEvent> {

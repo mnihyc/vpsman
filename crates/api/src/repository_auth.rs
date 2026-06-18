@@ -1142,12 +1142,15 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut operators = memory.operators.write().await;
-                let Some(operator) = operators
-                    .iter_mut()
-                    .find(|operator| operator.id == operator_id && operator.status != "deleted")
-                else {
+                let Some(index) = operators.iter().position(|operator| {
+                    operator.id == operator_id && operator.status != "deleted"
+                }) else {
                     return Ok(None);
                 };
+                ensure_memory_active_admin_remains(&operators, operator_id, Some(&role), None)?;
+                let operator = operators
+                    .get_mut(index)
+                    .expect("operator index checked before mutation");
                 operator.role = role;
                 operator.scopes = scopes;
                 operator.session_refresh_ttl_secs = session_refresh_ttl_secs;
@@ -1166,6 +1169,27 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                sqlx::query("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE")
+                    .execute(&mut *tx)
+                    .await?;
+                let target = sqlx::query(
+                    "SELECT status, role FROM operators WHERE id = $1 AND status <> 'deleted' FOR UPDATE",
+                )
+                .bind(operator_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(target) = target else {
+                    return Ok(None);
+                };
+                ensure_postgres_active_admin_remains(
+                    &mut tx,
+                    operator_id,
+                    target.try_get("status")?,
+                    target.try_get("role")?,
+                    Some(&role),
+                    None,
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     UPDATE operators
@@ -1231,13 +1255,17 @@ impl Repository {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
                 let mut operators = memory.operators.write().await;
-                let Some(operator) = operators.iter_mut().find(|operator| {
+                let Some(index) = operators.iter().position(|operator| {
                     operator.id == operator_id
                         && operator.status != "deleted"
                         && (status != "active" || operator.status == "disabled")
                 }) else {
                     return Ok(None);
                 };
+                ensure_memory_active_admin_remains(&operators, operator_id, None, Some(status))?;
+                let operator = operators
+                    .get_mut(index)
+                    .expect("operator index checked before mutation");
                 operator.status = status.to_string();
                 if status == "active" {
                     operator.disabled_at = None;
@@ -1265,6 +1293,35 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                sqlx::query("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE")
+                    .execute(&mut *tx)
+                    .await?;
+                let target = sqlx::query(
+                    r#"
+                    SELECT status, role
+                    FROM operators
+                    WHERE id = $1
+                      AND status <> 'deleted'
+                      AND ($2 <> 'active' OR status = 'disabled')
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(operator_id)
+                .bind(status)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(target) = target else {
+                    return Ok(None);
+                };
+                ensure_postgres_active_admin_remains(
+                    &mut tx,
+                    operator_id,
+                    target.try_get("status")?,
+                    target.try_get("role")?,
+                    None,
+                    Some(status),
+                )
+                .await?;
                 let row = sqlx::query(
                     r#"
                     UPDATE operators
@@ -2253,6 +2310,63 @@ fn auth_lockout_metadata(lockout: &AuthThrottleLockout, reason: &str) -> serde_j
         "failed_attempts": lockout.failed_attempts,
         "last_failure_reason": reason,
     })
+}
+
+fn ensure_memory_active_admin_remains(
+    operators: &[OperatorRecord],
+    operator_id: Uuid,
+    next_role: Option<&str>,
+    next_status: Option<&str>,
+) -> Result<()> {
+    let Some(operator) = operators.iter().find(|operator| operator.id == operator_id) else {
+        return Ok(());
+    };
+    let active_admin_count = operators
+        .iter()
+        .filter(|operator| is_active_admin(&operator.status, &operator.role))
+        .count();
+    let will_remain_active_admin = is_active_admin(
+        next_status.unwrap_or(operator.status.as_str()),
+        next_role.unwrap_or(operator.role.as_str()),
+    );
+    if is_active_admin(&operator.status, &operator.role)
+        && !will_remain_active_admin
+        && active_admin_count <= 1
+    {
+        anyhow::bail!("last_active_admin_required");
+    }
+    Ok(())
+}
+
+async fn ensure_postgres_active_admin_remains(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    _operator_id: Uuid,
+    current_status: String,
+    current_role: String,
+    next_role: Option<&str>,
+    next_status: Option<&str>,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT count(*) AS count FROM operators WHERE status = 'active' AND role = 'admin'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let active_admin_count: i64 = row.try_get("count")?;
+    let will_remain_active_admin = is_active_admin(
+        next_status.unwrap_or(current_status.as_str()),
+        next_role.unwrap_or(current_role.as_str()),
+    );
+    if is_active_admin(&current_status, &current_role)
+        && !will_remain_active_admin
+        && active_admin_count <= 1
+    {
+        anyhow::bail!("last_active_admin_required");
+    }
+    Ok(())
+}
+
+fn is_active_admin(status: &str, role: &str) -> bool {
+    status == "active" && role == "admin"
 }
 
 pub(crate) fn parse_scopes(value: serde_json::Value) -> Vec<String> {

@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
@@ -19,10 +14,9 @@ use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 #[cfg(test)]
-use vpsman_common::VpsMetadata;
+use vpsman_common::{expression_matches, parse_expression, ExpressionContext, VpsMetadata};
 use vpsman_common::{
-    expression_matches, parse_expression, payload_hash, read_secret_file_ref,
-    AgentCapabilitySnapshot, Expression, ExpressionContext, JobCommand, SuiteConfig,
+    payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
     SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
     SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
@@ -1064,26 +1058,21 @@ struct ArtifactCleanupRun {
     deleted_bytes: i64,
     tombstoned_rows: i64,
     tombstoned_bytes: i64,
+    skipped_rows: i64,
 }
 
 struct ArtifactCleanupJob {
     id: Uuid,
-    expression: String,
 }
 
 struct ArtifactCleanupCandidate {
     id: Uuid,
     domain: String,
     object_key: String,
-    sha256_hex: String,
     size_bytes: i64,
     status: String,
-    job_id: Option<Uuid>,
-    client_id: Option<String>,
-    stream: Option<String>,
-    seq: Option<i32>,
     backup_artifact_id: Option<Uuid>,
-    created_at: String,
+    identity_matches_review: bool,
 }
 
 async fn process_artifact_cleanup_jobs_if_leader(
@@ -1121,7 +1110,8 @@ async fn process_artifact_cleanup_jobs(
                     deleted_bytes = $4,
                     metadata = metadata || jsonb_build_object(
                         'tombstoned_count', $5::bigint,
-                        'tombstoned_bytes', $6::bigint
+                        'tombstoned_bytes', $6::bigint,
+                        'skipped_count', $7::bigint
                     ),
                     completed_at = now(),
                     error = NULL
@@ -1134,6 +1124,7 @@ async fn process_artifact_cleanup_jobs(
             .bind(run.deleted_bytes)
             .bind(run.tombstoned_rows)
             .bind(run.tombstoned_bytes)
+            .bind(run.skipped_rows)
             .execute(pool)
             .await?;
             Ok(ArtifactCleanupRun { jobs: 1, ..run })
@@ -1175,7 +1166,7 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
         SET status = $3, started_at = now()
         FROM claimed
         WHERE job.id = claimed.id
-        RETURNING job.id, job.expression
+        RETURNING job.id
         "#,
     )
     .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
@@ -1186,9 +1177,6 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
     row.map(|row| {
         Ok(ArtifactCleanupJob {
             id: row.try_get("id")?,
-            expression: row
-                .try_get::<Option<String>, _>("expression")?
-                .unwrap_or_default(),
         })
     })
     .transpose()
@@ -1199,14 +1187,15 @@ async fn run_artifact_cleanup_job(
     object_stores: ArtifactObjectStores<'_>,
     job: &ArtifactCleanupJob,
 ) -> Result<ArtifactCleanupRun> {
-    let parsed = parse_expression(&job.expression).map_err(|error| anyhow::anyhow!(error))?;
-    let candidates = artifact_cleanup_candidates(pool).await?;
+    let candidates = artifact_cleanup_targets(pool, job.id).await?;
     let mut run = ArtifactCleanupRun::default();
-    for candidate in candidates
-        .iter()
-        .filter(|candidate| artifact_cleanup_candidate_matches(candidate, parsed.as_ref()))
-        .take(1000)
-    {
+    for candidate in &candidates {
+        if !candidate.identity_matches_review
+            || !matches!(candidate.status.as_str(), "active" | "deleting")
+        {
+            run.skipped_rows += 1;
+            continue;
+        }
         match apply_artifact_cleanup_candidate(pool, object_stores, candidate).await? {
             ArtifactCleanupDisposition::Deleted => {
                 run.deleted_rows += 1;
@@ -1477,28 +1466,34 @@ async fn backup_artifact_is_referenced(
     Ok(referenced)
 }
 
-async fn artifact_cleanup_candidates(pool: &PgPool) -> Result<Vec<ArtifactCleanupCandidate>> {
+async fn artifact_cleanup_targets(
+    pool: &PgPool,
+    server_job_id: Uuid,
+) -> Result<Vec<ArtifactCleanupCandidate>> {
     let rows = sqlx::query(
         r#"
         SELECT
-            id,
-            domain,
-            object_key,
-            sha256_hex,
-            size_bytes,
-            status,
-            job_id,
-            client_id,
-            stream,
-            seq,
-            backup_artifact_id,
-            created_at::text AS created_at
-        FROM server_artifacts
-        WHERE status IN ('active', 'deleting')
-        ORDER BY created_at DESC, object_key ASC
+            target.artifact_id AS id,
+            COALESCE(artifact.domain, target.domain) AS domain,
+            COALESCE(artifact.object_key, target.object_key) AS object_key,
+            COALESCE(artifact.size_bytes, target.size_bytes) AS size_bytes,
+            COALESCE(artifact.status, 'missing') AS status,
+            artifact.backup_artifact_id,
+            (
+                artifact.id IS NOT NULL
+                AND artifact.domain = target.domain
+                AND artifact.object_key = target.object_key
+                AND artifact.sha256_hex = target.sha256_hex
+                AND artifact.size_bytes = target.size_bytes
+            ) AS identity_matches_review
+        FROM server_job_artifact_cleanup_targets target
+        LEFT JOIN server_artifacts artifact ON artifact.id = target.artifact_id
+        WHERE target.server_job_id = $1
+        ORDER BY target.created_at ASC, target.artifact_id ASC
         LIMIT 10000
         "#,
     )
+    .bind(server_job_id)
     .fetch_all(pool)
     .await?;
     rows.into_iter()
@@ -1507,51 +1502,14 @@ async fn artifact_cleanup_candidates(pool: &PgPool) -> Result<Vec<ArtifactCleanu
                 id: row.try_get("id")?,
                 domain: row.try_get("domain")?,
                 object_key: row.try_get("object_key")?,
-                sha256_hex: row.try_get("sha256_hex")?,
                 size_bytes: row.try_get("size_bytes")?,
                 status: row.try_get("status")?,
-                job_id: row.try_get("job_id")?,
-                client_id: row.try_get("client_id")?,
-                stream: row.try_get("stream")?,
-                seq: row.try_get("seq")?,
                 backup_artifact_id: row.try_get("backup_artifact_id")?,
-                created_at: row.try_get("created_at")?,
+                identity_matches_review: row.try_get("identity_matches_review")?,
             })
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
         .map_err(Into::into)
-}
-
-fn artifact_cleanup_candidate_matches(
-    candidate: &ArtifactCleanupCandidate,
-    expression: Option<&Expression>,
-) -> bool {
-    let Some(expression) = expression else {
-        return true;
-    };
-    let mut objects = BTreeMap::new();
-    objects.insert(
-        "artifact".to_string(),
-        serde_json::json!({
-            "domain": &candidate.domain,
-            "object": &candidate.object_key,
-            "size": candidate.size_bytes,
-            "status": &candidate.status,
-            "job": candidate.job_id.map(|id| id.to_string()),
-            "client": candidate.client_id.as_deref(),
-            "stream": candidate.stream.as_deref(),
-            "seq": candidate.seq,
-            "sha256": &candidate.sha256_hex,
-            "created_at": &candidate.created_at,
-        }),
-    );
-    expression_matches(
-        &ExpressionContext {
-            objects,
-            ..ExpressionContext::default()
-        },
-        expression,
-    )
 }
 
 async fn delete_object_key_confirmed(
@@ -1756,6 +1714,7 @@ struct ScheduleDueWebhookEvent<'a> {
 struct ScheduleTargetAvailability {
     capabilities: Vec<TargetCapability>,
     unavailable_targets: Vec<String>,
+    never_connected_targets: Vec<String>,
     missing_targets: Vec<String>,
 }
 
@@ -1836,17 +1795,28 @@ async fn materialize_due_schedule(
         .cloned()
         .map(unavailable_schedule_target_skip)
         .collect::<Vec<_>>();
+    let never_connected_skips = target_availability
+        .never_connected_targets
+        .iter()
+        .cloned()
+        .map(never_connected_schedule_target_skip)
+        .collect::<Vec<_>>();
+    let missing_target_skips = target_availability
+        .missing_targets
+        .iter()
+        .cloned()
+        .map(missing_schedule_target_skip)
+        .collect::<Vec<_>>();
     let busy_update_target_skips = busy_update_skips.clone();
     let schedule_target_skips = unavailable_skips
         .iter()
+        .chain(never_connected_skips.iter())
+        .chain(missing_target_skips.iter())
         .chain(busy_update_target_skips.iter())
         .cloned()
         .collect::<Vec<_>>();
-    let materialized_targets = materialized_schedule_targets(
-        &targets,
-        &available_targets,
-        &target_availability.unavailable_targets,
-    );
+    let materialized_targets =
+        materialized_schedule_targets(&targets, &available_targets, &schedule_target_skips);
     let no_dispatchable_targets = dispatch_targets_after_precomplete.is_empty();
     let status = if no_dispatchable_targets {
         JOB_STATUS_SKIPPED
@@ -1974,6 +1944,7 @@ async fn materialize_due_schedule(
         "fixed_targets": &targets,
         "materialized_targets": &materialized_targets,
         "unavailable_fixed_targets": &target_availability.unavailable_targets,
+        "never_connected_fixed_targets": &target_availability.never_connected_targets,
         "missing_fixed_targets": &target_availability.missing_targets,
         "busy_update_targets": busy_update_skips.iter().map(|skip| &skip.client_id).collect::<Vec<_>>(),
         "selector_expression": &schedule.selector_expression,
@@ -2056,12 +2027,18 @@ async fn load_schedule_target_capabilities(
         return Ok(ScheduleTargetAvailability {
             capabilities: Vec::new(),
             unavailable_targets: Vec::new(),
+            never_connected_targets: Vec::new(),
             missing_targets: Vec::new(),
         });
     }
     let rows = sqlx::query(
         r#"
-        SELECT id, capabilities, hidden_at IS NOT NULL AS hidden, status
+        SELECT
+            id,
+            capabilities,
+            hidden_at IS NOT NULL AS hidden,
+            status,
+            process_incarnation_id
         FROM clients
         WHERE id = ANY($1)
         "#,
@@ -2072,13 +2049,17 @@ async fn load_schedule_target_capabilities(
     let mut present_targets = HashSet::with_capacity(rows.len());
     let mut capabilities = Vec::new();
     let mut unavailable_targets = Vec::new();
+    let mut never_connected_targets = Vec::new();
     for row in rows {
         let client_id: String = row.try_get("id")?;
         let hidden: bool = row.try_get("hidden")?;
         let status: String = row.try_get("status")?;
+        let process_incarnation_id: Option<Uuid> = row.try_get("process_incarnation_id")?;
         present_targets.insert(client_id.clone());
         if hidden || matches!(status.as_str(), "deleted" | "revoked") {
             unavailable_targets.push(client_id);
+        } else if status == "never" || process_incarnation_id.is_none() {
+            never_connected_targets.push(client_id);
         } else {
             let snapshot: SqlJson<AgentCapabilitySnapshot> = row.try_get("capabilities")?;
             capabilities.push(TargetCapability {
@@ -2095,6 +2076,7 @@ async fn load_schedule_target_capabilities(
     Ok(ScheduleTargetAvailability {
         capabilities,
         unavailable_targets,
+        never_connected_targets,
         missing_targets,
     })
 }
@@ -2118,15 +2100,15 @@ fn available_schedule_targets(
 fn materialized_schedule_targets(
     targets: &[String],
     available_targets: &[String],
-    unavailable_targets: &[String],
+    schedule_target_skips: &[ScheduleTargetSkip],
 ) -> Vec<String> {
     targets
         .iter()
         .filter(|client_id| {
             available_targets.iter().any(|target| target == *client_id)
-                || unavailable_targets
+                || schedule_target_skips
                     .iter()
-                    .any(|target| target == *client_id)
+                    .any(|skip| skip.client_id == client_id.as_str())
         })
         .cloned()
         .collect()
@@ -2179,6 +2161,28 @@ fn unavailable_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
         hint:
             "fixed schedule target is hidden, deleted, revoked, or no longer available for dispatch",
         message: "fixed_target_unavailable: schedule target skipped",
+        accepted: false,
+    }
+}
+
+fn never_connected_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "schedule_target_skipped",
+        reason: "target_never_connected",
+        hint: "fixed schedule target has no accepted agent process incarnation; start or reconnect the agent before dispatch",
+        message: "target_never_connected: schedule target skipped",
+        accepted: false,
+    }
+}
+
+fn missing_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "schedule_target_skipped",
+        reason: "fixed_target_missing",
+        hint: "fixed schedule target no longer has an inventory row",
+        message: "fixed_target_missing: schedule target skipped",
         accepted: false,
     }
 }
@@ -2869,6 +2873,99 @@ mod schedule_tests {
     }
 
     #[tokio::test]
+    async fn postgres_due_schedule_skips_never_connected_fixed_targets() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        insert_worker_client_with_incarnation(&db.pool, "edge-b", "never", false, None).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "never-connected-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["edge-a", "edge-b"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert_eq!(
+            targets,
+            vec![
+                ("edge-a".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+                (
+                    "edge-b".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some("target_never_connected: schedule target skipped".to_string())
+                ),
+            ]
+        );
+        let output = job_status_output(&db.pool, job_id, "edge-b").await;
+        assert_eq!(output["type"], "schedule_target_skipped");
+        assert_eq!(output["reason"], "target_never_connected");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_due_schedule_records_missing_fixed_targets_as_skipped_rows() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "missing-fixed-target-schedule",
+            serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            &["edge-a", "edge-missing"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert_eq!(
+            targets,
+            vec![
+                ("edge-a".to_string(), TARGET_STATUS_QUEUED.to_string(), None),
+                (
+                    "edge-missing".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some("fixed_target_missing: schedule target skipped".to_string())
+                ),
+            ]
+        );
+        let output = job_status_output(&db.pool, job_id, "edge-missing").await;
+        assert_eq!(output["type"], "schedule_target_skipped");
+        assert_eq!(output["reason"], "fixed_target_missing");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn postgres_due_schedule_with_all_unavailable_targets_is_skipped() {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
@@ -3224,6 +3321,23 @@ mod schedule_tests {
     }
 
     async fn insert_worker_client(pool: &PgPool, client_id: &str, status: &str, hidden: bool) {
+        insert_worker_client_with_incarnation(
+            pool,
+            client_id,
+            status,
+            hidden,
+            Some(Uuid::new_v4()),
+        )
+        .await;
+    }
+
+    async fn insert_worker_client_with_incarnation(
+        pool: &PgPool,
+        client_id: &str,
+        status: &str,
+        hidden: bool,
+        process_incarnation_id: Option<Uuid>,
+    ) {
         sqlx::query(
             r#"
             INSERT INTO clients (
@@ -3235,7 +3349,7 @@ mod schedule_tests {
         )
         .bind(client_id)
         .bind(status)
-        .bind(Uuid::new_v4())
+        .bind(process_incarnation_id)
         .bind(SqlJson(AgentCapabilitySnapshot::default()))
         .bind(hidden)
         .execute(pool)

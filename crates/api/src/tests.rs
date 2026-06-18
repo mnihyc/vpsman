@@ -1,8 +1,10 @@
 use super::*;
+use base64::Engine as _;
 use vpsman_common::{
     job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, GatewayAgentHelloIngest,
     JobCommand, OspfCostPolicy, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
 };
+use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_SKIPPED};
 
 #[tokio::test]
 async fn memory_namespaced_tags_participate_in_bulk_resolution() {
@@ -194,12 +196,13 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
 async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
     let repo = Repository::Memory(MemoryState::default());
     let session_id = Uuid::new_v4();
+    let process_incarnation_id = uuid::Uuid::new_v4();
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
             &memory.agents,
             &AgentHello {
                 client_id: "client-delete".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
+                process_incarnation_id,
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: "x86_64".to_string(),
@@ -229,6 +232,50 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
                 ended_at: None,
                 end_reason: None,
             });
+        let job_id = Uuid::new_v4();
+        memory.jobs.write().await.push(JobHistoryView {
+            id: job_id,
+            actor_id: Some(test_operator().operator.id),
+            command_type: "shell".to_string(),
+            privileged: true,
+            status: "queued".to_string(),
+            target_count: 1,
+            payload_hash: "delete-test".to_string(),
+            created_at: "1700000000".to_string(),
+            completed_at: None,
+        });
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id,
+            client_id: "client-delete".to_string(),
+            status: "queued".to_string(),
+            message: None,
+            exit_code: None,
+            started_at: None,
+            completed_at: None,
+            process_incarnation_id: None,
+        });
+        let running_job_id = Uuid::new_v4();
+        memory.jobs.write().await.push(JobHistoryView {
+            id: running_job_id,
+            actor_id: Some(test_operator().operator.id),
+            command_type: "shell".to_string(),
+            privileged: true,
+            status: "running".to_string(),
+            target_count: 1,
+            payload_hash: "delete-running-test".to_string(),
+            created_at: "1700000000".to_string(),
+            completed_at: None,
+        });
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id: running_job_id,
+            client_id: "client-delete".to_string(),
+            status: "running".to_string(),
+            message: None,
+            exit_code: None,
+            started_at: Some("1700000001".to_string()),
+            completed_at: None,
+            process_incarnation_id: Some(process_incarnation_id),
+        });
     }
     repo.assign_agent_tag("client-delete", "provider:alpha")
         .await
@@ -240,6 +287,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             &DeleteAgentRequest {
                 confirmed: true,
                 reason: Some("retired".to_string()),
+                privilege_assertion: None,
             },
             &test_operator(),
         )
@@ -269,6 +317,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
                 tags: Vec::new(),
                 replace_existing_key: false,
                 confirmed: true,
+                privilege_assertion: None,
             },
             &test_operator(),
         )
@@ -297,6 +346,50 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             .await
             .iter()
             .any(|entry| entry.action == "agent.deleted"));
+        let targets = memory.job_targets.read().await;
+        let target = targets
+            .iter()
+            .find(|target| {
+                target.client_id == "client-delete" && target.status == TARGET_STATUS_SKIPPED
+            })
+            .unwrap();
+        assert_eq!(target.status, "skipped");
+        assert_eq!(
+            target.message.as_deref(),
+            Some("vps_deleted: target skipped before dispatch")
+        );
+        assert!(target.completed_at.is_some());
+        let agent_lost_target = targets
+            .iter()
+            .find(|target| {
+                target.client_id == "client-delete" && target.status == TARGET_STATUS_AGENT_LOST
+            })
+            .unwrap();
+        assert_eq!(
+            agent_lost_target.message.as_deref(),
+            Some("client was deleted before final command output")
+        );
+        assert!(agent_lost_target.completed_at.is_some());
+        drop(targets);
+        let outputs = memory.job_outputs.read().await;
+        let output_payloads = outputs
+            .iter()
+            .filter(|output| output.client_id == "client-delete")
+            .map(|output| {
+                serde_json::from_slice::<serde_json::Value>(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(&output.data_base64)
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(output_payloads.iter().any(|payload| {
+            payload["code"] == "vps_deleted" && payload["status"] == TARGET_STATUS_SKIPPED
+        }));
+        assert!(output_payloads.iter().any(|payload| {
+            payload["code"] == "vps_deleted" && payload["status"] == TARGET_STATUS_AGENT_LOST
+        }));
     }
 }
 
@@ -313,6 +406,7 @@ async fn gateway_identity_validation_uses_direct_client_public_key() {
                 tags: vec!["role:edge".to_string()],
                 replace_existing_key: false,
                 confirmed: true,
+                privilege_assertion: None,
             },
             &operator,
         )

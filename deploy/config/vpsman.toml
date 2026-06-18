@@ -1,7 +1,7 @@
 version = 1
 
 [api]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 artifact_max_bytes = 134217728

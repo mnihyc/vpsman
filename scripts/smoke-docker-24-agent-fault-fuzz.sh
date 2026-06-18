@@ -608,7 +608,8 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --right-tunnel-ipv4 10.254.25.1 \
   --bandwidth 1000m \
   --latency-ms 18 \
-  --save)"
+  --save \
+  --confirmed)"
 jq -e '.name == "docker-fault-fuzz-gre" and .status == "planned"' <<<"$tunnel_plan_json" >/dev/null
 
 alert_policy_json="$(vpsctl_json fleet-alert-policy-upsert \

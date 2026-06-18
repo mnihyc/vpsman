@@ -18,8 +18,7 @@ use tokio::{
 };
 use tracing::warn;
 use vpsman_common::{
-    payload_hash, GatewayCommandOutputAckRequest, GatewayCommandOutputAckResponse,
-    GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
+    payload_hash, GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
     GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
     GatewayForwardMetricsSnapshot,
 };
@@ -28,7 +27,6 @@ type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send 
 const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
 const SPOOL_SCHEMA_VERSION: u16 = 1;
 const COMMAND_OUTPUT_PATH: &str = "/internal/v1/gateway/command-output";
-const COMMAND_OUTPUT_ACKS_PATH: &str = "/internal/v1/gateway/command-output/acks";
 const DEFAULT_SPOOL_RAM_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_SPOOL_DISK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_SPOOL_SHUTDOWN_FLUSH_SECS: u64 = 30;
@@ -525,26 +523,6 @@ impl GatewayEventForwarder {
         tokio::spawn(async move {
             let items = forwarder.spool.pending_items().await;
             for (target_key, item) in items {
-                match spooled_command_output_already_acked(&forwarder.spool, &item, &timeouts).await
-                {
-                    Ok(true) => {
-                        if let GatewayForwardQueueItem::Spooled {
-                            path, disk_bytes, ..
-                        } = &item
-                        {
-                            forwarder.spool.remove_spooled_file(path, *disk_bytes).await;
-                        }
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        warn!(
-                            %error,
-                            target_key,
-                            "failed to reconcile spooled gateway command output before replay"
-                        );
-                    }
-                }
                 if let Err(error) = forwarder
                     .enqueue_queue_item(target_key.clone(), item, timeouts.clone())
                     .await
@@ -1064,6 +1042,7 @@ impl GatewayForwardSpool {
         decode_spooled_event(path, &bytes)
     }
 
+    #[cfg(test)]
     async fn load_spooled_header(&self, path: &Path) -> Result<SpooledGatewayForwardHeader> {
         let mut file = tokio::fs::File::open(path)
             .await
@@ -1556,7 +1535,7 @@ async fn post_json_retry_until_expired(
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
                 let error_message = error.to_string();
                 if event.kind == GatewayForwardEventKind::CommandOutput
-                    && command_output_conflict_is_non_retryable(&error_message)
+                    && command_output_error_is_non_retryable(&error_message)
                 {
                     metrics.record_drop(event.kind, GatewayForwardDropReason::ProtocolConflict);
                     warn!(
@@ -1564,7 +1543,7 @@ async fn post_json_retry_until_expired(
                         path = %event.path,
                         target_key,
                         attempt,
-                        "dropping non-retryable conflicting command output"
+                        "dropping non-retryable command output"
                     );
                     return GatewayForwardOutcome::NotDelivered;
                 }
@@ -1619,8 +1598,11 @@ fn notify_critical_failure(
     }
 }
 
-fn command_output_conflict_is_non_retryable(error_message: &str) -> bool {
-    error_message.contains("409 Conflict") && error_message.contains("job_output_sequence_conflict")
+fn command_output_error_is_non_retryable(error_message: &str) -> bool {
+    error_message.contains("409 Conflict")
+        && (error_message.contains("job_output_sequence_conflict")
+            || error_message.contains("job_target_not_active")
+            || error_message.contains("job_output_payload_hash_mismatch"))
 }
 
 async fn post_json<T: serde::Serialize>(
@@ -1845,43 +1827,6 @@ async fn fsync_dir_best_effort(path: &Path, label: &'static str) {
         Ok(Err(error)) => warn!(%error, label, "failed to fsync directory"),
         Err(error) => warn!(%error, label, "failed to join directory fsync task"),
     }
-}
-
-async fn spooled_command_output_already_acked(
-    spool: &GatewayForwardSpool,
-    item: &GatewayForwardQueueItem,
-    timeouts: &StdRwLock<GatewayHttpTimeouts>,
-) -> Result<bool> {
-    let GatewayForwardQueueItem::Spooled { path, kind, .. } = item else {
-        return Ok(false);
-    };
-    if *kind != GatewayForwardEventKind::CommandOutput {
-        return Ok(false);
-    }
-    let header = spool.load_spooled_header(path).await?;
-    if header.path != COMMAND_OUTPUT_PATH {
-        return Ok(false);
-    }
-    let Some(command_output) = header.command_output else {
-        return Ok(false);
-    };
-    let request = GatewayCommandOutputAckRequest {
-        client_id: command_output.client_id,
-        job_id: command_output.job_id,
-        seqs: vec![command_output.seq],
-    };
-    let seq = request.seqs[0];
-    let response = post_json(
-        &header.api_url,
-        COMMAND_OUTPUT_ACKS_PATH,
-        &request,
-        header.internal_token.as_deref(),
-        current_gateway_http_timeouts(timeouts),
-    )
-    .await?;
-    let response: GatewayCommandOutputAckResponse =
-        serde_json::from_str(&response).context("failed to decode command output ack response")?;
-    Ok(response.acked.contains(&seq))
 }
 
 fn command_output_replay_ref_from_body(body: &[u8]) -> Option<CommandOutputReplayRef> {
@@ -2128,7 +2073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_output_spool_header_preserves_ack_replay_key() {
+    async fn command_output_spool_header_preserves_command_output_replay_key() {
         let dir = std::env::temp_dir().join(format!(
             "vpsman-gateway-spool-header-{}",
             uuid::Uuid::new_v4()
@@ -2144,6 +2089,7 @@ mod tests {
             gateway_id: "gateway-a".to_string(),
             client_id: "client-a".to_string(),
             job_id,
+            payload_hash: "payload-a".to_string(),
             seq: 7,
             received_unix: Some(unix_now()),
             output: vpsman_common::CommandOutput {

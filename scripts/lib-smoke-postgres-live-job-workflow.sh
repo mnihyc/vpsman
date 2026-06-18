@@ -89,7 +89,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --right-tunnel-ipv4 127.0.0.3 \
   --bandwidth 100m \
   --latency-ms 5 \
-  --save >/dev/null
+  --save \
+  --confirmed >/dev/null
 
 shell_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \

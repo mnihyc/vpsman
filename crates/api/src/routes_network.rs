@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, BandwidthTier,
@@ -25,6 +26,13 @@ use crate::{
     util::limit_or_default,
 };
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TunnelPlanMutationRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
 pub(crate) async fn list_tunnel_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -43,6 +51,7 @@ pub(crate) async fn create_tunnel_plan(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
     let plan = plan_tunnel(&request.input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
     Ok((
@@ -95,27 +104,31 @@ pub(crate) async fn enable_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
+    Json(request): Json<TunnelPlanMutationRequest>,
 ) -> Result<Json<TunnelPlanView>, ApiError> {
-    mutate_tunnel_plan_enabled(state, headers, plan_id, true).await
+    mutate_tunnel_plan_enabled(state, headers, plan_id, request, true).await
 }
 
 pub(crate) async fn disable_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(plan_id): Path<Uuid>,
+    Json(request): Json<TunnelPlanMutationRequest>,
 ) -> Result<Json<TunnelPlanView>, ApiError> {
-    mutate_tunnel_plan_enabled(state, headers, plan_id, false).await
+    mutate_tunnel_plan_enabled(state, headers, plan_id, request, false).await
 }
 
 async fn mutate_tunnel_plan_enabled(
     state: AppState,
     headers: HeaderMap,
     plan_id: Uuid,
+    request: TunnelPlanMutationRequest,
     enabled: bool,
 ) -> Result<Json<TunnelPlanView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
     if state.repo.get_tunnel_plan(plan_id).await?.is_none() {
         return Err(ApiError::bad_request("tunnel_plan_not_found"));
     }
@@ -135,6 +148,7 @@ pub(crate) async fn promote_telemetry_tunnel_plan(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
     validate_telemetry_promotion_request(&request)?;
     let mut reports = state
         .repo
@@ -162,6 +176,16 @@ pub(crate) async fn promote_telemetry_tunnel_plan(
         .record_tunnel_plan_promotion_audit(&view, &operator, &report)
         .await?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+fn require_tunnel_plan_confirmed(confirmed: bool) -> Result<(), ApiError> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(ApiError::conflict(
+            "tunnel_plan_mutation_requires_confirmation",
+        ))
+    }
 }
 
 pub(crate) async fn promote_tunnel_plan_to_adapter(

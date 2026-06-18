@@ -116,6 +116,7 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
         retry_delay_secs: 300,
         max_failures: 3,
         confirmed: true,
+        privilege_assertion: None,
     };
 
     validate_create_backup_policy_request(&request).unwrap();
@@ -481,6 +482,8 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
 #[tokio::test]
 async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent_id(&repo, "client-a").await;
+    seed_backup_agent_id(&repo, "client-b").await;
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
     let recipient_public_key_hex = "b".repeat(64);
@@ -502,6 +505,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         retry_delay_secs: 120,
         max_failures: 5,
         confirmed: true,
+        privilege_assertion: None,
     };
 
     let (status, Json(view)) =
@@ -549,6 +553,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
 #[tokio::test]
 async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
     let object_root =
         std::env::temp_dir().join(format!("vpsman-api-backup-policy-prune-{}", Uuid::new_v4()));
     let state = test_state_with_store(
@@ -577,6 +582,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
             retry_delay_secs: 120,
             max_failures: 3,
             confirmed: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -669,6 +675,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 #[tokio::test]
 async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure() {
     let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
     let object_root = std::env::temp_dir().join(format!(
         "vpsman-api-backup-policy-prune-partial-{}",
         Uuid::new_v4()
@@ -699,6 +706,7 @@ async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure
             retry_delay_secs: 120,
             max_failures: 3,
             confirmed: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1024,6 +1032,20 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
     .0;
     assert_eq!(second.next_offset_bytes, artifact_bytes.len() as i64);
     assert_eq!(second.status, "uploaded");
+
+    let unconfirmed = commit_backup_artifact_upload_session(
+        State(state.clone()),
+        headers.clone(),
+        Path((backup.id, session.upload_id)),
+        Json(BackupArtifactUploadCommitRequest { confirmed: false }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unconfirmed.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        unconfirmed.code,
+        "backup_artifact_upload_commit_confirmation_required"
+    );
 
     let (status, Json(artifact)) = commit_backup_artifact_upload_session(
         State(state.clone()),
@@ -1490,11 +1512,15 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
 }
 
 async fn seed_backup_agent(repo: &crate::repository::Repository) {
+    seed_backup_agent_id(repo, "client-a").await;
+}
+
+async fn seed_backup_agent_id(repo: &crate::repository::Repository, client_id: &str) {
     if let Repository::Memory(memory) = repo {
         upsert_memory_agent(
             &memory.agents,
             &AgentHello {
-                client_id: "client-a".to_string(),
+                client_id: client_id.to_string(),
                 process_incarnation_id: uuid::Uuid::new_v4(),
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),

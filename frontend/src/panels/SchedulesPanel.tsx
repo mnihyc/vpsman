@@ -441,6 +441,7 @@ export function SchedulesPanel({
         catch_up_limit: snapshot.catchUpLimit,
         retry_delay_secs: snapshot.retryDelaySecs,
         max_failures: snapshot.maxFailures,
+        confirmed: true,
         privilege_assertion: privilegeAssertion,
       };
       if (snapshot.editingScheduleId) {
@@ -577,30 +578,36 @@ export function SchedulesPanel({
       );
       if (action.type === "enable") {
         await onEnableSchedule(action.schedule.id, {
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "disable") {
         await onDisableSchedule(action.schedule.id, {
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "defer") {
         await onDeferSchedule(action.schedule.id, {
           deferred_until: action.deferredUntil,
           reason: action.reason || null,
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "delete") {
         await onDeleteSchedule(action.schedule.id, {
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "applyNow") {
         await onApplyScheduleNow(action.schedule.id, {
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       } else if (action.type === "targetUpdate") {
         await onUpdateScheduleTargets(action.schedule.id, {
           selector_expression: action.selectorExpression,
           target_client_ids: action.targetClientIds,
+          confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
       }

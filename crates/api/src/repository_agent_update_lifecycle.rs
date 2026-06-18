@@ -115,10 +115,10 @@ impl Repository {
             "marker_unix": heartbeat.marker_unix,
             "observed_unix": heartbeat.observed_unix,
             "heartbeat": "post_restart_activation_marker",
-            "status": "heartbeat_verified",
+            "status": "heartbeat_observed",
         });
         self.record_agent_update_lifecycle_audit(
-            "agent_update.heartbeat_verified",
+            "agent_update.heartbeat_observed",
             client_id,
             metadata,
             Some(heartbeat.observed_unix.to_string()),

@@ -19,7 +19,10 @@ use crate::{
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::{http_get, http_post_json},
     jobs::resolve_target_ids,
-    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{
+        build_privilege_for_job_command, build_privilege_for_schedule, load_super_password,
+        load_super_salt_hex, SchedulePrivilegeRequest,
+    },
 };
 
 pub(crate) use crate::backup_artifact_crypto::restore_artifact_bytes;
@@ -191,6 +194,39 @@ pub(crate) fn backup_policy_upsert(
     );
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let recipient_public_key_hex = options
+        .recipient_public_key_hex
+        .map(|value| value.to_ascii_lowercase());
+    let operation = JobCommand::Backup {
+        paths: options.paths.clone(),
+        include_config: options.include_config,
+        recipient_public_key_hex: recipient_public_key_hex.clone(),
+    };
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let privilege_assertion = build_privilege_for_schedule(
+        SchedulePrivilegeRequest {
+            action: "backup_policy.create",
+            schedule_id: None,
+            name: &options.name,
+            command: &operation,
+            command_type: "backup",
+            selector_expression: &selector_expression,
+            resolved_targets: &target_ids,
+            cron_expr: &options.cron_expr,
+            timezone: "UTC",
+            enabled: options.enabled,
+            catch_up_policy: &options.catch_up_policy,
+            catch_up_limit: options.catch_up_limit,
+            retry_delay_secs: options.retry_delay_secs,
+            max_failures: options.max_failures,
+            deferred_until: None,
+            deleted: false,
+        },
+        &password,
+        &salt_hex,
+        300,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -201,7 +237,7 @@ pub(crate) fn backup_policy_upsert(
                 "name": options.name,
                 "paths": options.paths,
                 "include_config": options.include_config,
-                "recipient_public_key_hex": options.recipient_public_key_hex,
+                "recipient_public_key_hex": recipient_public_key_hex,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
                 "cron_expr": options.cron_expr,
@@ -215,6 +251,7 @@ pub(crate) fn backup_policy_upsert(
                 "keep_last": options.keep_last,
                 "rotation_generation": options.rotation_generation,
                 "confirmed": options.confirmed,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );

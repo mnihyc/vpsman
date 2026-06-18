@@ -116,6 +116,8 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) max_failures: i32,
     #[serde(default)]
     pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]

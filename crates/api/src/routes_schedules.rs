@@ -47,6 +47,7 @@ pub(crate) async fn create_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_schedule_request(&request)?;
+    require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     verify_schedule_privilege_for_definition(
         &state,
@@ -74,6 +75,7 @@ pub(crate) async fn update_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_update_schedule_request(&request)?;
+    require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     verify_schedule_privilege_for_definition(
         &state,
@@ -102,6 +104,7 @@ pub(crate) async fn update_schedule_targets(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
+    require_schedule_confirmed(request.confirmed)?;
     let target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     let selector_expression = request.selector_expression.trim().to_string();
     if !selector_expression.is_empty() {
@@ -172,6 +175,7 @@ pub(crate) async fn defer_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_defer_schedule_request(&request)?;
+    require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     verify_schedule_privilege_for_view(
         &state,
@@ -208,6 +212,7 @@ pub(crate) async fn apply_schedule_now(
     if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
+    require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     if !schedule.enabled {
         return Err(ApiError::conflict("schedule_apply_now_requires_enabled"));
@@ -248,6 +253,7 @@ pub(crate) async fn delete_schedule(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
+    require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     verify_schedule_privilege_for_view(
         &state,
@@ -276,6 +282,7 @@ async fn mutate_schedule_enabled(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
+    require_schedule_confirmed(request.confirmed)?;
     let schedule = state.repo.schedule_by_id(schedule_id).await?;
     verify_schedule_privilege_for_view(
         &state,
@@ -297,6 +304,16 @@ async fn mutate_schedule_enabled(
             .set_schedule_enabled(schedule_id, enabled, &operator)
             .await?,
     ))
+}
+
+fn require_schedule_confirmed(confirmed: bool) -> Result<(), ApiError> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(ApiError::conflict(
+            "schedule_mutation_requires_confirmation",
+        ))
+    }
 }
 
 pub(crate) fn validate_schedule_request(request: &CreateScheduleRequest) -> Result<(), ApiError> {

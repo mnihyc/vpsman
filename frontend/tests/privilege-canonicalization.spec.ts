@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 import { PRIVILEGE_OPERATION_GOLDEN_VECTORS } from "../src/generated/protocolContracts";
-import { buildPrivilegeForJobOperation, canonicalOperationJson } from "../src/privilege";
+import {
+  buildPrivilegeForJobOperation,
+  canonicalDbPrivilegeIntent,
+  canonicalOperationJson,
+  textPayloadHashHex,
+} from "../src/privilege";
 import type { JobOperation } from "../src/types";
 
 const goldenOperations: Record<string, JobOperation> = {
@@ -103,6 +108,21 @@ test("canonical restore payload keeps non-skipped null archive fields", () => {
   };
   expect(canonicalOperationJson(restore)).toBe(
     '{"type":"restore","source_backup_request_id":"11111111-2222-4333-8444-555555555555","paths":["/etc/app.conf"],"include_config":false,"destination_root":null,"archive_base64":null,"archive_size_bytes":null,"archive_sha256_hex":null}',
+  );
+});
+
+test("DB privilege intent binds suite config payload hash", async () => {
+  const payloadHash = await textPayloadHashHex("version = 1\n");
+
+  expect(
+    canonicalDbPrivilegeIntent({
+      action: "suite_config.update",
+      confirmed: true,
+      payloadHash,
+      target: "suite_config",
+    }),
+  ).toBe(
+    `{"version":1,"action":"suite_config.update","target":"suite_config","selector_expression":null,"resolved_targets":[],"confirmed":true,"payload_hash":"${payloadHash}"}`,
   );
 });
 

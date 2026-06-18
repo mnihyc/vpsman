@@ -668,6 +668,11 @@
   min-width: 0;
 }
 
+.systemDiffPreview > div {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .compactChipList {
   margin: 0;
 }
@@ -693,7 +698,10 @@
 }
 
 .jsonPreview {
+  box-sizing: border-box;
   max-height: 360px;
+  max-width: 100%;
+  min-width: 0;
   overflow: auto;
   border: 1px solid #dfe3eb;
   border-radius: 8px;

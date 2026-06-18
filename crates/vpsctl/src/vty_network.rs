@@ -49,6 +49,7 @@ pub(crate) struct VtyTunnelPromoteTelemetryRequest {
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,12 +67,12 @@ pub(crate) fn submit_or_render_vty_tunnel_plan(
     request: VtyTunnelPlanRequest,
 ) -> Result<String> {
     if request.save {
-        http_post_json(
-            api_url,
-            "/api/v1/tunnel-plans",
-            token,
-            &serde_json::to_value(&request.input)?,
-        )
+        anyhow::ensure!(request.confirmed, "tunnel-plan --save requires --confirmed");
+        let mut body = serde_json::to_value(&request.input)?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("confirmed".to_string(), serde_json::Value::Bool(true));
+        }
+        http_post_json(api_url, "/api/v1/tunnel-plans", token, &body)
     } else {
         let plan = plan_tunnel(&request.input)?;
         Ok(serde_json::to_string_pretty(&plan)?)
@@ -102,6 +103,10 @@ pub(crate) fn submit_vty_tunnel_promote_telemetry(
     token: Option<&str>,
     request: VtyTunnelPromoteTelemetryRequest,
 ) -> Result<String> {
+    anyhow::ensure!(
+        request.confirmed,
+        "tunnel-promote-telemetry requires --confirmed"
+    );
     http_post_json(
         api_url,
         "/api/v1/tunnel-plans/promote-telemetry",
@@ -124,6 +129,7 @@ pub(crate) fn submit_vty_tunnel_promote_telemetry(
             "latency_ms": request.latency_ms,
             "packet_loss_ratio": request.packet_loss_ratio,
             "preference": request.preference,
+            "confirmed": true,
         }),
     )
 }
@@ -237,9 +243,14 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
     let mut latency_ms = None::<f64>;
     let mut packet_loss_ratio = None::<f64>;
     let mut preference = None::<f64>;
+    let mut confirmed = false;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
+            "--confirmed" => {
+                confirmed = true;
+                index += 1;
+            }
             "--client-id" => {
                 client_id = Some(next_value(tokens, index, "--client-id")?.to_string());
                 index += 2;
@@ -479,6 +490,7 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
         latency_ms,
         packet_loss_ratio,
         preference,
+        confirmed,
     })
 }
 
@@ -920,6 +932,7 @@ mod tests {
             "--packet-loss-ratio",
             "0.02",
             "--preference=1.5",
+            "--confirmed",
         ])
         .unwrap();
 
@@ -937,6 +950,7 @@ mod tests {
         assert_eq!(request.latency_ms, Some(21.5));
         assert_eq!(request.packet_loss_ratio, Some(0.02));
         assert_eq!(request.preference, Some(1.5));
+        assert!(request.confirmed);
     }
 
     #[test]

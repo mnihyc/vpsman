@@ -76,6 +76,7 @@ pub(crate) struct DeleteAgentRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reason: Option<String>,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -425,6 +426,7 @@ pub(crate) struct UpsertAgentIdentityRequest {
     pub(crate) replace_existing_key: bool,
     #[serde(default)]
     pub(crate) confirmed: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -461,6 +463,7 @@ pub(crate) struct CreateClientKeyRevocationRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reason: Option<String>,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +482,8 @@ pub(crate) struct GatewayIdentityValidationResponse {
 pub(crate) struct CreateTunnelPlanRequest {
     #[serde(flatten)]
     pub(crate) input: TunnelPlanInput,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -526,6 +531,8 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 fn default_true() -> bool {
@@ -603,6 +610,8 @@ pub(crate) struct CreateScheduleRequest {
     pub(crate) max_failures: i32,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +637,8 @@ pub(crate) struct UpdateScheduleRequest {
     pub(crate) max_failures: i32,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +649,8 @@ pub(crate) struct DeferScheduleRequest {
     pub(crate) reason: Option<String>,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +658,8 @@ pub(crate) struct DeferScheduleRequest {
 pub(crate) struct SchedulePrivilegeMutationRequest {
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -655,6 +670,8 @@ pub(crate) struct UpdateScheduleTargetsRequest {
     pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -740,6 +757,7 @@ pub(crate) struct BulkTagMutationRequest {
     pub(crate) action: BulkTagMutationAction,
     pub(crate) tag: String,
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
     #[serde(default)]
@@ -911,6 +929,8 @@ pub(crate) struct CreateJobResponse {
 pub(crate) struct CancelJobRequest {
     #[serde(default)]
     pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Serialize)]

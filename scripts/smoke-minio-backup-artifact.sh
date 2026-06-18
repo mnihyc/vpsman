@@ -111,6 +111,8 @@ client_id="minio-smoke-$(date +%s)"
 client_keys="$(target/debug/vpsctl noise-keygen)"
 client_public_hex="$(jq -r '.public_key_hex' <<<"$client_keys")"
 VPSMAN_API_TOKEN="$access_token" \
+VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   target/debug/vpsctl --api-url "$api_url" agent-identity-upsert \
     --client-id "$client_id" \
     --client-public-key-hex "$client_public_hex" \

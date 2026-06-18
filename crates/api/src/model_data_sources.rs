@@ -136,6 +136,7 @@ pub(crate) struct AssignDataSourcePresetRequest {
     pub(crate) preset_id: Uuid,
     #[serde(default)]
     pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }

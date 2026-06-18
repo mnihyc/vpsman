@@ -87,6 +87,21 @@ async function confirmVisiblePrompt(
 ) {
   const prompt = page.locator(".confirmationPrompt").last();
   await expect(prompt).toBeVisible();
+  await expect
+    .poll(() =>
+      prompt.evaluate((element) => document.activeElement === element),
+    )
+    .toBe(true);
+  const viewport = page.viewportSize();
+  await expect
+    .poll(async () => {
+      const box = await prompt.boundingBox();
+      if (!box || !viewport) {
+        return false;
+      }
+      return box.y >= 0 && box.y + box.height <= viewport.height;
+    })
+    .toBe(true);
   await activate(prompt.getByRole("button", { name: label }));
 }
 
@@ -336,6 +351,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   );
 
   await page.goto("/");
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Fleet", "Instances");
 
   const fleetGrid = page.getByLabel("VPS instance records data grid");
@@ -386,6 +402,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     confirmed: true,
     reason: "Deleted from fleet inventory selection action",
   });
+  expectPrivilegeAssertion(deleteRequest);
 });
 
 test("reviews notification and webhook queue mutations before commit", async ({
@@ -894,6 +911,28 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByText("Unlock in Access")).toBeVisible();
   await expect(page.getByLabel(/super password/i)).toHaveCount(0);
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
+
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "System", "Config");
+  await page.getByLabel("API DB pool").fill("40");
+  await page.getByRole("button", { name: "Validate" }).click();
+  await expect(page.getByText(/Validation passed/)).toBeVisible();
+  await activate(page.getByRole("button", { name: "Review save", exact: true }).first());
+  await expect(page.getByText("Confirm suite config save")).toBeVisible();
+  await confirmVisiblePrompt(page, "Save suite config");
+  const suiteConfigRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { suiteConfigs: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.suiteConfigs.at(-1);
+  });
+  expect(suiteConfigRequest).toMatchObject({
+    confirmed: true,
+  });
+  expectPrivilegeAssertion(suiteConfigRequest);
+  expect((suiteConfigRequest as { toml: string }).toml).toContain("api_db_pool = 40");
 });
 
 test("surfaces operator users and sessions under System", async ({ page }) => {
@@ -1149,6 +1188,7 @@ test("manages data-source preset assignments from the config view", async ({
     domain: "runtime_traffic_accounting_source",
     preset_id: "11111111-1111-4111-8111-111111111111",
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
+    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
   });
 });
 
@@ -1369,7 +1409,7 @@ test("imports direct gateway identities and revokes current keys from the access
   await openConsoleSubpage(page, "Access", "VPS keys");
   const accessTabs = page.locator(".accessTabs");
   await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
-  await activate(page.getByRole("button", { name: "Open privilege unlock" }));
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Access", "VPS keys");
   await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
 
@@ -1416,6 +1456,7 @@ test("imports direct gateway identities and revokes current keys from the access
     replace_existing_key: false,
     tags: ["country:JP", "role:edge"],
   });
+  expectPrivilegeAssertion(identityRequest);
 
   await chooseVpsBySearch(
     inspector,
@@ -1443,6 +1484,7 @@ test("imports direct gateway identities and revokes current keys from the access
     confirmed: true,
     reason: "lost host rebuild",
   });
+  expectPrivilegeAssertion(revokeRequest);
 });
 
 test("rotates an existing agent key through the access panel", async ({
@@ -1454,6 +1496,7 @@ test("rotates an existing agent key through the access panel", async ({
   );
 
   await page.goto("/");
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Access", "VPS keys");
   const accessTabs = page.locator(".accessTabs");
   await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
@@ -1475,12 +1518,12 @@ test("rotates an existing agent key through the access panel", async ({
     .fill("b".repeat(64));
   await activate(inspector.getByRole("button", { name: "Rotate key" }));
   await expect(
-    page.getByLabel("Confirm direct gateway identity import"),
+    page.getByLabel("Confirm client key rotation"),
   ).toBeVisible();
   await activate(
     page
-      .getByLabel("Confirm direct gateway identity import")
-      .getByRole("button", { name: "Import identity" }),
+      .getByLabel("Confirm client key rotation")
+      .getByRole("button", { name: "Rotate key" }),
   );
 
   const identityRequest = await page.evaluate(() => {
@@ -1499,6 +1542,7 @@ test("rotates an existing agent key through the access panel", async ({
     replace_existing_key: true,
     tags: [],
   });
+  expectPrivilegeAssertion(identityRequest);
 });
 
 test("shows topology network evidence, speed metrics, and probe latency history", async ({
@@ -1593,10 +1637,14 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   await savedPlanRow.getByLabel("Select Tunnel plans row").check();
   await planGrid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Disable plan" }).click();
+  await expect(page.getByText("Confirm tunnel plan lifecycle")).toBeVisible();
+  await confirmVisiblePrompt(page, "Disable plans");
   await expect(savedPlanRow.getByText("disabled")).toBeVisible();
   await savedPlanRow.getByLabel("Select Tunnel plans row").check();
   await planGrid.getByRole("button", { name: "Action" }).click();
   await page.getByRole("menuitem", { name: "Enable plan" }).click();
+  await expect(page.getByText("Confirm tunnel plan lifecycle")).toBeVisible();
+  await confirmVisiblePrompt(page, "Enable plans");
   await expect(savedPlanRow.getByText("enabled")).toBeVisible();
 
   const enabledMutations = await page.evaluate(() => {
@@ -1663,6 +1711,8 @@ test("authors external adapter tunnel plans from the topology panel", async ({
     .getByLabel("Routes", { exact: true })
     .fill("10.42.0.0/24,dev=ovpn42,metric=42");
   await activate(composer.getByRole("button", { name: "Save plan" }));
+  await expect(page.getByText("Confirm tunnel plan save")).toBeVisible();
+  await confirmVisiblePrompt(page, "Save plan");
   await expect
     .poll(async () =>
       page.evaluate(() => {

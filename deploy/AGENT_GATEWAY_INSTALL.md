@@ -29,6 +29,8 @@ validation know the identity:
 
 ```sh
 vpsctl noise-keygen
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+export VPSMAN_SUPER_SALT_HEX='<server_super_salt_hex>'
 vpsctl agent-identity-upsert \
   --client-id agent-nrt-04 \
   --client-public-key-hex <agent_noise_public_key_hex> \

@@ -499,6 +499,16 @@ export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "deleted",
 ] as const;
 
+export const DB_PRIVILEGE_INTENT_FIELDS = [
+  "version",
+  "action",
+  "target",
+  "selector_expression",
+  "resolved_targets",
+  "confirmed",
+  "payload_hash",
+] as const;
+
 export const TERMINAL_COMMAND_TYPES = [
   "terminal_open",
   "terminal_input",

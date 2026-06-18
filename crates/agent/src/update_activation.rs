@@ -1,5 +1,6 @@
 use std::{
-    env, fs, os::unix::fs::PermissionsExt, path::Path, process::Command, thread, time::Duration,
+    env, fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::Command, thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -126,8 +127,8 @@ fn activate_staged_update(
         )?;
     }
     input.cancel_token.check("agent_update_activate")?;
-    replace_active_binary(current_exe, &staged)?;
     write_activation_marker(current_exe, input.job_id, &observed_sha256_hex)?;
+    replace_active_binary(current_exe, &staged)?;
     let _ = fs::remove_file(&staged_path);
     let restart = if input.restart_agent {
         request_supervised_restart(current_exe)?;
@@ -186,8 +187,8 @@ fn rollback_update(current_exe: &Path, input: AgentUpdateRollbackInput) -> Resul
         }
     }
     input.cancel_token.check("agent_update_rollback")?;
+    remove_activation_marker(current_exe)?;
     replace_active_binary(current_exe, &rollback)?;
-    let _ = fs::remove_file(activation_marker_path(current_exe)?);
     let status = serde_json::json!({
         "type": "agent_update_rollback",
         "status": "rolled_back_pending_restart",
@@ -215,9 +216,12 @@ pub(crate) fn read_activation_heartbeat() -> Result<Option<AgentUpdateHeartbeat>
         sha256_hex = %marker.sha256_hex,
         "read update activation heartbeat marker"
     );
+    let current_bytes = fs::read(&current_exe)
+        .with_context(|| format!("failed to read active agent {}", current_exe.display()))?;
+    let observed_sha256_hex = sha256_hex(&current_bytes);
     Ok(Some(AgentUpdateHeartbeat {
         activation_job_id: marker.activation_job_id,
-        sha256_hex: marker.sha256_hex,
+        sha256_hex: observed_sha256_hex,
         marker_unix: marker.marker_unix,
         observed_unix: unix_now(),
     }))
@@ -236,11 +240,29 @@ fn write_activation_marker(
         marker_unix: unix_now(),
     };
     let marker_bytes = serde_json::to_vec(&marker)?;
-    if let Err(error) = fs::write(&temp_path, marker_bytes) {
+    let mut temp_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to create activation marker {}", temp_path.display())
+            });
+        }
+    };
+    if let Err(error) = temp_file.write_all(&marker_bytes) {
         let _ = fs::remove_file(&temp_path);
         return Err(error)
             .with_context(|| format!("failed to write activation marker {}", temp_path.display()));
     }
+    if let Err(error) = temp_file.sync_all() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to fsync activation marker {}", temp_path.display()));
+    }
+    drop(temp_file);
     if let Err(error) = fs::rename(&temp_path, &marker_path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error).with_context(|| {
@@ -250,7 +272,25 @@ fn write_activation_marker(
             )
         });
     }
+    fsync_parent_dir_best_effort(&marker_path);
     Ok(())
+}
+
+fn remove_activation_marker(current_exe: &Path) -> Result<()> {
+    let marker_path = activation_marker_path(current_exe)?;
+    match fs::remove_file(&marker_path) {
+        Ok(()) => {
+            fsync_parent_dir_best_effort(&marker_path);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove activation marker {}",
+                marker_path.display()
+            )
+        }),
+    }
 }
 
 fn read_activation_marker(marker_path: &Path) -> Result<Option<ActivationMarker>> {
@@ -270,7 +310,19 @@ fn read_activation_marker(marker_path: &Path) -> Result<Option<ActivationMarker>
 
 fn replace_active_binary(current_exe: &Path, next_bytes: &[u8]) -> Result<()> {
     let temp_path = current_exe.with_extension(format!("activate-tmp-{}", uuid::Uuid::new_v4()));
-    if let Err(error) = fs::write(&temp_path, next_bytes) {
+    let mut temp_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to create activation temp {}", temp_path.display())
+            });
+        }
+    };
+    if let Err(error) = temp_file.write_all(next_bytes) {
         let _ = fs::remove_file(&temp_path);
         return Err(error)
             .with_context(|| format!("failed to write activation temp {}", temp_path.display()));
@@ -280,6 +332,12 @@ fn replace_active_binary(current_exe: &Path, next_bytes: &[u8]) -> Result<()> {
         return Err(error)
             .with_context(|| format!("failed to set executable mode on {}", temp_path.display()));
     }
+    if let Err(error) = temp_file.sync_all() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to fsync activation temp {}", temp_path.display()));
+    }
+    drop(temp_file);
     if let Err(error) = fs::rename(&temp_path, current_exe) {
         let _ = fs::remove_file(&temp_path);
         return Err(error).with_context(|| {
@@ -289,7 +347,16 @@ fn replace_active_binary(current_exe: &Path, next_bytes: &[u8]) -> Result<()> {
             )
         });
     }
+    fsync_parent_dir_best_effort(current_exe);
     Ok(())
+}
+
+fn fsync_parent_dir_best_effort(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(file) = fs::File::open(parent) {
+            let _ = file.sync_all();
+        }
+    }
 }
 
 fn normalize_sha256(value: &str) -> Result<String> {

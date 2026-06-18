@@ -541,6 +541,7 @@ export function App() {
                 onPruneBackupPolicies={dashboard.pruneBackupPolicies}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadBackups}
+                onResolveTargets={dashboard.resolveJobTargets}
                 privilegeMaterial={privilegeMaterial}
                 setPrivilegeMaterial={setPrivilegeMaterial}
                 onUploadBackupArtifact={dashboard.uploadBackupArtifact}

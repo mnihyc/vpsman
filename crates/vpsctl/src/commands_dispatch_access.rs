@@ -537,6 +537,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     catch_up_limit: command.catch_up_limit,
                     retry_delay_secs: command.retry_delay_secs,
                     max_failures: command.max_failures,
+                    confirmed: command.confirmed,
                 },
             )?;
             Ok(None)
@@ -559,16 +560,27 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     catch_up_limit: command.catch_up_limit,
                     retry_delay_secs: command.retry_delay_secs,
                     max_failures: command.max_failures,
+                    confirmed: command.confirmed,
                 },
             )?;
             Ok(None)
         }
         Command::ScheduleEnable(command) => {
-            commands_schedules::schedule_enable(api_url, token, command.schedule_id)?;
+            commands_schedules::schedule_enable(
+                api_url,
+                token,
+                command.schedule_id,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         Command::ScheduleDisable(command) => {
-            commands_schedules::schedule_disable(api_url, token, command.schedule_id)?;
+            commands_schedules::schedule_disable(
+                api_url,
+                token,
+                command.schedule_id,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         Command::ScheduleDefer(command) => {
@@ -578,15 +590,26 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.schedule_id,
                 command.deferred_until,
                 command.reason,
+                command.confirmed,
             )?;
             Ok(None)
         }
         Command::ScheduleApplyNow(command) => {
-            commands_schedules::schedule_apply_now(api_url, token, command.schedule_id)?;
+            commands_schedules::schedule_apply_now(
+                api_url,
+                token,
+                command.schedule_id,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         Command::ScheduleDelete(command) => {
-            commands_schedules::schedule_delete(api_url, token, command.schedule_id)?;
+            commands_schedules::schedule_delete(
+                api_url,
+                token,
+                command.schedule_id,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         other => Ok(Some(other)),

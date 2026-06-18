@@ -14,6 +14,7 @@ import type {
   KeyLifecycleReportView,
   UpsertAgentIdentityRequest,
 } from "../typesAccess";
+import type { PrivilegeAssertion } from "../privilege";
 
 export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   const [operator, setOperator] = useState<OperatorView | null>(null);
@@ -500,13 +501,18 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const revokeClientKey = useCallback(
-    async (clientId: string, reason: string | null, confirmed: boolean) => {
+    async (
+      clientId: string,
+      reason: string | null,
+      confirmed: boolean,
+      privilegeAssertion: PrivilegeAssertion | null,
+    ) => {
       setAccessError(null);
       try {
         await apiPost<ClientKeyRevocationView>(
           `/api/v1/clients/${encodeURIComponent(clientId)}/key-revocations`,
           apiToken,
-          { confirmed, reason },
+          { confirmed, reason, privilege_assertion: privilegeAssertion },
         );
         await loadCurrentOperator();
       } catch (error) {

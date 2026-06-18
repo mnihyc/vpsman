@@ -93,7 +93,7 @@ CREATE INDEX jobs_active_status_idx
 
 CREATE TABLE job_targets (
     job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
     status TEXT NOT NULL,
     message TEXT,
     exit_code INTEGER,
@@ -222,6 +222,23 @@ CREATE TABLE server_jobs (
 
 CREATE INDEX server_jobs_status_created_idx
     ON server_jobs (status, created_at ASC);
+
+CREATE TABLE server_job_artifact_cleanup_targets (
+    server_job_id UUID NOT NULL REFERENCES server_jobs(id) ON DELETE CASCADE,
+    artifact_id UUID NOT NULL,
+    domain TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    sha256_hex TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    status_at_review TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (server_job_id, artifact_id),
+    CONSTRAINT server_job_artifact_cleanup_targets_status_check
+        CHECK (status_at_review IN ('active', 'deleting', 'tombstoned', 'deleted'))
+);
+
+CREATE INDEX server_job_artifact_cleanup_targets_job_idx
+    ON server_job_artifact_cleanup_targets (server_job_id, created_at ASC, artifact_id);
 
 CREATE TABLE terminal_sessions (
     session_id UUID NOT NULL,

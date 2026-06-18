@@ -433,7 +433,8 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
   "bandwidth": "1000m",
   "latency_ms": 17,
   "packet_loss_ratio": 0,
-  "preference": 1.5
+  "preference": 1.5,
+  "confirmed": true
 }')"
 jq -e '.name == "pg-gre-a-b" and .status == "planned" and .plan.mutates_host == false' <<<"$plan_json" >/dev/null
 
@@ -445,7 +446,8 @@ schedule_json="$(vpsctl_json schedule-create \
   --catch-up-policy run_all_limited \
   --catch-up-limit 2 \
   --retry-delay-secs 120 \
-  --max-failures 5)"
+  --max-failures 5 \
+  --confirmed)"
 schedule_id="$(jq -r '.id' <<<"$schedule_json")"
 jq -e '.name == "pg-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and (.target_client_ids | sort == ["pg-agent-a","pg-agent-b"]) and .cron_expr == "* * * * *" and .catch_up_policy == "run_all_limited" and .catch_up_limit == 2 and .retry_delay_secs == 120 and .max_failures == 5 and .failure_count == 0' \
   <<<"$schedule_json" >/dev/null

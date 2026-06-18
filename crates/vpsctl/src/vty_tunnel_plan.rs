@@ -13,6 +13,7 @@ use crate::network_runtime_args::{
 pub(crate) struct VtyTunnelPlanRequest {
     pub(crate) input: TunnelPlanInput,
     pub(crate) save: bool,
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequest> {
@@ -56,12 +57,17 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut topology_routes = Vec::<String>::new();
     let mut topology_stale_routes = Vec::<String>::new();
     let mut save = false;
+    let mut confirmed = false;
 
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
             "--save" => {
                 save = true;
+                index += 1;
+            }
+            "--confirmed" => {
+                confirmed = true;
                 index += 1;
             }
             "--name" => {
@@ -552,7 +558,11 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         ospf_policy: OspfCostPolicy::default(),
     };
     ensure_explicit_tunnel_endpoints(&input.ipv4_tunnel, &input.ipv6_tunnel, "tunnel-plan")?;
-    Ok(VtyTunnelPlanRequest { input, save })
+    Ok(VtyTunnelPlanRequest {
+        input,
+        save,
+        confirmed,
+    })
 }
 
 fn next_value<'a>(tokens: &'a [&str], index: usize, flag: &str) -> Result<&'a str> {
@@ -728,10 +738,12 @@ mod tests {
             "--fou-port=6655",
             "--fou-peer-port=7755",
             "--fou-ipproto=47",
+            "--confirmed",
         ])
         .unwrap();
 
         assert!(request.save);
+        assert!(request.confirmed);
         assert_eq!(request.input.kind, TunnelKind::Fou);
         assert_eq!(request.input.bandwidth, BandwidthTier::M100);
         assert_eq!(request.input.packet_loss_ratio, 0.0);

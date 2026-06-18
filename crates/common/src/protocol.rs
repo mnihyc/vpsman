@@ -957,22 +957,11 @@ pub struct GatewayCommandOutputIngest {
     pub gateway_id: String,
     pub client_id: String,
     pub job_id: Uuid,
+    pub payload_hash: String,
     pub seq: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_unix: Option<u64>,
     pub output: CommandOutput,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayCommandOutputAckRequest {
-    pub client_id: String,
-    pub job_id: Uuid,
-    pub seqs: Vec<i32>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct GatewayCommandOutputAckResponse {
-    pub acked: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1005,6 +994,20 @@ pub struct GatewayCommandDispatch {
 pub struct GatewayCommandCancel {
     pub client_id: String,
     pub request: JobCancelRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewaySessionDisconnect {
+    pub client_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewaySessionDisconnectResult {
+    pub client_id: String,
+    pub accepted: bool,
+    pub disconnected: bool,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1521,6 +1524,18 @@ pub fn schedule_privilege_intent_fields() -> &'static [&'static str] {
     ]
 }
 
+pub fn db_privilege_intent_fields() -> &'static [&'static str] {
+    &[
+        "version",
+        "action",
+        "target",
+        "selector_expression",
+        "resolved_targets",
+        "confirmed",
+        "payload_hash",
+    ]
+}
+
 #[derive(Serialize)]
 pub struct JobPrivilegeIntent<'a> {
     version: u8,
@@ -1632,6 +1647,7 @@ pub struct DbPrivilegeIntent<'a> {
     selector_expression: Option<&'a str>,
     resolved_targets: Vec<&'a str>,
     confirmed: bool,
+    payload_hash: Option<&'a str>,
 }
 
 impl<'a> DbPrivilegeIntent<'a> {
@@ -1641,6 +1657,7 @@ impl<'a> DbPrivilegeIntent<'a> {
         selector_expression: Option<&'a str>,
         resolved_targets: &'a [String],
         confirmed: bool,
+        payload_hash: Option<&'a str>,
     ) -> Self {
         Self {
             version: 1,
@@ -1649,6 +1666,7 @@ impl<'a> DbPrivilegeIntent<'a> {
             selector_expression: selector_expression.map(str::trim),
             resolved_targets: sorted_str_refs(resolved_targets),
             confirmed,
+            payload_hash: payload_hash.map(str::trim),
         }
     }
 }
@@ -1671,6 +1689,7 @@ pub fn canonical_db_privilege_intent(
     selector_expression: Option<&str>,
     resolved_targets: &[String],
     confirmed: bool,
+    payload_hash: Option<&str>,
 ) -> serde_json::Result<String> {
     serde_json::to_string(&DbPrivilegeIntent::new(
         action,
@@ -1678,6 +1697,7 @@ pub fn canonical_db_privilege_intent(
         selector_expression,
         resolved_targets,
         confirmed,
+        payload_hash,
     ))
 }
 
@@ -3035,9 +3055,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        agent_update_release_statuses, backup_request_statuses, file_transfer_command_types,
-        file_transfer_session_events, file_transfer_session_status, file_transfer_session_statuses,
-        fleet_alert_notification_delivery_process_statuses,
+        agent_update_release_statuses, backup_request_statuses, canonical_db_privilege_intent,
+        file_transfer_command_types, file_transfer_session_events, file_transfer_session_status,
+        file_transfer_session_statuses, fleet_alert_notification_delivery_process_statuses,
         fleet_alert_notification_delivery_statuses, is_file_transfer_command_type,
         is_file_transfer_session_event, is_fleet_alert_notification_delivery_process_status,
         is_fleet_alert_notification_delivery_status, is_server_job_status, is_server_job_type,
@@ -3514,5 +3534,24 @@ mod tests {
         };
         let encoded = serde_json::to_value(&restart).unwrap();
         assert_eq!(encoded["restart_agent"], true);
+    }
+
+    #[test]
+    fn db_privilege_intent_binds_optional_payload_hash() {
+        let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
+        let intent = canonical_db_privilege_intent(
+            "suite_config.update",
+            "suite_config",
+            None,
+            &resolved_targets,
+            true,
+            Some("ab"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            intent,
+            r#"{"version":1,"action":"suite_config.update","target":"suite_config","selector_expression":null,"resolved_targets":["client-a","client-b"],"confirmed":true,"payload_hash":"ab"}"#
+        );
     }
 }

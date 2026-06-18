@@ -802,7 +802,7 @@ nav {
 
 .confirmationPrompt {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
   min-width: 0;
@@ -837,6 +837,12 @@ nav {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.confirmationPromptClose {
+  width: 30px;
+  height: 30px;
+  align-self: start;
 }
 
 .confirmationPromptBody strong {
@@ -896,7 +902,7 @@ nav {
 
 .inspector .confirmationPrompt,
 .actionDrawer .confirmationPrompt {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
 .inspector .confirmationPromptActions,

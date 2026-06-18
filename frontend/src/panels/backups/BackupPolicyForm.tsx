@@ -206,7 +206,7 @@ export function BackupPolicyForm({
               pending ||
               !name.trim() ||
               !cronExpr.trim() ||
-              targetCount === 0 ||
+              !targetsText.trim() ||
               !targetExpressionValid
             }
             type="submit"

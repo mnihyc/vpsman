@@ -512,7 +512,8 @@ schedule_json="$(vpsctl_json schedule-create \
   --disabled \
   --catch-up-policy skip_missed \
   --retry-delay-secs 120 \
-  --max-failures 5)"
+  --max-failures 5 \
+  --confirmed)"
 jq -e --argjson alpha_count "$provider_alpha_count" '
   .name == "docker-provider-alpha-hourly" and
   .enabled == false and
@@ -544,7 +545,8 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   "bandwidth": "1000m",
   "latency_ms": 12,
   "packet_loss_ratio": 0,
-  "preference": 1.0
+  "preference": 1.0,
+  "confirmed": true
 }')" | jq -e '.name == "docker-fleet-gre" and .status == "planned"' >/dev/null
 
 backup_json="$(vpsctl_json backup-request \

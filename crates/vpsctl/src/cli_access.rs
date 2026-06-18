@@ -123,7 +123,7 @@ pub(crate) struct TotpConfirmCommand {
 #[derive(Debug, Args)]
 pub(crate) struct AgentIdentityUpsertCommand {
     #[arg(long)]
-    pub(crate) client_id: Option<String>,
+    pub(crate) client_id: String,
     #[arg(long)]
     pub(crate) client_public_key_hex: String,
     #[arg(long)]
@@ -550,6 +550,8 @@ pub(crate) struct ScheduleCreateCommand {
     pub(crate) retry_delay_secs: i64,
     #[arg(long, default_value_t = 3)]
     pub(crate) max_failures: i32,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -580,12 +582,16 @@ pub(crate) struct ScheduleUpdateCommand {
     pub(crate) retry_delay_secs: i64,
     #[arg(long, default_value_t = 3)]
     pub(crate) max_failures: i32,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ScheduleMutationCommand {
     #[arg(long)]
     pub(crate) schedule_id: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -596,4 +602,6 @@ pub(crate) struct ScheduleDeferCommand {
     pub(crate) deferred_until: String,
     #[arg(long)]
     pub(crate) reason: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }

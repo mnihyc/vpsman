@@ -642,6 +642,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --bandwidth 100m \
     --latency-ms 5 \
     --save \
+    --confirmed \
   | jq -e '
       .name == "live-apply"
       and .left_status == "planned"
@@ -783,7 +784,8 @@ observed_json="$(VPSMAN_API_TOKEN="$access_token" \
     --right-tunnel-ipv4 10.255.10.1 \
     --bandwidth 100m \
     --latency-ms 5 \
-    --save)"
+    --save \
+    --confirmed)"
 adapter_plan_id="$(jq -r '.id' <<<"$observed_json")"
 jq -e '
   .name == "live-observed"

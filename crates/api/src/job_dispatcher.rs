@@ -368,18 +368,13 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
                 }
             }
         }
-        if let Some(status) = state
+        let refreshed = state
             .repo
             .refresh_job_status_from_targets(target.job_id)
-            .await?
-        {
-            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                state.publish(WsEvent::JobFinished {
-                    job_id: target.job_id,
-                    status,
-                });
-            }
-        }
+            .await?;
+        state
+            .publish_job_finished_after_refresh(target.job_id, refreshed)
+            .await?;
     }
     Ok(())
 }
@@ -447,18 +442,13 @@ async fn finish_claimed_target(
         }
     }
     if target_terminalized {
-        if let Some(status) = state
+        let refreshed = state
             .repo
             .refresh_job_status_from_targets(claimed.job_id)
-            .await?
-        {
-            if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                state.publish(WsEvent::JobFinished {
-                    job_id: claimed.job_id,
-                    status,
-                });
-            }
-        }
+            .await?;
+        state
+            .publish_job_finished_after_refresh(claimed.job_id, refreshed)
+            .await?;
     }
     Ok(())
 }

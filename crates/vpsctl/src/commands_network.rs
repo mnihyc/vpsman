@@ -114,6 +114,8 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) topology_stale_route: Vec<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) save: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -167,6 +169,8 @@ pub(crate) struct TunnelPromoteTelemetryCommand {
     pub(crate) packet_loss_ratio: Option<f64>,
     #[arg(long)]
     pub(crate) preference: Option<f64>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -886,14 +890,14 @@ pub(crate) fn tunnel_plan(
     };
     ensure_explicit_tunnel_endpoints(&input.ipv4_tunnel, &input.ipv6_tunnel, "tunnel-plan")?;
     if request.save {
+        anyhow::ensure!(request.confirmed, "tunnel-plan --save requires --confirmed");
+        let mut body = serde_json::to_value(&input)?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert("confirmed".to_string(), serde_json::Value::Bool(true));
+        }
         println!(
             "{}",
-            http_post_json(
-                api_url,
-                "/api/v1/tunnel-plans",
-                token,
-                &serde_json::to_value(&input)?,
-            )?
+            http_post_json(api_url, "/api/v1/tunnel-plans", token, &body,)?
         );
     } else {
         let plan = plan_tunnel(&input)?;
@@ -936,6 +940,10 @@ pub(crate) fn tunnel_promote_telemetry(
     token: Option<&str>,
     request: TunnelPromoteTelemetryCommand,
 ) -> Result<()> {
+    anyhow::ensure!(
+        request.confirmed,
+        "tunnel-promote-telemetry requires --confirmed"
+    );
     let ipv4_tunnel = build_address_pair(
         request.left_tunnel_ipv4,
         request.right_tunnel_ipv4,
@@ -973,6 +981,7 @@ pub(crate) fn tunnel_promote_telemetry(
                 "latency_ms": request.latency_ms,
                 "packet_loss_ratio": request.packet_loss_ratio,
                 "preference": request.preference,
+                "confirmed": request.confirmed,
             }),
         )?
     );

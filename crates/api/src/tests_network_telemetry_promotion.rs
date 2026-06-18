@@ -59,6 +59,7 @@ async fn promote_telemetry_tunnel_creates_external_observed_plan_and_audit() {
             latency_ms: Some(8.0),
             packet_loss_ratio: Some(0.0),
             preference: Some(2.0),
+            confirmed: true,
         }),
     )
     .await
@@ -144,6 +145,7 @@ async fn promote_telemetry_tunnel_rejects_non_import_candidate() {
             latency_ms: None,
             packet_loss_ratio: None,
             preference: None,
+            confirmed: true,
         }),
     )
     .await

@@ -719,7 +719,8 @@ plan_json="$(vpsctl_auth tunnel-plan \
   --right-tunnel-ipv4 10.252.0.1 \
   --bandwidth 100m \
   --latency-ms 25 \
-  --save)"
+  --save \
+  --confirmed)"
 jq -e '.name == "cli-gre-a-b" and .status == "planned" and .plan.mutates_host == false' \
   <<<"$plan_json" >/dev/null
 plans_json="$(vpsctl_auth tunnel-plans)"
@@ -732,7 +733,8 @@ schedule_json="$(vpsctl_auth schedule-create \
   --cron-expr '0 * * * *' \
   --catch-up-policy run_once \
   --retry-delay-secs 120 \
-  --max-failures 7)"
+  --max-failures 7 \
+  --confirmed)"
 jq -e '.name == "cli-hourly-uptime" and .enabled == true and .command_type == "shell_argv" and .selector_expression == "tag:edge" and (.target_client_ids | index("cli-agent-a")) and .cron_expr == "0 * * * *" and .catch_up_policy == "run_once" and .retry_delay_secs == 120 and .max_failures == 7' \
   <<<"$schedule_json" >/dev/null
 schedules_json="$(vpsctl_auth schedules)"

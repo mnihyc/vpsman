@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
     encode_json, payload_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand,
@@ -50,6 +51,7 @@ fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
         retry_delay_secs: 120,
         max_failures: 5,
         privilege_assertion: None,
+        confirmed: true,
     }
 }
 
@@ -95,6 +97,26 @@ async fn seed_unprivileged_agent(repo: &crate::repository::Repository, client_id
         },
     )
     .await;
+}
+
+async fn seed_never_connected_agent(repo: &crate::repository::Repository, client_id: &str) {
+    let Repository::Memory(memory) = repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "never".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
 }
 
 async fn record_scheduled_memory_job(
@@ -162,6 +184,22 @@ async fn schedule_create_lists_durable_selector_without_plaintext_privilege_mate
 }
 
 #[tokio::test]
+async fn schedule_mutations_require_explicit_confirmation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = schedule_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let mut request = shell_schedule_request("unconfirmed-schedule", true);
+    request.confirmed = false;
+
+    let error = crate::routes_schedules::create_schedule(State(state), headers, Json(request))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "schedule_mutation_requires_confirmation");
+}
+
+#[tokio::test]
 async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
@@ -195,6 +233,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
                 retry_delay_secs: 60,
                 max_failures: 2,
                 privilege_assertion: None,
+                confirmed: true,
             }
             .into(),
             &operator,
@@ -439,6 +478,7 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
         Path(schedule.id),
         Json(SchedulePrivilegeMutationRequest {
             privilege_assertion: None,
+            confirmed: true,
         }),
     )
     .await
@@ -474,6 +514,60 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
             .and_then(serde_json::Value::as_str),
         Some(schedule_id.as_str())
     );
+}
+
+#[tokio::test]
+async fn saved_schedule_job_skips_never_connected_targets_immediately() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-never").await;
+    let state = schedule_test_state(repo.clone());
+    let request = CreateJobRequest {
+        job_id: None,
+        selector_expression: "id:client-never".to_string(),
+        target_client_ids: vec!["client-never".to_string()],
+        destructive: false,
+        confirmed: true,
+        command: "true".to_string(),
+        argv: vec!["true".to_string()],
+        operation: None,
+        timeout_secs: Some(30),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+
+    let (status, Json(response)) = crate::routes_jobs::create_job_from_saved_schedule(
+        &state,
+        &operator,
+        request,
+        Uuid::new_v4(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(response.status, "skipped");
+    assert_eq!(response.target_counts.total, 1);
+    assert_eq!(response.target_counts.skipped, 1);
+    let targets = repo.list_job_targets(response.job_id).await.unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].client_id, "client-never");
+    assert_eq!(targets[0].status, "skipped");
+    assert_eq!(
+        targets[0].message.as_deref(),
+        Some("target_never_connected: target has never connected; job skipped")
+    );
+
+    let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].client_id, "client-never");
+    assert_eq!(outputs[0].stream, "status");
+    assert!(outputs[0].done);
+    let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
+    let output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
+    assert_eq!(output["type"], "target_never_connected");
+    assert_eq!(output["reason"], "target_never_connected");
 }
 
 async fn wait_for_job_status(
@@ -512,6 +606,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
         retry_delay_secs: 300,
         max_failures: 3,
         privilege_assertion: None,
+        confirmed: true,
     };
 
     assert_eq!(

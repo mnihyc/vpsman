@@ -215,8 +215,8 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::ServerJobCancel { job_id } => {
-            commands_jobs::server_job_cancel(api_url, token, job_id)?;
+        Command::ServerJobCancel { job_id, confirmed } => {
+            commands_jobs::server_job_cancel(api_url, token, job_id, confirmed)?;
             Ok(None)
         }
         Command::Audit { limit } => {

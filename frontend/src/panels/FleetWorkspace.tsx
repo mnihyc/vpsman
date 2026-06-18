@@ -84,6 +84,7 @@ import {
   buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
   canonicalDbPrivilegeIntent,
+  type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
@@ -149,6 +150,13 @@ type FleetSelectionStatsMode =
   | "network"
   | "overview"
   | "capabilities";
+
+type DeleteAgentConfirmationSnapshot = {
+  clientId: string;
+  displayName: string;
+  status: string;
+  privilegeAssertion: PrivilegeAssertion;
+};
 
 const detailTabs: FleetDetailTab[] = [
   "Overview",
@@ -309,7 +317,8 @@ export function FleetWorkspace({
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectionStatsMode, setSelectionStatsMode] =
     useState<FleetSelectionStatsMode>("telemetry");
-  const [deleteTarget, setDeleteTarget] = useState<AgentView | null>(null);
+  const [deleteSnapshot, setDeleteSnapshot] =
+    useState<DeleteAgentConfirmationSnapshot | null>(null);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const latestRollups = useMemo(
@@ -490,6 +499,7 @@ export function FleetWorkspace({
       confirmed: true,
       privilege_assertion: privilegeAssertion,
       selector_expression: selectorExpression,
+      target_client_ids: targetIds,
       tag: normalizedTag,
     });
   }
@@ -531,24 +541,49 @@ export function FleetWorkspace({
     });
   }
 
-  function requestDeleteAgent(rows: AgentView[]) {
+  async function requestDeleteAgent(rows: AgentView[]) {
     if (rows.length !== 1) {
       return;
     }
-    setDeleteError(null);
-    setDeleteTarget(rows[0]);
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      setDeleteError("Privilege unlock is required");
+      return;
+    }
+    const target = rows[0];
+    try {
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "agent.delete",
+          confirmed: true,
+          resolvedTargets: [target.id],
+          target: target.id,
+        }),
+        privilegeMaterial,
+      });
+      setDeleteError(null);
+      setDeleteSnapshot({
+        clientId: target.id,
+        displayName: formatVpsName(target, vpsNameDisplayMode),
+        status: target.status,
+        privilegeAssertion,
+      });
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function confirmDeleteAgent() {
-    if (!deleteTarget) {
+    if (!deleteSnapshot) {
       return;
     }
     await runPanelAction(setDeletePending, setDeleteError, async () => {
-      await onDeleteAgent(deleteTarget.id, {
+      await onDeleteAgent(deleteSnapshot.clientId, {
         confirmed: true,
+        privilege_assertion: deleteSnapshot.privilegeAssertion,
         reason: "Deleted from fleet inventory selection action",
       });
-      setDeleteTarget(null);
+      setDeleteSnapshot(null);
       onSelectAgent(null);
     });
   }
@@ -777,23 +812,23 @@ export function FleetWorkspace({
             detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
             error={deleteError}
             items={
-              deleteTarget
+              deleteSnapshot
                 ? [
                     {
                       label: "VPS",
-                      value: formatVpsName(deleteTarget, vpsNameDisplayMode),
+                      value: deleteSnapshot.displayName,
                     },
-                    { label: "Client ID", value: deleteTarget.id },
-                    { label: "Status", value: deleteTarget.status },
+                    { label: "Client ID", value: deleteSnapshot.clientId },
+                    { label: "Status", value: deleteSnapshot.status },
                   ]
                 : []
             }
             onCancel={() => {
               setDeleteError(null);
-              setDeleteTarget(null);
+              setDeleteSnapshot(null);
             }}
             onConfirm={() => void confirmDeleteAgent()}
-            open={Boolean(deleteTarget)}
+            open={Boolean(deleteSnapshot)}
             pending={deletePending}
             title="Delete VPS from panel"
             tone="danger"

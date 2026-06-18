@@ -222,6 +222,7 @@ async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
         &DeleteAgentRequest {
             confirmed: true,
             reason: Some("decommissioned peer".to_string()),
+            privilege_assertion: None,
         },
         &operator,
     )
@@ -374,7 +375,10 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
     let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
         State(state),
         headers,
-        Json(CreateTunnelPlanRequest { input }),
+        Json(CreateTunnelPlanRequest {
+            input,
+            confirmed: true,
+        }),
     )
     .await
     .unwrap();
@@ -396,6 +400,28 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
 }
 
 #[tokio::test]
+async fn create_tunnel_plan_requires_explicit_confirmation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = test_plan_input();
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "tunnel_plan_mutation_requires_confirmation");
+}
+
+#[tokio::test]
 async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager() {
     let repo = Repository::Memory(MemoryState::default());
     let mut input = test_plan_input();
@@ -408,7 +434,10 @@ async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager
     let error = crate::routes_network::create_tunnel_plan(
         State(state),
         headers,
-        Json(CreateTunnelPlanRequest { input }),
+        Json(CreateTunnelPlanRequest {
+            input,
+            confirmed: true,
+        }),
     )
     .await
     .unwrap_err();

@@ -672,7 +672,7 @@ const systemDashboard = {
 const suiteConfigToml = `version = 1
 
 [api]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 gateway_control_url = "unix:/var/lib/vpsman/gateway-control.sock"
 job_output_artifact_min_bytes = 32768
 require_registered_agent_updates = false
@@ -713,7 +713,7 @@ privilege_verifier_key_file = "/run/secrets/vpsman_privilege_verifier_key_hex"
 
 const suiteConfigRedacted = {
   api: {
-    bind: "0.0.0.0:8080",
+    bind: "127.0.0.1:8080",
     gateway_control_url: "unix:/var/lib/vpsman/gateway-control.sock",
     job_output_artifact_min_bytes: 32768,
     require_registered_agent_updates: false,
@@ -1985,9 +1985,13 @@ export const ospfUpdatePlans = [
   },
 ];
 
-export async function installConsoleApiMock(page: Page) {
+export async function installConsoleApiMock(
+  page: Page,
+  options: { agentListOverride?: typeof agents } = {},
+) {
   await page.addInitScript(
     ({
+      agentListOverrideFixture,
       agentsFixture,
       agentUpdateReleasesFixture,
       artifactsFixture,
@@ -2058,6 +2062,10 @@ export async function installConsoleApiMock(page: Page) {
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
       let currentSuiteConfigToml = suiteConfigTomlFixture;
       const deletedAgentIds = new Set<string>();
+      const dashboardAgents = () =>
+        (agentListOverrideFixture ?? agentsFixture).filter(
+          (agent) => !deletedAgentIds.has(agent.id),
+        );
       const visibleAgents = () =>
         agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const visibleTunnelPlans = () =>
@@ -2069,8 +2077,11 @@ export async function installConsoleApiMock(page: Page) {
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupArtifactRestorePreparations: [] as unknown[],
+        backupPolicies: [] as unknown[],
         agentDeletes: [] as unknown[],
+        bulkTagMutations: [] as unknown[],
         bulkResolve: [] as unknown[],
+        dataSourceHotConfigs: [] as unknown[],
         dataSourcePresetAssignments: [] as unknown[],
         dataSourcePresets: [] as unknown[],
         hotConfigRuleTemplates: [] as unknown[],
@@ -2095,6 +2106,7 @@ export async function installConsoleApiMock(page: Page) {
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
+        suiteConfigs: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
@@ -2862,6 +2874,7 @@ export async function installConsoleApiMock(page: Page) {
           }
           if (method === "PUT") {
             const body = (await requestJsonBody(input, init)) as { toml?: string };
+            requests.suiteConfigs.push(body);
             currentSuiteConfigToml = body.toml ?? currentSuiteConfigToml;
             return jsonResponse({
               changed_keys: ["capacity.api_db_pool"],
@@ -3106,7 +3119,7 @@ export async function installConsoleApiMock(page: Page) {
           });
         }
         if (pathname === "/api/v1/agents") {
-          return jsonResponse(visibleAgents());
+          return jsonResponse(dashboardAgents());
         }
         if (pathname === "/api/v1/gateway-sessions" && method === "GET")
           return emptyArrayResponse();
@@ -3568,24 +3581,52 @@ export async function installConsoleApiMock(page: Page) {
           const request = body as {
             preset_id?: string;
             selector_expression?: string;
+            target_client_ids?: string[];
+            confirmed?: boolean;
           };
           const preset =
             dataSourcePresetsFixture.find(
               (record: { id: string }) => record.id === request.preset_id,
             ) ?? dataSourcePresetsFixture[0];
-          const targetCount = request.selector_expression
-            ? visibleAgents().filter((agent) =>
-                expressionMatchesAgent(
-                  agent,
-                  request.selector_expression ?? "",
-                ),
-              ).length
-            : 0;
+          const targetCount = Array.isArray(request.target_client_ids)
+            ? request.target_client_ids.length
+            : request.selector_expression
+              ? visibleAgents().filter((agent) =>
+                  expressionMatchesAgent(
+                    agent,
+                    request.selector_expression ?? "",
+                  ),
+                ).length
+              : 0;
           return jsonResponse({
             assignments: dataSourceAssignmentsFixture,
-            confirmation_required: false,
+            confirmation_required: !request.confirmed,
             preset,
             target_count: targetCount,
+          });
+        }
+        if (
+          pathname === "/api/v1/data-source-hot-config" &&
+          method === "GET"
+        ) {
+          const clientId =
+            new URL(url, window.location.href).searchParams.get("client_id") ??
+            "agent-sfo-01";
+          requests.dataSourceHotConfigs.push({ client_id: clientId });
+          return jsonResponse({
+            assignments: dataSourceAssignmentsFixture.filter(
+              (assignment) => assignment.client_id === clientId,
+            ),
+            client_id: clientId,
+            generated_at: "2026-06-02T10:07:00Z",
+            render_notes: [],
+            sections: {
+              data_sources: {
+                client_id: clientId,
+              },
+            },
+            toml: `[data_sources]\nclient_id = "${clientId}"\n`,
+            unsupported_domains: [],
           });
         }
         if (pathname === "/api/v1/jobs" && method === "GET") {
@@ -3942,6 +3983,37 @@ export async function installConsoleApiMock(page: Page) {
         if (pathname === "/api/v1/tags") {
           return jsonResponse(tagsFixture);
         }
+        if (pathname === "/api/v1/tags/bulk" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.bulkTagMutations.push(body);
+          const request = body as {
+            action?: "add" | "remove";
+            confirmed?: boolean;
+            tag?: string;
+            target_client_ids?: string[];
+          };
+          const targetIds = Array.isArray(request.target_client_ids)
+            ? request.target_client_ids
+            : [];
+          const affected = visibleAgents().filter((agent) =>
+            targetIds.includes(agent.id),
+          );
+          const changedCount = affected.filter((agent) =>
+            request.action === "remove"
+              ? agent.tags.includes(request.tag ?? "")
+              : !agent.tags.includes(request.tag ?? ""),
+          ).length;
+          return jsonResponse({
+            action: request.action ?? "add",
+            affected,
+            changed_count: changedCount,
+            confirmation_required: !request.confirmed,
+            schedule_impacts: [],
+            skipped_count: affected.length - changedCount,
+            tag: request.tag ?? "",
+            target_count: affected.length,
+          });
+        }
         if (pathname === "/api/v1/backups" && method === "GET") {
           return jsonResponse(backupsFixture);
         }
@@ -4121,6 +4193,54 @@ export async function installConsoleApiMock(page: Page) {
         }
         if (pathname === "/api/v1/backup-policies" && method === "GET") {
           return jsonResponse([]);
+        }
+        if (pathname === "/api/v1/backup-policies" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          requests.backupPolicies.push(body);
+          const request = body as {
+            catch_up_limit?: number;
+            catch_up_policy?: string;
+            cron_expr?: string;
+            enabled?: boolean;
+            include_config?: boolean;
+            keep_last?: number | null;
+            max_failures?: number;
+            name?: string;
+            paths?: string[];
+            recipient_public_key_hex?: string | null;
+            retry_delay_secs?: number;
+            retention_days?: number | null;
+            rotation_generation?: string | null;
+            selector_expression?: string;
+            target_client_ids?: string[];
+            timezone?: string;
+          };
+          return jsonResponse({
+            catch_up_limit: request.catch_up_limit ?? 1,
+            catch_up_policy: request.catch_up_policy ?? "skip_missed",
+            created_at: "2026-06-02T10:11:00Z",
+            cron_expr: request.cron_expr ?? "0 3 * * *",
+            enabled: request.enabled ?? true,
+            failure_count: 0,
+            include_config: request.include_config ?? true,
+            keep_last: request.keep_last ?? 7,
+            last_error: null,
+            last_run_at: null,
+            max_failures: request.max_failures ?? 3,
+            name: request.name ?? "backup-policy",
+            next_run_at: "2026-06-03T03:00:00Z",
+            next_runs: ["2026-06-03T03:00:00Z"],
+            paths: request.paths ?? [],
+            recipient_public_key_hex: request.recipient_public_key_hex ?? null,
+            retry_delay_secs: request.retry_delay_secs ?? 300,
+            retention_days: request.retention_days ?? 30,
+            rotation_generation: request.rotation_generation ?? null,
+            schedule_id: "62626262-6161-4717-8abc-defdefdefdef",
+            selector_expression: request.selector_expression ?? "id:*",
+            target_client_ids: request.target_client_ids ?? [],
+            timezone: request.timezone ?? "UTC",
+            updated_at: "2026-06-02T10:11:00Z",
+          });
         }
         if (pathname === "/api/v1/backup-artifacts" && method === "GET") {
           return jsonResponse(artifactsFixture);
@@ -4486,6 +4606,7 @@ export async function installConsoleApiMock(page: Page) {
       });
     },
     {
+      agentListOverrideFixture: options.agentListOverride ?? null,
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
       artifactsFixture: backupArtifacts,

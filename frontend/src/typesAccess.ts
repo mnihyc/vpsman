@@ -1,3 +1,5 @@
+import type { PrivilegeAssertion } from "./privilege";
+
 export type AgentIdentityView = {
   client_id: string;
   display_name: string;
@@ -7,12 +9,13 @@ export type AgentIdentityView = {
 };
 
 export type UpsertAgentIdentityRequest = {
-  client_id?: string | null;
+  client_id: string;
   client_public_key_hex: string;
   display_name?: string | null;
   tags: string[];
   replace_existing_key: boolean;
   confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type ClientKeyRevocationView = {

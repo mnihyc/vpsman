@@ -80,6 +80,17 @@ impl Repository {
         &self,
         expression: &str,
     ) -> Result<ArtifactCleanupPreviewView> {
+        let (preview, _) = self.artifact_cleanup_preview_matches(expression).await?;
+        Ok(preview)
+    }
+
+    async fn artifact_cleanup_preview_matches(
+        &self,
+        expression: &str,
+    ) -> Result<(
+        ArtifactCleanupPreviewView,
+        Vec<ServerArtifactCleanupCandidate>,
+    )> {
         let expression = normalize_cleanup_expression(expression)?;
         let parsed = parse_cleanup_expression(&expression)?;
         let candidates = self.artifact_cleanup_candidates(&expression).await?;
@@ -87,7 +98,8 @@ impl Repository {
             .into_iter()
             .filter(|candidate| artifact_matches_cleanup_expression(candidate, parsed.as_ref()))
             .collect::<Vec<_>>();
-        Ok(cleanup_preview_from_matches(expression, &matched))
+        let preview = cleanup_preview_from_matches(expression, &matched);
+        Ok((preview, matched))
     }
 
     pub(crate) async fn create_artifact_cleanup_job(
@@ -96,7 +108,8 @@ impl Repository {
         preview_hash: &str,
         operator: &AuthContext,
     ) -> Result<ServerJobView> {
-        let preview = self.preview_artifact_cleanup(expression).await?;
+        let (preview, matched_artifacts) =
+            self.artifact_cleanup_preview_matches(expression).await?;
         ensure!(
             preview.preview_hash == preview_hash,
             "artifact_cleanup_preview_hash_mismatch"
@@ -127,6 +140,7 @@ impl Repository {
                 Ok(view)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO server_jobs (
@@ -168,8 +182,34 @@ impl Repository {
                 .bind(preview.matched_count)
                 .bind(preview.matched_bytes)
                 .bind(operator.operator.id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
+                for artifact in &matched_artifacts {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO server_job_artifact_cleanup_targets (
+                            server_job_id,
+                            artifact_id,
+                            domain,
+                            object_key,
+                            sha256_hex,
+                            size_bytes,
+                            status_at_review
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(artifact.id)
+                    .bind(&artifact.domain)
+                    .bind(&artifact.object_key)
+                    .bind(&artifact.sha256_hex)
+                    .bind(artifact.size_bytes)
+                    .bind(&artifact.status)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
                 Ok(server_job_from_row(row)?)
             }
         }

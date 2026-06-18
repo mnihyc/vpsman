@@ -143,7 +143,7 @@ export function useTopologyData(
           apiPost<TunnelPlanRecord>(
             `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/${enabled ? "enable" : "disable"}`,
             apiToken,
-            {},
+            { confirmed: true },
           ),
         ),
       );

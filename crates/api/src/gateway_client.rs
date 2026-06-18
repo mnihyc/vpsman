@@ -13,7 +13,8 @@ use tokio::{
 use vpsman_common::{
     GatewayCommandCancel, GatewayCommandCancelResult, GatewayCommandDispatch,
     GatewayCommandDispatchResult, GatewayForwardMetricsSnapshot, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationResult, JobCancelRequest, JobRequest, PrivilegeAssertion,
+    GatewayPrivilegeVerificationResult, GatewaySessionDisconnect, GatewaySessionDisconnectResult,
+    JobCancelRequest, JobRequest, PrivilegeAssertion,
 };
 
 const CONTROL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -168,6 +169,37 @@ impl GatewayDispatchClient {
             &GatewayCommandCancel {
                 client_id: client_id.to_string(),
                 request,
+            },
+            self.internal_token.as_deref(),
+            self.timeouts(),
+        )
+        .await
+    }
+
+    pub(crate) async fn disconnect_session(
+        &self,
+        client_id: &str,
+        reason: &str,
+    ) -> Result<GatewaySessionDisconnectResult> {
+        #[cfg(test)]
+        if self.test_privilege_auto_approve {
+            return Ok(GatewaySessionDisconnectResult {
+                client_id: client_id.to_string(),
+                accepted: true,
+                disconnected: false,
+                message: "test gateway disconnect auto-approved".to_string(),
+            });
+        }
+        let control_url = self
+            .control_url
+            .as_deref()
+            .context("gateway control URL is not configured")?;
+        post_gateway_control(
+            control_url,
+            "/internal/v1/gateway/session/disconnect",
+            &GatewaySessionDisconnect {
+                client_id: client_id.to_string(),
+                reason: reason.to_string(),
             },
             self.internal_token.as_deref(),
             self.timeouts(),

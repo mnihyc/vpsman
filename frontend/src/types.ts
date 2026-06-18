@@ -704,6 +704,7 @@ export type AgentView = {
 export type DeleteAgentRequest = {
   confirmed: boolean;
   reason?: string | null;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type DeleteAgentResponse = {
@@ -1234,6 +1235,7 @@ export type PromoteTelemetryTunnelRequest = {
   latency_ms?: number | null;
   packet_loss_ratio?: number | null;
   preference?: number | null;
+  confirmed: boolean;
 };
 
 export type TopologyGraphNode = {
@@ -1856,6 +1858,7 @@ export type CreateScheduleRequest = {
   catch_up_limit: number;
   retry_delay_secs: number;
   max_failures: number;
+  confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
@@ -1864,16 +1867,19 @@ export type UpdateScheduleRequest = CreateScheduleRequest;
 export type UpdateScheduleTargetsRequest = {
   selector_expression: string;
   target_client_ids: string[];
+  confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type SchedulePrivilegeMutationRequest = {
+  confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type DeferScheduleRequest = {
   deferred_until: string;
   reason?: string | null;
+  confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
@@ -1922,9 +1928,12 @@ export type CreateBackupPolicyRequest = {
   retry_delay_secs: number;
   max_failures: number;
   confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
-export type CreateTunnelPlanRequest = TunnelPlanInput;
+export type CreateTunnelPlanRequest = TunnelPlanInput & {
+  confirmed: boolean;
+};
 
 export type AllocateTunnelEndpointsRequest = {
   ipv4_pool_cidr?: string | null;
@@ -2194,6 +2203,7 @@ export type BulkTagMutationRequest = {
   action: "add" | "remove";
   tag: string;
   selector_expression: string;
+  target_client_ids: string[];
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
@@ -2337,6 +2347,7 @@ export type AssignDataSourcePresetRequest = {
   domain: string;
   preset_id: string;
   selector_expression: string;
+  target_client_ids: string[];
   confirmed: boolean;
 };
 

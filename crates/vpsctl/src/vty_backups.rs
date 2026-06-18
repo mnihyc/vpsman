@@ -10,7 +10,10 @@ use crate::{
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
-    privilege::build_privilege_for_job_command,
+    privilege::{
+        build_privilege_for_job_command, build_privilege_for_schedule, load_super_password,
+        load_super_salt_hex, SchedulePrivilegeRequest,
+    },
     vty_jobs::{
         vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyPrivilegeContext,
     },
@@ -814,6 +817,39 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     let selector_expression =
         selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
     let target_client_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+    let recipient_public_key_hex = request
+        .recipient_public_key_hex
+        .map(|value| value.to_ascii_lowercase());
+    let operation = JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        recipient_public_key_hex: recipient_public_key_hex.clone(),
+    };
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let privilege_assertion = build_privilege_for_schedule(
+        SchedulePrivilegeRequest {
+            action: "backup_policy.create",
+            schedule_id: None,
+            name: &request.name,
+            command: &operation,
+            command_type: "backup",
+            selector_expression: &selector_expression,
+            resolved_targets: &target_client_ids,
+            cron_expr: &request.cron_expr,
+            timezone: "UTC",
+            enabled: request.enabled,
+            catch_up_policy: &request.catch_up_policy,
+            catch_up_limit: request.catch_up_limit,
+            retry_delay_secs: request.retry_delay_secs,
+            max_failures: request.max_failures,
+            deferred_until: None,
+            deleted: false,
+        },
+        &password,
+        &salt_hex,
+        300,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/backup-policies",
@@ -822,7 +858,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "name": request.name,
             "paths": request.paths,
             "include_config": request.include_config,
-            "recipient_public_key_hex": request.recipient_public_key_hex,
+            "recipient_public_key_hex": recipient_public_key_hex,
             "selector_expression": selector_expression,
             "target_client_ids": target_client_ids,
             "cron_expr": request.cron_expr,
@@ -836,6 +872,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "keep_last": request.keep_last,
             "rotation_generation": request.rotation_generation,
             "confirmed": request.selection.confirmed,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }

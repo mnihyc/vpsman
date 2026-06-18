@@ -3087,9 +3087,7 @@ dependencies = [
  "libc",
  "lz4_flex",
  "rand 0.8.6",
- "rustls",
- "rustls-pki-types",
- "rustls-rustcrypto",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -3101,7 +3099,6 @@ dependencies = [
  "uuid",
  "vpsman-build-support",
  "vpsman-common",
- "webpki-roots 1.0.7",
  "x25519-dalek",
 ]
 

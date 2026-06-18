@@ -163,6 +163,7 @@ pub(crate) fn build_privilege_for_db(
         request.selector_expression,
         request.resolved_targets,
         request.confirmed,
+        None,
     )?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }

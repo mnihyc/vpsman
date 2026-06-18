@@ -603,6 +603,7 @@ async fn handle_agent(
                             client_id,
                             job_id,
                             command_version,
+                            payload_hash: command.payload_hash.clone(),
                             ack: None,
                             outputs: Vec::new(),
                             response: Some(command.response),
@@ -879,11 +880,13 @@ async fn handle_agent_frame(
                 .and_modify(|pending| {
                     pending.command_version = resume.command_version;
                     pending.client_id = active_client_id.clone();
+                    pending.payload_hash = resume.payload_hash.clone();
                 })
                 .or_insert_with(|| PendingCommand {
                     client_id: active_client_id,
                     job_id: resume.job_id,
                     command_version: resume.command_version,
+                    payload_hash: resume.payload_hash.clone(),
                     ack: Some(JobAck {
                         job_id: resume.job_id,
                         accepted: true,
@@ -909,6 +912,7 @@ async fn handle_agent_frame(
                     gateway_id: context.args.gateway_id.clone(),
                     client_id: pending.client_id.clone(),
                     job_id: output.job_id,
+                    payload_hash: pending.payload_hash.clone(),
                     seq: sequenced.seq,
                     received_unix: Some(unix_now()),
                     output: output.clone(),

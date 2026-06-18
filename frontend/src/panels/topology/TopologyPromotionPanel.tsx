@@ -50,6 +50,17 @@ type AdapterPromotionForm = {
   topologyStaleRoutesText: string;
 };
 
+type AdapterPromotionSnapshot = {
+  detail: string;
+  items: Array<{ label: string; value: string }>;
+  request: PromoteTunnelPlanToAdapterRequest;
+};
+type TelemetryPromotionSnapshot = {
+  detail: string;
+  items: Array<{ label: string; value: string }>;
+  request: PromoteTelemetryTunnelRequest;
+};
+
 export function TopologyPromotionPanel({
   agents,
   onAllocateTunnelEndpoints,
@@ -82,6 +93,7 @@ export function TopologyPromotionPanel({
     latency_ms: 20,
     packet_loss_ratio: 0,
     preference: 1,
+    confirmed: false,
   });
   const [adapterForm, setAdapterForm] = useState<AdapterPromotionForm>({
     planId: "",
@@ -104,7 +116,8 @@ export function TopologyPromotionPanel({
   const [adapterTrafficLimitEnabled, setAdapterTrafficLimitEnabled] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [adapterConfirmationOpen, setAdapterConfirmationOpen] = useState(false);
+  const [telemetryPromotionSnapshot, setTelemetryPromotionSnapshot] = useState<TelemetryPromotionSnapshot | null>(null);
+  const [adapterPromotionSnapshot, setAdapterPromotionSnapshot] = useState<AdapterPromotionSnapshot | null>(null);
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const importCandidates = useMemo(
@@ -137,56 +150,89 @@ export function TopologyPromotionPanel({
     actionError ??
     `${importCandidates.length} telemetry imports / ${observedPlans.length} observed plans`;
 
-  async function submitTelemetryPromotion(event: FormEvent<HTMLFormElement>) {
+  function submitTelemetryPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setActionError(null);
+    if (!promotionReady) {
+      setActionError("Promotion request is incomplete");
+      return;
+    }
+    const request = normalizeTelemetryPromotionRequest({
+      ...promoteForm,
+      confirmed: true,
+    });
+    setTelemetryPromotionSnapshot({
+      detail: "Confirm saving the observed telemetry candidate as a tunnel plan.",
+      items: [
+        { label: "Candidate", value: `${clientLabel(request.client_id)} / ${request.interface}` },
+        { label: "Peer", value: clientLabel(request.peer_client_id) },
+        { label: "Name", value: request.name ?? "generated" },
+        { label: "Side", value: request.side ?? "left" },
+      ],
+      request,
+    });
+  }
+
+  async function executeTelemetryPromotion(snapshot: TelemetryPromotionSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!promotionReady) {
-        throw new Error("Promotion request is incomplete");
-      }
-      await onPromoteTelemetryTunnel(normalizeTelemetryPromotionRequest(promoteForm));
+      await onPromoteTelemetryTunnel(snapshot.request);
+      setTelemetryPromotionSnapshot(null);
     });
   }
 
   function submitAdapterPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setAdapterConfirmationOpen(true);
+    setActionError(null);
+    if (!selectedObservedPlan) {
+      setActionError("Select an observed tunnel plan");
+      return;
+    }
+    if (!adapterForm.statusArgv.trim()) {
+      setActionError("Adapter status argv is required");
+      return;
+    }
+    const runtimeTopology = buildRuntimeTopology({
+      version: adapterForm.topologyVersion,
+      desiredText: adapterForm.topologyDesiredText,
+      staleText: adapterForm.topologyStaleText,
+      routesText: adapterForm.topologyRoutesText,
+      staleRoutesText: adapterForm.topologyStaleRoutesText,
+    });
+    const request: PromoteTunnelPlanToAdapterRequest = {
+      plan_id: selectedObservedPlan.id,
+      runtime_control: buildRuntimeControl("external_managed_adapter", {
+        startup: adapterForm.startupArgv,
+        stop: adapterForm.stopArgv,
+        cleanup: adapterForm.cleanupArgv,
+        restart: adapterForm.restartArgv,
+        status: adapterForm.statusArgv,
+        traffic: adapterTrafficLimitEnabled ? adapterForm.trafficArgv : "",
+        ingressKbps: adapterTrafficLimitEnabled ? adapterForm.trafficIngressKbps : "",
+        egressKbps: adapterTrafficLimitEnabled ? adapterForm.trafficEgressKbps : "",
+        burstKb: adapterTrafficLimitEnabled ? adapterForm.trafficBurstKb : "",
+        fouPort: "",
+        fouPeerPort: "",
+        fouIpproto: "",
+      }),
+      runtime_topology: isDefaultRuntimeTopology(runtimeTopology) ? undefined : runtimeTopology,
+      name: adapterForm.name.trim() || undefined,
+      confirmed: true,
+    };
+    setAdapterPromotionSnapshot({
+      detail: "Confirm promoting the observed tunnel plan into an externally managed runtime adapter.",
+      items: [
+        { label: "Plan", value: selectedObservedPlan.name },
+        { label: "Runtime", value: "external_managed_adapter" },
+        { label: "Status argv", value: adapterForm.statusArgv.trim() },
+        { label: "Traffic", value: adapterTrafficLimitEnabled ? "enabled" : "disabled" },
+      ],
+      request,
+    });
   }
 
-  async function executeAdapterPromotion() {
+  async function executeAdapterPromotion(snapshot: AdapterPromotionSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!selectedObservedPlan) {
-        throw new Error("Select an observed tunnel plan");
-      }
-      if (!adapterForm.statusArgv.trim()) {
-        throw new Error("Adapter status argv is required");
-      }
-      const runtimeTopology = buildRuntimeTopology({
-        version: adapterForm.topologyVersion,
-        desiredText: adapterForm.topologyDesiredText,
-        staleText: adapterForm.topologyStaleText,
-        routesText: adapterForm.topologyRoutesText,
-        staleRoutesText: adapterForm.topologyStaleRoutesText,
-      });
-      await onPromoteTunnelPlanToAdapter({
-        plan_id: selectedObservedPlan.id,
-        runtime_control: buildRuntimeControl("external_managed_adapter", {
-          startup: adapterForm.startupArgv,
-          stop: adapterForm.stopArgv,
-          cleanup: adapterForm.cleanupArgv,
-          restart: adapterForm.restartArgv,
-          status: adapterForm.statusArgv,
-          traffic: adapterTrafficLimitEnabled ? adapterForm.trafficArgv : "",
-          ingressKbps: adapterTrafficLimitEnabled ? adapterForm.trafficIngressKbps : "",
-          egressKbps: adapterTrafficLimitEnabled ? adapterForm.trafficEgressKbps : "",
-          burstKb: adapterTrafficLimitEnabled ? adapterForm.trafficBurstKb : "",
-          fouPort: "",
-          fouPeerPort: "",
-          fouIpproto: "",
-        }),
-        runtime_topology: isDefaultRuntimeTopology(runtimeTopology) ? undefined : runtimeTopology,
-        name: adapterForm.name.trim() || undefined,
-        confirmed: true,
-      });
+      await onPromoteTunnelPlanToAdapter(snapshot.request);
     });
   }
 
@@ -203,6 +249,7 @@ export function TopologyPromotionPanel({
         include_ipv4: includeIpv4,
         include_ipv6: includeIpv6,
       });
+      setTelemetryPromotionSnapshot(null);
       setPromoteForm((current) => ({
         ...current,
         ipv4_tunnel: allocation.ipv4_tunnel,
@@ -223,19 +270,35 @@ export function TopologyPromotionPanel({
       </div>
       <div className="promotionWorkflow">
         <ConfirmationPrompt
-          confirmLabel="Promote adapter"
-          detail="Confirm promoting the observed tunnel plan into an externally managed runtime adapter."
-          items={[
-            { label: "Plan", value: selectedObservedPlan?.name ?? "none" },
-            { label: "Runtime", value: "external_managed_adapter" },
-            { label: "Status argv", value: adapterForm.statusArgv.trim() || "missing" },
-          ]}
-          onCancel={() => setAdapterConfirmationOpen(false)}
+          confirmLabel="Promote observed plan"
+          detail={telemetryPromotionSnapshot?.detail ?? ""}
+          items={telemetryPromotionSnapshot?.items ?? []}
+          onCancel={() => setTelemetryPromotionSnapshot(null)}
           onConfirm={() => {
-            setAdapterConfirmationOpen(false);
-            void executeAdapterPromotion();
+            const snapshot = telemetryPromotionSnapshot;
+            if (!snapshot) {
+              return;
+            }
+            void executeTelemetryPromotion(snapshot);
           }}
-          open={adapterConfirmationOpen}
+          open={telemetryPromotionSnapshot !== null}
+          pending={pending}
+          title="Confirm observed import"
+        />
+        <ConfirmationPrompt
+          confirmLabel="Promote adapter"
+          detail={adapterPromotionSnapshot?.detail ?? ""}
+          items={adapterPromotionSnapshot?.items ?? []}
+          onCancel={() => setAdapterPromotionSnapshot(null)}
+          onConfirm={() => {
+            const snapshot = adapterPromotionSnapshot;
+            if (!snapshot) {
+              return;
+            }
+            setAdapterPromotionSnapshot(null);
+            void executeAdapterPromotion(snapshot);
+          }}
+          open={adapterPromotionSnapshot !== null}
           pending={pending}
           title="Promote tunnel adapter"
         />
@@ -497,7 +560,10 @@ export function TopologyPromotionPanel({
           <label className="checkLine">
             <input
               checked={adapterTrafficLimitEnabled}
-              onChange={(event) => setAdapterTrafficLimitEnabled(event.target.checked)}
+              onChange={(event) => {
+                setAdapterPromotionSnapshot(null);
+                setAdapterTrafficLimitEnabled(event.target.checked);
+              }}
               type="checkbox"
             />
             <span>Enable traffic shaping</span>
@@ -577,7 +643,7 @@ export function TopologyPromotionPanel({
               onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
             />
           </label>
-          {!adapterConfirmationOpen && (
+          {!adapterPromotionSnapshot && (
             <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
               <ShieldCheck size={17} />
               Review promotion
@@ -592,10 +658,12 @@ export function TopologyPromotionPanel({
     key: K,
     value: PromoteTelemetryTunnelRequest[K],
   ) {
+    setTelemetryPromotionSnapshot(null);
     setPromoteForm((current) => ({ ...current, [key]: value }));
   }
 
   function setPromotionSide(side: TunnelEndpointSide) {
+    setTelemetryPromotionSnapshot(null);
     setPromoteForm((current) => {
       const previousSide = current.side ?? "left";
       return {
@@ -613,6 +681,7 @@ export function TopologyPromotionPanel({
     value: string,
     fallbackPrefix: number,
   ) {
+    setTelemetryPromotionSnapshot(null);
     setPromoteForm((current) => ({
       ...current,
       [key]: updatePairForSide(current[key] ?? null, current.side ?? "left", role, value, fallbackPrefix),
@@ -620,6 +689,7 @@ export function TopologyPromotionPanel({
   }
 
   function setPromotionAddressPrefix(key: "ipv4_tunnel" | "ipv6_tunnel", value: number, fallbackPrefix: number) {
+    setTelemetryPromotionSnapshot(null);
     setPromoteForm((current) => ({
       ...current,
       [key]: updatePairPrefix(current[key] ?? null, value, fallbackPrefix),
@@ -627,10 +697,12 @@ export function TopologyPromotionPanel({
   }
 
   function setAdapterField<K extends keyof AdapterPromotionForm>(key: K, value: AdapterPromotionForm[K]) {
+    setAdapterPromotionSnapshot(null);
     setAdapterForm((current) => ({ ...current, [key]: value }));
   }
 
   function selectPromotionCandidate(value: string) {
+    setTelemetryPromotionSnapshot(null);
     const candidate = importCandidates.find((tunnel) => `${tunnel.client_id}:${tunnel.interface}` === value);
     if (!candidate) {
       setPromoteForm((current) => ({ ...current, client_id: "", interface: "" }));
@@ -646,6 +718,7 @@ export function TopologyPromotionPanel({
   }
 
   function selectAdapterPlan(planId: string) {
+    setAdapterPromotionSnapshot(null);
     const plan = observedPlans.find((candidate) => candidate.id === planId);
     if (!plan) {
       setAdapterForm((current) => ({ ...current, planId: "" }));

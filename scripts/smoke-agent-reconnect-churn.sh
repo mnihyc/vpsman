@@ -61,7 +61,9 @@ gateway_control_addr="127.0.0.1:$gateway_control_port"
 gateway_control_url="http://$gateway_control_addr"
 proxy_addr="127.0.0.1:$proxy_port"
 internal_token="agent-reconnect-internal-token-$(date +%s%N)"
-privilege_verifier_key_hex="1111111111111111111111111111111111111111111111111111111111111111"
+super_password="agent-reconnect-super-password"
+super_salt_hex="1111111111111111111111111111111111111111111111111111111111111111"
+privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
 gateway_keys="$("$vpsctl_bin" noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
@@ -200,7 +202,10 @@ auth_json="$(curl -fsS \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 
-VPSMAN_API_TOKEN="$access_token" "$vpsctl_bin" --api-url "$api_url" agent-identity-upsert \
+VPSMAN_API_TOKEN="$access_token" \
+VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
+  "$vpsctl_bin" --api-url "$api_url" agent-identity-upsert \
   --client-id reconnect-smoke \
   --client-public-key-hex "$client_public_hex" \
   --display-name reconnect-smoke \

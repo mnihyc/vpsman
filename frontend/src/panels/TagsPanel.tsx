@@ -492,6 +492,7 @@ function TagAssignments({
           confirmed: true,
           privilege_assertion: privilegeAssertion,
           selector_expression: selector,
+          target_client_ids: [agent.id],
           tag,
         }),
       );
@@ -592,6 +593,11 @@ function BulkTagPanel({
 
   useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
+  function clearMutationPreview() {
+    setPreview(null);
+    setConfirmOpen(false);
+  }
+
   async function previewTargets() {
     await runAction(async () => {
       if (action !== "delete" && selectorParse.error) {
@@ -601,12 +607,18 @@ function BulkTagPanel({
         setPreview(await onDeleteTag(tag.trim(), false, null));
         return;
       }
+      const resolved = await onResolveBulk(selectorExpression.trim());
+      const targetClientIds = resolved.targets.map((target) => target.id);
+      if (!targetClientIds.length) {
+        throw new Error("Bulk tag preview resolved no VPSs");
+      }
       setPreview(
         await onBulkMutateTags({
           action,
           confirmed: false,
           privilege_assertion: null,
           selector_expression: selectorExpression.trim(),
+          target_client_ids: targetClientIds,
           tag: tag.trim(),
         }),
       );
@@ -634,6 +646,9 @@ function BulkTagPanel({
         return;
       }
       const targetIds = preview?.affected.map((agent) => agent.id) ?? [];
+      if (!targetIds.length) {
+        throw new Error("Review targets before applying the tag mutation");
+      }
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
@@ -648,6 +663,7 @@ function BulkTagPanel({
           confirmed: true,
           privilege_assertion: privilegeAssertion,
           selector_expression: selectorExpression.trim(),
+          target_client_ids: targetIds,
           tag: tag.trim(),
         }),
       );
@@ -666,7 +682,7 @@ function BulkTagPanel({
             aria-label="Bulk tag action"
             onChange={(event) => {
               setAction(event.target.value as "add" | "remove" | "delete");
-              setPreview(null);
+              clearMutationPreview();
             }}
             value={action}
           >
@@ -682,7 +698,7 @@ function BulkTagPanel({
             list="bulk-tag-options"
             onChange={(event) => {
               setTag(event.target.value);
-              setPreview(null);
+              clearMutationPreview();
             }}
             placeholder="provider:aws or role:edge"
             value={tag}
@@ -701,7 +717,7 @@ function BulkTagPanel({
               className="targetExpressionBar"
               onChange={(value) => {
                 setSelectorExpression(value);
-                setPreview(null);
+                clearMutationPreview();
               }}
               placeholder="provider:* && country:US"
               showMatchCount

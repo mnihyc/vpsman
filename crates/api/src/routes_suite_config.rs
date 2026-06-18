@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
-    redact_suite_config_value, PrivilegeAssertion, SuiteConfig, SuiteConfigValidation,
+    payload_hash, redact_suite_config_value, PrivilegeAssertion, SuiteConfig, SuiteConfigValidation,
 };
 
 use crate::{
@@ -93,9 +93,17 @@ pub(crate) async fn update_suite_config(
     }
     let parsed = SuiteConfig::parse(&request.toml)
         .map_err(|_| ApiError::bad_request("suite_config_invalid"))?;
+    let toml_payload_hash = payload_hash(request.toml.as_bytes());
     verify_privilege_intent(
         &state,
-        &DbPrivilegeIntent::new("suite_config.update", "suite_config", None, &[], true),
+        &DbPrivilegeIntent::new(
+            "suite_config.update",
+            "suite_config",
+            None,
+            &[],
+            true,
+            Some(&toml_payload_hash),
+        ),
         request.privilege_assertion.clone(),
     )
     .await?;

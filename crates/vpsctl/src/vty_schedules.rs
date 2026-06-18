@@ -20,6 +20,10 @@ pub(crate) struct VtyScheduleCreateRequest<'a> {
 }
 
 pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) -> Result<String> {
+    anyhow::ensure!(
+        request.options.confirmed,
+        "schedule-create requires --confirmed"
+    );
     validate_schedule_policy(
         &request.options.catch_up_policy,
         request.options.catch_up_limit,
@@ -77,6 +81,7 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
             "catch_up_limit": request.options.catch_up_limit,
             "retry_delay_secs": request.options.retry_delay_secs,
             "max_failures": request.options.max_failures,
+            "confirmed": request.options.confirmed,
             "privilege_assertion": privilege_assertion,
         }),
     )
@@ -88,6 +93,7 @@ pub(crate) struct VtyScheduleCreateOptions {
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
     pub(crate) max_failures: i32,
+    pub(crate) confirmed: bool,
     pub(crate) target_tokens: Vec<String>,
 }
 
@@ -98,6 +104,7 @@ impl Default for VtyScheduleCreateOptions {
             catch_up_limit: 1,
             retry_delay_secs: 300,
             max_failures: 3,
+            confirmed: false,
             target_tokens: Vec::new(),
         }
     }
@@ -180,6 +187,10 @@ pub(crate) fn parse_vty_schedule_create_options(
                     1,
                     100,
                 )?;
+                index += 1;
+            }
+            "--confirmed" => {
+                options.confirmed = true;
                 index += 1;
             }
             value => {

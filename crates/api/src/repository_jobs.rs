@@ -16,7 +16,7 @@ use vpsman_server_core::{
     JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
     TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
     TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
-    TARGET_STATUS_RUNNING,
+    TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
 };
 
 pub(crate) use vpsman_server_core::aggregate_job_status_from_statuses;
@@ -89,6 +89,23 @@ fn agent_lost_status_output_value(
     })
 }
 
+fn target_skipped_status_output_value(
+    job_id: Uuid,
+    client_id: &str,
+    reason_code: &str,
+    message: &str,
+) -> serde_json::Value {
+    json!({
+        "type": "target_skipped",
+        "status": TARGET_STATUS_SKIPPED,
+        "code": reason_code,
+        "reason": reason_code,
+        "message": message,
+        "job_id": job_id,
+        "client_id": client_id,
+    })
+}
+
 pub(crate) async fn append_synthetic_status_output_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -150,6 +167,233 @@ pub(crate) async fn append_synthetic_status_output_in_tx(
         }
     }
     bail!("agent_lost_output_sequence_conflict:{job_id}:{client_id}")
+}
+
+pub(crate) async fn finish_job_in_tx_if_all_targets_terminal(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+) -> Result<Option<String>> {
+    let Some(job_row) = sqlx::query(
+        r#"
+        SELECT completed_at::text AS completed_at
+        FROM jobs
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let completed_at: Option<String> = job_row.try_get("completed_at")?;
+    if completed_at.is_some() {
+        return Ok(None);
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT status
+        FROM job_targets
+        WHERE job_id = $1
+        ORDER BY client_id
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let statuses = rows
+        .into_iter()
+        .map(|row| row.try_get("status").map_err(Into::into))
+        .collect::<Result<Vec<String>>>()?;
+    if statuses
+        .iter()
+        .any(|status| target_status_is_active(status))
+    {
+        return Ok(None);
+    }
+    let status = aggregate_job_status_from_statuses(&statuses, statuses.len()).to_string();
+    let updated = sqlx::query(
+        r#"
+        UPDATE jobs
+        SET status = $2, completed_at = now()
+        WHERE id = $1
+          AND completed_at IS NULL
+        "#,
+    )
+    .bind(job_id)
+    .bind(&status)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() > 0 {
+        Ok(Some(status))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    reason_code: &str,
+    message: &str,
+) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT job_id, client_id
+        FROM job_targets
+        WHERE client_id = $1
+          AND completed_at IS NULL
+          AND status = 'queued'
+          AND started_at IS NULL
+          AND process_incarnation_id IS NULL
+        ORDER BY job_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut job_ids = Vec::new();
+    for row in rows {
+        let job_id: Uuid = row.try_get("job_id")?;
+        let target_client_id: String = row.try_get("client_id")?;
+        append_synthetic_status_output_in_tx(
+            tx,
+            job_id,
+            &target_client_id,
+            target_skipped_status_output_value(job_id, &target_client_id, reason_code, message),
+            Some(0),
+        )
+        .await?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_targets
+            SET
+                status = 'skipped',
+                message = $3,
+                exit_code = 0,
+                started_at = COALESCE(started_at, now()),
+                completed_at = now(),
+                dispatch_lease_until = NULL,
+                last_dispatch_error = NULL
+            WHERE job_id = $1
+              AND client_id = $2
+              AND completed_at IS NULL
+              AND status = 'queued'
+              AND started_at IS NULL
+              AND process_incarnation_id IS NULL
+            "#,
+        )
+        .bind(job_id)
+        .bind(&target_client_id)
+        .bind(message)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() > 0 {
+            let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+            job_ids.push(job_id);
+        }
+    }
+    job_ids.sort();
+    job_ids.dedup();
+    Ok(job_ids)
+}
+
+pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    expected_process_incarnation_id: Uuid,
+    current_process_incarnation_id: Option<Uuid>,
+    code: &str,
+    message: &str,
+) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT job_id, client_id
+        FROM job_targets
+        WHERE client_id = $1
+          AND completed_at IS NULL
+          AND status IN ('dispatching', 'running')
+          AND process_incarnation_id = $2
+        ORDER BY job_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(client_id)
+    .bind(expected_process_incarnation_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut job_ids = Vec::new();
+    for row in rows {
+        let job_id: Uuid = row.try_get("job_id")?;
+        let target_client_id: String = row.try_get("client_id")?;
+        append_synthetic_agent_lost_output_with_code_in_tx(
+            tx,
+            job_id,
+            &target_client_id,
+            message,
+            Some(expected_process_incarnation_id),
+            current_process_incarnation_id,
+            code,
+        )
+        .await?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_targets
+            SET
+                status = 'agent_lost',
+                message = $3,
+                completed_at = now(),
+                result_received_at = now(),
+                dispatch_lease_until = NULL,
+                cancel_requested_at = COALESCE(cancel_requested_at, now()),
+                last_dispatch_error = $3
+            WHERE job_id = $1
+              AND client_id = $2
+              AND completed_at IS NULL
+              AND status IN ('dispatching', 'running')
+              AND process_incarnation_id = $4
+            "#,
+        )
+        .bind(job_id)
+        .bind(&target_client_id)
+        .bind(message)
+        .bind(expected_process_incarnation_id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            bail!("agent_lost_target_cas_lost:{job_id}:{target_client_id}");
+        }
+        let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (
+                id, actor_id, action, target, command_hash, metadata
+            )
+            VALUES ($1, NULL, 'job.target_result', $2, NULL, $3)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("client:{target_client_id}"))
+        .bind(json!({
+            "job_id": job_id,
+            "status": TARGET_STATUS_AGENT_LOST,
+            "message": message,
+            "reason": code,
+            "expected_process_incarnation_id": expected_process_incarnation_id,
+            "current_process_incarnation_id": current_process_incarnation_id,
+        }))
+        .execute(&mut **tx)
+        .await?;
+        job_ids.push(job_id);
+    }
+    job_ids.sort();
+    job_ids.dedup();
+    Ok(job_ids)
 }
 
 pub(crate) async fn append_synthetic_agent_lost_output_with_code_in_tx(
@@ -1531,9 +1775,11 @@ impl Repository {
             return Ok(None);
         };
         if job.completed_at.is_some() {
-            if !matches!(job.status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                self.record_job_terminal_side_effects(job_id, &job.status, None)
-                    .await?;
+            if job.status == JOB_STATUS_COMPLETED {
+                if let Some(operation) = self.job_operation(job_id).await? {
+                    self.repair_tunnel_plan_execution(job_id, &operation, &job.status)
+                        .await?;
+                }
             }
             return Ok(None);
         }
@@ -1551,6 +1797,191 @@ impl Repository {
         } else {
             Ok(None)
         }
+    }
+
+    pub(crate) async fn skip_unstarted_queued_targets_for_client(
+        &self,
+        client_id: &str,
+        reason_code: &str,
+        message: &str,
+    ) -> Result<Vec<Uuid>> {
+        let job_ids = match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let mut changed = Vec::new();
+                {
+                    let mut targets = memory.job_targets.write().await;
+                    for target in targets.iter_mut().filter(|target| {
+                        target.client_id == client_id
+                            && target.completed_at.is_none()
+                            && target.status == TARGET_STATUS_QUEUED
+                            && target.started_at.is_none()
+                            && target.process_incarnation_id.is_none()
+                    }) {
+                        target.status = TARGET_STATUS_SKIPPED.to_string();
+                        target.message = Some(message.to_string());
+                        target.exit_code = Some(0);
+                        target.started_at = Some(now.clone());
+                        target.completed_at = Some(now.clone());
+                        changed.push((target.job_id, target.client_id.clone()));
+                    }
+                }
+                if !changed.is_empty() {
+                    let mut outputs = memory.job_outputs.write().await;
+                    for (job_id, target_client_id) in &changed {
+                        let seq = outputs
+                            .iter()
+                            .filter(|output| {
+                                output.job_id == *job_id && output.client_id == *target_client_id
+                            })
+                            .map(|output| output.seq)
+                            .max()
+                            .map_or(0, |seq| seq + 1);
+                        let value = target_skipped_status_output_value(
+                            *job_id,
+                            target_client_id,
+                            reason_code,
+                            message,
+                        );
+                        let data = serde_json::to_vec(&value)?;
+                        outputs.push(JobOutputView {
+                            job_id: *job_id,
+                            client_id: target_client_id.clone(),
+                            seq,
+                            stream: "status".to_string(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                            storage: "inline".to_string(),
+                            artifact_object_key: None,
+                            artifact_sha256_hex: None,
+                            artifact_size_bytes: None,
+                            exit_code: Some(0),
+                            done: true,
+                            received_at: Some(now.clone()),
+                            created_at: now.clone(),
+                        });
+                    }
+                }
+                changed
+                    .into_iter()
+                    .map(|(job_id, _)| job_id)
+                    .collect::<Vec<_>>()
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                    &mut tx,
+                    client_id,
+                    reason_code,
+                    message,
+                )
+                .await?;
+                tx.commit().await?;
+                job_ids
+            }
+        };
+        let mut unique_job_ids = job_ids;
+        unique_job_ids.sort();
+        unique_job_ids.dedup();
+        for job_id in &unique_job_ids {
+            self.refresh_job_status_from_targets(*job_id).await?;
+        }
+        Ok(unique_job_ids)
+    }
+
+    pub(crate) async fn mark_active_targets_agent_lost_for_client(
+        &self,
+        client_id: &str,
+        expected_process_incarnation_id: Uuid,
+        current_process_incarnation_id: Option<Uuid>,
+        code: &str,
+        message: &str,
+    ) -> Result<Vec<Uuid>> {
+        let job_ids = match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let mut changed = Vec::new();
+                {
+                    let mut targets = memory.job_targets.write().await;
+                    for target in targets.iter_mut().filter(|target| {
+                        target.client_id == client_id
+                            && target.completed_at.is_none()
+                            && matches!(
+                                target.status.as_str(),
+                                TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
+                            )
+                            && target.process_incarnation_id
+                                == Some(expected_process_incarnation_id)
+                    }) {
+                        target.status = TARGET_STATUS_AGENT_LOST.to_string();
+                        target.message = Some(message.to_string());
+                        target.completed_at = Some(now.clone());
+                        changed.push((target.job_id, target.client_id.clone()));
+                    }
+                }
+                if !changed.is_empty() {
+                    let mut outputs = memory.job_outputs.write().await;
+                    for (job_id, target_client_id) in &changed {
+                        let seq = outputs
+                            .iter()
+                            .filter(|output| {
+                                output.job_id == *job_id && output.client_id == *target_client_id
+                            })
+                            .map(|output| output.seq)
+                            .max()
+                            .map_or(0, |seq| seq + 1);
+                        let value = agent_lost_status_output_value(
+                            *job_id,
+                            target_client_id,
+                            message,
+                            Some(expected_process_incarnation_id),
+                            current_process_incarnation_id,
+                            code,
+                        );
+                        let data = serde_json::to_vec(&value)?;
+                        outputs.push(JobOutputView {
+                            job_id: *job_id,
+                            client_id: target_client_id.clone(),
+                            seq,
+                            stream: "status".to_string(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                            storage: "inline".to_string(),
+                            artifact_object_key: None,
+                            artifact_sha256_hex: None,
+                            artifact_size_bytes: None,
+                            exit_code: None,
+                            done: true,
+                            received_at: Some(now.clone()),
+                            created_at: now.clone(),
+                        });
+                    }
+                }
+                changed
+                    .into_iter()
+                    .map(|(job_id, _)| job_id)
+                    .collect::<Vec<_>>()
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let job_ids = mark_active_targets_agent_lost_for_client_in_tx(
+                    &mut tx,
+                    client_id,
+                    expected_process_incarnation_id,
+                    current_process_incarnation_id,
+                    code,
+                    message,
+                )
+                .await?;
+                tx.commit().await?;
+                job_ids
+            }
+        };
+        let mut unique_job_ids = job_ids;
+        unique_job_ids.sort();
+        unique_job_ids.dedup();
+        for job_id in &unique_job_ids {
+            self.refresh_job_status_from_targets(*job_id).await?;
+        }
+        Ok(unique_job_ids)
     }
 
     pub(crate) async fn mark_job_target_running(
@@ -1825,6 +2256,7 @@ impl Repository {
                 }))
                 .execute(&mut *tx)
                 .await?;
+                let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                 tx.commit().await?;
             }
         }
@@ -2107,6 +2539,7 @@ impl Repository {
                     }))
                     .execute(&mut *tx)
                     .await?;
+                    let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                     expired.push(DeadlineExpiredJobTarget {
                         job_id,
                         client_id,
@@ -2215,6 +2648,9 @@ impl Repository {
                     .into_iter()
                     .map(|row| row.try_get("client_id").map_err(Into::into))
                     .collect::<Result<Vec<String>>>()?;
+                if pending_canceled > 0 {
+                    let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -2270,7 +2706,8 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
-                sqlx::query(
+                let mut tx = pool.begin().await?;
+                let updated = sqlx::query(
                     r#"
                     UPDATE job_targets
                     SET
@@ -2294,8 +2731,12 @@ impl Repository {
                 .bind(acked)
                 .bind(applied)
                 .bind(message)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                if applied && updated.rows_affected() > 0 {
+                    let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                }
+                tx.commit().await?;
             }
         }
         Ok(())
@@ -2445,6 +2886,7 @@ impl Repository {
                 Ok(true)
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let updated = sqlx::query(
                     r#"
                     UPDATE job_targets
@@ -2468,7 +2910,7 @@ impl Repository {
                 .bind(&outcome.message)
                 .bind(outcome.exit_code)
                 .bind(outcome.received_at.as_deref())
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
                 if updated.rows_affected() == 0 {
                     return Ok(false);
@@ -2492,85 +2934,77 @@ impl Repository {
                         "message": outcome.message,
                         "received_at": outcome.received_at,
                     }))
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
-                    let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
-                        || agent_update_activation_failure_status(&outcome.status)
-                    {
-                        let row = sqlx::query(
-                            r#"
-                            SELECT operation
-                            FROM jobs
-                            WHERE id = $1
-                            "#,
-                        )
-                        .bind(job_id)
-                        .fetch_optional(pool)
-                        .await?;
-                        match row {
-                            Some(row) => {
-                                let operation: sqlx::types::Json<JobCommand> =
-                                    row.try_get("operation")?;
-                                match operation.0 {
-                                    operation @ (JobCommand::AgentUpdateActivate { .. }
-                                    | JobCommand::AgentUpdateRollback { .. }) => Some(operation),
-                                    _ => None,
-                                }
-                            }
-                            None => None,
-                        }
-                    } else {
-                        None
-                    };
-                    match update_lifecycle_operation {
-                        Some(JobCommand::AgentUpdateActivate {
-                            staged_sha256_hex, ..
-                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                            self.record_agent_update_activation_completed(
-                                client_id,
-                                job_id,
-                                &staged_sha256_hex,
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateActivate {
-                            staged_sha256_hex, ..
-                        }) if agent_update_activation_failure_status(&outcome.status) => {
-                            self.record_agent_update_activation_failed(
-                                client_id,
-                                job_id,
-                                &staged_sha256_hex,
-                                &outcome.status,
-                                outcome.exit_code,
-                                &outcome.message,
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateRollback {
-                            rollback_sha256_hex,
-                        }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                            self.record_agent_update_rollback_completed(
-                                client_id,
-                                job_id,
-                                rollback_sha256_hex.as_deref(),
-                            )
-                            .await?;
-                        }
-                        Some(JobCommand::AgentUpdateRollback {
-                            rollback_sha256_hex,
-                        }) if agent_update_activation_failure_status(&outcome.status) => {
-                            self.record_agent_update_rollback_failed(
-                                client_id,
-                                job_id,
-                                rollback_sha256_hex.as_deref(),
-                                &outcome.status,
-                                outcome.exit_code,
-                                &outcome.message,
-                            )
-                            .await?;
-                        }
-                        _ => {}
+                }
+                let finished_status =
+                    finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                tx.commit().await?;
+                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
+                    || agent_update_activation_failure_status(&outcome.status)
+                {
+                    match self.job_operation(job_id).await? {
+                        Some(
+                            operation @ (JobCommand::AgentUpdateActivate { .. }
+                            | JobCommand::AgentUpdateRollback { .. }),
+                        ) => Some(operation),
+                        _ => None,
                     }
+                } else {
+                    None
+                };
+                match update_lifecycle_operation {
+                    Some(JobCommand::AgentUpdateActivate {
+                        staged_sha256_hex, ..
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                        self.record_agent_update_activation_completed(
+                            client_id,
+                            job_id,
+                            &staged_sha256_hex,
+                        )
+                        .await?;
+                    }
+                    Some(JobCommand::AgentUpdateActivate {
+                        staged_sha256_hex, ..
+                    }) if agent_update_activation_failure_status(&outcome.status) => {
+                        self.record_agent_update_activation_failed(
+                            client_id,
+                            job_id,
+                            &staged_sha256_hex,
+                            &outcome.status,
+                            outcome.exit_code,
+                            &outcome.message,
+                        )
+                        .await?;
+                    }
+                    Some(JobCommand::AgentUpdateRollback {
+                        rollback_sha256_hex,
+                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
+                        self.record_agent_update_rollback_completed(
+                            client_id,
+                            job_id,
+                            rollback_sha256_hex.as_deref(),
+                        )
+                        .await?;
+                    }
+                    Some(JobCommand::AgentUpdateRollback {
+                        rollback_sha256_hex,
+                    }) if agent_update_activation_failure_status(&outcome.status) => {
+                        self.record_agent_update_rollback_failed(
+                            client_id,
+                            job_id,
+                            rollback_sha256_hex.as_deref(),
+                            &outcome.status,
+                            outcome.exit_code,
+                            &outcome.message,
+                        )
+                        .await?;
+                    }
+                    _ => {}
+                }
+                if let Some(status) = finished_status {
+                    self.record_job_terminal_side_effects(job_id, &status, None)
+                        .await?;
                 }
                 self.record_job_target_webhook_event(job_id, client_id, outcome)
                     .await?;

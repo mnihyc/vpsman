@@ -58,9 +58,10 @@ Target statuses are:
   incarnation or a missing expected update activation heartbeat. `control_timeout`
   means the immutable control deadline elapsed without proof that the process
   restarted.
-- `control_timeout` is a terminal control-plane decision. Late final agent
-  output may be persisted as diagnostic evidence, but it must not rewrite the
-  target or parent job terminal state.
+- `control_timeout` is a terminal control-plane decision. Late command output
+  after a target is terminal is accepted only when it is an exact duplicate of
+  already durable output. New or conflicting late output is rejected and must not
+  rewrite output history, target state, or parent job state.
 - Agent-side timeouts are reported as structured `command_timeout` status
   output and map to `agent_timeout`. Operator cancellation is operational for
   active shell/script/PTY children, backup, restore, network apply/rollback,
@@ -87,11 +88,10 @@ Target statuses are:
   during bounded graceful shutdown. Spool files are promoted with a temp-file
   write, best-effort fsync, atomic rename, schema version, and body checksum;
   corrupt startup entries are quarantined and do not block gateway start.
-  Startup replay checks `/internal/v1/gateway/command-output/acks` before
-  reposting spooled command outputs. Non-final chunks are ACKed when the output
-  row is durable; final chunks are ACKed only after both the output row and
-  terminal target state are durable. Command-output retry retention defaults
-  to 24 hours and can be adjusted with
+  Startup replay reposts spooled command outputs through normal ingest so the
+  API can classify inserts, exact duplicates, conflicts, late-terminal output,
+  and payload-hash mismatches with one consistency path. Command-output retry
+  retention defaults to 24 hours and can be adjusted with
   `[gateway].command_output_event_ttl_secs` or the
   `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS` override. Queue pressure must
   not delete already spooled forwarder files; they remain on disk for later
@@ -100,10 +100,10 @@ Target statuses are:
   cap or disk write failure, hard gateway process crash before a RAM-resident
   event is spooled, and sustained overload beyond configured retention.
 - Job finalization is idempotent and repairable. The first process that
-  transitions a job from non-terminal to terminal emits terminal side effects,
-  and later refresh/replay paths may re-materialize deterministic terminal
-  webhooks and schedule outcome events without double-incrementing schedule
-  failure counters or moving a schedule backward after a newer job has already
+  transitions a job from non-terminal to terminal emits terminal side effects.
+  Later refresh/replay paths may repair deterministic domain state, such as
+  tunnel-plan execution records, without double-incrementing schedule failure
+  counters or moving a schedule backward after a newer job has already
   completed.
 - Job output rows are first-writer-wins by `(job_id, client_id, seq)`. Same
   duplicate rows are no-ops; conflicting replay rows are audit evidence and do

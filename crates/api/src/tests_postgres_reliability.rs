@@ -1,21 +1,30 @@
 use std::{path::Path, str::FromStr};
 
+use axum::http::{header::AUTHORIZATION, HeaderMap};
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     PgPool, Row,
 };
+use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
     payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentCapabilitySnapshot, AgentHello,
     AgentUpdateHeartbeat, BandwidthTier, CommandOutput, GatewayAgentHelloIngest, JobCommand,
     OspfCostPolicy, OutputStream, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
 };
-use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED};
+use vpsman_server_core::{
+    JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_FAILED,
+};
 
 use crate::{
-    model::{AuthContext, BootstrapOperatorRequest, JobOutputView, LoginRequest},
+    gateway_client::GatewayDispatchClient,
+    model::{
+        AuthContext, BootstrapOperatorRequest, JobOutputView, LoginRequest, NewServerArtifact,
+    },
     repository::Repository,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
+    state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
 
 struct PgReliabilityTestDb {
@@ -107,6 +116,35 @@ fn workspace_migrations_dir() -> std::path::PathBuf {
         .join("migrations")
 }
 
+fn postgres_app_state(db: &PgReliabilityTestDb) -> AppState {
+    let (events, _) = broadcast::channel(16);
+    AppState {
+        repo: db.repo.clone(),
+        events,
+        internal_token: Some("gateway-secret-at-least-32-characters".to_string()),
+        gateway: GatewayDispatchClient::default(),
+        backup_object_store: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: 32768,
+        artifact_max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
+        require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: DispatcherRuntimeConfig::default(),
+    }
+}
+
+fn internal_gateway_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        "Bearer gateway-secret-at-least-32-characters"
+            .parse()
+            .unwrap(),
+    );
+    headers
+}
+
 async fn insert_client(pool: &PgPool, client_id: &str, incarnation: Option<Uuid>) {
     sqlx::query(
         r#"
@@ -146,7 +184,7 @@ async fn insert_job_target(
         "#,
     )
     .bind(job_id)
-    .bind(format!("hash-{job_id}"))
+    .bind(payload_hash(format!("payload-{job_id}").as_bytes()))
     .bind(sqlx::types::Json(operation))
     .bind(format!("fingerprint-{job_id}"))
     .execute(pool)
@@ -201,7 +239,7 @@ async fn insert_update_activation_target(
         "#,
     )
     .bind(job_id)
-    .bind(format!("hash-{job_id}"))
+    .bind(payload_hash(format!("payload-{job_id}").as_bytes()))
     .bind(sqlx::types::Json(operation))
     .bind(format!("fingerprint-{job_id}"))
     .execute(pool)
@@ -305,6 +343,22 @@ async fn target_status(pool: &PgPool, job_id: Uuid, client_id: &str) -> String {
     sqlx::query_scalar("SELECT status FROM job_targets WHERE job_id = $1 AND client_id = $2")
         .bind(job_id)
         .bind(client_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn job_status(pool: &PgPool, job_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn job_payload_hash(pool: &PgPool, job_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT payload_hash FROM jobs WHERE id = $1")
+        .bind(job_id)
         .fetch_one(pool)
         .await
         .unwrap()
@@ -452,6 +506,108 @@ async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
         .await
         .unwrap();
     assert_eq!(audit_count, 1);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_artifact_cleanup_job_persists_reviewed_artifact_identity() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .register_server_artifact(NewServerArtifact {
+            domain: "job_output".to_string(),
+            object_key: "job-output/test-reviewed-artifact".to_string(),
+            sha256_hex: "a".repeat(64),
+            size_bytes: 12,
+            job_id: Some(Uuid::new_v4()),
+            client_id: Some("edge-reviewed".to_string()),
+            stream: Some("stdout".to_string()),
+            seq: Some(0),
+            backup_request_id: None,
+            backup_artifact_id: None,
+            release_id: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+    let preview = db
+        .repo
+        .preview_artifact_cleanup(r#"artifact.domain = "job_output""#)
+        .await
+        .unwrap();
+    assert_eq!(preview.matched_count, 1);
+    let job = db
+        .repo
+        .create_artifact_cleanup_job(&preview.expression, &preview.preview_hash, &operator)
+        .await
+        .unwrap();
+
+    let row = sqlx::query(
+        r#"
+        SELECT domain, object_key, sha256_hex, size_bytes
+        FROM server_job_artifact_cleanup_targets
+        WHERE server_job_id = $1
+        "#,
+    )
+    .bind(job.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("domain"), "job_output");
+    assert_eq!(
+        row.get::<String, _>("object_key"),
+        "job-output/test-reviewed-artifact"
+    );
+    assert_eq!(row.get::<String, _>("sha256_hex"), "a".repeat(64));
+    assert_eq!(row.get::<i64, _>("size_bytes"), 12);
+
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET sha256_hex = $2, size_bytes = $3
+        WHERE object_key = $1
+        "#,
+    )
+    .bind("job-output/test-reviewed-artifact")
+    .bind("b".repeat(64))
+    .bind(13_i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let identity_matches_review: bool = sqlx::query_scalar(
+        r#"
+        SELECT (
+            artifact.domain = target.domain
+            AND artifact.object_key = target.object_key
+            AND artifact.sha256_hex = target.sha256_hex
+            AND artifact.size_bytes = target.size_bytes
+        )
+        FROM server_job_artifact_cleanup_targets target
+        JOIN server_artifacts artifact ON artifact.id = target.artifact_id
+        WHERE target.server_job_id = $1
+        "#,
+    )
+    .bind(job.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(!identity_matches_review);
+    sqlx::query("DELETE FROM server_artifacts WHERE object_key = $1")
+        .bind("job-output/test-reviewed-artifact")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let reviewed_target_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM server_job_artifact_cleanup_targets WHERE server_job_id = $1",
+    )
+    .bind(job.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(reviewed_target_count, 1);
     db.cleanup().await;
 }
 
@@ -722,6 +878,94 @@ async fn postgres_batch_output_conflict_poison_prevents_later_final_insert() {
 }
 
 #[tokio::test]
+async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_target() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let job_id = Uuid::new_v4();
+    let client_id = "pg-client-late-output";
+    let incarnation = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(incarnation)).await;
+    insert_job_target(
+        &db.pool,
+        job_id,
+        client_id,
+        "running",
+        true,
+        Some(incarnation),
+    )
+    .await;
+    let state = postgres_app_state(&db);
+    let payload_hash = job_payload_hash(&db.pool, job_id).await;
+    let final_output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"completed"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    let final_event = vpsman_common::GatewayCommandOutputIngest {
+        gateway_id: "gateway-a".to_string(),
+        client_id: client_id.to_string(),
+        job_id,
+        payload_hash: payload_hash.clone(),
+        seq: 0,
+        received_unix: Some(100),
+        output: final_output,
+    };
+    let _ = crate::routes_ingest::ingest_command_output(
+        axum::extract::State(state.clone()),
+        internal_gateway_headers(),
+        axum::Json(final_event.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        target_status(&db.pool, job_id, client_id).await,
+        TARGET_STATUS_COMPLETED
+    );
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
+
+    let _ = crate::routes_ingest::ingest_command_output(
+        axum::extract::State(state.clone()),
+        internal_gateway_headers(),
+        axum::Json(final_event),
+    )
+    .await
+    .unwrap();
+
+    let late_output = CommandOutput {
+        job_id,
+        stream: OutputStream::Stdout,
+        data: b"late data".to_vec(),
+        exit_code: None,
+        done: false,
+    };
+    let late_event = vpsman_common::GatewayCommandOutputIngest {
+        gateway_id: "gateway-a".to_string(),
+        client_id: client_id.to_string(),
+        job_id,
+        payload_hash,
+        seq: 1,
+        received_unix: Some(101),
+        output: late_output,
+    };
+    let error = crate::routes_ingest::ingest_command_output(
+        axum::extract::State(state),
+        internal_gateway_headers(),
+        axum::Json(late_event),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "job_target_not_active");
+    let outputs = output_rows(&db.pool, job_id, client_id).await;
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].seq, 0);
+    assert!(outputs[0].done);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_changed_incarnation_matching_update_heartbeat_completes_activation() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -760,6 +1004,7 @@ async fn postgres_changed_incarnation_matching_update_heartbeat_completes_activa
         target_status(&db.pool, job_id, client_id).await,
         TARGET_STATUS_COMPLETED
     );
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
     let client_incarnation: Uuid =
         sqlx::query_scalar("SELECT process_incarnation_id FROM clients WHERE id = $1")
             .bind(client_id)
@@ -770,6 +1015,58 @@ async fn postgres_changed_incarnation_matching_update_heartbeat_completes_activa
     let output = latest_status_output_json(&db.pool, job_id, client_id).await;
     assert_eq!(output["code"], "agent_update_restart_heartbeat_verified");
     assert_eq!(output["activation_job_id"], job_id.to_string());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_changed_incarnation_matching_job_but_wrong_hash_fails_activation() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-client-update-heartbeat-mismatch";
+    let old_incarnation = Uuid::new_v4();
+    let new_incarnation = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let staged_sha256_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let observed_sha256_hex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    insert_client(&db.pool, client_id, Some(old_incarnation)).await;
+    insert_update_activation_target(
+        &db.pool,
+        job_id,
+        client_id,
+        old_incarnation,
+        staged_sha256_hex,
+        false,
+    )
+    .await;
+
+    db.repo
+        .upsert_agent_hello(&hello_event(
+            client_id,
+            new_incarnation,
+            Some(AgentUpdateHeartbeat {
+                activation_job_id: job_id,
+                sha256_hex: observed_sha256_hex.to_string(),
+                marker_unix: 100,
+                observed_unix: 101,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        target_status(&db.pool, job_id, client_id).await,
+        TARGET_STATUS_FAILED
+    );
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_FAILED);
+    let output = latest_status_output_json(&db.pool, job_id, client_id).await;
+    assert_eq!(
+        output["code"],
+        "agent_update_activation_heartbeat_hash_mismatch"
+    );
+    assert_eq!(output["activation_job_id"], job_id.to_string());
+    assert_eq!(output["artifact_sha256_hex"], observed_sha256_hex);
+    assert_eq!(output["staged_sha256_hex"], staged_sha256_hex);
     db.cleanup().await;
 }
 
@@ -800,6 +1097,7 @@ async fn postgres_missing_update_heartbeat_deadline_becomes_agent_lost() {
         target_status(&db.pool, job_id, client_id).await,
         TARGET_STATUS_AGENT_LOST
     );
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_FAILED);
     let output = latest_status_output_json(&db.pool, job_id, client_id).await;
     assert_eq!(output["code"], "agent_update_restart_missing_heartbeat");
     db.cleanup().await;

@@ -716,6 +716,8 @@ pub(crate) enum Command {
     ServerJobCancel {
         #[arg(long)]
         job_id: String,
+        #[arg(long, default_value_t = false)]
+        confirmed: bool,
     },
     Audit {
         #[arg(long, default_value_t = 50)]

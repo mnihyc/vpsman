@@ -359,7 +359,8 @@ pub(crate) async fn update_operator(
     state
         .repo
         .update_operator(operator_id, &request, &actor)
-        .await?
+        .await
+        .map_err(operator_management_error)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_not_found"))
 }
@@ -410,7 +411,8 @@ async fn set_operator_lifecycle_status(
     state
         .repo
         .set_operator_status(operator_id, status, &actor)
-        .await?
+        .await
+        .map_err(operator_management_error)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_not_found"))
 }
@@ -517,6 +519,14 @@ fn require_confirmed(confirmed: bool) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::bad_request("confirmation_required"))
+    }
+}
+
+fn operator_management_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("last_active_admin_required") {
+        ApiError::conflict("last_active_admin_required")
+    } else {
+        ApiError::from(error)
     }
 }
 

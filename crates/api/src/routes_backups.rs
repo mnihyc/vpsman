@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use vpsman_common::{encode_json, payload_hash, JobCommand};
+use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
 
 use crate::{
     backup_artifact_crypto::prepare_backup_archive_for_restore,
@@ -14,7 +14,10 @@ use crate::{
     backup_handoff::{backup_artifact_streaming_max_bytes, stage_retained_backup_artifact_stdout},
     backup_upload_sessions::backup_upload_sessions,
     error::ApiError,
-    job_request::validate_file_path,
+    job_request::{
+        fixed_target_selection, job_command_type_label, normalized_target_client_ids,
+        validate_file_path,
+    },
     model::{
         BackupArtifactHandoffRequest, BackupArtifactHandoffView, BackupArtifactUploadChunkRequest,
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
@@ -24,7 +27,10 @@ use crate::{
         ListQuery, PrepareBackupArtifactRestoreRequest, PreparedBackupArtifactRestoreView,
         RecordBackupArtifactMetadataRequest, UploadBackupArtifactRequest, WsEvent,
     },
-    privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
+    privilege::{
+        verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
+        SchedulePrivilegeIntent, SchedulePrivilegeIntentInput,
+    },
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::validate_schedule_request,
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
@@ -75,7 +81,7 @@ pub(crate) async fn list_backup_policies(
 pub(crate) async fn create_backup_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateBackupPolicyRequest>,
+    Json(mut request): Json<CreateBackupPolicyRequest>,
 ) -> Result<(StatusCode, Json<BackupPolicyView>), ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "backups:write")
@@ -84,10 +90,69 @@ pub(crate) async fn create_backup_policy(
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
     validate_create_backup_policy_request(&request)?;
+    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    verify_backup_policy_privilege(&state, &request, request.privilege_assertion.clone()).await?;
     Ok((
         StatusCode::CREATED,
         Json(state.repo.create_backup_policy(request, &operator).await?),
     ))
+}
+
+async fn verify_backup_policy_privilege(
+    state: &AppState,
+    request: &CreateBackupPolicyRequest,
+    assertion: Option<PrivilegeAssertion>,
+) -> Result<(), ApiError> {
+    let resolved_targets =
+        resolved_backup_policy_targets(state, &request.target_client_ids).await?;
+    let operation = backup_policy_command(request);
+    let operation_payload = encode_json(&operation).map_err(|error| {
+        ApiError::from(anyhow!("failed to encode backup policy command: {error}"))
+    })?;
+    let operation_payload_hash = payload_hash(&operation_payload);
+    let command_type = job_command_type_label(&operation);
+    let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
+        action: "backup_policy.create",
+        schedule_id: None,
+        name: &request.name,
+        command_type,
+        operation_payload_hash: &operation_payload_hash,
+        selector_expression: &request.selector_expression,
+        resolved_targets: &resolved_targets,
+        cron_expr: &request.cron_expr,
+        timezone: &request.timezone,
+        enabled: request.enabled,
+        catch_up_policy: &request.catch_up_policy,
+        catch_up_limit: request.catch_up_limit,
+        retry_delay_secs: request.retry_delay_secs,
+        max_failures: request.max_failures,
+        deferred_until: None,
+        deleted: false,
+    });
+    verify_privilege_intent(state, &privilege_intent, assertion).await
+}
+
+async fn resolved_backup_policy_targets(
+    state: &AppState,
+    target_client_ids: &[String],
+) -> Result<Vec<String>, ApiError> {
+    let target_client_ids = normalized_target_client_ids(target_client_ids)?;
+    let resolved = state
+        .repo
+        .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
+        .await?
+        .targets
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let missing = target_client_ids
+        .iter()
+        .filter(|client_id| !resolved.iter().any(|resolved_id| resolved_id == *client_id))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(ApiError::conflict("backup_policy_fixed_targets_not_found"));
+    }
+    Ok(target_client_ids)
 }
 
 pub(crate) async fn prune_backup_policies(
@@ -443,6 +508,11 @@ pub(crate) async fn commit_backup_artifact_upload_session(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "backups:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "backup_artifact_upload_commit_confirmation_required",
+        ));
+    }
     let store = state
         .backup_object_store
         .as_ref()
@@ -873,6 +943,7 @@ pub(crate) fn validate_create_backup_policy_request(
         retry_delay_secs: request.retry_delay_secs,
         max_failures: request.max_failures,
         privilege_assertion: None,
+        confirmed: true,
     };
     validate_schedule_request(&schedule_request)?;
     let retention_days = request.retention_days.unwrap_or(30);
@@ -949,6 +1020,17 @@ async fn ensure_single_backup_client(
 }
 
 fn backup_command(request: &CreateBackupRequest) -> JobCommand {
+    JobCommand::Backup {
+        paths: request.paths.clone(),
+        include_config: request.include_config,
+        recipient_public_key_hex: request
+            .recipient_public_key_hex
+            .clone()
+            .map(|value| value.to_ascii_lowercase()),
+    }
+}
+
+fn backup_policy_command(request: &CreateBackupPolicyRequest) -> JobCommand {
     JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,

@@ -1,20 +1,10 @@
-use std::{
-    env, fs,
-    io::{Read, Write},
-    net::{TcpStream as StdTcpStream, ToSocketAddrs},
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{env, fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-use rustls_pki_types::{CertificateDer, ServerName};
+use reqwest::{redirect, Url};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::{task, time};
+use tokio::time;
 use vpsman_common::{CommandOutput, OutputStream};
 
 use crate::{
@@ -56,23 +46,19 @@ pub(crate) async fn execute_update_agent(
     let artifact_url = input.artifact_url.to_string();
     let sha256_hex = normalize_sha256(input.sha256_hex)?;
     let job_id = input.job_id;
-    let cancel_token = input.cancel_token.clone();
     let output = match time::timeout(
         timeout,
-        task::spawn_blocking(move || {
-            cancel_token.check("agent_update")?;
-            stage_update_artifact(UpdateStageInput {
-                job_id,
-                artifact_url: &artifact_url,
-                expected_sha256_hex: &sha256_hex,
-                current_exe: &current_exe,
-                cancel_token: &cancel_token,
-            })
+        stage_update_artifact(UpdateStageInput {
+            job_id,
+            artifact_url: &artifact_url,
+            expected_sha256_hex: &sha256_hex,
+            current_exe: &current_exe,
+            cancel_token: &input.cancel_token,
         }),
     )
     .await
     {
-        Ok(result) => result.context("agent update staging task failed")??,
+        Ok(result) => result?,
         Err(_) => {
             input
                 .cancel_token
@@ -91,22 +77,18 @@ pub(crate) async fn execute_update_check(
     input.cancel_token.check("agent_update_check")?;
     let job_id = input.job_id;
     let version_url = input.version_url.trim().to_string();
-    let cancel_token = input.cancel_token.clone();
     let check = match time::timeout(
         timeout,
-        task::spawn_blocking(move || {
-            cancel_token.check("agent_update_check")?;
-            check_and_stage_update(CheckStageInput {
-                job_id,
-                version_url: &version_url,
-                current_exe: &current_exe,
-                cancel_token: &cancel_token,
-            })
+        check_and_stage_update(CheckStageInput {
+            job_id,
+            version_url: &version_url,
+            current_exe: &current_exe,
+            cancel_token: &input.cancel_token,
         }),
     )
     .await
     {
-        Ok(result) => result.context("agent update check task failed")??,
+        Ok(result) => result?,
         Err(_) => {
             input
                 .cancel_token
@@ -187,9 +169,9 @@ struct VersionManifestDownload {
     download_url: String,
 }
 
-fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
+async fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
     input.cancel_token.check("agent_update")?;
-    let artifact = fetch_update_artifact(input.artifact_url)?;
+    let artifact = fetch_update_artifact(input.artifact_url).await?;
     input.cancel_token.check("agent_update")?;
     let observed_sha256_hex = sha256_hex(&artifact);
     if observed_sha256_hex != input.expected_sha256_hex {
@@ -220,9 +202,10 @@ fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
     })
 }
 
-fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult> {
+async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult> {
     input.cancel_token.check("agent_update_check")?;
     let manifest_bytes = fetch_update_artifact(input.version_url)
+        .await
         .with_context(|| format!("failed to fetch update manifest {}", input.version_url))?;
     input.cancel_token.check("agent_update_check")?;
     let header: VersionManifestHeader = serde_json::from_slice(&manifest_bytes)
@@ -302,6 +285,7 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
     let sums_url = manifest_download_url(&checksum_manifest.download_url, "SHA256SUMS")?;
     let sums = String::from_utf8(
         fetch_update_artifact(&sums_url)
+            .await
             .with_context(|| format!("failed to fetch update checksum manifest {sums_url}"))?,
     )
     .context("update checksum manifest is not UTF-8")?;
@@ -326,7 +310,8 @@ fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult
         expected_sha256_hex: &expected_sha256_hex,
         current_exe: input.current_exe,
         cancel_token: input.cancel_token,
-    })?;
+    })
+    .await?;
     outputs.push(staged);
     Ok(CheckStageResult {
         outputs,
@@ -426,12 +411,11 @@ fn checksum_for_asset(checksums: &str, asset_name: &str) -> Result<String> {
     anyhow::bail!("update checksum manifest does not contain {asset_name}");
 }
 
-fn fetch_update_artifact(artifact_url: &str) -> Result<Vec<u8>> {
+async fn fetch_update_artifact(artifact_url: &str) -> Result<Vec<u8>> {
     let parsed = parse_artifact_url(artifact_url)?;
     match parsed.scheme {
         ArtifactScheme::File => read_file_artifact(&parsed),
-        ArtifactScheme::Https => fetch_http_artifact(&parsed, true),
-        ArtifactScheme::HttpLocalDev => fetch_http_artifact(&parsed, false),
+        ArtifactScheme::Https | ArtifactScheme::HttpLocalDev => fetch_http_artifact(&parsed).await,
     }
 }
 
@@ -452,177 +436,87 @@ fn read_file_artifact(parsed: &ParsedArtifactUrl) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("failed to read update artifact {}", path.display()))
 }
 
-fn fetch_http_artifact(parsed: &ParsedArtifactUrl, tls: bool) -> Result<Vec<u8>> {
-    let response = if tls {
-        let tcp = connect_tcp(parsed)?;
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        load_extra_update_roots(&mut roots)?;
-        let tls_config =
-            ClientConfig::builder_with_provider(Arc::new(rustls_rustcrypto::provider()))
-                .with_safe_default_protocol_versions()
-                .context("failed to configure update TLS protocol versions")?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-        let server_name = ServerName::try_from(parsed.host.clone())
-            .context("update artifact URL host is not a valid TLS server name")?;
-        let connection = ClientConnection::new(Arc::new(tls_config), server_name)
-            .context("failed to create update TLS client")?;
-        let mut stream = StreamOwned::new(connection, tcp);
-        send_http_get(&mut stream, parsed)?;
-        read_limited_response(&mut stream)?
-    } else {
-        let mut tcp = connect_tcp(parsed)?;
-        send_http_get(&mut tcp, parsed)?;
-        read_limited_response(&mut tcp)?
-    };
-    decode_http_response(&response)
+async fn fetch_http_artifact(parsed: &ParsedArtifactUrl) -> Result<Vec<u8>> {
+    let client = update_http_client()?;
+    let url = Url::parse(&parsed.http_url()).context("update artifact URL is invalid")?;
+    if !update_http_url_allowed(&url) {
+        anyhow::bail!("update artifact URL is not allowed");
+    }
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .send()
+        .await
+        .context("failed to fetch update artifact")?
+        .error_for_status()
+        .context("update artifact endpoint returned an error")?;
+    read_limited_response(response).await
 }
 
-fn load_extra_update_roots(roots: &mut RootCertStore) -> Result<()> {
+fn update_http_client() -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(UPDATE_DOWNLOAD_TIMEOUT)
+        .timeout(UPDATE_DOWNLOAD_TIMEOUT)
+        .redirect(redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("update artifact redirect limit exceeded");
+            }
+            if update_redirect_url_allowed(attempt.previous().last(), attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("update artifact redirect target is not allowed")
+            }
+        }))
+        .user_agent(format!(
+            "vpsman-agent/{} build/{}",
+            crate::build_info::agent_release_version(),
+            crate::build_info::AGENT_BUILD_NUMBER
+        ));
     let Ok(path) = env::var(UPDATE_ROOT_CERT_PEM_ENV) else {
-        return Ok(());
+        return builder
+            .build()
+            .context("failed to build update HTTP client");
     };
     if path.trim().is_empty() {
-        return Ok(());
+        return builder
+            .build()
+            .context("failed to build update HTTP client");
     }
-    let pem = fs::read_to_string(&path)
+    let pem = fs::read(&path)
         .with_context(|| format!("failed to read update root certificate PEM from {path}"))?;
-    let count = add_pem_certificates(roots, &pem)?;
-    if count == 0 {
+    let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+        .context("failed to parse update root certificate PEM")?;
+    if certificates.is_empty() {
         anyhow::bail!("update root certificate PEM contained no certificates");
     }
-    Ok(())
+    for certificate in certificates {
+        builder = builder.add_root_certificate(certificate);
+    }
+    builder
+        .build()
+        .context("failed to build update HTTP client")
 }
 
-fn add_pem_certificates(roots: &mut RootCertStore, pem: &str) -> Result<usize> {
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-
-    let mut rest = pem;
-    let mut count = 0usize;
-    while let Some(begin) = rest.find(BEGIN) {
-        let after_begin = &rest[begin + BEGIN.len()..];
-        let end = after_begin
-            .find(END)
-            .context("update root certificate PEM is missing END CERTIFICATE marker")?;
-        let base64_body = after_begin[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<String>();
-        let der = BASE64_STANDARD
-            .decode(base64_body.as_bytes())
-            .context("update root certificate PEM is not valid base64")?;
-        roots
-            .add(CertificateDer::from(der))
-            .context("failed to add update root certificate")?;
-        count += 1;
-        rest = &after_begin[end + END.len()..];
-    }
-    Ok(count)
-}
-
-fn connect_tcp(parsed: &ParsedArtifactUrl) -> Result<StdTcpStream> {
-    let mut last_error = None;
-    for addr in (parsed.host.as_str(), parsed.port).to_socket_addrs()? {
-        match StdTcpStream::connect_timeout(&addr, UPDATE_DOWNLOAD_TIMEOUT) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(UPDATE_DOWNLOAD_TIMEOUT))?;
-                stream.set_write_timeout(Some(UPDATE_DOWNLOAD_TIMEOUT))?;
-                return Ok(stream);
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error
-        .map(anyhow::Error::new)
-        .unwrap_or_else(|| anyhow!("update artifact host resolved to no addresses")))
-}
-
-fn send_http_get(stream: &mut impl Write, parsed: &ParsedArtifactUrl) -> Result<()> {
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: vpsman-agent/{} build/{}\r\nAccept: application/octet-stream\r\nConnection: close\r\n\r\n",
-        parsed.path_and_query,
-        parsed.host_header(),
-        crate::build_info::agent_release_version(),
-        crate::build_info::AGENT_BUILD_NUMBER
-    );
-    stream.write_all(request.as_bytes())?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn read_limited_response(stream: &mut impl Read) -> Result<Vec<u8>> {
-    let mut response = Vec::new();
-    stream
-        .take((MAX_UPDATE_ARTIFACT_BYTES + 4096) as u64)
-        .read_to_end(&mut response)?;
-    if response.len() > MAX_UPDATE_ARTIFACT_BYTES + 4096 {
-        anyhow::bail!("update artifact HTTP response exceeded size limit");
-    }
-    Ok(response)
-}
-
-fn decode_http_response(response: &[u8]) -> Result<Vec<u8>> {
-    let header_end = find_bytes(response, b"\r\n\r\n").context("update HTTP header incomplete")?;
-    let header =
-        std::str::from_utf8(&response[..header_end]).context("update HTTP header is not UTF-8")?;
-    let body = &response[header_end + 4..];
-    let mut lines = header.split("\r\n");
-    let status = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .context("update HTTP response missing status code")?;
-    if status != "200" {
-        anyhow::bail!("update artifact endpoint returned HTTP {status}");
-    }
-    let mut chunked = false;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            && value
-                .split(',')
-                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
-        {
-            chunked = true;
-        }
-    }
-    let decoded = if chunked {
-        decode_chunked_body(body)?
-    } else {
-        body.to_vec()
-    };
-    if decoded.len() > MAX_UPDATE_ARTIFACT_BYTES {
+async fn read_limited_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_UPDATE_ARTIFACT_BYTES as u64)
+    {
         anyhow::bail!("update artifact exceeds {MAX_UPDATE_ARTIFACT_BYTES} bytes");
     }
-    Ok(decoded)
-}
-
-fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    loop {
-        let size_end = find_bytes(body, b"\r\n").context("chunked update body is incomplete")?;
-        let size_line = std::str::from_utf8(&body[..size_end])
-            .context("chunked update size line is not UTF-8")?;
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16)
-            .context("chunked update body has invalid chunk size")?;
-        body = &body[size_end + 2..];
-        if size == 0 {
-            return Ok(decoded);
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("failed to read update artifact body")?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_UPDATE_ARTIFACT_BYTES {
+            anyhow::bail!("update artifact exceeds {MAX_UPDATE_ARTIFACT_BYTES} bytes");
         }
-        if body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
-            anyhow::bail!("chunked update body chunk is incomplete");
-        }
-        decoded.extend_from_slice(&body[..size]);
-        if decoded.len() > MAX_UPDATE_ARTIFACT_BYTES {
-            anyhow::bail!("decoded update artifact exceeded {MAX_UPDATE_ARTIFACT_BYTES} bytes");
-        }
-        body = &body[size + 2..];
+        body.extend_from_slice(&chunk);
     }
+    Ok(body)
 }
 
 fn normalize_sha256(value: &str) -> Result<String> {
@@ -635,12 +529,6 @@ fn normalize_sha256(value: &str) -> Result<String> {
 
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -659,16 +547,34 @@ struct ParsedArtifactUrl {
 }
 
 impl ParsedArtifactUrl {
-    fn host_header(&self) -> String {
+    fn http_url(&self) -> String {
+        let scheme = match self.scheme {
+            ArtifactScheme::Https => "https",
+            ArtifactScheme::HttpLocalDev => "http",
+            ArtifactScheme::File => unreachable!("file artifacts are not fetched over HTTP"),
+        };
+        format!(
+            "{scheme}://{}{}",
+            self.authority_for_url(),
+            self.path_and_query
+        )
+    }
+
+    fn authority_for_url(&self) -> String {
         let default_port = match self.scheme {
             ArtifactScheme::File => 0,
             ArtifactScheme::Https => 443,
             ArtifactScheme::HttpLocalDev => 80,
         };
-        if self.port == default_port {
-            self.host.clone()
+        let host = if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == default_port {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 }
@@ -760,16 +666,37 @@ fn is_localhost(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+fn update_http_url_allowed(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(is_localhost),
+        _ => false,
+    }
+}
+
+fn update_redirect_url_allowed(previous: Option<&Url>, next: &Url) -> bool {
+    match next.scheme() {
+        "https" => true,
+        "http" => {
+            next.host_str().is_some_and(is_localhost)
+                && previous.is_some_and(|url| {
+                    url.scheme() == "http" && url.host_str().is_some_and(is_localhost)
+                })
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     use super::{
-        add_pem_certificates, agent_asset_name, check_and_stage_update, decode_http_response,
-        normalize_sha256, parse_artifact_url, sha256_hex, stage_update_artifact, CheckStageInput,
-        UpdateStageInput,
+        agent_asset_name, check_and_stage_update, normalize_sha256, parse_artifact_url, sha256_hex,
+        stage_update_artifact, update_http_url_allowed, update_redirect_url_allowed,
+        CheckStageInput, UpdateStageInput,
     };
-    use rustls::RootCertStore;
+    use reqwest::Url;
 
     #[test]
     fn parses_artifact_urls_and_rejects_remote_http() {
@@ -785,8 +712,8 @@ mod tests {
         assert!(normalize_sha256("not-a-hash").is_err());
     }
 
-    #[test]
-    fn stages_file_artifact_after_hash_verification() {
+    #[tokio::test]
+    async fn stages_file_artifact_after_hash_verification() {
         let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let current = dir.join("vpsman-agent");
@@ -801,6 +728,7 @@ mod tests {
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
+        .await
         .unwrap();
 
         let staged = dir.join("vpsman-agent.next");
@@ -822,8 +750,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn update_check_uses_embedded_release_version_for_current_detection() {
+    #[tokio::test]
+    async fn update_check_uses_embedded_release_version_for_current_detection() {
         let Some(_) = agent_asset_name() else {
             return;
         };
@@ -852,6 +780,7 @@ mod tests {
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
+        .await
         .unwrap();
 
         assert_eq!(result.staged_sha256_hex, None);
@@ -864,8 +793,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn update_check_uses_explicit_manifest_download_urls() {
+    #[tokio::test]
+    async fn update_check_uses_explicit_manifest_download_urls() {
         let Some(asset_name) = agent_asset_name() else {
             return;
         };
@@ -913,6 +842,7 @@ mod tests {
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
+        .await
         .unwrap();
 
         assert_eq!(
@@ -930,8 +860,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn update_check_rejects_legacy_name_only_manifest() {
+    #[tokio::test]
+    async fn update_check_rejects_legacy_name_only_manifest() {
         let Some(asset_name) = agent_asset_name() else {
             return;
         };
@@ -958,7 +888,9 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
-        }) {
+        })
+        .await
+        {
             Ok(_) => panic!("legacy update manifest unexpectedly passed"),
             Err(error) => error.to_string(),
         };
@@ -968,8 +900,8 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn rejects_hash_mismatch_before_writing_staged_artifact() {
+    #[tokio::test]
+    async fn rejects_hash_mismatch_before_writing_staged_artifact() {
         let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let current = dir.join("vpsman-agent");
@@ -984,6 +916,7 @@ mod tests {
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
         })
+        .await
         .is_err());
         assert!(!dir.join("vpsman-agent.next").exists());
 
@@ -991,24 +924,19 @@ mod tests {
     }
 
     #[test]
-    fn decodes_chunked_update_response_before_hashing() {
-        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nnew\r\n6\r\n-agent\r\n0\r\n\r\n";
-        assert_eq!(decode_http_response(response).unwrap(), b"new-agent");
-    }
-
-    #[test]
-    fn rejects_incomplete_chunked_update_response() {
-        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nnew";
-        assert!(decode_http_response(response).is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_extra_update_root_pem() {
-        let mut roots = RootCertStore::empty();
-        assert!(add_pem_certificates(
-            &mut roots,
-            "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----"
-        )
-        .is_err());
+    fn redirect_policy_accepts_https_and_local_http_only() {
+        let https = Url::parse("https://updates.example/vpsman-agent").unwrap();
+        let local_http = Url::parse("http://127.0.0.1:8080/vpsman-agent").unwrap();
+        let remote_http = Url::parse("http://updates.example/vpsman-agent").unwrap();
+        assert!(update_http_url_allowed(&https));
+        assert!(update_http_url_allowed(&local_http));
+        assert!(!update_http_url_allowed(&remote_http));
+        assert!(update_redirect_url_allowed(Some(&https), &https));
+        assert!(update_redirect_url_allowed(Some(&local_http), &local_http));
+        assert!(!update_redirect_url_allowed(Some(&https), &local_http));
+        assert!(!update_redirect_url_allowed(
+            Some(&local_http),
+            &remote_http
+        ));
     }
 }

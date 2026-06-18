@@ -43,7 +43,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-plan --name <name> --interface-name <ifname> --kind <gre|ipip|sit|fou|openvpn|wireguard|tun_tap|custom> --left-client-id <id> --right-client-id <id> --left-underlay <ip> --right-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] --bandwidth <10m|100m|1000m> --latency-ms <ms> [--runtime-manager <agent|observed|adapter>] [--runtime-startup-argv <abs,arg>] [--runtime-stop-argv <abs,arg>] [--runtime-cleanup-argv <abs,arg>] [--runtime-status-argv <abs,arg>] [--fou-port <1-65535>] [--fou-peer-port <1-65535>] [--fou-ipproto <1-255>] [--packet-loss-ratio <0-1>] [--preference <value>] [--reserved-address <ip>] [--save]"
+                        "usage: tunnel-plan --name <name> --interface-name <ifname> --kind <gre|ipip|sit|fou|openvpn|wireguard|tun_tap|custom> --left-client-id <id> --right-client-id <id> --left-underlay <ip> --right-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] --bandwidth <10m|100m|1000m> --latency-ms <ms> [--runtime-manager <agent|observed|adapter>] [--runtime-startup-argv <abs,arg>] [--runtime-stop-argv <abs,arg>] [--runtime-cleanup-argv <abs,arg>] [--runtime-status-argv <abs,arg>] [--fou-port <1-65535>] [--fou-peer-port <1-65535>] [--fou-ipproto <1-255>] [--packet-loss-ratio <0-1>] [--preference <value>] [--reserved-address <ip>] [--save --confirmed]"
                     );
                     return Ok(());
                 }
@@ -72,7 +72,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-promote-telemetry --client-id <id> --interface <ifname> --peer-client-id <id> --local-underlay <ip> --peer-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] [--side <left|right>] [--name <name>] [--bandwidth <10m|100m|1000m>]"
+                        "usage: tunnel-promote-telemetry --client-id <id> --interface <ifname> --peer-client-id <id> --local-underlay <ip> --peer-underlay <ip> (--left-tunnel-ipv4 <ip> --right-tunnel-ipv4 <ip> and/or --left-tunnel-ipv6 <ip> --right-tunnel-ipv6 <ip>) [--address-pool-cidr <cidr>] [--ipv6-address-pool-cidr <cidr>] [--latency-primary-family <ipv4|ipv6>] [--side <left|right>] [--name <name>] [--bandwidth <10m|100m|1000m>] --confirmed"
                     );
                     return Ok(());
                 }

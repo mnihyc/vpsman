@@ -8,9 +8,10 @@ use uuid::Uuid;
 use vpsman_common::{
     agent_update_release_status_class_by_status, agent_update_release_statuses,
     backup_request_status_class_by_status, backup_request_statuses, create_job_request_fields,
-    data_source_readiness_status_class_by_status, data_source_readiness_statuses, encode_json,
-    file_transfer_command_types, file_transfer_directions, file_transfer_session_events,
-    file_transfer_session_status_class_by_status, file_transfer_session_statuses,
+    data_source_readiness_status_class_by_status, data_source_readiness_statuses,
+    db_privilege_intent_fields, encode_json, file_transfer_command_types, file_transfer_directions,
+    file_transfer_session_events, file_transfer_session_status_class_by_status,
+    file_transfer_session_statuses,
     fleet_alert_notification_delivery_process_status_class_by_status,
     fleet_alert_notification_delivery_process_statuses,
     fleet_alert_notification_delivery_status_class_by_status,
@@ -208,6 +209,11 @@ fn main() -> io::Result<()> {
         &mut output,
         "SCHEDULE_PRIVILEGE_INTENT_FIELDS",
         schedule_privilege_intent_fields(),
+    )?;
+    write_string_array(
+        &mut output,
+        "DB_PRIVILEGE_INTENT_FIELDS",
+        db_privilege_intent_fields(),
     )?;
     write_domain_array(
         &mut output,

@@ -29,7 +29,12 @@ import type {
   KeyLifecycleReportView,
   UpsertAgentIdentityRequest,
 } from "../typesAccess";
-import type { PrivilegeMaterial } from "../privilege";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeAssertion,
+  type PrivilegeMaterial,
+} from "../privilege";
 import {
   clientDisplayNameFromMap,
   clientLifecycleNameMap,
@@ -54,6 +59,21 @@ type AccessConfirmationAction =
   | "totp-disable"
   | "vault-clear";
 
+type AgentIdentityConfirmationSnapshot = {
+  clientId: string;
+  publicKeyHex: string;
+  displayName: string | null;
+  tags: string[];
+  replaceExistingKey: boolean;
+  privilegeAssertion: PrivilegeAssertion;
+};
+
+type KeyRevokeConfirmationSnapshot = {
+  clientId: string;
+  reason: string | null;
+  privilegeAssertion: PrivilegeAssertion;
+};
+
 type AccessPanelProps = {
   activeSubpage: string;
   apiToken: string;
@@ -69,6 +89,7 @@ type AccessPanelProps = {
     clientId: string,
     reason: string | null,
     confirmed: boolean,
+    privilegeAssertion: PrivilegeAssertion | null,
   ) => Promise<void>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
   onUpsertAgentIdentity: (
@@ -148,6 +169,10 @@ export function AccessPanel({
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AccessConfirmationAction | null>(null);
+  const [identitySnapshot, setIdentitySnapshot] =
+    useState<AgentIdentityConfirmationSnapshot | null>(null);
+  const [revokeSnapshot, setRevokeSnapshot] =
+    useState<KeyRevokeConfirmationSnapshot | null>(null);
 
   const canManageOperators = operator?.role === "admin";
   const sessionState = apiToken ? "Bearer session active" : "No bearer session";
@@ -187,10 +212,14 @@ export function AccessPanel({
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
-    isFixedHex32(identityPublicKeyHex) &&
-    (identityMode === "register" || identityClientId.trim().length > 0);
+    Boolean(privilegeMaterial) &&
+    identityClientId.trim().length > 0 &&
+    isFixedHex32(identityPublicKeyHex);
   const canRevokeClientKey =
-    canManageOperators && revokeClientId.trim().length > 0 && !revokePending;
+    canManageOperators &&
+    Boolean(privilegeMaterial) &&
+    revokeClientId.trim().length > 0 &&
+    !revokePending;
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
@@ -209,6 +238,18 @@ export function AccessPanel({
       clearVault();
     }
     setPendingConfirmation(null);
+  }
+
+  function clearIdentityReview() {
+    setIdentitySnapshot(null);
+    setPendingConfirmation((current) =>
+      current === "agent-identity" ? null : current,
+    );
+  }
+
+  function clearRevokeReview() {
+    setRevokeSnapshot(null);
+    setPendingConfirmation((current) => (current === "key-revoke" ? null : current));
   }
 
   async function setupTotp() {
@@ -292,33 +333,61 @@ export function AccessPanel({
     }
   }
 
-  function requestIdentityImport(event: FormEvent<HTMLFormElement>) {
+  async function requestIdentityImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const clientId = identityClientId.trim();
     if (!canUpsertIdentity) {
       setIdentityError(
-        "Client public key must be exactly 64 hex characters",
+        privilegeMaterial
+          ? "Client ID and 64-hex public key are required"
+          : "Privilege unlock is required",
       );
       return;
     }
     setIdentityError(null);
-    setPendingConfirmation("agent-identity");
+    try {
+      const isRotate = identityMode === "rotate";
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: isRotate ? "agent_identity.rotate" : "agent_identity.import",
+          confirmed: true,
+          resolvedTargets: [clientId],
+          target: clientId,
+        }),
+        privilegeMaterial: privilegeMaterial!,
+      });
+      setIdentitySnapshot({
+        clientId,
+        publicKeyHex: identityPublicKeyHex.trim().toLowerCase(),
+        displayName: isRotate ? null : identityDisplayName.trim() || null,
+        tags: isRotate ? [] : parseListInput(identityTags),
+        replaceExistingKey: isRotate,
+        privilegeAssertion,
+      });
+      setPendingConfirmation("agent-identity");
+    } catch (error) {
+      setIdentityError(
+        error instanceof Error ? error.message : "Privilege assertion failed",
+      );
+    }
   }
 
   async function confirmIdentityImport() {
-    if (!canUpsertIdentity) {
+    const snapshot = identitySnapshot;
+    if (!snapshot || identityPending) {
       return;
     }
     setIdentityPending(true);
     setIdentityError(null);
     try {
-      const isRotate = identityMode === "rotate";
       const response = await onUpsertAgentIdentity({
-        client_id: identityClientId.trim(),
-        client_public_key_hex: identityPublicKeyHex.trim().toLowerCase(),
-        display_name: isRotate ? null : (identityDisplayName.trim() || null),
-        tags: isRotate ? [] : parseListInput(identityTags),
-        replace_existing_key: isRotate,
+        client_id: snapshot.clientId,
+        client_public_key_hex: snapshot.publicKeyHex,
+        display_name: snapshot.displayName,
+        tags: snapshot.tags,
+        replace_existing_key: snapshot.replaceExistingKey,
         confirmed: true,
+        privilege_assertion: snapshot.privilegeAssertion,
       });
       setCreatedIdentity(response);
       setIdentityClientId("");
@@ -326,6 +395,7 @@ export function AccessPanel({
       setIdentityDisplayName("");
       setIdentityTags("");
       setIdentityMode("register");
+      setIdentitySnapshot(null);
       setPendingConfirmation(null);
     } catch (actionError) {
       setIdentityError(
@@ -338,29 +408,54 @@ export function AccessPanel({
     }
   }
 
-  function requestClientKeyRevoke(event: FormEvent<HTMLFormElement>) {
+  async function requestClientKeyRevoke(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const clientId = revokeClientId.trim();
     if (!canRevokeClientKey) {
+      setRevokeError(privilegeMaterial ? "VPS ID is required" : "Privilege unlock is required");
       return;
     }
     setRevokeError(null);
-    setPendingConfirmation("key-revoke");
+    try {
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "client_key.revoke",
+          confirmed: true,
+          resolvedTargets: [clientId],
+          target: clientId,
+        }),
+        privilegeMaterial: privilegeMaterial!,
+      });
+      setRevokeSnapshot({
+        clientId,
+        reason: revokeReason.trim() || null,
+        privilegeAssertion,
+      });
+      setPendingConfirmation("key-revoke");
+    } catch (error) {
+      setRevokeError(
+        error instanceof Error ? error.message : "Privilege assertion failed",
+      );
+    }
   }
 
   async function confirmClientKeyRevoke() {
-    if (!canRevokeClientKey) {
+    const snapshot = revokeSnapshot;
+    if (!snapshot || revokePending) {
       return;
     }
     setRevokePending(true);
     setRevokeError(null);
     try {
       await onRevokeClientKey(
-        revokeClientId.trim(),
-        revokeReason.trim() || null,
+        snapshot.clientId,
+        snapshot.reason,
         true,
+        snapshot.privilegeAssertion,
       );
       setRevokeClientId("");
       setRevokeReason("");
+      setRevokeSnapshot(null);
       setPendingConfirmation(null);
     } catch (actionError) {
       setRevokeError(
@@ -796,14 +891,20 @@ export function AccessPanel({
         >
           <button
             className={identityMode === "register" ? "selected" : ""}
-            onClick={() => setIdentityMode("register")}
+            onClick={() => {
+              setIdentityMode("register");
+              clearIdentityReview();
+            }}
             type="button"
           >
             New registration
           </button>
           <button
             className={identityMode === "rotate" ? "selected" : ""}
-            onClick={() => setIdentityMode("rotate")}
+            onClick={() => {
+              setIdentityMode("rotate");
+              clearIdentityReview();
+            }}
             type="button"
           >
             Key rotation
@@ -819,11 +920,14 @@ export function AccessPanel({
             <input
               aria-label="Agent identity client ID"
               disabled={!canManageOperators || identityPending}
-              onChange={(event) => setIdentityClientId(event.target.value)}
+              onChange={(event) => {
+                setIdentityClientId(event.target.value);
+                clearIdentityReview();
+              }}
               placeholder={
                 identityMode === "rotate"
                   ? "existing VPS ID"
-                  : "auto-generated if empty"
+                  : "new VPS ID"
               }
               value={identityClientId}
             />
@@ -833,7 +937,10 @@ export function AccessPanel({
             <textarea
               aria-label="Agent identity public key hex"
               disabled={!canManageOperators || identityPending}
-              onChange={(event) => setIdentityPublicKeyHex(event.target.value)}
+              onChange={(event) => {
+                setIdentityPublicKeyHex(event.target.value);
+                clearIdentityReview();
+              }}
               placeholder="64 hex characters"
               rows={3}
               value={identityPublicKeyHex}
@@ -841,7 +948,10 @@ export function AccessPanel({
             <button
               className="secondaryAction compact"
               disabled={!canManageOperators || identityPending}
-              onClick={() => void handleGenerateKeypair()}
+              onClick={() => {
+                clearIdentityReview();
+                void handleGenerateKeypair();
+              }}
               type="button"
             >
               <KeyRound size={15} />
@@ -880,7 +990,10 @@ export function AccessPanel({
               disabled={
                 !canManageOperators || identityPending || identityMode === "rotate"
               }
-              onChange={(event) => setIdentityDisplayName(event.target.value)}
+              onChange={(event) => {
+                setIdentityDisplayName(event.target.value);
+                clearIdentityReview();
+              }}
               placeholder={
                 identityMode === "rotate" ? "unchanged" : "edge-nrt-04"
               }
@@ -894,7 +1007,10 @@ export function AccessPanel({
               disabled={
                 !canManageOperators || identityPending || identityMode === "rotate"
               }
-              onChange={(event) => setIdentityTags(event.target.value)}
+              onChange={(event) => {
+                setIdentityTags(event.target.value);
+                clearIdentityReview();
+              }}
               placeholder={
                 identityMode === "rotate" ? "unchanged" : "country:JP, role:edge"
               }
@@ -947,7 +1063,10 @@ export function AccessPanel({
               agents={lifecycleVpsOptions}
               ariaLabel="VPS key revoke VPS ID"
               disabled={!canManageOperators || revokePending}
-              onChange={setRevokeClientId}
+              onChange={(value) => {
+                setRevokeClientId(value);
+                clearRevokeReview();
+              }}
               placeholder="Search VPS key"
               value={revokeClientId}
             />
@@ -957,7 +1076,10 @@ export function AccessPanel({
             <input
               aria-label="VPS key revoke reason"
               disabled={!canManageOperators || revokePending}
-              onChange={(event) => setRevokeReason(event.target.value)}
+              onChange={(event) => {
+                setRevokeReason(event.target.value);
+                clearRevokeReview();
+              }}
               placeholder="lost host, rebuild, or operator request"
               value={revokeReason}
             />
@@ -1009,35 +1131,53 @@ export function AccessPanel({
       </aside>
 
       <ConfirmationPrompt
-        confirmLabel="Import identity"
-        detail="This registers a gateway-issued client public key for inventory and key lifecycle management. It does not create a token and does not give the agent a panel endpoint."
+        confirmLabel={
+          identitySnapshot?.replaceExistingKey ? "Rotate key" : "Import identity"
+        }
+        detail={
+          identitySnapshot?.replaceExistingKey
+            ? "This replaces the stored client public key, disconnects the old gateway session, and marks old active work lost."
+            : "This registers a gateway-issued client public key for inventory and key lifecycle management. It does not create a token and does not give the agent a panel endpoint."
+        }
         items={[
-          { label: "Client", value: identityClientId.trim() },
+          { label: "Client", value: identitySnapshot?.clientId ?? "" },
           {
             label: "Public key",
-            value: shortHash(identityPublicKeyHex.trim()),
+            value: identitySnapshot ? shortHash(identitySnapshot.publicKeyHex) : "",
           },
           {
             label: "Mode",
-            value: identityMode === "rotate" ? "key rotation" : "new registration",
+            value: identitySnapshot?.replaceExistingKey
+              ? "key rotation"
+              : "new registration",
           },
         ]}
-        onCancel={() => setPendingConfirmation(null)}
+        onCancel={() => {
+          setIdentitySnapshot(null);
+          setPendingConfirmation(null);
+        }}
         onConfirm={() => void confirmIdentityImport()}
-        open={pendingConfirmation === "agent-identity"}
+        open={pendingConfirmation === "agent-identity" && Boolean(identitySnapshot)}
         pending={identityPending}
-        title="Confirm direct gateway identity import"
+        title={
+          identitySnapshot?.replaceExistingKey
+            ? "Confirm client key rotation"
+            : "Confirm direct gateway identity import"
+        }
       />
       <ConfirmationPrompt
         confirmLabel="Revoke key"
-        detail="The current stored public key is revoked, the VPS is hidden as revoked, and active gateway sessions are ended. Revoked or deleted identities cannot be reused through direct import."
+        detail="The current stored public key is revoked, the VPS is hidden as revoked, the live gateway session is disconnected, and old active work is marked lost. Revoked or deleted identities cannot be reused through direct import."
         items={[
-          { label: "VPS", value: revokeClientId.trim() },
-          { label: "Reason", value: revokeReason.trim() || "operator request" },
+          { label: "VPS", value: revokeSnapshot?.clientId ?? "" },
+          { label: "Reason", value: revokeSnapshot?.reason ?? "operator request" },
         ]}
-        onCancel={() => setPendingConfirmation(null)}
+        onCancel={() => {
+          setRevokeSnapshot(null);
+          setPendingConfirmation(null);
+        }}
         onConfirm={() => void confirmClientKeyRevoke()}
-        open={pendingConfirmation === "key-revoke"}
+        open={pendingConfirmation === "key-revoke" && Boolean(revokeSnapshot)}
         pending={revokePending}
         title="Confirm current key revocation"
         tone="danger"

@@ -26,6 +26,7 @@ import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSer
 import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
+  textPayloadHashHex,
   type PrivilegeMaterial,
 } from "../privilege";
 import type {
@@ -1498,9 +1499,11 @@ function SystemConfigPanel({
     setConfigError(null);
     setConfigMessage(null);
     try {
+      const payloadHash = await textPayloadHashHex(draftToml);
       const intent = canonicalDbPrivilegeIntent({
         action: "suite_config.update",
         confirmed: true,
+        payloadHash,
         target: "suite_config",
       });
       const privilegeAssertion = await buildPrivilegeAssertion({

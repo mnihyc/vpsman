@@ -1,11 +1,14 @@
 use anyhow::Result;
 
 use crate::http::{http_delete, http_get, http_post_json, http_put_json};
+use crate::privilege::{build_privilege_for_db, DbPrivilegeRequest};
+use crate::vty_jobs::VtyPrivilegeContext;
 
 pub(crate) fn submit_vty_direct_command(
     api_url: &str,
     token: Option<&str>,
     command: &str,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<Option<String>> {
     match command {
         "health" => Ok(Some(http_get(api_url, "/health", None)?)),
@@ -52,12 +55,15 @@ pub(crate) fn submit_vty_direct_command(
         "restore-plans" => Ok(Some(http_get(api_url, "/api/v1/restore-plans", token)?)),
         "migration-links" => Ok(Some(http_get(api_url, "/api/v1/migration-links", token)?)),
         "tunnel-plans" => Ok(Some(http_get(api_url, "/api/v1/tunnel-plans", token)?)),
-        command if command.starts_with("agent-identity-upsert ") => {
-            Ok(Some(submit_agent_identity_upsert(api_url, token, command)?))
-        }
-        command if command.starts_with("client-key-revoke ") => {
-            Ok(Some(submit_client_key_revoke(api_url, token, command)?))
-        }
+        command if command.starts_with("agent-identity-upsert ") => Ok(Some(
+            submit_agent_identity_upsert(api_url, token, command, privilege_context)?,
+        )),
+        command if command.starts_with("client-key-revoke ") => Ok(Some(submit_client_key_revoke(
+            api_url,
+            token,
+            command,
+            privilege_context,
+        )?)),
         command if command.starts_with("operator-create ") => {
             Ok(Some(submit_operator_create(api_url, token, command)?))
         }
@@ -117,11 +123,18 @@ fn submit_agent_identity_upsert(
     api_url: &str,
     token: Option<&str>,
     command: &str,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let client_id = required_flag(&parts, "--client-id")?;
     let client_public_key_hex = required_flag(&parts, "--client-public-key-hex")?;
     let display_name = optional_flag(&parts, "--display-name");
+    let replace_existing_key = has_flag(&parts, "--replace-existing-key");
+    let confirmed = has_flag(&parts, "--confirmed");
     let tags = optional_flag(&parts, "--tags")
         .map(|value| {
             value
@@ -132,6 +145,23 @@ fn submit_agent_identity_upsert(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let targets = vec![client_id.clone()];
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: if replace_existing_key {
+                "agent_identity.rotate"
+            } else {
+                "agent_identity.import"
+            },
+            target: &client_id,
+            selector_expression: None,
+            resolved_targets: &targets,
+            confirmed,
+        },
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        300,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/agent-identities",
@@ -141,22 +171,47 @@ fn submit_agent_identity_upsert(
             "client_public_key_hex": client_public_key_hex,
             "display_name": display_name,
             "tags": tags,
-            "replace_existing_key": has_flag(&parts, "--replace-existing-key"),
-            "confirmed": has_flag(&parts, "--confirmed"),
+            "replace_existing_key": replace_existing_key,
+            "confirmed": confirmed,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
 
-fn submit_client_key_revoke(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+fn submit_client_key_revoke(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+    privilege_context: &VtyPrivilegeContext,
+) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let client_id = required_flag(&parts, "--client-id")?;
+    let confirmed = has_flag(&parts, "--confirmed");
+    let targets = vec![client_id.clone()];
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: "client_key.revoke",
+            target: &client_id,
+            selector_expression: None,
+            resolved_targets: &targets,
+            confirmed,
+        },
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        300,
+    )?;
     http_post_json(
         api_url,
         &format!("/api/v1/clients/{client_id}/key-revocations"),
         token,
         &serde_json::json!({
             "reason": optional_flag(&parts, "--reason"),
-            "confirmed": has_flag(&parts, "--confirmed"),
+            "confirmed": confirmed,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -517,11 +572,15 @@ fn submit_server_job_cancel(api_url: &str, token: Option<&str>, command: &str) -
     let Some(job_id) = option_value(&parts, "--job-id") else {
         return Ok(server_job_cancel_usage());
     };
+    let confirmed = has_flag(&parts, "--confirmed");
+    if !confirmed {
+        return Ok(server_job_cancel_usage());
+    }
     http_post_json(
         api_url,
         &format!("/api/v1/server-jobs/{job_id}/cancel"),
         token,
-        &serde_json::json!({}),
+        &serde_json::json!({ "confirmed": confirmed }),
     )
 }
 
@@ -688,7 +747,7 @@ fn artifact_cleanup_create_usage() -> String {
 }
 
 fn server_job_cancel_usage() -> String {
-    "usage: server-job-cancel --job-id <uuid>".to_string()
+    "usage: server-job-cancel --job-id <uuid> --confirmed".to_string()
 }
 
 fn backup_policy_prune_usage() -> String {

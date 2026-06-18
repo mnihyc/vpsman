@@ -157,7 +157,12 @@ smoke_create_direct_agent_config() {
   if [[ -n "$tags_csv" ]]; then
     upsert_args+=(--tags "$tags_csv")
   fi
-  VPSMAN_API_TOKEN="$access_token" target/debug/vpsctl "${upsert_args[@]}" >/dev/null
+  : "${super_password:?smoke_create_direct_agent_config requires super_password}"
+  : "${super_salt_hex:?smoke_create_direct_agent_config requires super_salt_hex}"
+  VPSMAN_API_TOKEN="$access_token" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
+    target/debug/vpsctl "${upsert_args[@]}" >/dev/null
 
   smoke_write_enrolled_agent_config \
     "$config_path" \

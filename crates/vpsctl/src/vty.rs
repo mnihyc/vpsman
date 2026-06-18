@@ -80,7 +80,8 @@ Access:
   operator-delete | operator-password-reset | operator-totp-clear
   operator-sessions | operator-session-revoke | operator-auth-events
   totp-setup | totp-confirm | totp-disable
-  agent-identity-upsert | client-key-revocations | client-key-revoke | key-lifecycle-report
+  agent-identity-upsert | client-key-revoke (privileged mode required)
+  client-key-revocations | key-lifecycle-report
 
 Fleet and integrations:
   tags | tag-create | agent-tag
@@ -182,7 +183,7 @@ const TERMINAL_SESSIONS_USAGE: &str = concat!(
 
 const SCHEDULE_CREATE_USAGE: &str = concat!(
     "usage: schedule-create <name> <cron_min> <cron_hour> <cron_dom> ",
-    "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...>"
+    "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...> --confirmed"
 );
 
 const TERMINAL_COMMAND_USAGE: &str = concat!(
@@ -280,7 +281,9 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
         if command.is_empty() {
             continue;
         }
-        if let Some(output) = submit_vty_direct_command(api_url, token.as_deref(), command)? {
+        if let Some(output) =
+            submit_vty_direct_command(api_url, token.as_deref(), command, &privilege_context)?
+        {
             println!("{output}");
             continue;
         }

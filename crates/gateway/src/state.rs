@@ -74,6 +74,7 @@ pub(crate) enum GatewaySessionMessage {
 
 pub(crate) struct GatewayCommand {
     pub(crate) request: JobRequest,
+    pub(crate) payload_hash: String,
     pub(crate) response: oneshot::Sender<GatewayCommandDispatchResult>,
 }
 
@@ -86,6 +87,7 @@ pub(crate) struct PendingCommand {
     pub(crate) client_id: String,
     pub(crate) job_id: uuid::Uuid,
     pub(crate) command_version: u16,
+    pub(crate) payload_hash: String,
     pub(crate) ack: Option<JobAck>,
     pub(crate) outputs: Vec<CommandOutput>,
     pub(crate) response: Option<oneshot::Sender<GatewayCommandDispatchResult>>,
@@ -173,6 +175,7 @@ mod tests {
             client_id: "client-a".to_string(),
             job_id,
             command_version: 1,
+            payload_hash: "payload-a".to_string(),
             ack: Some(JobAck {
                 job_id,
                 accepted: true,
@@ -204,6 +207,7 @@ mod tests {
             client_id: "client-a".to_string(),
             job_id,
             command_version: 1,
+            payload_hash: "payload-a".to_string(),
             ack: None,
             outputs: Vec::new(),
             response: Some(response),

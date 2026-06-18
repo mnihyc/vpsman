@@ -208,7 +208,7 @@ struct Args {
         default_value = "config/vpsman.toml"
     )]
     suite_config: PathBuf,
-    #[arg(long, env = "VPSMAN_API_BIND", default_value = "0.0.0.0:8080")]
+    #[arg(long, env = "VPSMAN_API_BIND", default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
     #[arg(long, env = "VPSMAN_POSTGRES_URL")]
     postgres_url: Option<String>,

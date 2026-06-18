@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::util::percent_encode_query_value;
 use crate::{
-    commands_schedules::selector_expression_from_targets,
+    commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::{http_get, http_post_json},
     privilege::{
         build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
@@ -710,17 +710,23 @@ pub(crate) fn submit_vty_inventory_command(
             clients,
             tags,
             confirmed,
-        } => http_post_json(
-            api_url,
-            "/api/v1/data-source-assignments",
-            token,
-            &serde_json::json!({
-                "domain": domain,
-                "preset_id": preset_id,
-                "selector_expression": selector_expression_from_targets(&clients, &tags),
-                "confirmed": confirmed,
-            }),
-        ),
+        } => {
+            let selector_expression = selector_expression_from_targets(&clients, &tags);
+            let target_client_ids =
+                resolve_schedule_target_ids(api_url, token, &selector_expression)?;
+            http_post_json(
+                api_url,
+                "/api/v1/data-source-assignments",
+                token,
+                &serde_json::json!({
+                    "domain": domain,
+                    "preset_id": preset_id,
+                    "selector_expression": selector_expression,
+                    "target_client_ids": target_client_ids,
+                    "confirmed": confirmed,
+                }),
+            )
+        }
         VtyInventoryCommand::BulkResolve { tags } => http_post_json(
             api_url,
             "/api/v1/bulk/resolve",

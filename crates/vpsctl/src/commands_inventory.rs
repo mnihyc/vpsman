@@ -11,7 +11,7 @@ use vpsman_common::{
 
 use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
-use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
+use crate::jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest};
 use crate::privilege::{
     build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
 };
@@ -1340,6 +1340,8 @@ pub(crate) fn data_source_preset_assign(
     options: DataSourcePresetAssignOptions,
 ) -> Result<()> {
     let preset_id = Uuid::parse_str(&options.preset_id).context("invalid --preset-id UUID")?;
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
+    let target_client_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
     println!(
         "{}",
         http_post_json(
@@ -1349,7 +1351,8 @@ pub(crate) fn data_source_preset_assign(
             &serde_json::json!({
                 "domain": options.domain,
                 "preset_id": preset_id,
-                "selector_expression": selector_expression_from_targets(&options.clients, &options.tags),
+                "selector_expression": selector_expression,
+                "target_client_ids": target_client_ids,
                 "confirmed": options.confirmed,
             }),
         )?

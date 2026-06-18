@@ -1,6 +1,10 @@
 import type { JobOperation } from "./types";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
-import { JOB_PRIVILEGE_INTENT_FIELDS, SCHEDULE_PRIVILEGE_INTENT_FIELDS } from "./generated/protocolContracts";
+import {
+  DB_PRIVILEGE_INTENT_FIELDS,
+  JOB_PRIVILEGE_INTENT_FIELDS,
+  SCHEDULE_PRIVILEGE_INTENT_FIELDS,
+} from "./generated/protocolContracts";
 
 const encoder = new TextEncoder();
 const SUPER_KEY_DOMAIN = "vpsman-super-key-v1";
@@ -58,6 +62,7 @@ export type DbPrivilegeIntentInput = {
   selectorExpression?: string | null;
   resolvedTargets?: string[];
   confirmed: boolean;
+  payloadHash?: string | null;
 };
 
 export function parseCommandArgv(input: string): string[] {
@@ -213,6 +218,10 @@ export async function operationPayloadHashHex(operation: JobOperation): Promise<
   return sha256Hex(operationPayloadBytes(operation));
 }
 
+export async function textPayloadHashHex(text: string): Promise<string> {
+  return sha256Hex(encoder.encode(text));
+}
+
 export async function buildPrivilegeAssertion({
   intent,
   privilegeMaterial,
@@ -287,16 +296,17 @@ export function canonicalSchedulePrivilegeIntent(input: SchedulePrivilegeIntentI
 }
 
 export function canonicalDbPrivilegeIntent(input: DbPrivilegeIntentInput): string {
-  return JSON.stringify(
-    ordered([
-      ["version", 1],
-      ["action", input.action],
-      ["target", input.target],
-      ["selector_expression", input.selectorExpression ? input.selectorExpression.trim() : null],
-      ["resolved_targets", [...(input.resolvedTargets ?? [])].sort()],
-      ["confirmed", input.confirmed],
-    ]),
-  );
+  const entries: Array<[string, JsonValue]> = [
+    ["version", 1],
+    ["action", input.action],
+    ["target", input.target],
+    ["selector_expression", input.selectorExpression ? input.selectorExpression.trim() : null],
+    ["resolved_targets", [...(input.resolvedTargets ?? [])].sort()],
+    ["confirmed", input.confirmed],
+    ["payload_hash", input.payloadHash ? normalizeSha256Hex(input.payloadHash) : null],
+  ];
+  assertGeneratedFieldOrder("db privilege", entries, DB_PRIVILEGE_INTENT_FIELDS);
+  return JSON.stringify(ordered(entries));
 }
 
 function operationPayloadBytes(operation: JobOperation): Uint8Array {

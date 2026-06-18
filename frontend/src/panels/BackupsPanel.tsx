@@ -7,7 +7,10 @@ import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { bytesToBase64 } from "../fileTransfer";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
+  buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
+  canonicalSchedulePrivilegeIntent,
+  operationPayloadHashHex,
   parseCommandArgv,
   type PrivilegeMaterial,
 } from "../privilege";
@@ -38,6 +41,7 @@ import type {
   BackupPolicyPruneResponse,
   BackupPolicyRecord,
   BackupRequestRecord,
+  BulkResolveResponse,
   CreateBackupPolicyRequest,
   CreateBackupRequest,
   CreateJobRequest,
@@ -46,6 +50,7 @@ import type {
   CreateRestorePlanRequest,
   JobOperation,
   JobOutputRecord,
+  JobTargetSelection,
   MigrationLinkRecord,
   PreparedBackupArtifactRestoreRecord,
   RestorePlanRecord,
@@ -95,6 +100,7 @@ type BackupsPanelProps = {
   onPruneBackupPolicies: (
     request: BackupPolicyPruneRequest,
   ) => Promise<BackupPolicyPruneResponse>;
+  onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
   onUploadBackupArtifact: (
     backupRequestId: string,
     request: UploadBackupArtifactRequest,
@@ -127,9 +133,10 @@ type RestoreRunInput = {
   forceUnprivileged: boolean;
 };
 
-type RestoreRunResult = {
-  nextJob: CreateJobResponse;
+type RestoreRunJobSnapshot = {
   payloadHashHex: string;
+  request: CreateJobRequest;
+  targetClientId: string;
 };
 
 type BackupConfirmationAction =
@@ -143,6 +150,81 @@ type BackupConfirmationAction =
   | "restore-rollback"
   | "migration-link"
   | "migration-run";
+
+type BackupPolicySnapshot = {
+  request: CreateBackupPolicyRequest;
+  selectorExpression: string;
+  targetClientIds: string[];
+  targets: AgentView[];
+};
+
+type BackupActionSnapshot =
+  | {
+      action: "policy-prune";
+      modeLabel: string;
+      request: BackupPolicyPruneRequest;
+      scopeLabel: string;
+    }
+  | {
+      action: "backup-request";
+      clientLabel: string;
+      payloadHashHex: string;
+      request: CreateBackupRequest;
+      scopeLabel: string;
+    }
+  | {
+      action: "artifact-upload";
+      artifactBase64: string | null;
+      backupRequestId: string;
+      file: File;
+      fileLabel: string;
+      objectKey: string;
+      requestLabel: string;
+      uploadMode: "inline" | "chunked";
+    }
+  | {
+      action: "artifact-handoff";
+      backupRequestId: string;
+      request: BackupArtifactHandoffRequest;
+      requestLabel: string;
+      sourceLabel: string;
+    }
+  | {
+      action: "restore-plan";
+      payloadHashHex: string;
+      request: CreateRestorePlanRequest;
+      scopeLabel: string;
+      sourceLabel: string;
+      targetLabel: string;
+    }
+  | {
+      action: "restore-run";
+      modeLabel: string;
+      run: RestoreRunJobSnapshot;
+      sourceLabel: string;
+      targetLabel: string;
+    }
+  | {
+      action: "restore-rollback";
+      payloadHashHex: string;
+      request: CreateJobRequest;
+      restoreJobId: string;
+      targetLabel: string;
+    }
+  | {
+      action: "migration-link";
+      noteLabel: string;
+      planLabel: string;
+      request: CreateMigrationLinkRequest;
+    }
+  | {
+      action: "migration-run";
+      linkRequest: CreateMigrationLinkRequest;
+      modeLabel: string;
+      restorePlan: RestorePlanRecord;
+      routeLabel: string;
+      run: RestoreRunJobSnapshot;
+    };
 
 const INLINE_BACKUP_ARTIFACT_UPLOAD_LIMIT_BYTES = 16 * 1024 * 1024;
 const backupSubpageSummaries: Record<
@@ -176,6 +258,7 @@ export function BackupsPanel({
   onLoadJobOutputs,
   onPrepareBackupArtifactRestore,
   onPruneBackupPolicies,
+  onResolveTargets,
   onOpenPrivilegeUnlock,
   onUploadBackupArtifact,
   onUploadBackupArtifactChunked,
@@ -259,6 +342,10 @@ export function BackupsPanel({
     useState<MigrationLinkRecord | null>(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<BackupConfirmationAction | null>(null);
+  const [pendingPolicySnapshot, setPendingPolicySnapshot] =
+    useState<BackupPolicySnapshot | null>(null);
+  const [pendingActionSnapshot, setPendingActionSnapshot] =
+    useState<BackupActionSnapshot | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
@@ -338,13 +425,13 @@ export function BackupsPanel({
                         migrationLinks.length === 1 ? "" : "s"
                       }`);
 
-  function submitPolicy(event: FormEvent<HTMLFormElement>) {
+  async function submitPolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPendingConfirmation("policy");
-  }
-
-  async function executePolicy() {
     await runPanelAction(setPending, setActionError, async () => {
+      if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
+        throw new Error("Privilege unlock is locked");
+      }
       if (!policyName.trim()) {
         throw new Error("Policy name is required");
       }
@@ -352,21 +439,32 @@ export function BackupsPanel({
         throw new Error("Select config or at least one absolute path");
       }
       if (policyTargetParse.error) {
-        throw new Error(
-          `Invalid target expression: ${policyTargetParse.error}`,
-        );
+        throw new Error(`Invalid target expression: ${policyTargetParse.error}`);
       }
-      if (policyTargetCount === 0) {
-        throw new Error("Add at least one matching target selector");
+      const selectorExpression = policyTargetsText.trim();
+      if (!selectorExpression) {
+        throw new Error("Add at least one target selector");
       }
       const recipient = policyRecipientPublicKeyHex.trim().toLowerCase();
       if (recipient && !/^[0-9a-f]{64}$/.test(recipient)) {
         throw new Error("Recipient public key must be 32-byte hex");
       }
-      const policy = await onCreateBackupPolicy({
+      const resolved = await onResolveTargets({ selector_expression: selectorExpression });
+      const targetClientIds = resolved.targets.map((target) => target.id);
+      if (!targetClientIds.length) {
+        throw new Error("Backup policy confirmation resolved no VPSs");
+      }
+      const operation: JobOperation = {
+        type: "backup",
+        paths: policyPaths,
+        include_config: policyIncludeConfig,
+        recipient_public_key_hex: recipient || null,
+      };
+      const operationPayloadHash = await operationPayloadHashHex(operation);
+      const request: CreateBackupPolicyRequest = {
         name: policyName.trim(),
-        selector_expression: policyTargetsText.trim(),
-        target_client_ids: policyTargetIds,
+        selector_expression: selectorExpression,
+        target_client_ids: targetClientIds,
         paths: policyPaths,
         include_config: policyIncludeConfig,
         recipient_public_key_hex: recipient || null,
@@ -381,40 +479,112 @@ export function BackupsPanel({
         retry_delay_secs: 300,
         max_failures: 3,
         confirmed: true,
+        privilege_assertion: await buildPrivilegeAssertion({
+          intent: canonicalSchedulePrivilegeIntent({
+            action: "backup_policy.create",
+            scheduleId: null,
+            name: policyName.trim(),
+            commandType: "backup",
+            operationPayloadHash,
+            selectorExpression,
+            resolvedTargets: targetClientIds,
+            cronExpr: policyCronExpr.trim(),
+            timezone: "UTC",
+            enabled: policyEnabled,
+            catchUpPolicy: "skip_missed",
+            catchUpLimit: 1,
+            retryDelaySecs: 300,
+            maxFailures: 3,
+            deferredUntil: null,
+            deleted: false,
+          }),
+          privilegeMaterial,
+        }),
+      };
+      setPendingPolicySnapshot({
+        request,
+        selectorExpression,
+        targetClientIds,
+        targets: resolved.targets,
       });
-      setLastPolicy(policy);
+      setPendingConfirmation("policy");
     });
+  }
+
+  async function executePolicy() {
+    await runPanelAction(setPending, setActionError, async () => {
+      const snapshot = pendingPolicySnapshot;
+      if (!snapshot) {
+        throw new Error("Backup policy confirmation snapshot is missing; review the policy again");
+      }
+      const policy = await onCreateBackupPolicy(snapshot.request);
+      setLastPolicy(policy);
+      setPendingPolicySnapshot(null);
+    });
+  }
+
+  function clearPolicyConfirmation() {
+    setPendingPolicySnapshot(null);
+    setPendingConfirmation((current) => (current === "policy" ? null : current));
+  }
+
+  function clearBackupConfirmations(actions: BackupConfirmationAction[]) {
+    const actionSet = new Set(actions);
+    if (actionSet.has("policy")) {
+      setPendingPolicySnapshot(null);
+    }
+    setPendingActionSnapshot((current) =>
+      current && actionSet.has(current.action) ? null : current,
+    );
+    setPendingConfirmation((current) =>
+      current && actionSet.has(current) ? null : current,
+    );
+  }
+
+  function policyPruneRequest(): BackupPolicyPruneRequest {
+    return {
+      schedule_id: policyPruneScheduleId || null,
+      dry_run: policyPruneDryRun,
+      metadata_only: policyPruneMetadataOnly,
+      confirmed: !policyPruneDryRun,
+    };
   }
 
   function submitPolicyPrune(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const request = policyPruneRequest();
     if (policyPruneDryRun) {
-      void executePolicyPrune();
+      void executePolicyPrune(request);
     } else {
+      setPendingActionSnapshot({
+        action: "policy-prune",
+        modeLabel: policyPruneMetadataOnly
+          ? "metadata only"
+          : "metadata and objects",
+        request,
+        scopeLabel: policyPruneScheduleId
+          ? shortId(policyPruneScheduleId)
+          : "all policies",
+      });
       setPendingConfirmation("policy-prune");
     }
   }
 
-  async function executePolicyPrune() {
+  async function executePolicyPrune(request: BackupPolicyPruneRequest) {
     await runPanelAction(setPending, setActionError, async () => {
-      const result = await onPruneBackupPolicies({
-        schedule_id: policyPruneScheduleId || null,
-        dry_run: policyPruneDryRun,
-        metadata_only: policyPruneMetadataOnly,
-        confirmed: !policyPruneDryRun,
-      });
+      const result = await onPruneBackupPolicies(request);
       setLastPolicyPrune(result);
+      setPendingActionSnapshot((current) =>
+        current?.action === "policy-prune" ? null : current,
+      );
     });
   }
 
-  function submitRequest(event: FormEvent<HTMLFormElement>) {
+  async function submitRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPendingConfirmation("backup-request");
-  }
-
-  async function executeRequest() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
       }
       if (!clientId) {
@@ -437,27 +607,39 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: 30,
       });
-      const request = await onCreateBackupRequest({
-        client_id: clientId,
-        paths,
-        include_config: includeConfig,
-        confirmed: true,
-        note: note.trim() || null,
-        privilege_assertion: built.privilegeAssertion,
+      setPendingActionSnapshot({
+        action: "backup-request",
+        clientLabel: selectedAgent
+          ? formatVpsName(selectedAgent, vpsNameDisplayMode)
+          : clientId,
+        payloadHashHex: built.payloadHashHex,
+        request: {
+          client_id: clientId,
+          paths,
+          include_config: includeConfig,
+          confirmed: true,
+          note: note.trim() || null,
+          privilege_assertion: built.privilegeAssertion,
+        },
+        scopeLabel: `${includeConfig ? "config, " : ""}${paths.length} paths`,
       });
-      setLastPayloadHash(built.payloadHashHex);
-      setLastRequest(request);
-      setArtifactBackupId(request.id);
-      setArtifactObjectKey(`backups/${request.client_id}/${request.id}.json`);
+      setPendingConfirmation("backup-request");
     });
   }
 
-  function submitArtifactUpload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPendingConfirmation("artifact-upload");
+  async function executeRequest(snapshot: Extract<BackupActionSnapshot, { action: "backup-request" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const request = await onCreateBackupRequest(snapshot.request);
+      setLastPayloadHash(snapshot.payloadHashHex);
+      setLastRequest(request);
+      setArtifactBackupId(request.id);
+      setArtifactObjectKey(`backups/${request.client_id}/${request.id}.json`);
+      setPendingActionSnapshot(null);
+    });
   }
 
-  async function executeArtifactUpload() {
+  async function submitArtifactUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     await runPanelAction(setPending, setActionError, async () => {
       if (!artifactBackupId) {
         throw new Error("Select a backup request");
@@ -469,41 +651,75 @@ export function BackupsPanel({
         throw new Error("Select an encrypted artifact file");
       }
       const objectKey = artifactObjectKey.trim();
+      const artifactBase64 =
+        artifactUploadMode === "inline" ? await fileToBase64(artifactFile) : null;
+      setPendingActionSnapshot({
+        action: "artifact-upload",
+        artifactBase64,
+        backupRequestId: artifactBackupId,
+        file: artifactFile,
+        fileLabel: `${artifactFile.name || "artifact"} (${artifactFile.size} bytes)`,
+        objectKey,
+        requestLabel: shortId(artifactBackupId),
+        uploadMode: artifactUploadMode,
+      });
+      setPendingConfirmation("artifact-upload");
+    });
+  }
+
+  async function executeArtifactUpload(snapshot: Extract<BackupActionSnapshot, { action: "artifact-upload" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
       const artifact =
-        artifactUploadMode === "chunked"
+        snapshot.uploadMode === "chunked"
           ? await onUploadBackupArtifactChunked(
-              artifactBackupId,
-              objectKey,
-              artifactFile,
+              snapshot.backupRequestId,
+              snapshot.objectKey,
+              snapshot.file,
               true,
             )
-          : await onUploadBackupArtifact(artifactBackupId, {
-              object_key: objectKey,
-              artifact_base64: await fileToBase64(artifactFile),
+          : await onUploadBackupArtifact(snapshot.backupRequestId, {
+              object_key: snapshot.objectKey,
+              artifact_base64: snapshot.artifactBase64 ?? "",
               confirmed: true,
             });
       setLastArtifact(artifact);
+      setPendingActionSnapshot(null);
     });
   }
 
   function submitArtifactHandoff() {
+    if (!artifactBackupId) {
+      setActionError("Select a backup request");
+      return;
+    }
+    setPendingActionSnapshot({
+      action: "artifact-handoff",
+      backupRequestId: artifactBackupId,
+      request: {
+        confirmed: true,
+        job_id: handoffJobId.trim() || null,
+      },
+      requestLabel: shortId(artifactBackupId),
+      sourceLabel: handoffJobId.trim()
+        ? shortId(handoffJobId.trim())
+        : "latest retained output",
+    });
     setPendingConfirmation("artifact-handoff");
   }
 
-  async function executeArtifactHandoff() {
+  async function executeArtifactHandoff(snapshot: Extract<BackupActionSnapshot, { action: "artifact-handoff" }>) {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!artifactBackupId) {
-        throw new Error("Select a backup request");
-      }
-      const handoff = await onHandoffBackupArtifact(artifactBackupId, {
-        confirmed: true,
-        job_id: handoffJobId.trim() || null,
-      });
+      const handoff = await onHandoffBackupArtifact(
+        snapshot.backupRequestId,
+        snapshot.request,
+      );
       setLastArtifact(handoff.artifact);
+      setPendingActionSnapshot(null);
     });
   }
 
   function selectArtifactBackupId(backupId: string) {
+    clearBackupConfirmations(["artifact-upload", "artifact-handoff"]);
     setArtifactBackupId(backupId);
     const backup = backups.find((item) => item.id === backupId);
     if (backup) {
@@ -512,20 +728,18 @@ export function BackupsPanel({
   }
 
   function selectArtifactFile(file: File | null) {
+    clearBackupConfirmations(["artifact-upload"]);
     setArtifactFile(file);
     if (file && file.size > INLINE_BACKUP_ARTIFACT_UPLOAD_LIMIT_BYTES) {
       setArtifactUploadMode("chunked");
     }
   }
 
-  function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
+  async function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPendingConfirmation("restore-plan");
-  }
-
-  async function executeRestorePlan() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
       }
       if (!restoreSourceId) {
@@ -558,24 +772,41 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: 30,
       });
-      const plan = await onCreateRestorePlan({
-        source_backup_request_id: restoreSourceId,
-        target_client_id: restoreTargetId,
-        paths: restorePaths,
-        include_config: restoreIncludeConfig,
-        destination_root: restoreDestinationRoot.trim() || null,
-        confirmed: true,
-        note: restoreNote.trim() || null,
-        privilege_assertion: built.privilegeAssertion,
+      setPendingActionSnapshot({
+        action: "restore-plan",
+        payloadHashHex: built.payloadHashHex,
+        request: {
+          source_backup_request_id: restoreSourceId,
+          target_client_id: restoreTargetId,
+          paths: restorePaths,
+          include_config: restoreIncludeConfig,
+          destination_root: restoreDestinationRoot.trim() || null,
+          confirmed: true,
+          note: restoreNote.trim() || null,
+          privilege_assertion: built.privilegeAssertion,
+        },
+        scopeLabel: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
+        sourceLabel: shortId(restoreSourceId),
+        targetLabel: restoreTarget
+          ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+          : restoreTargetId,
       });
-      setLastPayloadHash(built.payloadHashHex);
-      setLastRestorePlan(plan);
+      setPendingConfirmation("restore-plan");
     });
   }
 
-  async function dispatchRestoreRun(
+  async function executeRestorePlan(snapshot: Extract<BackupActionSnapshot, { action: "restore-plan" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const plan = await onCreateRestorePlan(snapshot.request);
+      setLastPayloadHash(snapshot.payloadHashHex);
+      setLastRestorePlan(plan);
+      setPendingActionSnapshot(null);
+    });
+  }
+
+  async function buildRestoreRunJobSnapshot(
     input: RestoreRunInput,
-  ): Promise<RestoreRunResult> {
+  ): Promise<RestoreRunJobSnapshot> {
     if (!privilegeMaterial) {
       throw new Error("Privilege unlock is locked");
     }
@@ -677,58 +908,99 @@ export function BackupsPanel({
       selectorExpression,
       timeoutSecs: boundedTimeoutSecs,
     });
-    const nextJob = await onCreateJob({
-      selector_expression: selectorExpression,
-      target_client_ids: [input.targetClientId],
-      destructive: !input.dryRun,
-      confirmed: true,
-      command: "restore",
-      argv: [],
-      operation,
-      timeout_secs: boundedTimeoutSecs,
-      force_unprivileged: input.forceUnprivileged,
-      privileged: true,
-      privilege_assertion: built.privilegeAssertion,
-    });
-    return { nextJob, payloadHashHex: built.payloadHashHex };
+    return {
+      payloadHashHex: built.payloadHashHex,
+      request: {
+        selector_expression: selectorExpression,
+        target_client_ids: [input.targetClientId],
+        destructive: !input.dryRun,
+        confirmed: true,
+        command: "restore",
+        argv: [],
+        operation,
+        timeout_secs: boundedTimeoutSecs,
+        force_unprivileged: input.forceUnprivileged,
+        privileged: true,
+        privilege_assertion: built.privilegeAssertion,
+      },
+      targetClientId: input.targetClientId,
+    };
   }
 
-  function submitRestoreRun() {
-    setPendingConfirmation("restore-run");
-  }
-
-  async function executeRestoreRun() {
+  async function executeRestoreRunSnapshot(snapshot: Extract<BackupActionSnapshot, { action: "restore-run" }>) {
     await runPanelAction(setPending, setActionError, async () => {
-      const { nextJob, payloadHashHex } = await dispatchRestoreRun({
-        sourceBackupRequestId: restoreSourceId,
-        targetClientId: restoreTargetId,
-        paths: restorePaths,
-        includeConfig: restoreIncludeConfig,
-        destinationRoot: restoreDestinationRoot,
-        archivePath: restoreArchivePath,
-        archiveSha256Hex: restoreArchiveSha256Hex,
-        artifactFile: restoreArtifactFile,
-        dryRun: restoreDryRun,
-        privateKeyHex: restorePrivateKeyHex,
-        postRestoreArgv: restorePostRestoreArgv,
-        timeoutSecs: restoreTimeoutSecs,
-        forceUnprivileged: restoreForceUnprivileged,
-      });
+      const nextJob = await onCreateJob(snapshot.run.request);
       setRestorePrivateKeyHex("");
-      setLastPayloadHash(payloadHashHex);
+      setLastPayloadHash(snapshot.run.payloadHashHex);
       setLastRestoreJob(nextJob);
       setRollbackRestoreJobId(nextJob.job_id);
-      setRollbackTargetId(restoreTargetId);
+      setRollbackTargetId(snapshot.run.targetClientId);
+      setPendingActionSnapshot(null);
     });
   }
 
-  function submitRestoreRollback() {
-    setPendingConfirmation("restore-rollback");
+  async function executeRestoreRollbackSnapshot(snapshot: Extract<BackupActionSnapshot, { action: "restore-rollback" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const nextJob = await onCreateJob(snapshot.request);
+      setLastPayloadHash(snapshot.payloadHashHex);
+      setLastRollbackJob(nextJob);
+      setPendingActionSnapshot(null);
+    });
   }
 
-  async function executeRestoreRollback() {
+  function buildRestoreRunInput(): RestoreRunInput {
+    return {
+      sourceBackupRequestId: restoreSourceId,
+      targetClientId: restoreTargetId,
+      paths: restorePaths,
+      includeConfig: restoreIncludeConfig,
+      destinationRoot: restoreDestinationRoot,
+      archivePath: restoreArchivePath,
+      archiveSha256Hex: restoreArchiveSha256Hex,
+      artifactFile: restoreArtifactFile,
+      dryRun: restoreDryRun,
+      privateKeyHex: restorePrivateKeyHex,
+      postRestoreArgv: restorePostRestoreArgv,
+      timeoutSecs: restoreTimeoutSecs,
+      forceUnprivileged: restoreForceUnprivileged,
+    };
+  }
+
+  function restoreRunLabels(input: RestoreRunInput) {
+    const target =
+      agents.find((agent) => agent.id === input.targetClientId) ?? null;
+    return {
+      modeLabel: input.dryRun ? "dry run" : "live restore",
+      sourceLabel: input.sourceBackupRequestId
+        ? shortId(input.sourceBackupRequestId)
+        : "none",
+      targetLabel: target
+        ? formatVpsName(target, vpsNameDisplayMode)
+        : input.targetClientId || "none",
+    };
+  }
+
+  async function submitRestoreRun() {
     await runPanelAction(setPending, setActionError, async () => {
       if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
+        throw new Error("Privilege unlock is locked");
+      }
+      const input = buildRestoreRunInput();
+      const run = await buildRestoreRunJobSnapshot(input);
+      setPendingActionSnapshot({
+        action: "restore-run",
+        run,
+        ...restoreRunLabels(input),
+      });
+      setPendingConfirmation("restore-run");
+    });
+  }
+
+  async function submitRestoreRollback() {
+    await runPanelAction(setPending, setActionError, async () => {
+      if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
       }
       if (!rollbackRestoreJobId.trim()) {
@@ -758,63 +1030,73 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: boundedTimeoutSecs,
       });
-      const nextJob = await onCreateJob({
-        selector_expression: selectorExpression,
-        target_client_ids: [targetClientId],
-        destructive: true,
-        confirmed: true,
-        command: "restore_rollback",
-        argv: [],
-        operation,
-        timeout_secs: boundedTimeoutSecs,
-        force_unprivileged: rollbackForceUnprivileged,
-        privileged: true,
-        privilege_assertion: built.privilegeAssertion,
+      setPendingActionSnapshot({
+        action: "restore-rollback",
+        payloadHashHex: built.payloadHashHex,
+        request: {
+          selector_expression: selectorExpression,
+          target_client_ids: [targetClientId],
+          destructive: true,
+          confirmed: true,
+          command: "restore_rollback",
+          argv: [],
+          operation,
+          timeout_secs: boundedTimeoutSecs,
+          force_unprivileged: rollbackForceUnprivileged,
+          privileged: true,
+          privilege_assertion: built.privilegeAssertion,
+        },
+        restoreJobId,
+        targetLabel: rollbackTarget
+          ? formatVpsName(rollbackTarget, vpsNameDisplayMode)
+          : targetClientId,
       });
-      setLastPayloadHash(built.payloadHashHex);
-      setLastRollbackJob(nextJob);
+      setPendingConfirmation("restore-rollback");
     });
   }
 
   function submitMigrationLink() {
-    setPendingConfirmation("migration-link");
-  }
-
-  async function executeMigrationLink() {
-    await runPanelAction(setPending, setActionError, async () => {
-      if (!migrationRestorePlanId) {
-        throw new Error("Select a restore plan");
-      }
-      const link = await onCreateMigrationLink({
+    if (!migrationRestorePlanId) {
+      setActionError("Select a restore plan");
+      return;
+    }
+    setPendingActionSnapshot({
+      action: "migration-link",
+      noteLabel: migrationNote.trim() || "none",
+      planLabel: shortId(migrationRestorePlanId),
+      request: {
         restore_plan_id: migrationRestorePlanId,
         confirmed: true,
         note: migrationNote.trim() || null,
-      });
+      },
+    });
+    setPendingConfirmation("migration-link");
+  }
+
+  async function executeMigrationLink(snapshot: Extract<BackupActionSnapshot, { action: "migration-link" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const link = await onCreateMigrationLink(snapshot.request);
       setLastMigrationLink(link);
+      setPendingActionSnapshot(null);
     });
   }
 
-  function submitMigrationRun() {
-    setPendingConfirmation("migration-run");
-  }
-
-  async function executeMigrationRun() {
+  async function submitMigrationRun() {
     await runPanelAction(setPending, setActionError, async () => {
-      if (!selectedMigrationRestorePlan) {
+      if (!privilegeMaterial) {
+        onOpenPrivilegeUnlock();
+        throw new Error("Privilege unlock is locked");
+      }
+      const restorePlan = selectedMigrationRestorePlan;
+      if (!restorePlan) {
         throw new Error("Select a restore plan");
       }
-      const link = await onCreateMigrationLink({
-        restore_plan_id: selectedMigrationRestorePlan.id,
-        confirmed: true,
-        note: migrationNote.trim() || null,
-      });
-      const { nextJob, payloadHashHex } = await dispatchRestoreRun({
-        sourceBackupRequestId:
-          selectedMigrationRestorePlan.source_backup_request_id,
-        targetClientId: selectedMigrationRestorePlan.target_client_id,
-        paths: selectedMigrationRestorePlan.paths,
-        includeConfig: selectedMigrationRestorePlan.include_config,
-        destinationRoot: selectedMigrationRestorePlan.destination_root ?? "",
+      const input: RestoreRunInput = {
+        sourceBackupRequestId: restorePlan.source_backup_request_id,
+        targetClientId: restorePlan.target_client_id,
+        paths: restorePlan.paths,
+        includeConfig: restorePlan.include_config,
+        destinationRoot: restorePlan.destination_root ?? "",
         archivePath: restoreArchivePath,
         archiveSha256Hex: restoreArchiveSha256Hex,
         artifactFile: restoreArtifactFile,
@@ -823,20 +1105,40 @@ export function BackupsPanel({
         postRestoreArgv: restorePostRestoreArgv,
         timeoutSecs: restoreTimeoutSecs,
         forceUnprivileged: restoreForceUnprivileged,
+      };
+      const run = await buildRestoreRunJobSnapshot(input);
+      setPendingActionSnapshot({
+        action: "migration-run",
+        linkRequest: {
+          restore_plan_id: restorePlan.id,
+          confirmed: true,
+          note: migrationNote.trim() || null,
+        },
+        modeLabel: input.dryRun ? "dry run" : "live restore",
+        restorePlan,
+        routeLabel: `${clientLabel(restorePlan.source_client_id)} to ${clientLabel(restorePlan.target_client_id)}`,
+        run,
       });
-      setRestoreSourceId(selectedMigrationRestorePlan.source_backup_request_id);
-      setRestoreTargetId(selectedMigrationRestorePlan.target_client_id);
-      setRestorePathsText(selectedMigrationRestorePlan.paths.join("\n"));
-      setRestoreIncludeConfig(selectedMigrationRestorePlan.include_config);
-      setRestoreDestinationRoot(
-        selectedMigrationRestorePlan.destination_root ?? "",
-      );
+      setPendingConfirmation("migration-run");
+    });
+  }
+
+  async function executeMigrationRun(snapshot: Extract<BackupActionSnapshot, { action: "migration-run" }>) {
+    await runPanelAction(setPending, setActionError, async () => {
+      const link = await onCreateMigrationLink(snapshot.linkRequest);
+      const nextJob = await onCreateJob(snapshot.run.request);
+      setRestoreSourceId(snapshot.restorePlan.source_backup_request_id);
+      setRestoreTargetId(snapshot.restorePlan.target_client_id);
+      setRestorePathsText(snapshot.restorePlan.paths.join("\n"));
+      setRestoreIncludeConfig(snapshot.restorePlan.include_config);
+      setRestoreDestinationRoot(snapshot.restorePlan.destination_root ?? "");
       setRestorePrivateKeyHex("");
       setLastMigrationLink(link);
-      setLastPayloadHash(payloadHashHex);
+      setLastPayloadHash(snapshot.run.payloadHashHex);
       setLastRestoreJob(nextJob);
       setRollbackRestoreJobId(nextJob.job_id);
-      setRollbackTargetId(selectedMigrationRestorePlan.target_client_id);
+      setRollbackTargetId(snapshot.restorePlan.target_client_id);
+      setPendingActionSnapshot(null);
     });
   }
 
@@ -844,159 +1146,273 @@ export function BackupsPanel({
     action: BackupConfirmationAction,
   ): Array<{ label: string; value: ReactNode }> {
     switch (action) {
-      case "policy":
+      case "policy": {
+        const policySnapshot = pendingPolicySnapshot;
         return [
-          { label: "Policy", value: policyName.trim() || "unnamed" },
-          { label: "Fixed targets", value: `${policyTargetCount} VPSs resolved and saved` },
+          {
+            label: "Policy",
+            value: policySnapshot?.request.name ?? policyName.trim() ?? "unnamed",
+          },
+          {
+            label: "Fixed targets",
+            value: policySnapshot
+              ? `${policySnapshot.targetClientIds.length} VPSs resolved and saved`
+              : `${policyTargetCount} VPSs resolved and saved`,
+          },
           {
             label: "Scope",
-            value: `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths`,
+            value: policySnapshot
+              ? `${policySnapshot.request.include_config ? "config, " : ""}${policySnapshot.request.paths.length} paths`
+              : `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths`,
           },
           {
             label: "Schedule",
-            value: policyCronExpr.trim() || "cron required",
+            value:
+              policySnapshot?.request.cron_expr ??
+              policyCronExpr.trim() ??
+              "cron required",
+          },
+          {
+            label: "Preview",
+            value: policySnapshot
+              ? policySnapshot.targets
+                  .slice(0, 4)
+                  .map((target) => formatVpsName(target, vpsNameDisplayMode))
+                  .join(", ") +
+                (policySnapshot.targets.length > 4
+                  ? `, +${policySnapshot.targets.length - 4} more`
+                  : "")
+              : "Review policy to freeze targets",
           },
         ];
-      case "policy-prune":
+      }
+      case "policy-prune": {
+        const snapshot =
+          pendingActionSnapshot?.action === "policy-prune"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Scope",
-            value: policyPruneScheduleId
-              ? shortId(policyPruneScheduleId)
-              : "all policies",
+            value:
+              snapshot?.scopeLabel ??
+              (policyPruneScheduleId
+                ? shortId(policyPruneScheduleId)
+                : "all policies"),
           },
           {
             label: "Mode",
-            value: policyPruneMetadataOnly
-              ? "metadata only"
-              : "metadata and objects",
+            value:
+              snapshot?.modeLabel ??
+              (policyPruneMetadataOnly
+                ? "metadata only"
+                : "metadata and objects"),
           },
         ];
-      case "backup-request":
+      }
+      case "backup-request": {
+        const snapshot =
+          pendingActionSnapshot?.action === "backup-request"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "VPS",
-            value: selectedAgent
-              ? formatVpsName(selectedAgent, vpsNameDisplayMode)
-              : clientId || "none",
+            value:
+              snapshot?.clientLabel ??
+              (selectedAgent
+                ? formatVpsName(selectedAgent, vpsNameDisplayMode)
+                : clientId || "none"),
           },
           {
             label: "Scope",
-            value: `${includeConfig ? "config, " : ""}${paths.length} paths`,
+            value:
+              snapshot?.scopeLabel ??
+              `${includeConfig ? "config, " : ""}${paths.length} paths`,
           },
           {
             label: "Privilege",
-            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+            value: snapshot ? "Frozen assertion" : "Review backup to freeze",
           },
         ];
-      case "artifact-upload":
+      }
+      case "artifact-upload": {
+        const snapshot =
+          pendingActionSnapshot?.action === "artifact-upload"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Request",
-            value: artifactBackupId ? shortId(artifactBackupId) : "none",
+            value:
+              snapshot?.requestLabel ??
+              (artifactBackupId ? shortId(artifactBackupId) : "none"),
           },
-          { label: "Object", value: artifactObjectKey.trim() || "missing" },
-          { label: "Mode", value: artifactUploadMode },
+          {
+            label: "Object",
+            value: snapshot?.objectKey ?? (artifactObjectKey.trim() || "missing"),
+          },
+          { label: "Mode", value: snapshot?.uploadMode ?? artifactUploadMode },
+          { label: "File", value: snapshot?.fileLabel ?? "Review upload to freeze" },
         ];
-      case "artifact-handoff":
+      }
+      case "artifact-handoff": {
+        const snapshot =
+          pendingActionSnapshot?.action === "artifact-handoff"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Request",
-            value: artifactBackupId ? shortId(artifactBackupId) : "none",
+            value:
+              snapshot?.requestLabel ??
+              (artifactBackupId ? shortId(artifactBackupId) : "none"),
           },
           {
             label: "Source job",
-            value: handoffJobId.trim() || "latest retained output",
+            value:
+              snapshot?.sourceLabel ??
+              (handoffJobId.trim() || "latest retained output"),
           },
         ];
-      case "restore-plan":
+      }
+      case "restore-plan": {
+        const snapshot =
+          pendingActionSnapshot?.action === "restore-plan"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Source",
-            value: restoreSourceId ? shortId(restoreSourceId) : "none",
+            value:
+              snapshot?.sourceLabel ??
+              (restoreSourceId ? shortId(restoreSourceId) : "none"),
           },
           {
             label: "Target",
-            value: restoreTarget
-              ? formatVpsName(restoreTarget, vpsNameDisplayMode)
-              : restoreTargetId || "none",
+            value:
+              snapshot?.targetLabel ??
+              (restoreTarget
+                ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+                : restoreTargetId || "none"),
           },
           {
             label: "Scope",
-            value: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
+            value:
+              snapshot?.scopeLabel ??
+              `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
           },
           {
             label: "Privilege",
-            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+            value: snapshot ? "Frozen assertion" : "Review plan to freeze",
           },
         ];
-      case "restore-run":
+      }
+      case "restore-run": {
+        const snapshot =
+          pendingActionSnapshot?.action === "restore-run"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Source",
-            value: restoreSourceId ? shortId(restoreSourceId) : "none",
+            value:
+              snapshot?.sourceLabel ??
+              (restoreSourceId ? shortId(restoreSourceId) : "none"),
           },
           {
             label: "Target",
-            value: restoreTarget
-              ? formatVpsName(restoreTarget, vpsNameDisplayMode)
-              : restoreTargetId || "none",
+            value:
+              snapshot?.targetLabel ??
+              (restoreTarget
+                ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+                : restoreTargetId || "none"),
           },
-          { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
+          {
+            label: "Mode",
+            value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
+          },
           {
             label: "Privilege",
-            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+            value: snapshot ? "Frozen assertion" : "Review restore to freeze",
           },
         ];
-      case "restore-rollback":
+      }
+      case "restore-rollback": {
+        const snapshot =
+          pendingActionSnapshot?.action === "restore-rollback"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Restore job",
-            value: rollbackRestoreJobId.trim()
-              ? shortId(rollbackRestoreJobId.trim())
-              : "none",
+            value:
+              snapshot?.restoreJobId ??
+              (rollbackRestoreJobId.trim()
+                ? shortId(rollbackRestoreJobId.trim())
+                : "none"),
           },
           {
             label: "Target",
-            value: rollbackTarget
-              ? formatVpsName(rollbackTarget, vpsNameDisplayMode)
-              : rollbackTargetId || "none",
+            value:
+              snapshot?.targetLabel ??
+              (rollbackTarget
+                ? formatVpsName(rollbackTarget, vpsNameDisplayMode)
+                : rollbackTargetId || "none"),
           },
           {
             label: "Privilege",
-            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+            value: snapshot ? "Frozen assertion" : "Review rollback to freeze",
           },
         ];
-      case "migration-link":
+      }
+      case "migration-link": {
+        const snapshot =
+          pendingActionSnapshot?.action === "migration-link"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Restore plan",
-            value: migrationRestorePlanId
-              ? shortId(migrationRestorePlanId)
-              : "none",
+            value:
+              snapshot?.planLabel ??
+              (migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none"),
           },
-          { label: "Note", value: migrationNote.trim() || "none" },
+          { label: "Note", value: snapshot?.noteLabel ?? (migrationNote.trim() || "none") },
         ];
-      case "migration-run":
+      }
+      case "migration-run": {
+        const snapshot =
+          pendingActionSnapshot?.action === "migration-run"
+            ? pendingActionSnapshot
+            : null;
         return [
           {
             label: "Restore plan",
-            value: selectedMigrationRestorePlan
-              ? shortId(selectedMigrationRestorePlan.id)
-              : "none",
+            value:
+              (snapshot ? shortId(snapshot.restorePlan.id) : null) ??
+              (selectedMigrationRestorePlan
+                ? shortId(selectedMigrationRestorePlan.id)
+                : "none"),
           },
           {
             label: "Route",
-            value: selectedMigrationRestorePlan
-              ? `${clientLabel(selectedMigrationRestorePlan.source_client_id)} to ${clientLabel(selectedMigrationRestorePlan.target_client_id)}`
-              : "none",
+            value:
+              snapshot?.routeLabel ??
+              (selectedMigrationRestorePlan
+                ? `${clientLabel(selectedMigrationRestorePlan.source_client_id)} to ${clientLabel(selectedMigrationRestorePlan.target_client_id)}`
+                : "none"),
           },
-          { label: "Mode", value: restoreDryRun ? "dry run" : "live restore" },
+          {
+            label: "Mode",
+            value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
+          },
           {
             label: "Privilege",
-            value: privilegeMaterial ? "Unlocked locally" : "Locked",
+            value: snapshot ? "Frozen assertion" : "Review migration to freeze",
           },
         ];
+      }
     }
   }
 
@@ -1007,7 +1423,9 @@ export function BackupsPanel({
       case "policy":
         return "Confirm the saved schedule, target snapshot, and backup scope.";
       case "policy-prune":
-        return policyPruneMetadataOnly
+        return (pendingActionSnapshot?.action === "policy-prune"
+          ? pendingActionSnapshot.request.metadata_only
+          : policyPruneMetadataOnly)
           ? "Confirm pruning retained backup metadata for the selected policy scope."
           : "Confirm pruning retained backup metadata and deleting retained object files for the selected policy scope.";
       case "backup-request":
@@ -1019,7 +1437,9 @@ export function BackupsPanel({
       case "restore-plan":
         return "Confirm the restore intent and target before saving the plan.";
       case "restore-run":
-        return restoreDryRun
+        return (pendingActionSnapshot?.action === "restore-run"
+          ? !pendingActionSnapshot.run.request.destructive
+          : restoreDryRun)
           ? "Confirm the restore rehearsal dispatch."
           : "Confirm the live restore dispatch.";
       case "restore-rollback":
@@ -1027,7 +1447,9 @@ export function BackupsPanel({
       case "migration-link":
         return "Confirm writing the migration link for the selected restore plan.";
       case "migration-run":
-        return restoreDryRun
+        return (pendingActionSnapshot?.action === "migration-run"
+          ? !pendingActionSnapshot.run.request.destructive
+          : restoreDryRun)
           ? "Confirm migration link and restore rehearsal dispatch."
           : "Confirm migration link and live restore dispatch.";
       default:
@@ -1045,33 +1467,78 @@ export function BackupsPanel({
       case "policy":
         await executePolicy();
         break;
-      case "policy-prune":
-        await executePolicyPrune();
+      case "policy-prune": {
+        if (pendingActionSnapshot?.action !== "policy-prune") {
+          setActionError("Backup prune confirmation snapshot is missing; review prune again");
+          return;
+        }
+        await executePolicyPrune(pendingActionSnapshot.request);
         break;
-      case "backup-request":
-        await executeRequest();
+      }
+      case "backup-request": {
+        if (pendingActionSnapshot?.action !== "backup-request") {
+          setActionError("Backup request confirmation snapshot is missing; review backup again");
+          return;
+        }
+        await executeRequest(pendingActionSnapshot);
         break;
-      case "artifact-upload":
-        await executeArtifactUpload();
+      }
+      case "artifact-upload": {
+        if (pendingActionSnapshot?.action !== "artifact-upload") {
+          setActionError("Artifact upload confirmation snapshot is missing; review upload again");
+          return;
+        }
+        await executeArtifactUpload(pendingActionSnapshot);
         break;
-      case "artifact-handoff":
-        await executeArtifactHandoff();
+      }
+      case "artifact-handoff": {
+        if (pendingActionSnapshot?.action !== "artifact-handoff") {
+          setActionError("Artifact handoff confirmation snapshot is missing; review promotion again");
+          return;
+        }
+        await executeArtifactHandoff(pendingActionSnapshot);
         break;
-      case "restore-plan":
-        await executeRestorePlan();
+      }
+      case "restore-plan": {
+        if (pendingActionSnapshot?.action !== "restore-plan") {
+          setActionError("Restore plan confirmation snapshot is missing; review plan again");
+          return;
+        }
+        await executeRestorePlan(pendingActionSnapshot);
         break;
-      case "restore-run":
-        await executeRestoreRun();
+      }
+      case "restore-run": {
+        if (pendingActionSnapshot?.action !== "restore-run") {
+          setActionError("Restore run confirmation snapshot is missing; review restore again");
+          return;
+        }
+        await executeRestoreRunSnapshot(pendingActionSnapshot);
         break;
-      case "restore-rollback":
-        await executeRestoreRollback();
+      }
+      case "restore-rollback": {
+        if (pendingActionSnapshot?.action !== "restore-rollback") {
+          setActionError("Restore rollback confirmation snapshot is missing; review rollback again");
+          return;
+        }
+        await executeRestoreRollbackSnapshot(pendingActionSnapshot);
         break;
-      case "migration-link":
-        await executeMigrationLink();
+      }
+      case "migration-link": {
+        if (pendingActionSnapshot?.action !== "migration-link") {
+          setActionError("Migration link confirmation snapshot is missing; review link again");
+          return;
+        }
+        await executeMigrationLink(pendingActionSnapshot);
         break;
-      case "migration-run":
-        await executeMigrationRun();
+      }
+      case "migration-run": {
+        if (pendingActionSnapshot?.action !== "migration-run") {
+          setActionError("Migration run confirmation snapshot is missing; review migration again");
+          return;
+        }
+        await executeMigrationRun(pendingActionSnapshot);
         break;
+      }
     }
   }
 
@@ -1185,7 +1652,14 @@ export function BackupsPanel({
             confirmLabel={backupConfirmationConfirmLabel}
             detail={backupConfirmationDetail(pendingConfirmation)}
             items={backupConfirmationItems}
-            onCancel={() => setPendingConfirmation(null)}
+            onCancel={() => {
+              if (pendingConfirmation === "policy") {
+                setPendingPolicySnapshot(null);
+              } else {
+                setPendingActionSnapshot(null);
+              }
+              setPendingConfirmation(null);
+            }}
             onConfirm={() => void confirmBackupAction()}
             open={pendingConfirmation !== null}
             pending={pending}
@@ -1201,17 +1675,47 @@ export function BackupsPanel({
                 includeConfig={policyIncludeConfig}
                 keepLast={policyKeepLast}
                 name={policyName}
-                onCronExprChange={setPolicyCronExpr}
-                onEnabledChange={setPolicyEnabled}
-                onIncludeConfigChange={setPolicyIncludeConfig}
-                onKeepLastChange={setPolicyKeepLast}
-                onNameChange={setPolicyName}
-                onPathsTextChange={setPolicyPathsText}
-                onRecipientPublicKeyHexChange={setPolicyRecipientPublicKeyHex}
-                onRetentionDaysChange={setPolicyRetentionDays}
-                onRotationGenerationChange={setPolicyRotationGeneration}
+                onCronExprChange={(value) => {
+                  setPolicyCronExpr(value);
+                  clearPolicyConfirmation();
+                }}
+                onEnabledChange={(value) => {
+                  setPolicyEnabled(value);
+                  clearPolicyConfirmation();
+                }}
+                onIncludeConfigChange={(value) => {
+                  setPolicyIncludeConfig(value);
+                  clearPolicyConfirmation();
+                }}
+                onKeepLastChange={(value) => {
+                  setPolicyKeepLast(value);
+                  clearPolicyConfirmation();
+                }}
+                onNameChange={(value) => {
+                  setPolicyName(value);
+                  clearPolicyConfirmation();
+                }}
+                onPathsTextChange={(value) => {
+                  setPolicyPathsText(value);
+                  clearPolicyConfirmation();
+                }}
+                onRecipientPublicKeyHexChange={(value) => {
+                  setPolicyRecipientPublicKeyHex(value);
+                  clearPolicyConfirmation();
+                }}
+                onRetentionDaysChange={(value) => {
+                  setPolicyRetentionDays(value);
+                  clearPolicyConfirmation();
+                }}
+                onRotationGenerationChange={(value) => {
+                  setPolicyRotationGeneration(value);
+                  clearPolicyConfirmation();
+                }}
                 onSubmit={submitPolicy}
-                onTargetsTextChange={setPolicyTargetsText}
+                onTargetsTextChange={(value) => {
+                  setPolicyTargetsText(value);
+                  clearPolicyConfirmation();
+                }}
                 pathsCount={policyPaths.length}
                 pathsText={policyPathsText}
                 pending={pending}
@@ -1231,9 +1735,18 @@ export function BackupsPanel({
                 confirmationOpen={pendingConfirmation === "policy-prune"}
                 dryRun={policyPruneDryRun}
                 metadataOnly={policyPruneMetadataOnly}
-                onDryRunChange={setPolicyPruneDryRun}
-                onMetadataOnlyChange={setPolicyPruneMetadataOnly}
-                onScheduleIdChange={setPolicyPruneScheduleId}
+                onDryRunChange={(value) => {
+                  setPolicyPruneDryRun(value);
+                  clearBackupConfirmations(["policy-prune"]);
+                }}
+                onMetadataOnlyChange={(value) => {
+                  setPolicyPruneMetadataOnly(value);
+                  clearBackupConfirmations(["policy-prune"]);
+                }}
+                onScheduleIdChange={(value) => {
+                  setPolicyPruneScheduleId(value);
+                  clearBackupConfirmations(["policy-prune"]);
+                }}
                 onSubmit={submitPolicyPrune}
                 pending={pending}
                 policies={backupPolicies}
@@ -1249,10 +1762,22 @@ export function BackupsPanel({
               confirmationOpen={pendingConfirmation === "backup-request"}
               includeConfig={includeConfig}
               note={note}
-              onClientIdChange={setClientId}
-              onIncludeConfigChange={setIncludeConfig}
-              onNoteChange={setNote}
-              onPathsTextChange={setPathsText}
+              onClientIdChange={(value) => {
+                setClientId(value);
+                clearBackupConfirmations(["backup-request"]);
+              }}
+              onIncludeConfigChange={(value) => {
+                setIncludeConfig(value);
+                clearBackupConfirmations(["backup-request"]);
+              }}
+              onNoteChange={(value) => {
+                setNote(value);
+                clearBackupConfirmations(["backup-request"]);
+              }}
+              onPathsTextChange={(value) => {
+                setPathsText(value);
+                clearBackupConfirmations(["backup-request"]);
+              }}
               onSubmit={submitRequest}
               pathsCount={paths.length}
               pathsText={pathsText}
@@ -1282,9 +1807,18 @@ export function BackupsPanel({
               handoffJobId={handoffJobId}
               onArtifactBackupIdChange={selectArtifactBackupId}
               onArtifactFileChange={selectArtifactFile}
-              onArtifactObjectKeyChange={setArtifactObjectKey}
-              onArtifactUploadModeChange={setArtifactUploadMode}
-              onHandoffJobIdChange={setHandoffJobId}
+              onArtifactObjectKeyChange={(value) => {
+                setArtifactObjectKey(value);
+                clearBackupConfirmations(["artifact-upload"]);
+              }}
+              onArtifactUploadModeChange={(value) => {
+                setArtifactUploadMode(value);
+                clearBackupConfirmations(["artifact-upload"]);
+              }}
+              onHandoffJobIdChange={(value) => {
+                setHandoffJobId(value);
+                clearBackupConfirmations(["artifact-handoff"]);
+              }}
               onHandoffSubmit={submitArtifactHandoff}
               onSubmit={submitArtifactUpload}
               pending={pending}
@@ -1296,13 +1830,51 @@ export function BackupsPanel({
                 agents={agents}
                 backups={backups}
                 confirmationOpen={pendingConfirmation === "restore-plan"}
-                onDestinationRootChange={setRestoreDestinationRoot}
-                onIncludeConfigChange={setRestoreIncludeConfig}
-                onNoteChange={setRestoreNote}
-                onPathsTextChange={setRestorePathsText}
-                onSourceIdChange={setRestoreSourceId}
+                onDestinationRootChange={(value) => {
+                  setRestoreDestinationRoot(value);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "migration-run",
+                  ]);
+                }}
+                onIncludeConfigChange={(value) => {
+                  setRestoreIncludeConfig(value);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "migration-run",
+                  ]);
+                }}
+                onNoteChange={(value) => {
+                  setRestoreNote(value);
+                  clearBackupConfirmations(["restore-plan"]);
+                }}
+                onPathsTextChange={(value) => {
+                  setRestorePathsText(value);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "migration-run",
+                  ]);
+                }}
+                onSourceIdChange={(value) => {
+                  setRestoreSourceId(value);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "migration-run",
+                  ]);
+                }}
                 onSubmit={submitRestorePlan}
-                onTargetIdChange={setRestoreTargetId}
+                onTargetIdChange={(value) => {
+                  setRestoreTargetId(value);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "migration-run",
+                  ]);
+                }}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
                 restoreDestinationRoot={restoreDestinationRoot}
@@ -1322,14 +1894,38 @@ export function BackupsPanel({
               <RestoreRunForm
                 confirmationOpen={pendingConfirmation === "restore-run"}
                 forceUnprivileged={restoreForceUnprivileged}
-                onForceUnprivilegedChange={setRestoreForceUnprivileged}
-                onArtifactFileChange={setRestoreArtifactFile}
-                onArchivePathChange={setRestoreArchivePath}
-                onArchiveSha256HexChange={setRestoreArchiveSha256Hex}
-                onDryRunChange={setRestoreDryRun}
-                onPrivateKeyHexChange={setRestorePrivateKeyHex}
-                onPostRestoreArgvChange={setRestorePostRestoreArgv}
-                onRestoreTimeoutSecsChange={setRestoreTimeoutSecs}
+                onForceUnprivilegedChange={(value) => {
+                  setRestoreForceUnprivileged(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onArtifactFileChange={(value) => {
+                  setRestoreArtifactFile(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onArchivePathChange={(value) => {
+                  setRestoreArchivePath(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onArchiveSha256HexChange={(value) => {
+                  setRestoreArchiveSha256Hex(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onDryRunChange={(value) => {
+                  setRestoreDryRun(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onPrivateKeyHexChange={(value) => {
+                  setRestorePrivateKeyHex(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onPostRestoreArgvChange={(value) => {
+                  setRestorePostRestoreArgv(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onRestoreTimeoutSecsChange={(value) => {
+                  setRestoreTimeoutSecs(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
                 onRunRestore={submitRestoreRun}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
@@ -1348,11 +1944,23 @@ export function BackupsPanel({
                 agents={agents}
                 confirmationOpen={pendingConfirmation === "restore-rollback"}
                 forceUnprivileged={rollbackForceUnprivileged}
-                onForceUnprivilegedChange={setRollbackForceUnprivileged}
-                onRestoreJobIdChange={setRollbackRestoreJobId}
-                onRestoreRollbackTimeoutSecsChange={setRollbackTimeoutSecs}
+                onForceUnprivilegedChange={(value) => {
+                  setRollbackForceUnprivileged(value);
+                  clearBackupConfirmations(["restore-rollback"]);
+                }}
+                onRestoreJobIdChange={(value) => {
+                  setRollbackRestoreJobId(value);
+                  clearBackupConfirmations(["restore-rollback"]);
+                }}
+                onRestoreRollbackTimeoutSecsChange={(value) => {
+                  setRollbackTimeoutSecs(value);
+                  clearBackupConfirmations(["restore-rollback"]);
+                }}
                 onRunRestoreRollback={submitRestoreRollback}
-                onTargetClientIdChange={setRollbackTargetId}
+                onTargetClientIdChange={(value) => {
+                  setRollbackTargetId(value);
+                  clearBackupConfirmations(["restore-rollback"]);
+                }}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
                 restoreJobId={rollbackRestoreJobId}
@@ -1363,7 +1971,14 @@ export function BackupsPanel({
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}
                 onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                onPrivilegeMaterialChange={(material) => {
+                  setPrivilegeMaterial(material);
+                  clearBackupConfirmations([
+                    "restore-plan",
+                    "restore-run",
+                    "restore-rollback",
+                  ]);
+                }}
                 privilegeMaterial={privilegeMaterial}
               />
             </>
@@ -1378,8 +1993,14 @@ export function BackupsPanel({
                 linkConfirmationOpen={pendingConfirmation === "migration-link"}
                 migrationNote={migrationNote}
                 migrationRestorePlanId={migrationRestorePlanId}
-                onMigrationNoteChange={setMigrationNote}
-                onMigrationRestorePlanIdChange={setMigrationRestorePlanId}
+                onMigrationNoteChange={(value) => {
+                  setMigrationNote(value);
+                  clearBackupConfirmations(["migration-link", "migration-run"]);
+                }}
+                onMigrationRestorePlanIdChange={(value) => {
+                  setMigrationRestorePlanId(value);
+                  clearBackupConfirmations(["migration-link", "migration-run"]);
+                }}
                 onRunMigrationRestore={submitMigrationRun}
                 onSubmit={submitMigrationLink}
                 pending={pending}
@@ -1395,7 +2016,10 @@ export function BackupsPanel({
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}
                 onOpenUnlock={onOpenPrivilegeUnlock}
-                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                onPrivilegeMaterialChange={(material) => {
+                  setPrivilegeMaterial(material);
+                  clearBackupConfirmations(["migration-run"]);
+                }}
                 privilegeMaterial={privilegeMaterial}
               />
             </>

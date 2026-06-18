@@ -1,11 +1,12 @@
-import type { ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
+import { useEffect, useRef, type ReactNode } from "react";
+import { AlertTriangle, X } from "lucide-react";
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
   confirmLabel,
   detail,
   error,
+  expiresAtUnix = null,
   items = [],
   onCancel,
   onConfirm,
@@ -18,6 +19,7 @@ export function ConfirmationPrompt({
   confirmLabel: string;
   detail: ReactNode;
   error?: ReactNode;
+  expiresAtUnix?: number | null;
   items?: Array<{ label: string; value: ReactNode }>;
   onCancel: () => void;
   onConfirm: () => void;
@@ -26,11 +28,54 @@ export function ConfirmationPrompt({
   title: string;
   tone?: "danger" | "normal";
 }) {
+  const promptRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open || !promptRef.current) {
+      return;
+    }
+    const element = promptRef.current;
+    let focusTimeout: number | null = null;
+    window.requestAnimationFrame(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      element.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+      element.focus({ preventScroll: true });
+      focusTimeout = window.setTimeout(() => {
+        if (element.isConnected) {
+          element.focus({ preventScroll: true });
+        }
+      }, 100);
+    });
+    return () => {
+      if (focusTimeout !== null) {
+        window.clearTimeout(focusTimeout);
+      }
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || pending || expiresAtUnix === null || expiresAtUnix === undefined) {
+      return undefined;
+    }
+    const delayMs = expiresAtUnix * 1000 - Date.now();
+    if (delayMs <= 0) {
+      onCancel();
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(onCancel, delayMs);
+    return () => window.clearTimeout(timeoutId);
+  }, [expiresAtUnix, onCancel, open, pending]);
+
   if (!open) {
     return null;
   }
   return (
-    <section className={`confirmationPrompt ${tone}`} aria-label={title}>
+    <section
+      ref={promptRef}
+      className={`confirmationPrompt ${tone}`}
+      aria-label={title}
+      tabIndex={-1}
+    >
       <div className="confirmationPromptIcon">
         <AlertTriangle size={18} />
       </div>
@@ -49,6 +94,16 @@ export function ConfirmationPrompt({
         )}
         {error && <small className="confirmationPromptError">{error}</small>}
       </div>
+      <button
+        aria-label="Close confirmation"
+        className="iconButton confirmationPromptClose"
+        disabled={pending}
+        onClick={onCancel}
+        title="Close confirmation"
+        type="button"
+      >
+        <X size={16} />
+      </button>
       <div className="confirmationPromptActions">
         <button
           className="secondaryAction compactAction"

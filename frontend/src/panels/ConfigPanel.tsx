@@ -39,6 +39,7 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
   JsonValue,
+  PrivilegeAssertion,
   UpdateDataSourcePresetRequest,
   UpdateDataSourcePresetResponse,
   UpsertHotConfigRuleTemplateRequest,
@@ -49,6 +50,30 @@ import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
 const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
 const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
+
+type BulkConfigApplySnapshot = {
+  selectorExpression: string;
+  clientIds: string[];
+  targets: AgentView[];
+  rendered: HotConfigRuleTemplateRenderResponse;
+  operation: JobOperation;
+  templateName: string;
+  timeoutSecs: number;
+  privilegeAssertion: PrivilegeAssertion;
+  payloadHashHex: string;
+};
+
+type SingleConfigApplySnapshot = {
+  baseHash: string;
+  clientId: string;
+  operation: JobOperation;
+  payloadHashHex: string;
+  privilegeAssertion: PrivilegeAssertion;
+  selectorExpression: string;
+  target: AgentView;
+  timeoutSecs: number;
+  toml: string;
+};
 
 export function ConfigPanel({
   activeSubpage,
@@ -130,6 +155,7 @@ export function ConfigPanel({
           onDiffPreset={onDiffDataSourcePreset}
           onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onRenderHotConfig={onRenderDataSourceHotConfig}
+          onResolveBulk={onResolveBulk}
           onTestPreset={onTestDataSourcePreset}
           onUpdatePreset={onUpdateDataSourcePreset}
           privilegeMaterial={privilegeMaterial}
@@ -449,12 +475,13 @@ function BulkConfigApply({
   const [valuesText, setValuesText] = useState("");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
+  const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [timeoutSecs, setTimeoutSecs] = useState(30);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const selectedTemplate = hotConfigRuleTemplates.find((template) => template.id === (templateId || hotConfigRuleTemplates[0]?.id));
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
-  const ready = Boolean(selectedTemplate && preview?.target_count && rendered && privilegeMaterial && !selectorParse.error);
+  const ready = Boolean(selectedTemplate && selectorExpression.trim() && privilegeMaterial && !selectorParse.error);
 
   useEffect(() => writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
@@ -462,6 +489,8 @@ function BulkConfigApply({
     if (selectedTemplate) {
       setValuesText(formatJsonObject(exampleValuesForTemplate(selectedTemplate)));
       setRendered(null);
+      setApplySnapshot(null);
+      setConfirmOpen(false);
     }
   }, [selectedTemplate?.id]);
 
@@ -471,6 +500,7 @@ function BulkConfigApply({
         throw new Error(selectorParse.error);
       }
       setPreview(await onResolveBulk(selectorExpression.trim()));
+      setApplySnapshot(null);
     });
   }
 
@@ -480,20 +510,32 @@ function BulkConfigApply({
     }
     await runAction(async () => {
       setRendered(await onRenderHotConfigRuleTemplate(selectedTemplate.id, { values: parseJsonObject(valuesText) }));
+      setApplySnapshot(null);
     });
   }
 
-  async function applyPatch() {
-    setConfirmOpen(false);
+  async function reviewApply() {
     await runAction(async () => {
-      if (!ready || !preview || !rendered || !privilegeMaterial) {
+      if (!selectedTemplate || !privilegeMaterial) {
         throw new Error("Bulk config apply is incomplete");
       }
-      const clientIds = preview.targets.map((target) => target.id);
+      if (selectorParse.error) {
+        throw new Error(selectorParse.error);
+      }
+      const frozenSelector = selectorExpression.trim();
+      if (!frozenSelector) {
+        throw new Error("Add at least one target selector");
+      }
+      const nextPreview = await onResolveBulk(frozenSelector);
+      const clientIds = nextPreview.targets.map((target) => target.id);
+      if (!clientIds.length) {
+        throw new Error("Bulk config confirmation resolved no VPSs");
+      }
+      const nextRendered = await onRenderHotConfigRuleTemplate(selectedTemplate.id, { values: parseJsonObject(valuesText) });
       const operation: JobOperation = {
         type: "data_source_config_patch",
         apply_mode: "incremental_patch",
-        toml: rendered.toml,
+        toml: nextRendered.toml,
       };
       const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
       const built = await buildPrivilegeForJobOperation({
@@ -501,34 +543,58 @@ function BulkConfigApply({
         commandType: "data_source_config_patch",
         operation,
         privilegeMaterial,
-        selectorExpression: selectorExpression.trim(),
+        selectorExpression: frozenSelector,
         timeoutSecs: boundedTimeoutSecs,
       });
+      setPreview(nextPreview);
+      setRendered(nextRendered);
+      setApplySnapshot({
+        clientIds,
+        operation,
+        payloadHashHex: built.payloadHashHex,
+        privilegeAssertion: built.privilegeAssertion,
+        rendered: nextRendered,
+        selectorExpression: frozenSelector,
+        targets: nextPreview.targets,
+        templateName: selectedTemplate.name,
+        timeoutSecs: boundedTimeoutSecs,
+      });
+      setConfirmOpen(true);
+    });
+  }
+
+  async function applyPatch() {
+    setConfirmOpen(false);
+    await runAction(async () => {
+      const snapshot = applySnapshot;
+      if (!snapshot) {
+        throw new Error("Bulk config confirmation snapshot is missing; review the apply again");
+      }
       const response = await onCreateJob({
         argv: [],
-            command: "data_source_config_patch",
+        command: "data_source_config_patch",
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
-        operation,
+        operation: snapshot.operation,
         privileged: true,
-        privilege_assertion: built.privilegeAssertion,
-        selector_expression: selectorExpression.trim(),
-        target_client_ids: clientIds,
-        timeout_secs: boundedTimeoutSecs,
+        privilege_assertion: snapshot.privilegeAssertion,
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: snapshot.clientIds,
+        timeout_secs: snapshot.timeoutSecs,
       });
       const initial = buildBulkJobProgress({
         targetCount: createJobTargetCount(response),
         jobId: response.job_id,
         targetRecords: [],
-        targets: preview.targets,
+        targets: snapshot.targets,
       });
       setProgress(initial);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
-        targets: preview.targets,
-        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
+        targets: snapshot.targets,
+        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs),
       });
       if (waited.timedOut) {
         throw new Error("Timed out waiting for bulk config apply targets");
@@ -540,9 +606,10 @@ function BulkConfigApply({
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
-          targets: preview.targets,
+          targets: snapshot.targets,
         }),
       );
+      setApplySnapshot(null);
     });
   }
 
@@ -557,7 +624,17 @@ function BulkConfigApply({
             </option>
           ))}
         </select>
-        <textarea aria-label="Rule values JSON" onChange={(event) => setValuesText(event.target.value)} rows={7} value={valuesText} />
+        <textarea
+          aria-label="Rule values JSON"
+          onChange={(event) => {
+            setValuesText(event.target.value);
+            setRendered(null);
+            setApplySnapshot(null);
+            setConfirmOpen(false);
+          }}
+          rows={7}
+          value={valuesText}
+        />
         <button className="secondaryAction" disabled={pending || !selectedTemplate} onClick={renderPatch} type="button">
           Render patch
         </button>
@@ -572,6 +649,8 @@ function BulkConfigApply({
           onChange={(value) => {
             setSelectorExpression(value);
             setPreview(null);
+            setApplySnapshot(null);
+            setConfirmOpen(false);
           }}
           placeholder="provider:hetzner && country:US"
           showMatchCount
@@ -591,7 +670,18 @@ function BulkConfigApply({
           {preview && preview.target_count > 24 && <span className="targetChip mutedChip">+{preview.target_count - 24} more</span>}
         </div>
         <div className="inlinePrivilege">
-          <input aria-label="Config apply timeout seconds" max={3600} min={1} onChange={(event) => setTimeoutSecs(Number(event.target.value))} type="number" value={timeoutSecs} />
+          <input
+            aria-label="Config apply timeout seconds"
+            max={3600}
+            min={1}
+            onChange={(event) => {
+              setTimeoutSecs(Number(event.target.value));
+              setApplySnapshot(null);
+              setConfirmOpen(false);
+            }}
+            type="number"
+            value={timeoutSecs}
+          />
         </div>
         <PrivilegeVaultBox
           labelPrefix="Config"
@@ -601,7 +691,7 @@ function BulkConfigApply({
           privilegeMaterial={privilegeMaterial}
           unlockRedirectLabel="Unlock config privilege"
         />
-        <button className="primaryAction" disabled={pending || !ready} onClick={() => setConfirmOpen(true)} type="button">
+        <button className="primaryAction" disabled={pending || !ready} onClick={() => void reviewApply()} type="button">
           <FileSliders size={16} />
           Review apply
         </button>
@@ -616,14 +706,19 @@ function BulkConfigApply({
       )}
       <ConfirmationPrompt
         confirmLabel="Apply config patch"
-        detail={`Apply one generated partial patch to ${preview?.target_count ?? 0} VPS targets.`}
+        detail={`Apply one generated partial patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
+        expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
-          { label: "Selector", value: selectorExpression || "-" },
-          { label: "Targets", value: `${preview?.target_count ?? 0}` },
-          { label: "Template", value: selectedTemplate?.name ?? "-" },
-          { label: "Sections", value: rendered?.affected_sections.join(", ") ?? "-" },
+          { label: "Selector", value: applySnapshot?.selectorExpression ?? "-" },
+          { label: "Targets", value: `${applySnapshot?.clientIds.length ?? 0}` },
+          { label: "Template", value: applySnapshot?.templateName ?? "-" },
+          { label: "Sections", value: applySnapshot?.rendered.affected_sections.join(", ") ?? "-" },
+          { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
         ]}
-        onCancel={() => setConfirmOpen(false)}
+        onCancel={() => {
+          setConfirmOpen(false);
+          setApplySnapshot(null);
+        }}
         onConfirm={() => void applyPatch()}
         open={confirmOpen}
         pending={pending}
@@ -662,7 +757,7 @@ function SingleVpsConfig({
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
   const [timeoutSecs, setTimeoutSecs] = useState(30);
-  const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
+  const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const singleTarget = useMemo(() => agents.find((agent) => agent.id === clientId) ?? null, [agents, clientId]);
 
@@ -672,11 +767,13 @@ function SingleVpsConfig({
     setClientId(value);
     setRedactedToml("");
     setBaseHash("");
+    setSingleApplySnapshot(null);
     setProgress(null);
   }
 
   async function readConfig() {
     await runAction(async () => {
+      setSingleApplySnapshot(null);
       if (!singleTarget || !privilegeMaterial) {
         throw new Error("Select one VPS and unlock privilege");
       }
@@ -727,11 +824,11 @@ function SingleVpsConfig({
       const config = extractConfigRead(outputs);
       setRedactedToml(config.toml);
       setBaseHash(config.baseHash);
+      setSingleApplySnapshot(null);
     });
   }
 
-  async function applyConfig() {
-    setConfirmApplyOpen(false);
+  async function reviewConfigApply() {
     await runAction(async () => {
       if (!singleTarget || !privilegeMaterial || !redactedToml || !baseHash) {
         throw new Error("Read a single VPS config before applying");
@@ -753,25 +850,42 @@ function SingleVpsConfig({
         selectorExpression: selectorExpressionForTarget,
         timeoutSecs: boundedTimeoutSecs,
       });
+      setSingleApplySnapshot({
+        baseHash,
+        clientId: singleTarget.id,
+        operation,
+        payloadHashHex: built.payloadHashHex,
+        privilegeAssertion: built.privilegeAssertion,
+        selectorExpression: selectorExpressionForTarget,
+        target: singleTarget,
+        timeoutSecs: boundedTimeoutSecs,
+        toml: redactedToml,
+      });
+    });
+  }
+
+  async function applyConfig(snapshot: SingleConfigApplySnapshot) {
+    setSingleApplySnapshot(null);
+    await runAction(async () => {
       const response = await onCreateJob({
         argv: [],
-            command: "hot_config",
+        command: "hot_config",
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
-        operation,
+        operation: snapshot.operation,
         privileged: true,
-        privilege_assertion: built.privilegeAssertion,
-        selector_expression: selectorExpressionForTarget,
-        target_client_ids: [singleTarget.id],
-        timeout_secs: boundedTimeoutSecs,
+        privilege_assertion: snapshot.privilegeAssertion,
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: [snapshot.clientId],
+        timeout_secs: snapshot.timeoutSecs,
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
-        targets: [singleTarget],
-        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
+        targets: [snapshot.target],
+        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs),
       });
       if (waited.timedOut) {
         throw new Error("Timed out waiting for config apply target");
@@ -783,7 +897,7 @@ function SingleVpsConfig({
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
-          targets: [singleTarget],
+          targets: [snapshot.target],
         }),
       );
     });
@@ -802,13 +916,26 @@ function SingleVpsConfig({
         />
         <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}</span>
         <div className="inlinePrivilege">
-          <input aria-label="Single config timeout seconds" max={3600} min={1} onChange={(event) => setTimeoutSecs(Number(event.target.value))} type="number" value={timeoutSecs} />
+          <input
+            aria-label="Single config timeout seconds"
+            max={3600}
+            min={1}
+            onChange={(event) => {
+              setSingleApplySnapshot(null);
+              setTimeoutSecs(Number(event.target.value));
+            }}
+            type="number"
+            value={timeoutSecs}
+          />
         </div>
         <PrivilegeVaultBox
           labelPrefix="Config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
-          onPrivilegeMaterialChange={setPrivilegeMaterial}
+          onPrivilegeMaterialChange={(material) => {
+            setSingleApplySnapshot(null);
+            setPrivilegeMaterial(material);
+          }}
           privilegeMaterial={privilegeMaterial}
           unlockRedirectLabel="Unlock config privilege"
         />
@@ -825,8 +952,21 @@ function SingleVpsConfig({
       <div className="compactForm configTomlEditor">
         <strong>Redacted TOML</strong>
         <span>{baseHash ? `base ${shortId(baseHash)}` : "Read a single VPS config before editing"}</span>
-        <textarea aria-label="Single VPS redacted config TOML" onChange={(event) => setRedactedToml(event.target.value)} rows={22} value={redactedToml} />
-        <button className="primaryAction" disabled={pending || !singleTarget || !privilegeMaterial || !baseHash || !redactedToml} onClick={() => setConfirmApplyOpen(true)} type="button">
+        <textarea
+          aria-label="Single VPS redacted config TOML"
+          onChange={(event) => {
+            setSingleApplySnapshot(null);
+            setRedactedToml(event.target.value);
+          }}
+          rows={22}
+          value={redactedToml}
+        />
+        <button
+          className="primaryAction"
+          disabled={pending || !singleTarget || !privilegeMaterial || !baseHash || !redactedToml || singleApplySnapshot !== null}
+          onClick={() => void reviewConfigApply()}
+          type="button"
+        >
           <Save size={16} />
           Review apply
         </button>
@@ -834,14 +974,16 @@ function SingleVpsConfig({
       <ConfirmationPrompt
         confirmLabel="Apply config"
         detail="Apply the redacted-preserve TOML only if the VPS config hash still matches the read base."
+        expiresAtUnix={singleApplySnapshot?.privilegeAssertion.expires_unix}
         items={[
-          { label: "Target", value: singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : "-" },
-          { label: "Base hash", value: baseHash || "-" },
+          { label: "Target", value: singleApplySnapshot ? formatVpsName(singleApplySnapshot.target, vpsNameDisplayMode) : "-" },
+          { label: "Base hash", value: singleApplySnapshot?.baseHash ?? "-" },
+          { label: "Payload", value: singleApplySnapshot?.payloadHashHex ? shortId(singleApplySnapshot.payloadHashHex) : "-" },
           { label: "Policy", value: "preserve redacted fields" },
         ]}
-        onCancel={() => setConfirmApplyOpen(false)}
-        onConfirm={() => void applyConfig()}
-        open={confirmApplyOpen}
+        onCancel={() => setSingleApplySnapshot(null)}
+        onConfirm={() => singleApplySnapshot && void applyConfig(singleApplySnapshot)}
+        open={singleApplySnapshot !== null}
         pending={pending}
         title="Confirm single-VPS config apply"
       />

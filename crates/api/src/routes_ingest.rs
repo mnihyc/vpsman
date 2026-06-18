@@ -5,13 +5,11 @@ use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use tracing::warn;
 use vpsman_common::{
-    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputAckRequest,
-    GatewayCommandOutputAckResponse, GatewayCommandOutputIngest, GatewaySessionLifecycleIngest,
-    GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand, OutputStream,
+    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
+    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
+    OutputStream,
 };
-use vpsman_server_core::{
-    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING,
-};
+use vpsman_server_core::{target_status_is_active, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING};
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
@@ -120,20 +118,6 @@ pub(crate) async fn ingest_telemetry(
     }))
 }
 
-pub(crate) async fn reconcile_command_output_acks(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<GatewayCommandOutputAckRequest>,
-) -> Result<Json<GatewayCommandOutputAckResponse>, ApiError> {
-    state.require_internal_gateway(&headers)?;
-    validate_command_output_ack_request(&request)?;
-    let acked = state
-        .repo
-        .list_existing_job_output_seqs(request.job_id, &request.client_id, &request.seqs)
-        .await?;
-    Ok(Json(GatewayCommandOutputAckResponse { acked }))
-}
-
 pub(crate) async fn ingest_command_output(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -141,28 +125,80 @@ pub(crate) async fn ingest_command_output(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_command_output_event(&event)?;
+    let Some(job) = state.repo.get_job(event.job_id).await? else {
+        return Err(ApiError::not_found("job_not_found"));
+    };
+    if !event.payload_hash.eq_ignore_ascii_case(&job.payload_hash) {
+        return Err(ApiError::conflict("job_output_payload_hash_mismatch"));
+    }
     let targets = state.repo.list_job_targets(event.job_id).await?;
-    if !targets
+    let Some(target) = targets
         .iter()
-        .any(|target| target.client_id == event.client_id)
-    {
+        .find(|target| target.client_id == event.client_id)
+    else {
         return Err(ApiError::not_found("job_target_not_found"));
+    };
+    let persist_config = JobOutputPersistConfig {
+        object_store: state.backup_object_store.as_ref(),
+        artifact_min_bytes: state.job_output_artifact_min_bytes(),
+    };
+    if target.completed_at.is_some() || !target_status_is_active(&target.status) {
+        match state
+            .repo
+            .classify_existing_job_output_chunk_with_config(
+                event.job_id,
+                &event.client_id,
+                event.seq,
+                &event.output,
+                persist_config,
+            )
+            .await?
+        {
+            Some(JobOutputWriteResult::DuplicateIdentical) => {
+                return Ok(Json(IngestResponse {
+                    accepted: true,
+                    message: "duplicate command output already recorded".to_string(),
+                }));
+            }
+            Some(JobOutputWriteResult::DuplicateConflict) => {
+                state
+                    .repo
+                    .record_job_output_sequence_conflict_audit(
+                        event.job_id,
+                        &event.client_id,
+                        event.seq,
+                    )
+                    .await?;
+                return Err(ApiError::conflict("job_output_sequence_conflict"));
+            }
+            Some(JobOutputWriteResult::Inserted) => {
+                return Err(ApiError::conflict("job_target_not_active"));
+            }
+            None => return Err(ApiError::conflict("job_target_not_active")),
+        }
     }
     let received_at = command_output_received_at(event.received_unix);
-    let write_result = state
+    let write_result = match state
         .repo
-        .record_job_output_chunk_checked_with_config(
+        .record_active_job_output_chunk_checked_with_config(
             event.job_id,
             &event.client_id,
             event.seq,
             &event.output,
             Some(received_at.clone()),
-            JobOutputPersistConfig {
-                object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes(),
-            },
+            persist_config,
         )
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(error) if error.to_string().contains("job_target_not_active") => {
+            return Err(ApiError::conflict("job_target_not_active"));
+        }
+        Err(error) if error.to_string().contains("job_target_not_found") => {
+            return Err(ApiError::not_found("job_target_not_found"));
+        }
+        Err(error) => return Err(ApiError::from(error)),
+    };
     if write_result == JobOutputWriteResult::DuplicateConflict {
         return Err(ApiError::conflict("job_output_sequence_conflict"));
     }
@@ -179,18 +215,13 @@ pub(crate) async fn ingest_command_output(
             .update_job_target_result(event.job_id, &event.client_id, &outcome)
             .await?;
         if target_terminalized {
-            if let Some(status) = state
+            let refreshed = state
                 .repo
                 .refresh_job_status_from_targets(event.job_id)
-                .await?
-            {
-                if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                    state.publish(WsEvent::JobFinished {
-                        job_id: event.job_id,
-                        status,
-                    });
-                }
-            }
+                .await?;
+            state
+                .publish_job_finished_after_refresh(event.job_id, refreshed)
+                .await?;
             if outcome.status == TARGET_STATUS_COMPLETED {
                 if let Err(error) =
                     try_auto_record_backup_artifact_from_ingest(&state, &event).await
@@ -406,24 +437,15 @@ fn validate_command_output_event(event: &GatewayCommandOutputIngest) -> Result<(
         || event.gateway_id.len() > 128
         || event.client_id.is_empty()
         || event.client_id.len() > 128
+        || event.payload_hash.len() != 64
+        || !event
+            .payload_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || event.seq < 0
         || event.output.job_id != event.job_id
     {
         return Err(ApiError::bad_request("invalid_command_output_event"));
-    }
-    Ok(())
-}
-
-fn validate_command_output_ack_request(
-    request: &GatewayCommandOutputAckRequest,
-) -> Result<(), ApiError> {
-    if request.client_id.is_empty()
-        || request.client_id.len() > 128
-        || request.seqs.is_empty()
-        || request.seqs.len() > 4096
-        || request.seqs.iter().any(|seq| *seq < 0)
-    {
-        return Err(ApiError::bad_request("invalid_command_output_ack_request"));
     }
     Ok(())
 }

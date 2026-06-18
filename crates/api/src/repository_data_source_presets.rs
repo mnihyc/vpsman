@@ -9,7 +9,7 @@ use crate::{
     data_source_builtin_presets::builtin_presets,
     model::{
         AssignDataSourcePresetRequest, AssignDataSourcePresetResponse, AuditLogView, AuthContext,
-        BulkResolveRequest, CloneDataSourcePresetRequest, CreateDataSourcePresetRequest,
+        CloneDataSourcePresetRequest, CreateDataSourcePresetRequest,
         DataSourcePresetAssignmentView, DataSourcePresetDiffRequest, DataSourcePresetDiffView,
         DataSourcePresetTestView, DataSourcePresetView, TestDataSourcePresetRequest,
         UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse,
@@ -566,12 +566,7 @@ impl Repository {
             "data_source_preset_domain_mismatch"
         );
 
-        let targets = self
-            .resolve_bulk_targets(&BulkResolveRequest {
-                selector_expression: request.selector_expression.clone(),
-            })
-            .await?
-            .targets;
+        let targets = self.fixed_target_agents(&request.target_client_ids).await?;
         anyhow::ensure!(
             !targets.is_empty(),
             "data_source_assignment_targets_required"
@@ -588,7 +583,7 @@ impl Repository {
             );
         }
 
-        if targets.len() > 1 && !request.confirmed {
+        if !request.confirmed {
             let client_ids = targets
                 .iter()
                 .map(|target| target.id.clone())

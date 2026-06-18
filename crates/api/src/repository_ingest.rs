@@ -10,7 +10,7 @@ use vpsman_common::{
     AgentHello, AgentMetrics, AgentUpdateHeartbeat, GatewayAgentHelloIngest,
     GatewayTelemetryIngest, JobCommand, RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
 };
-use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED};
+use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED};
 
 use crate::model::{
     AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
@@ -20,6 +20,7 @@ use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
+    finish_job_in_tx_if_all_targets_terminal,
 };
 use crate::security::constant_time_eq;
 
@@ -63,6 +64,110 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
         ) = (&operation.0, update_heartbeat)
         {
             if heartbeat.activation_job_id == job_id {
+                let expected_sha256_hex = staged_sha256_hex.to_ascii_lowercase();
+                let observed_sha256_hex = heartbeat.sha256_hex.to_ascii_lowercase();
+                if observed_sha256_hex != expected_sha256_hex {
+                    let message = format!(
+                        "agent update activation heartbeat reported artifact hash {observed_sha256_hex}, expected {expected_sha256_hex}"
+                    );
+                    append_synthetic_status_output_in_tx(
+                        tx,
+                        job_id,
+                        &target_client_id,
+                        serde_json::json!({
+                            "type": "agent_update_activation_heartbeat",
+                            "status": TARGET_STATUS_FAILED,
+                            "code": "agent_update_activation_heartbeat_hash_mismatch",
+                            "message": message,
+                            "job_id": job_id,
+                            "client_id": &target_client_id,
+                            "activation_job_id": heartbeat.activation_job_id,
+                            "artifact_sha256_hex": &observed_sha256_hex,
+                            "staged_sha256_hex": &expected_sha256_hex,
+                            "marker_unix": heartbeat.marker_unix,
+                            "observed_unix": heartbeat.observed_unix,
+                            "previous_process_incarnation_id": previous_process_incarnation_id,
+                            "process_incarnation_id": current_process_incarnation_id,
+                        }),
+                        Some(1),
+                    )
+                    .await?;
+                    let updated = sqlx::query(
+                        r#"
+                        UPDATE job_targets
+                        SET status = 'failed',
+                            message = $3,
+                            exit_code = 1,
+                            completed_at = now(),
+                            result_received_at = to_timestamp($5),
+                            dispatch_lease_until = NULL,
+                            last_dispatch_error = $3
+                        WHERE job_id = $1
+                          AND client_id = $2
+                          AND completed_at IS NULL
+                          AND status IN ('dispatching', 'running')
+                          AND process_incarnation_id = $4
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(&target_client_id)
+                    .bind(&message)
+                    .bind(previous_process_incarnation_id)
+                    .bind(heartbeat.observed_unix as f64)
+                    .execute(&mut **tx)
+                    .await?;
+                    if updated.rows_affected() == 0 {
+                        anyhow::bail!("agent_update_activation_heartbeat_terminal_cas_lost:{job_id}:{target_client_id}");
+                    }
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind("job.target_result")
+                    .bind(format!("client:{target_client_id}"))
+                    .bind(serde_json::json!({
+                        "job_id": job_id,
+                        "status": TARGET_STATUS_FAILED,
+                        "exit_code": 1,
+                        "accepted": false,
+                        "message": message,
+                        "client_id": &target_client_id,
+                        "reason": "agent_update_activation_heartbeat_hash_mismatch",
+                        "previous_process_incarnation_id": previous_process_incarnation_id,
+                        "current_process_incarnation_id": current_process_incarnation_id,
+                    }))
+                    .execute(&mut **tx)
+                    .await?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind("agent_update.activation_failed")
+                    .bind(format!("client:{target_client_id}"))
+                    .bind(serde_json::json!({
+                        "activation_job_id": job_id,
+                        "client_id": &target_client_id,
+                        "artifact_sha256_hex": &expected_sha256_hex,
+                        "observed_artifact_sha256_hex": &observed_sha256_hex,
+                        "status": "activation_failed",
+                        "reason": "heartbeat_hash_mismatch",
+                    }))
+                    .execute(&mut **tx)
+                    .await?;
+                    let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+                    affected_job_ids.push(job_id);
+                    continue;
+                }
                 let message = "agent update activation heartbeat verified after restart";
                 append_synthetic_status_output_in_tx(
                     tx,
@@ -76,8 +181,8 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                         "job_id": job_id,
                         "client_id": &target_client_id,
                         "activation_job_id": heartbeat.activation_job_id,
-                        "artifact_sha256_hex": heartbeat.sha256_hex.to_ascii_lowercase(),
-                        "staged_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                        "artifact_sha256_hex": &observed_sha256_hex,
+                        "staged_sha256_hex": &expected_sha256_hex,
                         "marker_unix": heartbeat.marker_unix,
                         "observed_unix": heartbeat.observed_unix,
                         "previous_process_incarnation_id": previous_process_incarnation_id,
@@ -151,12 +256,13 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                 .bind(serde_json::json!({
                     "activation_job_id": job_id,
                     "client_id": &target_client_id,
-                    "artifact_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                    "artifact_sha256_hex": &expected_sha256_hex,
                     "status": "activation_completed",
                     "heartbeat": "verified_after_restart",
                 }))
                 .execute(&mut **tx)
                 .await?;
+                let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
                 affected_job_ids.push(job_id);
                 continue;
             }
@@ -221,6 +327,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
         }))
         .execute(&mut **tx)
         .await?;
+        let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
         affected_job_ids.push(job_id);
     }
     affected_job_ids.sort();

@@ -12,7 +12,7 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
+import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
 import {
@@ -27,6 +27,7 @@ import type {
   AgentView,
   CreateJobRequest,
   CreateJobResponse,
+  JobOperation,
   JobTargetRecord,
   TunnelConfigBackend,
   TunnelEndpointSide,
@@ -71,7 +72,7 @@ export function TopologyApplyControls({
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [lastAction, setLastAction] = useState<NetworkAction>("apply");
-  const [pendingAction, setPendingAction] = useState<NetworkAction | null>(null);
+  const [networkSnapshot, setNetworkSnapshot] = useState<NetworkActionSnapshot | null>(null);
   const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
   const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -96,73 +97,30 @@ export function TopologyApplyControls({
       : privilegeMaterial
         ? "Ready"
         : "Locked");
-  const pendingActionTargetIds = pendingAction && endpoint ? targetClientIdsForAction(pendingAction, endpoint) : [];
-  const pendingActionTargets = resolveAgentsById(agents, pendingActionTargetIds);
-  const pendingSelector = pendingActionTargetIds.length > 0 ? selectorExpressionForClientIds(pendingActionTargetIds) : "-";
-  const pendingConfirmationItems = pendingAction
-    ? [
-        { label: "Operation", value: actionLabel(pendingAction) },
-        { label: "Selector", value: pendingSelector },
-        {
-          label: "Targets",
-          value: formatTargetAvailabilitySummary(pendingActionTargets),
-        },
-        { label: "Plan", value: selectedPlan?.name ?? "-" },
-        { label: "Endpoint", value: side },
-        ...(pendingAction === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
-        { label: "Timeout", value: `${clampInteger(timeoutSecs, 1, 3600)}s` },
-        { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
-        ...(isMutation(pendingAction) ? [{ label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" }] : []),
-      ]
-    : [];
 
   function submitApply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    openNetworkPrompt("apply");
+    void openNetworkPrompt("apply");
   }
 
   function submitRollback() {
-    openNetworkPrompt("rollback");
+    void openNetworkPrompt("rollback");
   }
 
   function submitStatus() {
-    openNetworkPrompt("status");
+    void openNetworkPrompt("status");
   }
 
   function submitProbe() {
-    openNetworkPrompt("probe");
+    void openNetworkPrompt("probe");
   }
 
   function submitSpeedTest() {
-    openNetworkPrompt("speed_test");
+    void openNetworkPrompt("speed_test");
   }
 
-  function openNetworkPrompt(mode: NetworkAction) {
+  async function openNetworkPrompt(mode: NetworkAction) {
     setActionError(null);
-    if (!selectedPlan || !endpoint) {
-      setActionError("Select a tunnel plan");
-      return;
-    }
-    if (!privilegeMaterial) {
-      setActionError("Privilege unlock is locked");
-      return;
-    }
-    if (!selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
-      setActionError("Tunnel plan is disabled");
-      return;
-    }
-    setPendingAction(mode);
-  }
-
-  function clearExecutionResults() {
-    setJobProgress(null);
-    setLastJobProgress(null);
-    setLastJob(null);
-  }
-
-  async function submitNetworkChange(mode: NetworkAction) {
-    setPendingAction(null);
-    clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
       if (!selectedPlan || !endpoint) {
         throw new Error("Select a tunnel plan");
@@ -202,6 +160,7 @@ export function TopologyApplyControls({
         mode === "speed_test"
           ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
           : [builtOperation.endpoint.localClientId];
+      const targets = resolveAgentsById(agents, targetClientIds);
       const selectorExpression = selectorExpressionForClientIds(targetClientIds);
       const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
       const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
@@ -214,27 +173,68 @@ export function TopologyApplyControls({
         selectorExpression,
         timeoutSecs: boundedTimeoutSecs,
       });
-      const job = await onCreateJob({
-        argv: [],
-        selector_expression: selectorExpression,
-        target_client_ids: targetClientIds,
+      setNetworkSnapshot({
+        action: mode,
         command: commandName(mode),
         confirmed: isMutation(mode),
         destructive: isMutation(mode),
+        detail: `${actionLabel(mode)} ${selectedPlan.name} on ${vpsCountLabel(targets.length)}.`,
+        forceUnprivileged: boundedForceUnprivileged,
+        items: [
+          { label: "Operation", value: actionLabel(mode) },
+          { label: "Selector", value: selectorExpression },
+          { label: "Targets", value: formatTargetAvailabilitySummary(targets) },
+          { label: "Plan", value: selectedPlan.name },
+          { label: "Endpoint", value: side },
+          ...(mode === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
+          { label: "Timeout", value: `${boundedTimeoutSecs}s` },
+          { label: "Privilege unlock", value: "Unlocked locally" },
+          ...(isMutation(mode)
+            ? [{ label: "Privilege", value: boundedForceUnprivileged ? "Forced best effort" : "Root required" }]
+            : []),
+        ],
         operation: builtOperation.operation,
-        force_unprivileged: boundedForceUnprivileged,
-        privileged: true,
-        privilege_assertion: builtPrivilege.privilegeAssertion,
-        timeout_secs: boundedTimeoutSecs,
+        payloadHashHex: builtPrivilege.payloadHashHex,
+        privilegeAssertion: builtPrivilege.privilegeAssertion,
+        selectorExpression,
+        targetClientIds,
+        targets,
+        timeoutSecs: boundedTimeoutSecs,
       });
-      setLastPayloadHash(builtPrivilege.payloadHashHex);
-      setLastJob(job);
-      setLastAction(mode);
-      await trackNetworkProgress(job, resolveAgentsById(agents, targetClientIds));
     });
   }
 
-  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[]) {
+  function clearExecutionResults() {
+    setJobProgress(null);
+    setLastJobProgress(null);
+    setLastJob(null);
+  }
+
+  async function submitNetworkChange(snapshot: NetworkActionSnapshot) {
+    setNetworkSnapshot(null);
+    clearExecutionResults();
+    await runPanelAction(setPending, setActionError, async () => {
+      const job = await onCreateJob({
+        argv: [],
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: snapshot.targetClientIds,
+        command: snapshot.command,
+        confirmed: snapshot.confirmed,
+        destructive: snapshot.destructive,
+        operation: snapshot.operation,
+        force_unprivileged: snapshot.forceUnprivileged,
+        privileged: true,
+        privilege_assertion: snapshot.privilegeAssertion,
+        timeout_secs: snapshot.timeoutSecs,
+      });
+      setLastPayloadHash(snapshot.payloadHashHex);
+      setLastJob(job);
+      setLastAction(snapshot.action);
+      await trackNetworkProgress(job, snapshot.targets, snapshot.timeoutSecs);
+    });
+  }
+
+  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[], timeoutSecsForSnapshot: number) {
     const targetCount = createJobTargetCount(job);
     setLastJobProgress(null);
     setJobProgress(buildBulkJobProgress({
@@ -248,7 +248,7 @@ export function TopologyApplyControls({
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(clampInteger(timeoutSecs, 1, 3600)),
+        timeoutMs: bulkProgressTimeoutMs(timeoutSecsForSnapshot),
       });
       setLastJobProgress(result.progress);
       if (result.timedOut) {
@@ -274,7 +274,10 @@ export function TopologyApplyControls({
             <span>Apply plan</span>
             <select
               aria-label="Network apply plan"
-              onChange={(event) => setSelectedPlanId(event.target.value)}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSelectedPlanId(event.target.value);
+              }}
               value={selectedPlan?.id ?? ""}
             >
               {tunnelPlans.map((plan) => (
@@ -288,7 +291,10 @@ export function TopologyApplyControls({
             <span>Endpoint side</span>
             <select
               aria-label="Network apply endpoint side"
-              onChange={(event) => setSide(event.target.value as TunnelEndpointSide)}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSide(event.target.value as TunnelEndpointSide);
+              }}
               value={side}
             >
               <option value="left">Left endpoint</option>
@@ -299,7 +305,10 @@ export function TopologyApplyControls({
             <span>Network backend</span>
             <select
               aria-label="Network apply backend"
-              onChange={(event) => setBackend(event.target.value as TunnelConfigBackend)}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setBackend(event.target.value as TunnelConfigBackend);
+              }}
               value={backend}
             >
               <option value="ifupdown">ifupdown</option>
@@ -315,7 +324,10 @@ export function TopologyApplyControls({
               aria-label="Network apply timeout seconds"
               max={3600}
               min={1}
-              onChange={(event) => setTimeoutSecs(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setTimeoutSecs(Number(event.target.value));
+              }}
               type="number"
               value={timeoutSecs}
             />
@@ -328,7 +340,10 @@ export function TopologyApplyControls({
               aria-label="Network probe count"
               max={20}
               min={1}
-              onChange={(event) => setProbeCount(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setProbeCount(Number(event.target.value));
+              }}
               type="number"
               value={probeCount}
             />
@@ -339,7 +354,10 @@ export function TopologyApplyControls({
               aria-label="Network probe interval milliseconds"
               max={10_000}
               min={200}
-              onChange={(event) => setProbeIntervalMs(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setProbeIntervalMs(Number(event.target.value));
+              }}
               type="number"
               value={probeIntervalMs}
             />
@@ -352,7 +370,10 @@ export function TopologyApplyControls({
               aria-label="Network speed test duration seconds"
               max={30}
               min={1}
-              onChange={(event) => setSpeedDurationSecs(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSpeedDurationSecs(Number(event.target.value));
+              }}
               type="number"
               value={speedDurationSecs}
             />
@@ -363,7 +384,10 @@ export function TopologyApplyControls({
               aria-label="Network speed test max mebibytes"
               max={256}
               min={1}
-              onChange={(event) => setSpeedMaxBytesMiB(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSpeedMaxBytesMiB(Number(event.target.value));
+              }}
               type="number"
               value={speedMaxBytesMiB}
             />
@@ -376,7 +400,10 @@ export function TopologyApplyControls({
               aria-label="Network speed test rate limit Kbps"
               max={1_000_000}
               min={64}
-              onChange={(event) => setSpeedRateLimitKbps(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSpeedRateLimitKbps(Number(event.target.value));
+              }}
               type="number"
               value={speedRateLimitKbps}
             />
@@ -387,7 +414,10 @@ export function TopologyApplyControls({
               aria-label="Network speed test TCP port"
               max={65_535}
               min={1024}
-              onChange={(event) => setSpeedPort(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSpeedPort(Number(event.target.value));
+              }}
               type="number"
               value={speedPort}
             />
@@ -400,7 +430,10 @@ export function TopologyApplyControls({
               aria-label="Network speed test connect timeout milliseconds"
               max={30_000}
               min={100}
-              onChange={(event) => setSpeedConnectTimeoutMs(Number(event.target.value))}
+              onChange={(event) => {
+                setNetworkSnapshot(null);
+                setSpeedConnectTimeoutMs(Number(event.target.value));
+              }}
               type="number"
               value={speedConnectTimeoutMs}
             />
@@ -424,25 +457,25 @@ export function TopologyApplyControls({
           <input
             aria-label="Force unprivileged network best effort"
             checked={forceUnprivileged}
-            onChange={(event) => setForceUnprivileged(event.target.checked)}
+            onChange={(event) => {
+              setNetworkSnapshot(null);
+              setForceUnprivileged(event.target.checked);
+            }}
             type="checkbox"
           />
           <span>Force unprivileged best effort</span>
         </label>
         <ConfirmationPrompt
-          confirmLabel={pendingAction ? actionConfirmLabel(pendingAction) : "Run"}
-          detail={
-            pendingAction
-              ? `${actionLabel(pendingAction)} ${selectedPlan?.name ?? "selected plan"} on ${vpsCountLabel(pendingActionTargets.length)}.`
-              : ""
-          }
-          items={pendingConfirmationItems}
-          onCancel={() => setPendingAction(null)}
-          onConfirm={() => pendingAction && void submitNetworkChange(pendingAction)}
-          open={pendingAction !== null}
+          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run"}
+          detail={networkSnapshot?.detail ?? ""}
+          expiresAtUnix={networkSnapshot?.privilegeAssertion.expires_unix}
+          items={networkSnapshot?.items ?? []}
+          onCancel={() => setNetworkSnapshot(null)}
+          onConfirm={() => networkSnapshot && void submitNetworkChange(networkSnapshot)}
+          open={networkSnapshot !== null}
           pending={pending}
-          title={pendingAction ? `Confirm ${actionLabel(pendingAction).toLowerCase()}` : "Confirm network action"}
-          tone={pendingAction && isMutation(pendingAction) ? "danger" : "normal"}
+          title={networkSnapshot ? `Confirm ${actionLabel(networkSnapshot.action).toLowerCase()}` : "Confirm network action"}
+          tone={networkSnapshot && isMutation(networkSnapshot.action) ? "danger" : "normal"}
         />
         {visibleJobProgress && (
           <ExecutionResultPanel
@@ -455,7 +488,7 @@ export function TopologyApplyControls({
         <div className="dispatchActions">
           <button
             className="primaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
+            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             type="submit"
           >
             <Play size={17} />
@@ -463,7 +496,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
+            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitRollback}
             type="button"
           >
@@ -472,7 +505,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial}
+            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
             onClick={submitStatus}
             type="button"
           >
@@ -481,7 +514,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
+            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             onClick={submitProbe}
             type="button"
           >
@@ -490,7 +523,7 @@ export function TopologyApplyControls({
           </button>
           <button
             className="secondaryAction"
-            disabled={pending || pendingAction !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
+            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
             onClick={submitSpeedTest}
             type="button"
           >
@@ -502,7 +535,10 @@ export function TopologyApplyControls({
       <PrivilegeVaultBox
         lastPayloadHash={lastPayloadHash}
         onOpenUnlock={onOpenPrivilegeUnlock}
-        onPrivilegeMaterialChange={setPrivilegeMaterial}
+        onPrivilegeMaterialChange={(material) => {
+          setNetworkSnapshot(null);
+          setPrivilegeMaterial(material);
+        }}
         privilegeMaterial={privilegeMaterial}
       />
     </section>
@@ -510,6 +546,23 @@ export function TopologyApplyControls({
 }
 
 type NetworkAction = "apply" | "rollback" | "status" | "probe" | "speed_test";
+
+type NetworkActionSnapshot = {
+  action: NetworkAction;
+  command: string;
+  confirmed: boolean;
+  destructive: boolean;
+  detail: string;
+  forceUnprivileged: boolean;
+  items: Array<{ label: string; value: string }>;
+  operation: JobOperation;
+  payloadHashHex: string;
+  privilegeAssertion: PrivilegeAssertion;
+  selectorExpression: string;
+  targetClientIds: string[];
+  targets: AgentView[];
+  timeoutSecs: number;
+};
 
 function disabledPlanAllowsAction(mode: NetworkAction): boolean {
   return mode === "rollback" || mode === "status";
@@ -565,13 +618,6 @@ function actionConfirmLabel(mode: NetworkAction): string {
 
 function isMutation(mode: NetworkAction) {
   return mode === "apply" || mode === "rollback";
-}
-
-function targetClientIdsForAction(
-  mode: NetworkAction,
-  endpoint: { localClientId: string; peerClientId: string },
-): string[] {
-  return mode === "speed_test" ? [endpoint.localClientId, endpoint.peerClientId] : [endpoint.localClientId];
 }
 
 function backendLabel(backend: TunnelConfigBackend) {

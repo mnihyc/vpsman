@@ -7,12 +7,35 @@ use uuid::Uuid;
 
 use crate::model::*;
 use crate::repository::Repository;
+use crate::repository_jobs::{
+    mark_active_targets_agent_lost_for_client_in_tx, skip_unstarted_queued_targets_for_client_in_tx,
+};
 use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
 use crate::unix_now;
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 
 impl Repository {
+    pub(crate) async fn fixed_target_agents(
+        &self,
+        target_client_ids: &[String],
+    ) -> Result<Vec<AgentView>> {
+        let agents = self.list_agents().await?;
+        let by_id = agents
+            .into_iter()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect::<HashMap<_, _>>();
+        let targets = target_client_ids
+            .iter()
+            .filter_map(|client_id| by_id.get(client_id).cloned())
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            targets.len() == target_client_ids.len(),
+            "fixed_targets_not_found"
+        );
+        Ok(targets)
+    }
+
     pub(crate) async fn fleet_summary(&self) -> Result<FleetSummary> {
         match self {
             Self::Memory(memory) => {
@@ -381,12 +404,7 @@ impl Repository {
         request: &BulkTagMutationRequest,
     ) -> Result<TagMutationResponse> {
         let before_agents = self.list_agents().await?;
-        let targets = self
-            .resolve_bulk_targets(&BulkResolveRequest {
-                selector_expression: request.selector_expression.clone(),
-            })
-            .await?
-            .targets;
+        let targets = self.fixed_target_agents(&request.target_client_ids).await?;
         let target_ids = targets
             .iter()
             .map(|agent| agent.id.clone())
@@ -781,6 +799,13 @@ impl Repository {
                     let mut hidden = memory.hidden_clients.write().await;
                     !hidden.insert(client_id.to_string())
                 };
+                let old_process_incarnation_id = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == client_id)
+                    .and_then(|agent| agent.process_incarnation_id);
                 let mut agents = memory.agents.write().await;
                 let found = agents.iter().any(|agent| agent.id == client_id);
                 agents.retain(|agent| agent.id != client_id);
@@ -814,6 +839,26 @@ impl Repository {
                         session.end_reason = Some("vps_deleted".to_string());
                     }
                 }
+                let agent_lost_job_ids =
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        self.mark_active_targets_agent_lost_for_client(
+                            client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "vps_deleted",
+                            "client was deleted before final command output",
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
+                let skipped_job_ids = self
+                    .skip_unstarted_queued_targets_for_client(
+                        client_id,
+                        "vps_deleted",
+                        "vps_deleted: target skipped before dispatch",
+                    )
+                    .await?;
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -826,6 +871,8 @@ impl Repository {
                         "frontend_visible": false,
                         "access_deactivated": true,
                         "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
+                        "agent_lost_job_ids": agent_lost_job_ids,
+                        "skipped_unstarted_job_ids": skipped_job_ids,
                     }),
                     created_at: deleted_at.clone(),
                 });
@@ -837,6 +884,22 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let client_row = sqlx::query(
+                    r#"
+                    SELECT process_incarnation_id
+                    FROM clients
+                    WHERE id = $1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(client_row) = client_row else {
+                    anyhow::bail!("agent_not_found");
+                };
+                let old_process_incarnation_id: Option<Uuid> =
+                    client_row.try_get("process_incarnation_id")?;
                 let row = sqlx::query(
                     r#"
                     UPDATE clients
@@ -845,7 +908,8 @@ impl Repository {
                         hidden_by = COALESCE(hidden_by, $2),
                         hidden_reason = COALESCE($3, hidden_reason),
                         public_key = ''::bytea,
-                        status = 'deleted'
+                        status = 'deleted',
+                        process_incarnation_id = NULL
                     WHERE id = $1
                     RETURNING id, hidden_at::text AS deleted_at
                     "#,
@@ -859,6 +923,20 @@ impl Repository {
                     anyhow::bail!("agent_not_found");
                 };
                 let deleted_at: String = row.try_get("deleted_at")?;
+                let agent_lost_job_ids =
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        mark_active_targets_agent_lost_for_client_in_tx(
+                            &mut tx,
+                            client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "vps_deleted",
+                            "client was deleted before final command output",
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
                 sqlx::query(
                     r#"
                     UPDATE gateway_sessions
@@ -894,6 +972,13 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
+                let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                    &mut tx,
+                    client_id,
+                    "vps_deleted",
+                    "vps_deleted: target skipped before dispatch",
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -907,11 +992,20 @@ impl Repository {
                     "reason": reason,
                     "frontend_visible": false,
                     "access_deactivated": true,
-                    "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count
+                    "soft_deleted_tunnel_plan_count": soft_deleted_tunnel_plan_count,
+                    "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>()
                 })))
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
+                let mut job_ids = agent_lost_job_ids;
+                job_ids.extend(skipped_job_ids);
+                job_ids.sort();
+                job_ids.dedup();
+                for job_id in job_ids {
+                    self.refresh_job_status_from_targets(job_id).await?;
+                }
                 Ok(DeleteAgentResponse {
                     client_id: client_id.to_string(),
                     deleted: true,

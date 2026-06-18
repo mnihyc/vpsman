@@ -37,6 +37,7 @@ export function ServerJobsPanel({
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [cancelJobSnapshot, setCancelJobSnapshot] = useState<ServerJobRecord | null>(null);
   const summary =
     error ??
     (preview
@@ -82,11 +83,17 @@ export function ServerJobsPanel({
     }
   }
 
+  function reviewCancelJob(job: ServerJobRecord) {
+    setError(null);
+    setCancelJobSnapshot(job);
+  }
+
   async function cancelJob(job: ServerJobRecord) {
     setPendingJobId(job.id);
     setError(null);
     try {
       await onCancelJob(job.id);
+      setCancelJobSnapshot(null);
     } catch (cancelError) {
       setError(
         cancelError instanceof Error
@@ -125,6 +132,7 @@ export function ServerJobsPanel({
               onChange={(event) => {
                 setExpression(event.target.value);
                 setPreview(null);
+                setConfirmOpen(false);
               }}
             />
           </label>
@@ -166,7 +174,7 @@ export function ServerJobsPanel({
         </div>
         <ConfirmationPrompt
           confirmLabel="Queue cleanup"
-          detail="Queues a server-side cleanup job for the current preview hash."
+          detail="Queues a server-side cleanup job for the reviewed artifact set."
           error={error}
           items={[
             { label: "Expression", value: preview?.expression ?? expression },
@@ -259,7 +267,7 @@ export function ServerJobsPanel({
                     <button
                       className="secondaryAction compactAction dangerAction"
                       disabled={pendingJobId === job.id || job.status !== "queued"}
-                      onClick={() => void cancelJob(job)}
+                      onClick={() => reviewCancelJob(job)}
                       title="Cancel queued server job"
                       type="button"
                     >
@@ -272,6 +280,26 @@ export function ServerJobsPanel({
             </div>
           )}
         </CrudPager>
+        <ConfirmationPrompt
+          confirmLabel="Cancel job"
+          detail="Cancel the reviewed queued server-side maintenance job."
+          error={error}
+          items={[
+            { label: "Job", value: cancelJobSnapshot ? shortId(cancelJobSnapshot.id) : "-" },
+            { label: "Type", value: cancelJobSnapshot ? displayToken(cancelJobSnapshot.job_type) : "-" },
+            { label: "Matched", value: cancelJobSnapshot?.matched_count ?? 0 },
+          ]}
+          onCancel={() => setCancelJobSnapshot(null)}
+          onConfirm={() => {
+            if (cancelJobSnapshot) {
+              void cancelJob(cancelJobSnapshot);
+            }
+          }}
+          open={cancelJobSnapshot !== null}
+          pending={pendingJobId !== null}
+          title="Confirm server job cancellation"
+          tone="danger"
+        />
       </div>
     </div>
   );

@@ -11,12 +11,105 @@ use crate::{
         UpsertAgentIdentityRequest,
     },
     repository::Repository,
+    repository_jobs::{
+        mark_active_targets_agent_lost_for_client_in_tx,
+        skip_unstarted_queued_targets_for_client_in_tx,
+    },
     util::unix_now,
 };
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 
 impl Repository {
+    pub(crate) async fn preflight_agent_identity_upsert(
+        &self,
+        request: &UpsertAgentIdentityRequest,
+    ) -> Result<()> {
+        let client_id = request
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("client_id_required")?;
+        let public_key = decode_public_key_hex(&request.client_public_key_hex)?;
+
+        if self
+            .is_client_key_revoked(client_id, &public_key)
+            .await
+            .context("failed to check agent key revocation before identity import")?
+        {
+            anyhow::bail!("agent_identity_key_revoked");
+        }
+
+        match self {
+            Self::Memory(memory) => {
+                if memory.hidden_clients.read().await.contains(client_id) {
+                    anyhow::bail!("agent_identity_deactivated");
+                }
+                if memory.agents.read().await.iter().any(|agent| {
+                    agent.id == client_id && matches!(agent.status.as_str(), "revoked" | "deleted")
+                }) {
+                    anyhow::bail!("agent_identity_deactivated");
+                }
+                let existing = memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .get(client_id)
+                    .cloned();
+                if request.replace_existing_key {
+                    if existing.as_ref().is_none_or(|key| key.is_empty()) {
+                        anyhow::bail!("client_not_found_or_no_key");
+                    }
+                } else if existing.is_some()
+                    || memory
+                        .agents
+                        .read()
+                        .await
+                        .iter()
+                        .any(|agent| agent.id == client_id)
+                {
+                    anyhow::bail!("client_id_already_registered");
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        status,
+                        public_key,
+                        hidden_at IS NOT NULL AS hidden
+                    FROM clients
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(pool)
+                .await?;
+
+                if let Some(row) = row {
+                    let hidden: bool = row.try_get("hidden")?;
+                    let status: String = row.try_get("status")?;
+                    if hidden || matches!(status.as_str(), "revoked" | "deleted") {
+                        anyhow::bail!("agent_identity_deactivated");
+                    }
+                    let existing_key: Vec<u8> = row.try_get("public_key")?;
+                    if request.replace_existing_key {
+                        if existing_key.is_empty() {
+                            anyhow::bail!("client_not_found_or_no_key");
+                        }
+                    } else {
+                        anyhow::bail!("client_id_already_registered");
+                    }
+                } else if request.replace_existing_key {
+                    anyhow::bail!("client_not_found_or_no_key");
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn upsert_agent_identity(
         &self,
         request: &UpsertAgentIdentityRequest,
@@ -77,6 +170,41 @@ impl Repository {
                         anyhow::bail!("client_id_already_registered");
                     }
                 }
+                let old_process_incarnation_id = if request.replace_existing_key {
+                    memory
+                        .agents
+                        .read()
+                        .await
+                        .iter()
+                        .find(|agent| agent.id == client_id)
+                        .and_then(|agent| agent.process_incarnation_id)
+                } else {
+                    None
+                };
+                let agent_lost_job_ids =
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        self.mark_active_targets_agent_lost_for_client(
+                            &client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "client_key_replaced",
+                            "client public key was replaced before final command output",
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
+                if request.replace_existing_key {
+                    let now = unix_now().to_string();
+                    for session in memory.gateway_sessions.write().await.iter_mut() {
+                        if session.client_id == client_id && session.status == "active" {
+                            session.status = "ended".to_string();
+                            session.last_seen_at = now.clone();
+                            session.ended_at = Some(now.clone());
+                            session.end_reason = Some("client_key_replaced".to_string());
+                        }
+                    }
+                }
                 memory
                     .client_public_keys
                     .write()
@@ -98,6 +226,12 @@ impl Repository {
                         }
                         if request.display_name.is_some() {
                             agent.display_name = display_name.clone();
+                        }
+                        if request.replace_existing_key {
+                            agent.status = "offline".to_string();
+                            agent.process_incarnation_id = None;
+                            agent.stale_since = None;
+                            agent.stale_reason = None;
                         }
                         for tag in &tags {
                             if !agent.tags.iter().any(|existing| existing == tag) {
@@ -147,6 +281,7 @@ impl Repository {
                         "public_key_sha256_hex": public_key_sha256_hex,
                         "replace_existing_key": request.replace_existing_key,
                         "tags": tags,
+                        "agent_lost_job_ids": agent_lost_job_ids,
                     }),
                     created_at: unix_now().to_string(),
                 });
@@ -154,6 +289,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let mut agent_lost_job_ids = Vec::new();
                 if fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
                     .await?
                     .is_some()
@@ -162,7 +298,13 @@ impl Repository {
                 }
                 let existing = sqlx::query(
                     r#"
-                    SELECT id, display_name, status, public_key, hidden_at IS NOT NULL AS hidden
+                    SELECT
+                        id,
+                        display_name,
+                        status,
+                        public_key,
+                        process_incarnation_id,
+                        hidden_at IS NOT NULL AS hidden
                     FROM clients
                     WHERE id = $1
                     FOR UPDATE
@@ -183,6 +325,33 @@ impl Repository {
                         if existing_key.is_empty() {
                             anyhow::bail!("client_not_found_or_no_key");
                         }
+                        let old_process_incarnation_id: Option<Uuid> =
+                            row.try_get("process_incarnation_id")?;
+                        if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                            agent_lost_job_ids = mark_active_targets_agent_lost_for_client_in_tx(
+                                &mut tx,
+                                &client_id,
+                                old_process_incarnation_id,
+                                None,
+                                "client_key_replaced",
+                                "client public key was replaced before final command output",
+                            )
+                            .await?;
+                        }
+                        sqlx::query(
+                            r#"
+                            UPDATE gateway_sessions
+                            SET
+                                status = 'ended',
+                                last_seen_at = now(),
+                                ended_at = COALESCE(ended_at, now()),
+                                end_reason = COALESCE(end_reason, 'client_key_replaced')
+                            WHERE client_id = $1 AND status = 'active'
+                            "#,
+                        )
+                        .bind(&client_id)
+                        .execute(&mut *tx)
+                        .await?;
                     } else {
                         anyhow::bail!("client_id_already_registered");
                     }
@@ -191,6 +360,8 @@ impl Repository {
                         UPDATE clients
                         SET display_name = CASE WHEN $2::text IS NULL THEN display_name ELSE $2 END,
                             public_key = $3,
+                            status = CASE WHEN $4 THEN 'offline' ELSE status END,
+                            process_incarnation_id = CASE WHEN $4 THEN NULL ELSE process_incarnation_id END,
                             stale_since = NULL,
                             stale_reason = NULL,
                             stale_build_number = NULL
@@ -206,6 +377,7 @@ impl Repository {
                             .filter(|value| !value.is_empty()),
                     )
                     .bind(&public_key)
+                    .bind(request.replace_existing_key)
                     .execute(&mut *tx)
                     .await?;
                 } else {
@@ -253,11 +425,15 @@ impl Repository {
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "replace_existing_key": request.replace_existing_key,
                     "tags": tags,
+                    "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                 }))
                 .execute(&mut *tx)
                 .await?;
                 let view = fetch_postgres_agent_identity(&mut tx, &client_id).await?;
                 tx.commit().await?;
+                for job_id in agent_lost_job_ids {
+                    self.refresh_job_status_from_targets(job_id).await?;
+                }
                 Ok(view)
             }
         }
@@ -312,6 +488,13 @@ impl Repository {
                     .cloned()
                     .with_context(|| format!("client public key missing for {client_id}"))?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
+                let old_process_incarnation_id = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .find(|agent| agent.id == client_id)
+                    .and_then(|agent| agent.process_incarnation_id);
                 if let Some(existing) = memory
                     .client_key_revocations
                     .read()
@@ -323,7 +506,23 @@ impl Repository {
                     })
                     .cloned()
                 {
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        self.mark_active_targets_agent_lost_for_client(
+                            client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "client_key_revoked",
+                            "client key was revoked before final command output",
+                        )
+                        .await?;
+                    }
                     mark_memory_agent_revoked(memory, client_id).await;
+                    self.skip_unstarted_queued_targets_for_client(
+                        client_id,
+                        "client_key_revoked",
+                        "client_key_revoked: target skipped before dispatch",
+                    )
+                    .await?;
                     return Ok(existing);
                 }
 
@@ -340,7 +539,27 @@ impl Repository {
                     .write()
                     .await
                     .push(record.clone());
+                let agent_lost_job_ids =
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        self.mark_active_targets_agent_lost_for_client(
+                            client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "client_key_revoked",
+                            "client key was revoked before final command output",
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
                 mark_memory_agent_revoked(memory, client_id).await;
+                let skipped_job_ids = self
+                    .skip_unstarted_queued_targets_for_client(
+                        client_id,
+                        "client_key_revoked",
+                        "client_key_revoked: target skipped before dispatch",
+                    )
+                    .await?;
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -351,6 +570,8 @@ impl Repository {
                         "client_id": client_id,
                         "public_key_sha256_hex": record.public_key_sha256_hex,
                         "reason": record.reason,
+                        "agent_lost_job_ids": agent_lost_job_ids,
+                        "skipped_unstarted_job_ids": skipped_job_ids,
                     }),
                     created_at: unix_now().to_string(),
                 });
@@ -360,7 +581,7 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
-                    SELECT public_key, status
+                    SELECT public_key, status, process_incarnation_id
                     FROM clients
                     WHERE id = $1 AND hidden_at IS NULL
                     FOR UPDATE
@@ -377,11 +598,27 @@ impl Repository {
                     anyhow::bail!("client public key missing for {client_id}");
                 }
                 let prior_status: String = row.try_get("status")?;
+                let old_process_incarnation_id: Option<Uuid> =
+                    row.try_get("process_incarnation_id")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
                     fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
                         .await?
                 {
+                    let mut job_ids =
+                        if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                            mark_active_targets_agent_lost_for_client_in_tx(
+                                &mut tx,
+                                client_id,
+                                old_process_incarnation_id,
+                                None,
+                                "client_key_revoked",
+                                "client key was revoked before final command output",
+                            )
+                            .await?
+                        } else {
+                            Vec::new()
+                        };
                     mark_postgres_agent_revoked(
                         &mut tx,
                         client_id,
@@ -390,7 +627,20 @@ impl Repository {
                         &prior_status,
                     )
                     .await?;
+                    let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                        &mut tx,
+                        client_id,
+                        "client_key_revoked",
+                        "client_key_revoked: target skipped before dispatch",
+                    )
+                    .await?;
+                    job_ids.extend(skipped_job_ids);
                     tx.commit().await?;
+                    job_ids.sort();
+                    job_ids.dedup();
+                    for job_id in job_ids {
+                        self.refresh_job_status_from_targets(job_id).await?;
+                    }
                     return Ok(existing);
                 }
 
@@ -410,12 +660,33 @@ impl Repository {
                 .bind(operator.operator.id)
                 .execute(&mut *tx)
                 .await?;
+                let agent_lost_job_ids =
+                    if let Some(old_process_incarnation_id) = old_process_incarnation_id {
+                        mark_active_targets_agent_lost_for_client_in_tx(
+                            &mut tx,
+                            client_id,
+                            old_process_incarnation_id,
+                            None,
+                            "client_key_revoked",
+                            "client key was revoked before final command output",
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
                 mark_postgres_agent_revoked(
                     &mut tx,
                     client_id,
                     operator.operator.id,
                     reason.as_deref(),
                     &prior_status,
+                )
+                .await?;
+                let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
+                    &mut tx,
+                    client_id,
+                    "client_key_revoked",
+                    "client_key_revoked: target skipped before dispatch",
                 )
                 .await?;
                 sqlx::query(
@@ -433,6 +704,8 @@ impl Repository {
                     "client_id": client_id,
                     "public_key_sha256_hex": public_key_sha256_hex,
                     "reason": reason,
+                    "agent_lost_job_ids": agent_lost_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                    "skipped_unstarted_job_ids": skipped_job_ids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
                 }))
                 .execute(&mut *tx)
                 .await?;
@@ -441,6 +714,13 @@ impl Repository {
                         .await?
                         .context("inserted client key revocation was not readable")?;
                 tx.commit().await?;
+                let mut job_ids = agent_lost_job_ids;
+                job_ids.extend(skipped_job_ids);
+                job_ids.sort();
+                job_ids.dedup();
+                for job_id in job_ids {
+                    self.refresh_job_status_from_targets(job_id).await?;
+                }
                 Ok(record)
             }
         }
@@ -698,6 +978,7 @@ async fn mark_memory_agent_revoked(memory: &crate::repository::MemoryState, clie
         .find(|agent| agent.id == client_id)
     {
         agent.status = "revoked".to_string();
+        agent.process_incarnation_id = None;
         agent.stale_since = None;
         agent.stale_reason = None;
     }
@@ -727,6 +1008,7 @@ async fn mark_postgres_agent_revoked(
             hidden_by = COALESCE(hidden_by, $2),
             hidden_reason = COALESCE($3, hidden_reason),
             status = 'revoked',
+            process_incarnation_id = NULL,
             stale_since = NULL,
             stale_reason = NULL,
             stale_build_number = NULL

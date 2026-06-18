@@ -40,6 +40,7 @@ pub(crate) struct ScheduleCreateOptions {
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
     pub(crate) max_failures: i32,
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) struct ScheduleUpdateOptions {
@@ -56,6 +57,7 @@ pub(crate) struct ScheduleUpdateOptions {
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
     pub(crate) max_failures: i32,
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn schedules(api_url: &str, token: Option<&str>) -> Result<()> {
@@ -68,6 +70,7 @@ pub(crate) fn schedule_create(
     token: Option<&str>,
     options: ScheduleCreateOptions,
 ) -> Result<()> {
+    anyhow::ensure!(options.confirmed, "schedule-create requires --confirmed");
     validate_schedule_policy(
         &options.catch_up_policy,
         options.catch_up_limit,
@@ -135,6 +138,7 @@ pub(crate) fn schedule_create(
                 "catch_up_limit": options.catch_up_limit,
                 "retry_delay_secs": options.retry_delay_secs,
                 "max_failures": options.max_failures,
+                "confirmed": options.confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -147,6 +151,7 @@ pub(crate) fn schedule_update(
     token: Option<&str>,
     options: ScheduleUpdateOptions,
 ) -> Result<()> {
+    anyhow::ensure!(options.confirmed, "schedule-update requires --confirmed");
     validate_schedule_policy(
         &options.catch_up_policy,
         options.catch_up_limit,
@@ -207,6 +212,7 @@ pub(crate) fn schedule_update(
                 "catch_up_limit": options.catch_up_limit,
                 "retry_delay_secs": options.retry_delay_secs,
                 "max_failures": options.max_failures,
+                "confirmed": options.confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -218,6 +224,7 @@ pub(crate) fn schedule_enable(
     api_url: &str,
     token: Option<&str>,
     schedule_id: String,
+    confirmed: bool,
 ) -> Result<()> {
     schedule_state_mutation(
         api_url,
@@ -226,6 +233,7 @@ pub(crate) fn schedule_enable(
         "schedule.enable",
         "enable",
         true,
+        confirmed,
     )
 }
 
@@ -233,6 +241,7 @@ pub(crate) fn schedule_disable(
     api_url: &str,
     token: Option<&str>,
     schedule_id: String,
+    confirmed: bool,
 ) -> Result<()> {
     schedule_state_mutation(
         api_url,
@@ -241,6 +250,7 @@ pub(crate) fn schedule_disable(
         "schedule.disable",
         "disable",
         false,
+        confirmed,
     )
 }
 
@@ -250,7 +260,9 @@ pub(crate) fn schedule_defer(
     schedule_id: String,
     deferred_until: String,
     reason: Option<String>,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "schedule-defer requires --confirmed");
     let schedule = schedule_by_id(api_url, token, &schedule_id)?;
     let privilege_assertion = schedule_privilege_for_record(
         api_url,
@@ -270,6 +282,7 @@ pub(crate) fn schedule_defer(
             &serde_json::json!({
                 "deferred_until": deferred_until,
                 "reason": reason,
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -281,7 +294,9 @@ pub(crate) fn schedule_apply_now(
     api_url: &str,
     token: Option<&str>,
     schedule_id: String,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "schedule-apply-now requires --confirmed");
     let schedule = schedule_by_id(api_url, token, &schedule_id)?;
     let privilege_assertion = schedule_privilege_for_record(
         api_url,
@@ -299,6 +314,7 @@ pub(crate) fn schedule_apply_now(
             &format!("/api/v1/schedules/{schedule_id}/apply-now"),
             token,
             &serde_json::json!({
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -310,7 +326,9 @@ pub(crate) fn schedule_delete(
     api_url: &str,
     token: Option<&str>,
     schedule_id: String,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "schedule-delete requires --confirmed");
     let schedule = schedule_by_id(api_url, token, &schedule_id)?;
     let privilege_assertion = schedule_privilege_for_record(
         api_url,
@@ -328,6 +346,7 @@ pub(crate) fn schedule_delete(
             &format!("/api/v1/schedules/{schedule_id}"),
             token,
             &serde_json::json!({
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -342,7 +361,9 @@ fn schedule_state_mutation(
     action: &str,
     endpoint: &str,
     enabled: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "schedule-{endpoint} requires --confirmed");
     let schedule = schedule_by_id(api_url, token, schedule_id)?;
     let privilege_assertion = schedule_privilege_for_record(
         api_url,
@@ -360,6 +381,7 @@ fn schedule_state_mutation(
             &format!("/api/v1/schedules/{schedule_id}/{endpoint}"),
             token,
             &serde_json::json!({
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?

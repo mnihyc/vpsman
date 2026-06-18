@@ -376,7 +376,13 @@ pub(crate) fn artifact_cleanup_create(
     Ok(())
 }
 
-pub(crate) fn server_job_cancel(api_url: &str, token: Option<&str>, job_id: String) -> Result<()> {
+pub(crate) fn server_job_cancel(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: String,
+    confirmed: bool,
+) -> Result<()> {
+    anyhow::ensure!(confirmed, "server-job-cancel requires --confirmed");
     let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
     println!(
         "{}",
@@ -384,7 +390,7 @@ pub(crate) fn server_job_cancel(api_url: &str, token: Option<&str>, job_id: Stri
             api_url,
             &format!("/api/v1/server-jobs/{job_id}/cancel"),
             token,
-            &serde_json::json!({}),
+            &serde_json::json!({ "confirmed": confirmed }),
         )?
     );
     Ok(())

@@ -14,8 +14,8 @@ use vpsman_common::{
     OutputStream,
 };
 use vpsman_server_core::{
-    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_QUEUED, JOB_STATUS_REJECTED,
-    JOB_STATUS_RUNNING, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
+    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_REJECTED, JOB_STATUS_RUNNING,
+    JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
     TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
     TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
     TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
@@ -53,6 +53,9 @@ pub(crate) async fn cancel_job(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict("job_cancel_requires_confirmation"));
+    }
     if state.repo.get_job(job_id).await?.is_none() {
         return Err(ApiError::not_found("job_not_found"));
     }
@@ -118,14 +121,9 @@ pub(crate) async fn cancel_job(
         }
     }
     let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
-    if let Some(status) = &refreshed {
-        if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-            state.publish(WsEvent::JobFinished {
-                job_id,
-                status: status.clone(),
-            });
-        }
-    }
+    state
+        .publish_job_finished_after_refresh(job_id, refreshed.clone())
+        .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(CancelJobResponse {
@@ -207,6 +205,16 @@ async fn create_job_inner(
     {
         return Err(ApiError::conflict("fixed_target_not_found"));
     }
+    let never_connected_skips = never_connected_target_skips(&resolved_targets, &resolved_agents);
+    let never_connected_skip_set = never_connected_skips
+        .iter()
+        .map(|skip| skip.client_id.clone())
+        .collect::<HashSet<_>>();
+    let claimable_targets = resolved_targets
+        .iter()
+        .filter(|client_id| !never_connected_skip_set.contains(*client_id))
+        .cloned()
+        .collect::<Vec<_>>();
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
@@ -216,7 +224,7 @@ async fn create_job_inner(
     };
     let effective_timeout_secs = effective_job_timeout_secs(
         request.timeout_secs.unwrap_or(30),
-        &resolved_targets,
+        &claimable_targets,
         &resolved_agents,
         &privilege_source,
     )?;
@@ -295,7 +303,7 @@ async fn create_job_inner(
     }
     let (dispatch_targets, capability_skips) = split_targets_by_capability(
         &job_command,
-        &resolved_targets,
+        &claimable_targets,
         &resolved_agents,
         request.force_unprivileged,
     );
@@ -350,11 +358,12 @@ async fn create_job_inner(
             )
             .await?
     };
+    precomplete_never_connected_skips(state, job_id, &job_command, never_connected_skips).await?;
     precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
     precomplete_busy_update_skips(state, job_id, &job_command, busy_update_skips).await?;
+    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
     let status = state
-        .repo
-        .refresh_job_status_from_targets(job_id)
+        .terminal_job_status_after_refresh(job_id, refreshed)
         .await?
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
@@ -372,6 +381,11 @@ async fn create_job_inner(
 
 #[derive(Clone, Debug)]
 struct BusyUpdateSkip {
+    client_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct NeverConnectedSkip {
     client_id: String,
 }
 
@@ -404,6 +418,28 @@ fn is_update_lifecycle_command(command: &JobCommand) -> bool {
             | JobCommand::AgentUpdateRollback { .. }
             | JobCommand::AgentUpdateCheck { .. }
     )
+}
+
+fn never_connected_target_skips(
+    targets: &[String],
+    agents: &[AgentView],
+) -> Vec<NeverConnectedSkip> {
+    targets
+        .iter()
+        .filter_map(|client_id| {
+            agents
+                .iter()
+                .find(|agent| agent.id == *client_id)
+                .filter(|agent| target_has_never_connected(agent))
+                .map(|_| NeverConnectedSkip {
+                    client_id: client_id.clone(),
+                })
+        })
+        .collect()
+}
+
+fn target_has_never_connected(agent: &AgentView) -> bool {
+    agent.process_incarnation_id.is_none() || agent.status == "never"
 }
 
 fn confirmation_error_code(command: &JobCommand) -> &'static str {
@@ -573,6 +609,42 @@ async fn precomplete_capability_skips(
         }
     }
     Ok(precompleted_statuses)
+}
+
+async fn precomplete_never_connected_skips(
+    state: &AppState,
+    job_id: Uuid,
+    job_command: &JobCommand,
+    never_connected_skips: Vec<NeverConnectedSkip>,
+) -> Result<(), ApiError> {
+    for skip in never_connected_skips {
+        let outcome = never_connected_skip_outcome(job_id, &skip, job_command)?;
+        state
+            .repo
+            .record_job_outputs_with_config(
+                job_id,
+                &skip.client_id,
+                &outcome.outputs,
+                JobOutputPersistConfig {
+                    object_store: state.backup_object_store.as_ref(),
+                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
+                },
+            )
+            .await?;
+        let target_terminalized = state
+            .repo
+            .update_job_target_result(job_id, &skip.client_id, &outcome)
+            .await?;
+        if target_terminalized {
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id,
+                client_id: skip.client_id,
+                seq: 0,
+                done: true,
+            });
+        }
+    }
+    Ok(())
 }
 
 async fn precomplete_busy_update_skips(
@@ -765,6 +837,38 @@ fn busy_update_skip_outcome(
         accepted: true,
         message: "busy_agent_active_jobs: target has another active job; update skipped"
             .to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            exit_code: Some(0),
+            done: true,
+        }],
+    })
+}
+
+fn never_connected_skip_outcome(
+    job_id: Uuid,
+    skip: &NeverConnectedSkip,
+    command: &JobCommand,
+) -> Result<TargetDispatchOutcome, ApiError> {
+    let status = serde_json::json!({
+        "type": "target_never_connected",
+        "status": TARGET_STATUS_SKIPPED,
+        "client_id": skip.client_id,
+        "command_type": crate::job_request::job_command_type_label(command),
+        "reason": "target_never_connected",
+        "hint": "target has no accepted agent process incarnation; start or reconnect the agent before dispatch",
+        "message": "target_never_connected: target has never connected; job skipped",
+    });
+    Ok(TargetDispatchOutcome {
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
+        command_version: None,
+        accepted: false,
+        message: "target_never_connected: target has never connected; job skipped".to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

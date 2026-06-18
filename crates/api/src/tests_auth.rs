@@ -1167,6 +1167,88 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
 }
 
 #[tokio::test]
+async fn admin_user_routes_preserve_one_active_admin() {
+    let state = memory_test_state();
+    let (admin, headers) = crate::test_auth_context_and_headers(&state).await;
+
+    let error = routes_auth::update_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(admin.operator.id),
+        axum::Json(UpdateOperatorRequest {
+            role: "operator".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            confirmed: true,
+            admin_risk_acknowledged: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "last_active_admin_required");
+
+    let error = routes_auth::disable_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(admin.operator.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "last_active_admin_required");
+
+    let error = routes_auth::delete_operator(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(admin.operator.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "last_active_admin_required");
+}
+
+#[tokio::test]
+async fn job_cancel_routes_require_explicit_confirmation() {
+    let state = memory_test_state();
+    let (_admin, headers) = crate::test_auth_context_and_headers(&state).await;
+
+    let error = routes_jobs::cancel_job(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(Uuid::new_v4()),
+        axum::Json(CancelJobRequest {
+            reason: Some("operator review".to_string()),
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "job_cancel_requires_confirmation");
+
+    let error = routes_server_jobs::cancel_server_job(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(Uuid::new_v4()),
+        axum::Json(routes_server_jobs::CancelServerJobRequest { confirmed: false }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "server_job_cancel_requires_confirmation");
+}
+
+#[tokio::test]
 async fn disabled_and_deleted_operators_cannot_login_and_deleted_usernames_remain_reserved() {
     let repo = Repository::Memory(MemoryState::default());
     let admin_auth = repo
@@ -1685,121 +1767,6 @@ fn internal_gateway_token_requires_matching_bearer() {
         StatusCode::UNAUTHORIZED
     );
     assert!(state.require_internal_gateway(&matching).is_ok());
-}
-
-#[tokio::test]
-async fn internal_command_output_acks_return_durable_sequences() {
-    let state = memory_test_state();
-    let job_id = uuid::Uuid::new_v4();
-    if let Repository::Memory(memory) = &state.repo {
-        memory.job_targets.write().await.push(JobTargetView {
-            job_id,
-            client_id: "client-a".to_string(),
-            status: "running".to_string(),
-            message: None,
-            exit_code: None,
-            started_at: Some("1".to_string()),
-            completed_at: None,
-            process_incarnation_id: None,
-        });
-    }
-    let partial_output = vpsman_common::CommandOutput {
-        job_id,
-        stream: vpsman_common::OutputStream::Stdout,
-        data: b"partial".to_vec(),
-        exit_code: None,
-        done: false,
-    };
-    let final_output = vpsman_common::CommandOutput {
-        job_id,
-        stream: vpsman_common::OutputStream::Stdout,
-        data: b"done".to_vec(),
-        exit_code: Some(0),
-        done: true,
-    };
-    state
-        .repo
-        .record_job_output_chunk_with_config(
-            job_id,
-            "client-a",
-            4,
-            &partial_output,
-            None,
-            crate::repository_job_outputs::JobOutputPersistConfig {
-                object_store: None,
-                artifact_min_bytes: usize::MAX,
-            },
-        )
-        .await
-        .unwrap();
-    state
-        .repo
-        .record_job_output_chunk_with_config(
-            job_id,
-            "client-a",
-            5,
-            &final_output,
-            None,
-            crate::repository_job_outputs::JobOutputPersistConfig {
-                object_store: None,
-                artifact_min_bytes: usize::MAX,
-            },
-        )
-        .await
-        .unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::AUTHORIZATION,
-        "Bearer gateway-secret-at-least-32-characters"
-            .parse()
-            .unwrap(),
-    );
-
-    let response = routes_ingest::reconcile_command_output_acks(
-        axum::extract::State(state.clone()),
-        headers.clone(),
-        axum::Json(vpsman_common::GatewayCommandOutputAckRequest {
-            client_id: "client-a".to_string(),
-            job_id,
-            seqs: vec![1, 4, 5, 8],
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.0.acked, vec![4]);
-
-    state
-        .repo
-        .update_job_target_result(
-            job_id,
-            "client-a",
-            &TargetDispatchOutcome {
-                status: "completed".to_string(),
-                exit_code: Some(0),
-                #[cfg(test)]
-                command_version: Some(1),
-                accepted: true,
-                message: "completed".to_string(),
-                received_at: None,
-                outputs: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-    let response = routes_ingest::reconcile_command_output_acks(
-        axum::extract::State(state),
-        headers,
-        axum::Json(vpsman_common::GatewayCommandOutputAckRequest {
-            client_id: "client-a".to_string(),
-            job_id,
-            seqs: vec![4, 5],
-        }),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.0.acked, vec![4, 5]);
 }
 
 #[test]

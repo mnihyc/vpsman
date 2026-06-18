@@ -141,7 +141,10 @@ async fn create_observed_plan(
     let (status, Json(observed)) = crate::routes_network::create_tunnel_plan(
         State(state),
         headers,
-        Json(CreateTunnelPlanRequest { input }),
+        Json(CreateTunnelPlanRequest {
+            input,
+            confirmed: true,
+        }),
     )
     .await
     .unwrap();

@@ -15,7 +15,8 @@ use tracing::{info, warn};
 use vpsman_common::{
     verify_privilege_assertion, GatewayCommandCancel, GatewayCommandCancelResult,
     GatewayCommandDispatch, GatewayCommandDispatchResult, GatewayPrivilegeVerification,
-    GatewayPrivilegeVerificationResult, PrivilegeAssertionError,
+    GatewayPrivilegeVerificationResult, GatewaySessionDisconnect, GatewaySessionDisconnectResult,
+    PrivilegeAssertionError,
 };
 
 use crate::{
@@ -114,6 +115,7 @@ where
             request.path.as_str(),
             "/internal/v1/gateway/command"
                 | "/internal/v1/gateway/command/cancel"
+                | "/internal/v1/gateway/session/disconnect"
                 | "/internal/v1/gateway/metrics"
                 | "/internal/v1/gateway/privilege/verify"
         )
@@ -167,6 +169,23 @@ where
             }
         };
         match cancel_gateway_command(&state, cancel).await {
+            Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
+            Err(error) => write_gateway_error(&mut stream, error).await?,
+        }
+    } else if request.path == "/internal/v1/gateway/session/disconnect" {
+        let disconnect: GatewaySessionDisconnect = match serde_json::from_slice(&request.body) {
+            Ok(disconnect) => disconnect,
+            Err(error) => {
+                write_http_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": format!("invalid_session_disconnect:{error}")}),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match disconnect_gateway_session(&state, disconnect).await {
             Ok(result) => write_http_json(&mut stream, "200 OK", &result).await?,
             Err(error) => write_gateway_error(&mut stream, error).await?,
         }
@@ -270,6 +289,7 @@ async fn dispatch_gateway_command(
                 .sender
                 .try_send(GatewaySessionMessage::Command(GatewayCommand {
                     request: dispatch.request.clone(),
+                    payload_hash: dispatch.payload_hash.clone(),
                     response: response_tx,
                 }))
                 .map_err(|error| match error {
@@ -337,6 +357,45 @@ async fn cancel_gateway_command(
         .context("gateway command cancel response dropped")
 }
 
+async fn disconnect_gateway_session(
+    state: &GatewayState,
+    disconnect: GatewaySessionDisconnect,
+) -> Result<GatewaySessionDisconnectResult> {
+    let sender = state
+        .sessions
+        .read()
+        .await
+        .get(&disconnect.client_id)
+        .map(|session| session.sender.clone());
+    let Some(sender) = sender else {
+        return Ok(GatewaySessionDisconnectResult {
+            client_id: disconnect.client_id,
+            accepted: true,
+            disconnected: false,
+            message: "agent_not_online".to_string(),
+        });
+    };
+    sender
+        .try_send(GatewaySessionMessage::Disconnect(disconnect.reason))
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                anyhow!(
+                    "agent_session_disconnect_queue_full:{}",
+                    disconnect.client_id
+                )
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow!("agent_session_closed:{}", disconnect.client_id)
+            }
+        })?;
+    Ok(GatewaySessionDisconnectResult {
+        client_id: disconnect.client_id,
+        accepted: true,
+        disconnected: true,
+        message: "disconnect_requested".to_string(),
+    })
+}
+
 async fn write_gateway_error<S>(stream: &mut S, error: anyhow::Error) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -344,7 +403,9 @@ where
     let message = error.to_string();
     let status = if message.contains("agent_not_online") {
         "404 Not Found"
-    } else if message.contains("agent_session_command_queue_full") {
+    } else if message.contains("agent_session_command_queue_full")
+        || message.contains("agent_session_disconnect_queue_full")
+    {
         "503 Service Unavailable"
     } else if message.contains("timed out") {
         "504 Gateway Timeout"
@@ -518,6 +579,7 @@ mod tests {
             sender
                 .try_send(GatewaySessionMessage::Command(GatewayCommand {
                     request: test_job_request(),
+                    payload_hash: "test-payload-hash".to_string(),
                     response,
                 }))
                 .unwrap();

@@ -22,6 +22,13 @@ pub(crate) struct ServerJobListQuery {
     pub(crate) limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelServerJobRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
 pub(crate) async fn preview_artifact_cleanup(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -78,10 +85,16 @@ pub(crate) async fn cancel_server_job(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
+    Json(request): Json<CancelServerJobRequest>,
 ) -> Result<Json<ServerJobView>, ApiError> {
     state
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "server_job_cancel_requires_confirmation",
+        ));
+    }
     let job = state
         .repo
         .cancel_server_job(job_id)

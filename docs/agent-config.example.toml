@@ -8,7 +8,7 @@ tags = []
 
 [noise]
 # Generated before install with `vpsctl noise-keygen`; register the matching
-# public key with `vpsctl agent-identity-upsert` before or after installation.
+# public key with privileged `vpsctl agent-identity-upsert`.
 mode = "enrolled_ik"
 client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
