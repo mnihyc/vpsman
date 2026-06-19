@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
@@ -159,6 +160,7 @@ export function AccessPanel({
     "register",
   );
   const [identityPending, setIdentityPending] = useState(false);
+  const [identityReviewPending, setIdentityReviewPending] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [privateKeyHex, setPrivateKeyHex] = useState<string | null>(null);
   const [createdIdentity, setCreatedIdentity] =
@@ -166,6 +168,7 @@ export function AccessPanel({
   const [revokeClientId, setRevokeClientId] = useState("");
   const [revokeReason, setRevokeReason] = useState("");
   const [revokePending, setRevokePending] = useState(false);
+  const [revokeReviewPending, setRevokeReviewPending] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [pendingConfirmation, setPendingConfirmation] =
     useState<AccessConfirmationAction | null>(null);
@@ -173,6 +176,11 @@ export function AccessPanel({
     useState<AgentIdentityConfirmationSnapshot | null>(null);
   const [revokeSnapshot, setRevokeSnapshot] =
     useState<KeyRevokeConfirmationSnapshot | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
 
   const canManageOperators = operator?.role === "admin";
   const sessionState = apiToken ? "Bearer session active" : "No bearer session";
@@ -212,6 +220,7 @@ export function AccessPanel({
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
+    !identityReviewPending &&
     Boolean(privilegeMaterial) &&
     identityClientId.trim().length > 0 &&
     isFixedHex32(identityPublicKeyHex);
@@ -219,7 +228,8 @@ export function AccessPanel({
     canManageOperators &&
     Boolean(privilegeMaterial) &&
     revokeClientId.trim().length > 0 &&
-    !revokePending;
+    !revokePending &&
+    !revokeReviewPending;
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
@@ -241,14 +251,18 @@ export function AccessPanel({
   }
 
   function clearIdentityReview() {
+    invalidateReviewGeneration();
     setIdentitySnapshot(null);
+    setIdentityReviewPending(false);
     setPendingConfirmation((current) =>
       current === "agent-identity" ? null : current,
     );
   }
 
   function clearRevokeReview() {
+    invalidateReviewGeneration();
     setRevokeSnapshot(null);
+    setRevokeReviewPending(false);
     setPendingConfirmation((current) => (current === "key-revoke" ? null : current));
   }
 
@@ -344,9 +358,19 @@ export function AccessPanel({
       );
       return;
     }
+    const reviewGeneration = captureReviewGeneration();
+    const isRotate = identityMode === "rotate";
+    const snapshotInput = {
+      clientId,
+      displayName: isRotate ? null : identityDisplayName.trim() || null,
+      publicKeyHex: identityPublicKeyHex.trim().toLowerCase(),
+      replaceExistingKey: isRotate,
+      tags: isRotate ? [] : parseListInput(identityTags),
+    };
     setIdentityError(null);
+    setIdentityReviewPending(true);
     try {
-      const isRotate = identityMode === "rotate";
+      await waitForReviewRender();
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
           action: isRotate ? "agent_identity.rotate" : "agent_identity.import",
@@ -356,19 +380,23 @@ export function AccessPanel({
         }),
         privilegeMaterial: privilegeMaterial!,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setIdentitySnapshot({
-        clientId,
-        publicKeyHex: identityPublicKeyHex.trim().toLowerCase(),
-        displayName: isRotate ? null : identityDisplayName.trim() || null,
-        tags: isRotate ? [] : parseListInput(identityTags),
-        replaceExistingKey: isRotate,
+        ...snapshotInput,
         privilegeAssertion,
       });
       setPendingConfirmation("agent-identity");
     } catch (error) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setIdentityError(
         error instanceof Error ? error.message : "Privilege assertion failed",
       );
+    } finally {
+      setIdentityReviewPending(false);
     }
   }
 
@@ -415,8 +443,15 @@ export function AccessPanel({
       setRevokeError(privilegeMaterial ? "VPS ID is required" : "Privilege unlock is required");
       return;
     }
+    const reviewGeneration = captureReviewGeneration();
+    const snapshotInput = {
+      clientId,
+      reason: revokeReason.trim() || null,
+    };
     setRevokeError(null);
+    setRevokeReviewPending(true);
     try {
+      await waitForReviewRender();
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
           action: "client_key.revoke",
@@ -426,16 +461,23 @@ export function AccessPanel({
         }),
         privilegeMaterial: privilegeMaterial!,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setRevokeSnapshot({
-        clientId,
-        reason: revokeReason.trim() || null,
+        ...snapshotInput,
         privilegeAssertion,
       });
       setPendingConfirmation("key-revoke");
     } catch (error) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setRevokeError(
         error instanceof Error ? error.message : "Privilege assertion failed",
       );
+    } finally {
+      setRevokeReviewPending(false);
     }
   }
 
@@ -1023,7 +1065,9 @@ export function AccessPanel({
             type="submit"
           >
             <Fingerprint size={17} />
-            {identityMode === "rotate"
+            {identityReviewPending
+              ? "Preparing review"
+              : identityMode === "rotate"
               ? "Rotate key"
               : "Import gateway identity"}
           </button>
@@ -1090,7 +1134,7 @@ export function AccessPanel({
             type="submit"
           >
             <Ban size={17} />
-            Revoke current key
+            {revokeReviewPending ? "Preparing review" : "Revoke current key"}
           </button>
         </form>
 

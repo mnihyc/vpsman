@@ -9,6 +9,8 @@ import {
 } from "./support/consoleNavigation";
 
 async function activate(locator: Locator) {
+  await expect(locator).toBeVisible();
+  await expect(locator).toBeEnabled();
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
@@ -267,6 +269,146 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   });
 });
 
+test("job dispatch async review preparation ignores stale edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dispatch async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+  await unlockPrivilege(page, "Dispatch");
+
+  await page.getByLabel("Command argv").fill("/usr/bin/uptime");
+  await page
+    .getByLabel("Bulk target selector expression")
+    .fill("id:agent-sfo-01");
+  await activate(page.getByRole("button", { name: "Review dispatch" }));
+  await expect(page.getByText("Preparing dispatch review")).toBeVisible();
+  await page.getByLabel("Command argv").fill("/usr/bin/id");
+  await expect(page.getByText("Preparing dispatch review")).toBeHidden();
+  await expect(page.getByText("Confirm job dispatch")).toBeHidden();
+
+  await activate(page.getByRole("button", { name: "Review dispatch" }));
+  await expect(page.getByText("Confirm job dispatch")).toBeVisible();
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Dispatch job" }),
+  );
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    argv: ["/usr/bin/id"],
+    command: "shell_argv",
+    operation: {
+      argv: ["/usr/bin/id"],
+      type: "shell",
+    },
+  });
+});
+
+test("bulk tag async preview ignores stale selector edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk tag async preview consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Tags", "Bulk");
+  await unlockPrivilegeFor(page, "Tags", "Bulk");
+
+  await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
+  const selector = page.getByRole("searchbox", {
+    name: "Bulk tag selector expression",
+  });
+  await selector.fill("id:agent-sfo-01");
+  await activate(page.getByRole("button", { name: "Preview targets" }));
+  await expect(page.getByText("Preparing tag preview")).toBeVisible();
+  await selector.fill("id:agent-fra-02");
+  await expect(page.getByText("Preparing tag preview")).toBeHidden();
+  await expect(page.locator(".bulkTagPreview")).toHaveCount(0);
+
+  await activate(page.getByRole("button", { name: "Preview targets" }));
+  await expect(page.locator(".bulkTagPreview")).toContainText("core-fra-02");
+  await activate(page.getByRole("button", { name: "Review mutation" }));
+  await expect(page.getByText("Confirm tag mutation")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Apply tag mutation" }));
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { bulkTagMutations: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.bulkTagMutations.at(-1);
+  });
+  expect(request).toMatchObject({
+    action: "add",
+    confirmed: true,
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+});
+
+test("artifact cleanup async preview ignores stale expression edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "server cleanup async preview consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Jobs", "Server jobs");
+
+  const cleanupPanel = page.locator(".fleetPanel", {
+    has: page.getByRole("heading", { name: "Artifact cleanup" }),
+  });
+  const expression = cleanupPanel.getByLabel("Expression");
+  await expression.fill('artifact.domain = "job_output"');
+  await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
+  await expect(page.getByText("Preparing cleanup preview")).toBeVisible();
+  await expression.fill('artifact.domain = "file_transfer_source"');
+  await expect(page.getByText("Preparing cleanup preview")).toBeHidden();
+  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue("");
+
+  await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
+  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  );
+  await activate(cleanupPanel.getByRole("button", { name: "Queue cleanup" }));
+  await expect(page.getByText("Confirm artifact cleanup")).toBeVisible();
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Queue cleanup" }),
+  );
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { artifactCleanupJobs: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.artifactCleanupJobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    expression: 'artifact.domain = "file_transfer_source"',
+    preview_hash:
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  });
+});
+
 test("backup policy review submits a frozen target list and privilege assertion", async ({
   page,
 }, testInfo) => {
@@ -365,6 +507,289 @@ test("data-source apply confirmation closes on edit and submits a fresh snapshot
   expect(
     (request as { operation: { toml: string } }).operation.toml,
   ).toContain('client_id = "agent-sfo-01"');
+});
+
+test("bulk config async review preparation ignores stale selector edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk config async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Bulk apply");
+  await unlockPrivilegeFor(page, "Config", "Bulk apply");
+
+  const panel = page.locator(".configApplyGrid");
+  const selector = panel.getByRole("searchbox", {
+    name: "Bulk config selector expression",
+  });
+  await selector.fill("id:agent-sfo-01");
+  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Preparing bulk config review")).toBeVisible();
+  await selector.fill("id:agent-fra-02");
+  await expect(page.getByText("Preparing bulk config review")).toBeHidden();
+  await expect(page.getByText("Confirm bulk config apply")).toBeHidden();
+
+  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Apply config patch" }));
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    command: "data_source_config_patch",
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+});
+
+test("data-source assignment async review ignores stale selector edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "data-source assignment async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Templates");
+  await unlockPrivilegeFor(page, "Config", "Templates");
+
+  const panel = page.locator(".dataSourcePresetPanel");
+  const selector = panel.getByRole("searchbox", {
+    name: "Data-source assignment target expression",
+  });
+  await selector.fill("id:agent-sfo-01");
+  await activate(panel.getByRole("button", { name: "Review assignment" }));
+  await expect(
+    page.getByText("Preparing data-source assignment review"),
+  ).toBeVisible();
+  await selector.fill("id:agent-fra-02");
+  await expect(
+    page.getByText("Preparing data-source assignment review"),
+  ).toBeHidden();
+  await expect(panel.getByText("Assign data-source preset")).toBeHidden();
+
+  await activate(panel.getByRole("button", { name: "Review assignment" }));
+  await expect(panel.getByText("Assign data-source preset")).toBeVisible();
+  await activate(
+    panel.locator(".confirmationPrompt").getByRole("button", {
+      name: "Confirm",
+      exact: true,
+    }),
+  );
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { dataSourcePresetAssignments: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.dataSourcePresetAssignments.at(-1);
+  });
+  expect(request).toMatchObject({
+    confirmed: true,
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+});
+
+test("data-source apply async review ignores stale target edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "data-source apply async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Templates");
+  await unlockPrivilegeFor(page, "Config", "Templates");
+
+  const panel = page.locator(".dataSourcePresetPanel");
+  await chooseVpsBySearch(
+    panel,
+    "Hot-config preview VPS",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await expect(
+    page.getByText("Preparing data-source apply review"),
+  ).toBeVisible();
+  await chooseVpsBySearch(
+    panel,
+    "Hot-config preview VPS",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await expect(
+    page.getByText("Preparing data-source apply review"),
+  ).toBeHidden();
+  await expect(panel.getByText("Apply data-source patch")).toBeHidden();
+
+  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await expect(panel.getByText("Apply data-source patch")).toBeVisible();
+  await activate(
+    panel.locator(".confirmationPrompt").getByRole("button", {
+      name: "Confirm",
+      exact: true,
+    }),
+  );
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    command: "data_source_config_patch",
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+  expect(
+    (request as { operation: { toml: string } }).operation.toml,
+  ).toContain('client_id = "agent-fra-02"');
+});
+
+test("access key lifecycle async reviews ignore stale field edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "access key lifecycle async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "VPS keys");
+  await unlockPrivilegeFor(page, "Access", "VPS keys");
+
+  const inspector = page.locator(".accessInspector");
+  await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
+  await inspector
+    .getByLabel("Agent identity public key hex")
+    .fill("a".repeat(64));
+  await inspector
+    .getByLabel("Agent identity display name")
+    .fill("edge-tokyo-a");
+  await activate(
+    inspector.getByRole("button", { name: "Import gateway identity" }),
+  );
+  await expect(inspector.getByText("Preparing review")).toBeVisible();
+  await inspector
+    .getByLabel("Agent identity display name")
+    .fill("edge-tokyo-b");
+  await expect(inspector.getByText("Preparing review")).toBeHidden();
+  await expect(
+    page.getByLabel("Confirm direct gateway identity import"),
+  ).toBeHidden();
+
+  await activate(
+    inspector.getByRole("button", { name: "Import gateway identity" }),
+  );
+  await expect(
+    page.getByLabel("Confirm direct gateway identity import"),
+  ).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm direct gateway identity import")
+      .getByRole("button", { name: "Import identity" }),
+  );
+  const identityRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { agentIdentities: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.agentIdentities.at(-1);
+  });
+  expect(identityRequest).toMatchObject({
+    client_id: "agent-tokyo-04",
+    display_name: "edge-tokyo-b",
+  });
+
+  await chooseVpsBySearch(
+    inspector,
+    "VPS key revoke VPS ID",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await inspector.getByLabel("VPS key revoke reason").fill("reason-a");
+  await activate(inspector.getByRole("button", { name: "Revoke current key" }));
+  await expect(inspector.getByText("Preparing review")).toBeVisible();
+  await inspector.getByLabel("VPS key revoke reason").fill("reason-b");
+  await expect(inspector.getByText("Preparing review")).toBeHidden();
+  await expect(page.getByLabel("Confirm current key revocation")).toBeHidden();
+
+  await activate(inspector.getByRole("button", { name: "Revoke current key" }));
+  await expect(page.getByLabel("Confirm current key revocation")).toBeVisible();
+  await activate(
+    page
+      .getByLabel("Confirm current key revocation")
+      .getByRole("button", { name: "Revoke key" }),
+  );
+  const revokeRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { clientKeyRevocations: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.clientKeyRevocations.at(-1);
+  });
+  expect(revokeRequest).toMatchObject({
+    reason: "reason-b",
+  });
+});
+
+test("fleet delete review clears on selection changes and ignores stale review completion", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "fleet delete review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await unlockPrivilegeFor(page, "Fleet", "Instances");
+
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  const backupRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  const sfoRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await backupRow.getByLabel("Select VPS instance records row").check();
+  await fleetGrid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+  await sfoRow.getByLabel("Select VPS instance records row").check();
+  await page.waitForTimeout(180);
+  await expect(page.getByText("Delete VPS from panel")).toBeHidden();
+
+  await backupRow.getByLabel("Select VPS instance records row").uncheck();
+  await fleetGrid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+  const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
+  await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
+  await activate(prompt.getByRole("button", { name: "Delete VPS" }));
+
+  const deleteRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { agentDeletes: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.agentDeletes.at(-1);
+  });
+  expect(deleteRequest).toMatchObject({
+    confirmed: true,
+    reason: "Deleted from fleet inventory selection action",
+  });
 });
 
 test("topology network confirmation closes on edit and submits a fresh snapshot", async ({

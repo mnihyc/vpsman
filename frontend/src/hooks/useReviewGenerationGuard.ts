@@ -3,7 +3,10 @@ import { useCallback, useRef } from "react";
 export function useReviewGenerationGuard() {
   const generationRef = useRef(0);
 
-  const captureReviewGeneration = useCallback(() => generationRef.current, []);
+  const captureReviewGeneration = useCallback(() => {
+    generationRef.current += 1;
+    return generationRef.current;
+  }, []);
   const invalidateReviewGeneration = useCallback(() => {
     generationRef.current += 1;
   }, []);

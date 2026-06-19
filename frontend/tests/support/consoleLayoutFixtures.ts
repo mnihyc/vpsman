@@ -2075,6 +2075,8 @@ export async function installConsoleApiMock(
         backupArtifactHandoffs: [] as unknown[],
         backupPolicies: [] as unknown[],
         agentDeletes: [] as unknown[],
+        artifactCleanupJobs: [] as unknown[],
+        artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
         bulkResolve: [] as unknown[],
         dataSourceHotConfigs: [] as unknown[],
@@ -3630,6 +3632,7 @@ export async function installConsoleApiMock(
         ) {
           const body = await readJsonBody(input, init);
           const request = body as { expression?: string };
+          requests.artifactCleanupPreviews.push(body);
           const matchedBytes = (
             fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
           ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
@@ -3652,6 +3655,7 @@ export async function installConsoleApiMock(
             expression?: string;
             preview_hash?: string;
           };
+          requests.artifactCleanupJobs.push(body);
           const matchedBytes = (
             fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
           ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);

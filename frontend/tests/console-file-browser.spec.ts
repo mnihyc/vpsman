@@ -7,6 +7,8 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function activate(locator: Locator) {
+  await expect(locator).toBeVisible();
+  await expect(locator).toBeEnabled();
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
@@ -44,7 +46,11 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await page.keyboard.type("listen=8443\n");
   await activate(page.getByRole("button", { name: "Review save", exact: true }));
   await expect(page.getByText("Save file")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Confirm" }));
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Confirm", exact: true }),
+  );
 
   await expect(page.getByText("Save /etc/app.conf completed", { exact: true })).toBeVisible();
   await page.locator(".fileDetailsToolbar .iconButton").nth(1).click();
@@ -57,7 +63,11 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(page.locator(".confirmationPrompt")).toContainText("Upload /upload.conf on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Existing file");
   await expect(page.locator(".confirmationPrompt")).toContainText("skip");
-  await activate(page.getByRole("button", { name: "Confirm" }));
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Confirm", exact: true }),
+  );
 
   await activate(page.getByTitle("Create file or folder"));
   await page.locator(".fileCommandPopover").getByLabel("Name").fill("new.conf");
@@ -68,7 +78,11 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
   await expect(page.locator(".confirmationPrompt")).toContainText("Write text /new.conf on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Policy");
-  await activate(page.getByRole("button", { name: "Confirm" }));
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Confirm", exact: true }),
+  );
 
   await page.locator(".fileCommandPopover").getByLabel("Name").fill("conf.d");
   await page.locator(".fileCommandPopover").getByLabel("Type").selectOption("directory");
@@ -80,7 +94,11 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await expect(page.locator(".confirmationPrompt")).toContainText("Create folder /conf.d on edge-sfo-01_agent-sf");
   await expect(page.locator(".confirmationPrompt")).toContainText("Recursive");
   await expect(page.locator(".confirmationPrompt")).toContainText("yes");
-  await activate(page.getByRole("button", { name: "Confirm" }));
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Confirm", exact: true }),
+  );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileBrowserJobs);
   expect(requests.some((request: any) => request.operation?.type === "file_list_dir")).toBe(true);
@@ -103,6 +121,50 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   const createdFolder = requests.find((request: any) => request.operation?.type === "file_mkdir" && request.operation?.path === "/conf.d");
   expect(createdFolder.operation.mode).toBe(0o755);
   expect(createdFolder.operation.recursive).toBe(true);
+});
+
+test("single-file operation confirmation closes on operation edits", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "file browser is a dense desktop operations panel");
+
+  await page.goto("/");
+  await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
+  await openConsoleSubpage(page, "Jobs", "Files");
+  await unlockPrivilege(page, "Files");
+  await activate(page.getByRole("button", { name: "Refresh", exact: true }));
+  await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
+
+  await activate(page.getByTitle("Create file or folder"));
+  const popover = page.locator(".fileCommandPopover");
+  await popover.getByLabel("Name").fill("stale-a.conf");
+  await activate(popover.getByRole("button", { name: "Review write" }));
+  await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
+
+  await popover.getByLabel("Name").fill("stale-b.conf");
+  await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeHidden();
+  await activate(popover.getByRole("button", { name: "Review write" }));
+  await expect(page.locator(".confirmationPrompt").getByText("Write text", { exact: true })).toBeVisible();
+  await activate(
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Confirm", exact: true }),
+  );
+
+  const createdFile = await page.evaluate(() => {
+    const requests = (window as any).__vpsmanTestRequests.fileBrowserJobs;
+    return requests.find(
+      (request: any) =>
+        request.operation?.type === "file_write_text" &&
+        request.operation?.path === "/stale-b.conf",
+    );
+  });
+  expect(createdFile).toMatchObject({
+    operation: {
+      create: true,
+      path: "/stale-b.conf",
+      type: "file_write_text",
+    },
+    selector_expression: "id:agent-sfo-01",
+  });
 });
 
 test("runs bulk file download and upload workflows with grouped summaries", async ({ page }, testInfo) => {

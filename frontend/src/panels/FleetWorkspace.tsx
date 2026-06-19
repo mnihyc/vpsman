@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -49,6 +50,7 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
@@ -320,7 +322,16 @@ export function FleetWorkspace({
   const [deleteSnapshot, setDeleteSnapshot] =
     useState<DeleteAgentConfirmationSnapshot | null>(null);
   const [deletePending, setDeletePending] = useState(false);
+  const [deleteReviewPending, setDeleteReviewPending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteReviewTargetRef = useRef<string | null>(null);
+  const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(null);
+  const deleteReviewPendingRef = useRef(false);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const latestRollups = useMemo(
     () => latestTelemetryRollupsByClient(telemetryRollups),
     [telemetryRollups],
@@ -342,6 +353,39 @@ export function FleetWorkspace({
   ].includes(activeSubpage)
     ? activeSubpage
     : "instances";
+
+  const clearDeleteReview = useCallback(() => {
+    deleteReviewTargetRef.current = null;
+    invalidateReviewGeneration();
+    setDeleteSnapshot(null);
+    setDeleteReviewPending(false);
+  }, [invalidateReviewGeneration]);
+
+  useEffect(() => {
+    deleteSnapshotRef.current = deleteSnapshot;
+  }, [deleteSnapshot]);
+
+  useEffect(() => {
+    deleteReviewPendingRef.current = deleteReviewPending;
+  }, [deleteReviewPending]);
+
+  useEffect(() => {
+    clearDeleteReview();
+  }, [activeSubpage, selectedAgent?.id, clearDeleteReview]);
+
+  const handleFleetSelectionChange = useCallback(
+    (rows: AgentView[]) => {
+      const reviewedClientId =
+        deleteSnapshotRef.current?.clientId ?? deleteReviewTargetRef.current;
+      if (!reviewedClientId && !deleteReviewPendingRef.current) {
+        return;
+      }
+      if (rows.length !== 1 || rows[0]?.id !== reviewedClientId) {
+        clearDeleteReview();
+      }
+    },
+    [clearDeleteReview],
+  );
   const fleetColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
     () => [
       {
@@ -510,6 +554,7 @@ export function FleetWorkspace({
     subpage: string,
     storageKey: string,
   ) {
+    clearDeleteReview();
     const selectorExpression = selectorExpressionForClientIds(
       rows.map((agent) => agent.id),
     );
@@ -521,6 +566,7 @@ export function FleetWorkspace({
   }
 
   function openFileBrowserWorkflow(rows: AgentView[]) {
+    clearDeleteReview();
     if (rows.length !== 1) {
       return;
     }
@@ -529,6 +575,7 @@ export function FleetWorkspace({
   }
 
   function openUpdateCheckWorkflow(rows: AgentView[]) {
+    clearDeleteReview();
     onOpenJobDispatchPreset({
       mode: "agent_update_check",
       selectorExpression: selectorExpressionForClientIds(
@@ -542,6 +589,7 @@ export function FleetWorkspace({
   }
 
   async function requestDeleteAgent(rows: AgentView[]) {
+    clearDeleteReview();
     if (rows.length !== 1) {
       return;
     }
@@ -551,7 +599,11 @@ export function FleetWorkspace({
       return;
     }
     const target = rows[0];
+    deleteReviewTargetRef.current = target.id;
+    const reviewGeneration = captureReviewGeneration();
+    setDeleteReviewPending(true);
     try {
+      await waitForReviewRender();
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
           action: "agent.delete",
@@ -561,6 +613,9 @@ export function FleetWorkspace({
         }),
         privilegeMaterial,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setDeleteError(null);
       setDeleteSnapshot({
         clientId: target.id,
@@ -569,7 +624,12 @@ export function FleetWorkspace({
         privilegeAssertion,
       });
     } catch (error) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleteReviewPending(false);
     }
   }
 
@@ -583,7 +643,7 @@ export function FleetWorkspace({
         privilege_assertion: deleteSnapshot.privilegeAssertion,
         reason: "Deleted from fleet inventory selection action",
       });
-      setDeleteSnapshot(null);
+      clearDeleteReview();
       onSelectAgent(null);
     });
   }
@@ -744,7 +804,11 @@ export function FleetWorkspace({
             expandOnRowClick
             getRowId={(agent) => agent.id}
             itemLabel="instances"
-            onOpenRow={(agent) => onSelectAgent(agent.id)}
+            onOpenRow={(agent) => {
+              clearDeleteReview();
+              onSelectAgent(agent.id);
+            }}
+            onSelectionChange={handleFleetSelectionChange}
             renderExpandedRow={(agent) => (
               <FleetInstanceDetail
                 agent={agent}
@@ -825,7 +889,7 @@ export function FleetWorkspace({
             }
             onCancel={() => {
               setDeleteError(null);
-              setDeleteSnapshot(null);
+              clearDeleteReview();
             }}
             onConfirm={() => void confirmDeleteAgent()}
             open={Boolean(deleteSnapshot)}

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
 import { FileSliders, Play, RefreshCw, Save, ServerCog, Trash2 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import {
@@ -479,88 +480,155 @@ function BulkConfigApply({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [timeoutSecs, setTimeoutSecs] = useState(30);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const selectedTemplate = hotConfigRuleTemplates.find((template) => template.id === (templateId || hotConfigRuleTemplates[0]?.id));
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
   const ready = Boolean(selectedTemplate && selectorExpression.trim() && privilegeMaterial && !selectorParse.error);
 
   useEffect(() => writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (selectedTemplate) {
       setValuesText(formatJsonObject(exampleValuesForTemplate(selectedTemplate)));
       setRendered(null);
-      setApplySnapshot(null);
-      setConfirmOpen(false);
+      clearBulkConfigReview();
     }
   }, [selectedTemplate?.id]);
 
+  function clearBulkConfigReview() {
+    invalidateReviewGeneration();
+    setApplySnapshot(null);
+    setConfirmOpen(false);
+    setReviewStatus(null);
+  }
+
   async function previewTargets() {
-    await runAction(async () => {
-      if (selectorParse.error) {
-        throw new Error(selectorParse.error);
+    clearBulkConfigReview();
+    const reviewGeneration = captureReviewGeneration();
+    const frozenSelector = selectorExpression.trim();
+    setReviewStatus("Resolving config targets");
+    try {
+      await runAction(async () => {
+        await waitForReviewRender();
+        if (selectorParse.error) {
+          throw new Error(selectorParse.error);
+        }
+        const nextPreview = await onResolveBulk(frozenSelector);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(nextPreview);
+        setApplySnapshot(null);
+      });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewStatus(null);
       }
-      setPreview(await onResolveBulk(selectorExpression.trim()));
-      setApplySnapshot(null);
-    });
+    }
   }
 
   async function renderPatch() {
     if (!selectedTemplate) {
       return;
     }
-    await runAction(async () => {
-      setRendered(await onRenderHotConfigRuleTemplate(selectedTemplate.id, { values: parseJsonObject(valuesText) }));
-      setApplySnapshot(null);
-    });
+    clearBulkConfigReview();
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTemplateId = selectedTemplate.id;
+    const frozenValuesText = valuesText;
+    setReviewStatus("Rendering config patch");
+    try {
+      await runAction(async () => {
+        const frozenValues = parseJsonObject(frozenValuesText);
+        await waitForReviewRender();
+        const nextRendered = await onRenderHotConfigRuleTemplate(frozenTemplateId, { values: frozenValues });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setRendered(nextRendered);
+        setApplySnapshot(null);
+      });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewStatus(null);
+      }
+    }
   }
 
   async function reviewApply() {
-    await runAction(async () => {
-      if (!selectedTemplate || !privilegeMaterial) {
-        throw new Error("Bulk config apply is incomplete");
-      }
-      if (selectorParse.error) {
-        throw new Error(selectorParse.error);
-      }
-      const frozenSelector = selectorExpression.trim();
-      if (!frozenSelector) {
-        throw new Error("Add at least one target selector");
-      }
-      const nextPreview = await onResolveBulk(frozenSelector);
-      const clientIds = nextPreview.targets.map((target) => target.id);
-      if (!clientIds.length) {
-        throw new Error("Bulk config confirmation resolved no VPSs");
-      }
-      const nextRendered = await onRenderHotConfigRuleTemplate(selectedTemplate.id, { values: parseJsonObject(valuesText) });
-      const operation: JobOperation = {
-        type: "data_source_config_patch",
-        apply_mode: "incremental_patch",
-        toml: nextRendered.toml,
-      };
-      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
-      const built = await buildPrivilegeForJobOperation({
-        clientIds,
-        commandType: "data_source_config_patch",
-        operation,
-        privilegeMaterial,
-        selectorExpression: frozenSelector,
-        timeoutSecs: boundedTimeoutSecs,
+    clearBulkConfigReview();
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTemplate = selectedTemplate;
+    const frozenPrivilegeMaterial = privilegeMaterial;
+    const frozenSelector = selectorExpression.trim();
+    const frozenValuesText = valuesText;
+    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+    setReviewStatus("Preparing bulk config review");
+    try {
+      await runAction(async () => {
+        const frozenValues = parseJsonObject(frozenValuesText);
+        await waitForReviewRender();
+        if (!frozenTemplate || !frozenPrivilegeMaterial) {
+          throw new Error("Bulk config apply is incomplete");
+        }
+        if (selectorParse.error) {
+          throw new Error(selectorParse.error);
+        }
+        if (!frozenSelector) {
+          throw new Error("Add at least one target selector");
+        }
+        const nextPreview = await onResolveBulk(frozenSelector);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        const clientIds = nextPreview.targets.map((target) => target.id);
+        if (!clientIds.length) {
+          throw new Error("Bulk config confirmation resolved no VPSs");
+        }
+        const nextRendered = await onRenderHotConfigRuleTemplate(frozenTemplate.id, { values: frozenValues });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        const operation: JobOperation = {
+          type: "data_source_config_patch",
+          apply_mode: "incremental_patch",
+          toml: nextRendered.toml,
+        };
+        const built = await buildPrivilegeForJobOperation({
+          clientIds,
+          commandType: "data_source_config_patch",
+          operation,
+          privilegeMaterial: frozenPrivilegeMaterial,
+          selectorExpression: frozenSelector,
+          timeoutSecs: boundedTimeoutSecs,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(nextPreview);
+        setRendered(nextRendered);
+        setApplySnapshot({
+          clientIds,
+          operation,
+          payloadHashHex: built.payloadHashHex,
+          privilegeAssertion: built.privilegeAssertion,
+          rendered: nextRendered,
+          selectorExpression: frozenSelector,
+          targets: nextPreview.targets,
+          templateName: frozenTemplate.name,
+          timeoutSecs: boundedTimeoutSecs,
+        });
+        setConfirmOpen(true);
       });
-      setPreview(nextPreview);
-      setRendered(nextRendered);
-      setApplySnapshot({
-        clientIds,
-        operation,
-        payloadHashHex: built.payloadHashHex,
-        privilegeAssertion: built.privilegeAssertion,
-        rendered: nextRendered,
-        selectorExpression: frozenSelector,
-        targets: nextPreview.targets,
-        templateName: selectedTemplate.name,
-        timeoutSecs: boundedTimeoutSecs,
-      });
-      setConfirmOpen(true);
-    });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewStatus(null);
+      }
+    }
   }
 
   async function applyPatch() {
@@ -617,7 +685,14 @@ function BulkConfigApply({
     <div className="configApplyGrid">
       <div className="compactForm">
         <strong>Patch source</strong>
-        <select aria-label="Rule template" onChange={(event) => setTemplateId(event.target.value)} value={selectedTemplate?.id ?? ""}>
+        <select
+          aria-label="Rule template"
+          onChange={(event) => {
+            setTemplateId(event.target.value);
+            clearBulkConfigReview();
+          }}
+          value={selectedTemplate?.id ?? ""}
+        >
           {hotConfigRuleTemplates.map((template) => (
             <option key={template.id} value={template.id}>
               {template.name}
@@ -629,8 +704,7 @@ function BulkConfigApply({
           onChange={(event) => {
             setValuesText(event.target.value);
             setRendered(null);
-            setApplySnapshot(null);
-            setConfirmOpen(false);
+            clearBulkConfigReview();
           }}
           rows={7}
           value={valuesText}
@@ -649,8 +723,7 @@ function BulkConfigApply({
           onChange={(value) => {
             setSelectorExpression(value);
             setPreview(null);
-            setApplySnapshot(null);
-            setConfirmOpen(false);
+            clearBulkConfigReview();
           }}
           placeholder="provider:hetzner && country:US"
           showMatchCount
@@ -676,8 +749,7 @@ function BulkConfigApply({
             min={1}
             onChange={(event) => {
               setTimeoutSecs(Number(event.target.value));
-              setApplySnapshot(null);
-              setConfirmOpen(false);
+              clearBulkConfigReview();
             }}
             type="number"
             value={timeoutSecs}
@@ -687,10 +759,14 @@ function BulkConfigApply({
           labelPrefix="Config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
-          onPrivilegeMaterialChange={setPrivilegeMaterial}
+          onPrivilegeMaterialChange={(material) => {
+            setPrivilegeMaterial(material);
+            clearBulkConfigReview();
+          }}
           privilegeMaterial={privilegeMaterial}
           unlockRedirectLabel="Unlock config privilege"
         />
+        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
         <button className="primaryAction" disabled={pending || !ready} onClick={() => void reviewApply()} type="button">
           <FileSliders size={16} />
           Review apply
@@ -759,38 +835,53 @@ function SingleVpsConfig({
   const [timeoutSecs, setTimeoutSecs] = useState(30);
   const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const singleTarget = useMemo(() => agents.find((agent) => agent.id === clientId) ?? null, [agents, clientId]);
 
   useEffect(() => writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId), [clientId]);
 
+  function clearSingleConfigReview() {
+    invalidateReviewGeneration();
+    setSingleApplySnapshot(null);
+    setReviewStatus(null);
+  }
+
   function selectClientId(value: string) {
+    clearSingleConfigReview();
     setClientId(value);
     setRedactedToml("");
     setBaseHash("");
-    setSingleApplySnapshot(null);
     setProgress(null);
   }
 
   async function readConfig() {
+    clearSingleConfigReview();
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTarget = singleTarget;
+    const frozenPrivilegeMaterial = privilegeMaterial;
+    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
     await runAction(async () => {
-      setSingleApplySnapshot(null);
-      if (!singleTarget || !privilegeMaterial) {
+      if (!frozenTarget || !frozenPrivilegeMaterial) {
         throw new Error("Select one VPS and unlock privilege");
       }
       const operation: JobOperation = { type: "config_read" };
-      const selectorExpressionForTarget = selectorExpressionForClientIds([singleTarget.id]);
-      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+      const selectorExpressionForTarget = selectorExpressionForClientIds([frozenTarget.id]);
       const built = await buildPrivilegeForJobOperation({
-        clientIds: [singleTarget.id],
+        clientIds: [frozenTarget.id],
         commandType: "config_read",
         operation,
-        privilegeMaterial,
+        privilegeMaterial: frozenPrivilegeMaterial,
         selectorExpression: selectorExpressionForTarget,
         timeoutSecs: boundedTimeoutSecs,
       });
       const response = await onCreateJob({
         argv: [],
-            command: "config_read",
+        command: "config_read",
         confirmed: true,
         destructive: false,
         force_unprivileged: false,
@@ -798,16 +889,22 @@ function SingleVpsConfig({
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
         selector_expression: selectorExpressionForTarget,
-        target_client_ids: [singleTarget.id],
+        target_client_ids: [frozenTarget.id],
         timeout_secs: boundedTimeoutSecs,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
-        targets: [singleTarget],
+        targets: [frozenTarget],
         timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       if (waited.timedOut) {
         throw new Error("Timed out waiting for config read target");
       }
@@ -818,10 +915,13 @@ function SingleVpsConfig({
           jobId: response.job_id,
           outputs,
           targetRecords: waited.targets,
-          targets: [singleTarget],
+          targets: [frozenTarget],
         }),
       );
       const config = extractConfigRead(outputs);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setRedactedToml(config.toml);
       setBaseHash(config.baseHash);
       setSingleApplySnapshot(null);
@@ -829,39 +929,53 @@ function SingleVpsConfig({
   }
 
   async function reviewConfigApply() {
-    await runAction(async () => {
-      if (!singleTarget || !privilegeMaterial || !redactedToml || !baseHash) {
-        throw new Error("Read a single VPS config before applying");
-      }
-      const operation: JobOperation = {
-        type: "hot_config",
-        apply_mode: "full_override",
-        toml: redactedToml,
-        preserve_redacted: true,
-        base_config_sha256_hex: baseHash,
-      };
-      const selectorExpressionForTarget = selectorExpressionForClientIds([singleTarget.id]);
-      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
-      const built = await buildPrivilegeForJobOperation({
-        clientIds: [singleTarget.id],
-        commandType: "hot_config",
-        operation,
-        privilegeMaterial,
-        selectorExpression: selectorExpressionForTarget,
-        timeoutSecs: boundedTimeoutSecs,
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTarget = singleTarget;
+    const frozenPrivilegeMaterial = privilegeMaterial;
+    const frozenToml = redactedToml;
+    const frozenBaseHash = baseHash;
+    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+    setReviewStatus("Preparing single config review");
+    try {
+      await runAction(async () => {
+        await waitForReviewRender();
+        if (!frozenTarget || !frozenPrivilegeMaterial || !frozenToml || !frozenBaseHash) {
+          throw new Error("Read a single VPS config before applying");
+        }
+        const operation: JobOperation = {
+          type: "hot_config",
+          apply_mode: "full_override",
+          toml: frozenToml,
+          preserve_redacted: true,
+          base_config_sha256_hex: frozenBaseHash,
+        };
+        const selectorExpressionForTarget = selectorExpressionForClientIds([frozenTarget.id]);
+        const built = await buildPrivilegeForJobOperation({
+          clientIds: [frozenTarget.id],
+          commandType: "hot_config",
+          operation,
+          privilegeMaterial: frozenPrivilegeMaterial,
+          selectorExpression: selectorExpressionForTarget,
+          timeoutSecs: boundedTimeoutSecs,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setSingleApplySnapshot({
+          baseHash: frozenBaseHash,
+          clientId: frozenTarget.id,
+          operation,
+          payloadHashHex: built.payloadHashHex,
+          privilegeAssertion: built.privilegeAssertion,
+          selectorExpression: selectorExpressionForTarget,
+          target: frozenTarget,
+          timeoutSecs: boundedTimeoutSecs,
+          toml: frozenToml,
+        });
       });
-      setSingleApplySnapshot({
-        baseHash,
-        clientId: singleTarget.id,
-        operation,
-        payloadHashHex: built.payloadHashHex,
-        privilegeAssertion: built.privilegeAssertion,
-        selectorExpression: selectorExpressionForTarget,
-        target: singleTarget,
-        timeoutSecs: boundedTimeoutSecs,
-        toml: redactedToml,
-      });
-    });
+    } finally {
+      setReviewStatus(null);
+    }
   }
 
   async function applyConfig(snapshot: SingleConfigApplySnapshot) {
@@ -921,7 +1035,7 @@ function SingleVpsConfig({
             max={3600}
             min={1}
             onChange={(event) => {
-              setSingleApplySnapshot(null);
+              clearSingleConfigReview();
               setTimeoutSecs(Number(event.target.value));
             }}
             type="number"
@@ -933,7 +1047,7 @@ function SingleVpsConfig({
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
           onPrivilegeMaterialChange={(material) => {
-            setSingleApplySnapshot(null);
+            clearSingleConfigReview();
             setPrivilegeMaterial(material);
           }}
           privilegeMaterial={privilegeMaterial}
@@ -955,7 +1069,7 @@ function SingleVpsConfig({
         <textarea
           aria-label="Single VPS redacted config TOML"
           onChange={(event) => {
-            setSingleApplySnapshot(null);
+            clearSingleConfigReview();
             setRedactedToml(event.target.value);
           }}
           rows={22}
@@ -970,6 +1084,7 @@ function SingleVpsConfig({
           <Save size={16} />
           Review apply
         </button>
+        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
       </div>
       <ConfirmationPrompt
         confirmLabel="Apply config"

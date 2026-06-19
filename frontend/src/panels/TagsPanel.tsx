@@ -19,6 +19,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
@@ -33,6 +34,13 @@ import { parseSearchExpression, selectorExpressionForClientIds } from "../search
 import { formatVpsName, runPanelAction } from "../utils";
 
 const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
+
+type BulkTagMutationSnapshot = {
+  action: "add" | "remove" | "delete";
+  preview: TagMutationResponse;
+  selectorExpression: string;
+  tag: string;
+};
 
 export function TagsPanel({
   activeSubpage,
@@ -589,88 +597,129 @@ function BulkTagPanel({
   const [tag, setTag] = useState("");
   const [preview, setPreview] = useState<TagMutationResponse | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [mutationSnapshot, setMutationSnapshot] = useState<BulkTagMutationSnapshot | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<string | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
 
   useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
   function clearMutationPreview() {
+    invalidateReviewGeneration();
     setPreview(null);
+    setMutationSnapshot(null);
     setConfirmOpen(false);
+    setPreviewStatus(null);
   }
 
   async function previewTargets() {
-    await runAction(async () => {
-      if (action !== "delete" && selectorParse.error) {
-        throw new Error(selectorParse.error);
-      }
-      if (action === "delete") {
-        setPreview(await onDeleteTag(tag.trim(), false, null));
-        return;
-      }
-      const resolved = await onResolveBulk(selectorExpression.trim());
-      const targetClientIds = resolved.targets.map((target) => target.id);
-      if (!targetClientIds.length) {
-        throw new Error("Bulk tag preview resolved no VPSs");
-      }
-      setPreview(
-        await onBulkMutateTags({
-          action,
+    const reviewGeneration = captureReviewGeneration();
+    const frozenAction = action;
+    const frozenTag = tag.trim();
+    const frozenSelector = selectorExpression.trim();
+    setPreviewStatus("Preparing tag preview");
+    try {
+      await runAction(async () => {
+        await waitForReviewRender();
+        if (frozenAction !== "delete" && selectorParse.error) {
+          throw new Error(selectorParse.error);
+        }
+        if (frozenAction === "delete") {
+          const nextPreview = await onDeleteTag(frozenTag, false, null);
+          if (!isReviewGenerationCurrent(reviewGeneration)) {
+            return;
+          }
+          setPreview(nextPreview);
+          setMutationSnapshot(null);
+          return;
+        }
+        const resolved = await onResolveBulk(frozenSelector);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        const targetClientIds = resolved.targets.map((target) => target.id);
+        if (!targetClientIds.length) {
+          throw new Error("Bulk tag preview resolved no VPSs");
+        }
+        const nextPreview = await onBulkMutateTags({
+          action: frozenAction,
           confirmed: false,
           privilege_assertion: null,
-          selector_expression: selectorExpression.trim(),
+          selector_expression: frozenSelector,
           target_client_ids: targetClientIds,
-          tag: tag.trim(),
-        }),
-      );
-    });
+          tag: frozenTag,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(nextPreview);
+        setMutationSnapshot(null);
+      });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setPreviewStatus(null);
+      }
+    }
   }
 
   async function submitMutation() {
+    const snapshot = mutationSnapshot;
     setConfirmOpen(false);
     await runAction(async () => {
+      if (!snapshot) {
+        throw new Error("Tag mutation confirmation snapshot is missing; preview the mutation again");
+      }
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required before bulk tag mutation");
       }
-      if (action === "delete") {
-        const targetIds = (preview?.affected ?? tags.find((item) => item.name === tag.trim())?.clients ?? []).map((client) => client.id);
+      if (snapshot.action === "delete") {
+        const targetIds = snapshot.preview.affected.map((client) => client.id);
         const privilegeAssertion = await dbPrivilegeAssertion(
           privilegeMaterial,
           onOpenPrivilegeUnlock,
           "tag.delete",
-          tag.trim(),
+          snapshot.tag,
           null,
           targetIds,
         );
-        setLastMutation(await onDeleteTag(tag.trim(), true, privilegeAssertion));
+        setLastMutation(await onDeleteTag(snapshot.tag, true, privilegeAssertion));
+        setMutationSnapshot(null);
         return;
       }
-      const targetIds = preview?.affected.map((agent) => agent.id) ?? [];
+      const targetIds = snapshot.preview.affected.map((agent) => agent.id);
       if (!targetIds.length) {
         throw new Error("Review targets before applying the tag mutation");
       }
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
-        action === "add" ? "tag.bulk_add" : "tag.bulk_remove",
-        tag.trim(),
-        selectorExpression.trim(),
+        snapshot.action === "add" ? "tag.bulk_add" : "tag.bulk_remove",
+        snapshot.tag,
+        snapshot.selectorExpression,
         targetIds,
       );
       setLastMutation(
         await onBulkMutateTags({
-          action,
+          action: snapshot.action,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
-          selector_expression: selectorExpression.trim(),
+          selector_expression: snapshot.selectorExpression,
           target_client_ids: targetIds,
-          tag: tag.trim(),
+          tag: snapshot.tag,
         }),
       );
+      setMutationSnapshot(null);
     });
   }
 
   const previewAgents = preview?.affected ?? [];
+  const confirmationSnapshot = confirmOpen ? mutationSnapshot : null;
+  const confirmationPreview = confirmationSnapshot?.preview ?? preview;
 
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
@@ -747,7 +796,18 @@ function BulkTagPanel({
         <button
           className="primaryAction"
           disabled={pending || !privilegeMaterial || !tag.trim() || !preview || (action !== "delete" && Boolean(selectorParse.error))}
-          onClick={() => setConfirmOpen(true)}
+          onClick={() => {
+            if (!preview) {
+              return;
+            }
+            setMutationSnapshot({
+              action,
+              preview,
+              selectorExpression: action === "delete" ? "" : selectorExpression.trim(),
+              tag: tag.trim(),
+            });
+            setConfirmOpen(true);
+          }}
           type="button"
         >
           <Tag size={16} />
@@ -758,7 +818,7 @@ function BulkTagPanel({
         <div className="bulkTagPreviewHeader">
           <div>
             <strong>Target preview</strong>
-            <span>{preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Review before mutation"}</span>
+            <span>{previewStatus ?? (preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Review before mutation")}</span>
           </div>
         </div>
         {previewAgents.length > 0 ? (
@@ -778,16 +838,25 @@ function BulkTagPanel({
       </section>
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"
-        detail={action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
+        detail={confirmationSnapshot?.action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
         items={[
-          { label: "Action", value: action },
-          { label: "Tag", value: tag || "-" },
-          { label: "Selector", value: action === "delete" ? "all assignments" : selectorExpression || "-" },
-          { label: "Targets", value: String(preview?.target_count ?? 0) },
-          { label: "Changed", value: String(preview?.changed_count ?? 0) },
-          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={preview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
+          { label: "Action", value: confirmationSnapshot?.action ?? action },
+          { label: "Tag", value: confirmationSnapshot?.tag || tag || "-" },
+          {
+            label: "Selector",
+            value:
+              confirmationSnapshot?.action === "delete"
+                ? "all assignments"
+                : confirmationSnapshot?.selectorExpression || selectorExpression || "-",
+          },
+          { label: "Targets", value: String(confirmationPreview?.target_count ?? 0) },
+          { label: "Changed", value: String(confirmationPreview?.changed_count ?? 0) },
+          { label: "Schedule target notices", value: <ScheduleImpactTable impacts={confirmationPreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
         ]}
-        onCancel={() => setConfirmOpen(false)}
+        onCancel={() => {
+          setConfirmOpen(false);
+          setMutationSnapshot(null);
+        }}
         onConfirm={() => void submitMutation()}
         open={confirmOpen}
         pending={pending}

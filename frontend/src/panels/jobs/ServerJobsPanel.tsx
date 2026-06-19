@@ -2,6 +2,7 @@ import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { CrudPager } from "../../components/CrudPager";
+import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { serverJobStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
   ArtifactCleanupPreviewRecord,
@@ -37,20 +38,38 @@ export function ServerJobsPanel({
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [previewStatus, setPreviewStatus] = useState<string | null>(null);
   const [cancelJobSnapshot, setCancelJobSnapshot] = useState<ServerJobRecord | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const summary =
     error ??
+    previewStatus ??
     (preview
       ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
       : `${jobs.length} server jobs`);
 
   async function previewCleanup() {
+    const reviewGeneration = captureReviewGeneration();
+    const frozenExpression = expression;
     setPending(true);
     setError(null);
+    setPreviewStatus("Preparing cleanup preview");
     try {
-      setPreview(await onPreviewCleanup(expression));
+      await waitForReviewRender();
+      const nextPreview = await onPreviewCleanup(frozenExpression);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPreview(nextPreview);
       setConfirmOpen(false);
     } catch (previewError) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPreview(null);
       setError(
         previewError instanceof Error
@@ -59,6 +78,9 @@ export function ServerJobsPanel({
       );
     } finally {
       setPending(false);
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setPreviewStatus(null);
+      }
     }
   }
 
@@ -130,9 +152,11 @@ export function ServerJobsPanel({
               rows={3}
               value={expression}
               onChange={(event) => {
+                invalidateReviewGeneration();
                 setExpression(event.target.value);
                 setPreview(null);
                 setConfirmOpen(false);
+                setPreviewStatus(null);
               }}
             />
           </label>

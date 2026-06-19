@@ -141,6 +141,12 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Jobs",
+    subpage: "Server jobs",
+    heading: "Artifact cleanup",
+    id: "22b-jobs-server-jobs",
+  },
+  {
+    view: "Jobs",
     subpage: "Schedule runs",
     heading: "Schedule runs",
     id: "23-jobs-schedule-runs",

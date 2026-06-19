@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
@@ -22,6 +22,7 @@ import {
   DEFAULT_UPDATE_VERSION_URL,
   type JobDispatchPreset,
 } from "../jobDispatchPreset";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import {
   buildPrivilegeAssertion,
   canonicalJobPrivilegeIntent,
@@ -313,6 +314,12 @@ export function JobDispatchPanel({
   const [selectorVerification, setSelectorVerification] = useState<"checking" | "invalid" | "neutral" | "valid">("neutral");
   const [selectorVerificationMessage, setSelectorVerificationMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
 
   useEffect(() => {
@@ -347,9 +354,8 @@ export function JobDispatchPanel({
       setUpdateRollbackSha256Hex(dispatchPreset.updateRollbackSha256Hex ?? "");
     }
     setPreview(null);
-    setDispatchConfirmation(null);
+    clearDispatchReview();
     setActionError(null);
-    setDispatchPromptOpen(false);
     clearExecutionResults();
     onDispatchPresetApplied?.();
   }, [dispatchPreset, onDispatchPresetApplied]);
@@ -380,7 +386,7 @@ export function JobDispatchPanel({
     setTerminalCloseReason(session.close_reason ?? "operator");
     setSelectorExpression(`id:${session.client_id}`);
     setPreview(null);
-    setDispatchConfirmation(null);
+    clearDispatchReview();
     setActionError(null);
   }, [terminalComposerAction]);
 
@@ -388,9 +394,11 @@ export function JobDispatchPanel({
     writeLocalString(JOB_SELECTOR_STORAGE_KEY, selectorExpression);
   }, [selectorExpression]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    invalidateReviewGeneration();
     setDispatchPromptOpen(false);
     setDispatchConfirmation(null);
+    setReviewStatus(null);
   }, [
     backupIncludeConfig,
     backupPathsText,
@@ -446,6 +454,7 @@ export function JobDispatchPanel({
     updateRestartAgent,
     updateRollbackSha256Hex,
     updateSha256Hex,
+    invalidateReviewGeneration,
   ]);
 
   useEffect(() => {
@@ -591,6 +600,7 @@ export function JobDispatchPanel({
   ];
   const status =
     actionError ??
+    reviewStatus ??
     (visibleDispatchProgress
       ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
       : lastJob
@@ -604,8 +614,7 @@ export function JobDispatchPanel({
   function lockPrivilege() {
     setPrivilegeMaterial(null);
     setActionError(null);
-    setDispatchPromptOpen(false);
-    setDispatchConfirmation(null);
+    clearDispatchReview();
   }
 
   function clearExecutionResults() {
@@ -615,14 +624,35 @@ export function JobDispatchPanel({
     setTransferProgress(null);
   }
 
+  function clearDispatchReview() {
+    invalidateReviewGeneration();
+    setDispatchPromptOpen(false);
+    setDispatchConfirmation(null);
+    setReviewStatus(null);
+  }
+
   async function previewTargets() {
     if (selectorParse.error) {
       setActionError(selectorParse.error);
       return;
     }
-    await runPanelAction(setPending, setActionError, async () => {
-      setPreview(await onResolveTargets(targetSelection()));
-    });
+    const reviewGeneration = captureReviewGeneration();
+    const selection = targetSelection();
+    setReviewStatus("Resolving dispatch targets");
+    try {
+      await runPanelAction(setPending, setActionError, async () => {
+        await waitForReviewRender();
+        const resolved = await onResolveTargets(selection);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(resolved);
+      });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewStatus(null);
+      }
+    }
   }
 
   async function submitJob(event: FormEvent<HTMLFormElement>) {
@@ -645,15 +675,32 @@ export function JobDispatchPanel({
       return;
     }
     blurActiveElement();
-    await runPanelAction(setPending, setActionError, async () => {
-      const resolved = await onResolveTargets(targetSelection());
-      if (!resolved.targets.length) {
-        throw new Error("Target confirmation resolved no VPSs");
+    const reviewGeneration = captureReviewGeneration();
+    const selection = targetSelection();
+    setReviewStatus("Preparing dispatch review");
+    try {
+      await runPanelAction(setPending, setActionError, async () => {
+        await waitForReviewRender();
+        const resolved = await onResolveTargets(selection);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        if (!resolved.targets.length) {
+          throw new Error("Target confirmation resolved no VPSs");
+        }
+        const snapshot = await buildDispatchConfirmationSnapshot(resolved.targets);
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(resolved);
+        setDispatchConfirmation(snapshot);
+        setDispatchPromptOpen(true);
+      });
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewStatus(null);
       }
-      setPreview(resolved);
-      setDispatchConfirmation(await buildDispatchConfirmationSnapshot(resolved.targets));
-      setDispatchPromptOpen(true);
-    });
+    }
   }
 
   async function buildDispatchConfirmationSnapshot(targets: AgentView[]): Promise<DispatchConfirmationSnapshot> {

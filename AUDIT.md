@@ -153,7 +153,7 @@ of the same root cause.
 | AUD-137 | Medium/High | Confirmed | API/Command Templates/Confirmation | Command-template delete route lacks backend confirmation |
 | AUD-138 | Medium/High | Confirmed | API/CLI/Data Sources/Confirmation | Data-source preset updates can bypass confirmation for one assigned VPS |
 | AUD-139 | Medium/High | Confirmed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
-| AUD-140 | Medium/High | Confirmed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
+| AUD-140 | Medium/High | Fixed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
 | AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
 | AUD-142 | High | Confirmed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
 | AUD-143 | Medium/High | Confirmed | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
@@ -186,17 +186,17 @@ of the same root cause.
 | AUD-170 | High | Fixed | Frontend/API/Backups/Key Custody | Dashboard restore preparation sends the backup private key to the API |
 | AUD-171 | Critical | Fixed | API/Backups/Restore Payloads/Webhooks | Inline restore archives persist decrypted backup content in jobs and webhooks |
 | AUD-172 | High | Confirmed | API/Auth/User Management | Password reset preserves old-password-encrypted TOTP secrets |
-| AUD-173 | High | Confirmed | Frontend/Fleet Tags | Bulk tag preview races can apply a stale target set to a newer tag form |
-| AUD-174 | High | Confirmed | Frontend/Server Jobs/Artifact Cleanup | Artifact cleanup preview races can queue a stale cleanup set after expression edits |
-| AUD-175 | High | Confirmed | Frontend/Job Dispatch | Dispatch review can open a stale confirmation after operation or selector edits |
-| AUD-176 | High | Confirmed | Frontend/Config/Data Sources | Config and data-source review requests can open stale confirmations after edits |
+| AUD-173 | High | Fixed | Frontend/Fleet Tags | Bulk tag preview races can apply a stale target set to a newer tag form |
+| AUD-174 | High | Fixed | Frontend/Server Jobs/Artifact Cleanup | Artifact cleanup preview races can queue a stale cleanup set after expression edits |
+| AUD-175 | High | Fixed | Frontend/Job Dispatch | Dispatch review can open a stale confirmation after operation or selector edits |
+| AUD-176 | High | Fixed | Frontend/Config/Data Sources | Config and data-source review requests can open stale confirmations after edits |
 | AUD-177 | Critical | Fixed | Frontend/Topology/Network | Network mutation review requests can open stale confirmations after topology edits |
 | AUD-178 | Critical | Fixed | Frontend/Backups/Restore | Backup and restore review requests can open stale confirmations after edits |
 | AUD-179 | Medium/High | Confirmed | API/Backups/Object Storage | Multiple backup artifacts can reference the same object key |
 | AUD-180 | Medium/High | Confirmed | API/File Transfers/Artifact Cleanup | Reuploaded file-transfer source artifacts can inherit stale cleanup age |
-| AUD-181 | High | Confirmed | Frontend/Access/Keys | Key lifecycle review can open stale confirmations after key-field edits |
+| AUD-181 | High | Fixed | Frontend/Access/Keys | Key lifecycle review can open stale confirmations after key-field edits |
 | AUD-182 | Medium/High | Confirmed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
-| AUD-183 | High | Confirmed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
+| AUD-183 | High | Fixed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
 | AUD-184 | Critical | Fixed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
 | AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
 | AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
@@ -5024,7 +5024,7 @@ of the same root cause.
 ### AUD-140: Single-File Browser Confirmations Remain Armed After Operation Edits
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/File Browser
 - Context: The single-VPS file browser lets operators create, upload, rename,
   delete, chmod, chown, copy, move, and save files on one selected VPS. These
@@ -5054,6 +5054,11 @@ of the same root cause.
   after editor edits. The clean fix should match the multi-file panel behavior:
   any edit that changes the pending operation must close the confirmation and
   require a fresh review.
+- Fix: The file browser now invalidates pending single-file confirmations when
+  any operation-affecting draft field changes, including path, selected item,
+  editor content/mode, upload/create/rename/chmod/chown fields, recursive
+  flags, and clipboard source. Covered by a Playwright regression in
+  `frontend/tests/console-file-browser.spec.ts`.
 
 ### AUD-141: Supervisor PID Records Can Target Reused Host Processes After Agent Restart
 
@@ -6406,7 +6411,7 @@ of the same root cause.
 ### AUD-173: Bulk Tag Preview Races Can Apply A Stale Target Set To A Newer Tag Form
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Fleet Tags
 - Context: System operators use the Tags bulk mutation panel to preview target
   VPSs and schedule impacts before adding, removing, or deleting tags. Tags are
@@ -6447,11 +6452,15 @@ of the same root cause.
   snapshot or request generation containing action, tag, selector, target IDs,
   and schedule impacts; ignore stale async preview responses; and submit only
   the reviewed snapshot.
+- Fix: Bulk tag preview now uses a review generation guard, discards stale
+  async preview completions, and opens confirmation from a frozen mutation
+  snapshot containing action, tag, selector, preview targets, and schedule
+  impacts. Covered by `dispatch-target-consistency.spec.ts`.
 
 ### AUD-174: Artifact Cleanup Preview Races Can Queue A Stale Cleanup Set After Expression Edits
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Server Jobs/Artifact Cleanup
 - Context: Server artifact cleanup is a destructive maintenance workflow. It
   deletes retained artifact objects and metadata for domains such as job
@@ -6493,11 +6502,15 @@ of the same root cause.
   preview responses, and submit only a confirmation snapshot whose expression,
   preview hash, matched count, bytes, and reviewed artifacts match the visible
   confirmation.
+- Fix: Artifact cleanup preview now freezes the expression for the preview
+  request, ignores stale preview completions after expression edits, and queues
+  cleanup only from the current reviewed preview hash/expression. Covered by
+  `dispatch-target-consistency.spec.ts`.
 
 ### AUD-175: Dispatch Review Can Open A Stale Confirmation After Operation Or Selector Edits
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Job Dispatch
 - Context: The Jobs dispatch composer is the primary operator path for shell,
   file, backup, config, process-supervisor, terminal, and agent-update jobs.
@@ -6543,11 +6556,15 @@ of the same root cause.
   pair them with a form generation. If the generation changes before the async
   review completes, the response should be ignored and no prompt should open.
   Valid prompts should remain bound only to their frozen snapshot.
+- Fix: Job dispatch target preview and dispatch review now use the shared
+  review-generation guard with a visible preparing state. Operation-affecting
+  edits invalidate pending review work, and stale completions cannot open a
+  dispatch confirmation. Covered by `dispatch-target-consistency.spec.ts`.
 
 ### AUD-176: Config And Data-Source Review Requests Can Open Stale Confirmations After Edits
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Config/Data Sources
 - Context: Operators use Config and Data-source panels to apply incremental
   runtime config patches and assign data-source presets across selector
@@ -6590,6 +6607,11 @@ of the same root cause.
   first await, assign a review generation to every async review request, ignore
   responses from stale generations, and submit only the frozen snapshot shown
   in the prompt.
+- Fix: Bulk config apply, single-VPS config apply, data-source assignment, and
+  data-source rendered apply now invalidate pending async review work on
+  selector, preset, target, TOML, timeout, values, or privilege edits. Stale
+  render/resolve/assertion completions are ignored. Covered by
+  `dispatch-target-consistency.spec.ts`.
 
 ### AUD-177: Network Mutation Review Requests Can Open Stale Confirmations After Topology Edits
 
@@ -6785,7 +6807,7 @@ of the same root cause.
 ### AUD-181: Key Lifecycle Review Can Open Stale Confirmations After Key-Field Edits
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Access/Keys
 - Context: The Access panel imports gateway-issued agent identities, rotates
   client public keys, and revokes current VPS keys. These actions can register
@@ -6816,6 +6838,10 @@ of the same root cause.
   after an already-open confirmation. The current issue occurs before the
   confirmation opens and should be fixed by snapshotting reviewed inputs plus a
   form generation before the first await, then ignoring stale async completions.
+- Fix: Access identity import/rotation and key revoke reviews now snapshot the
+  reviewed fields before building local privilege assertions, invalidate on
+  key-field edits, and ignore stale assertion completions. Covered by
+  `dispatch-target-consistency.spec.ts`.
 
 ### AUD-182: Terminal Stream Output Can Append After The Terminal-Open Target Is Terminal
 
@@ -6862,7 +6888,7 @@ of the same root cause.
 ### AUD-183: VPS Deletion Confirmation Can Remain Armed After Fleet Selection Changes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Fleet/Delete
 - Context: Fleet > Instances lets operators delete a VPS from inventory. This
   deactivates access, removes the VPS from future targeting, disconnects live
@@ -6899,6 +6925,10 @@ of the same root cause.
   Fleet context has changed. A clean fix should clear `deleteSnapshot` on row
   open, selection/action context changes, and navigation, and should ignore
   stale async privilege-assertion completions using a review generation.
+- Fix: Fleet deletion review now clears on row open, grid selection changes,
+  navigation workflow shortcuts, and route/context changes. The delete review
+  privilege assertion is generation-guarded so stale completions cannot open a
+  prompt. Covered by `dispatch-target-consistency.spec.ts`.
 
 ### AUD-184: Bulk File Review Can Open Stale Confirmations After Selector Or Operation Edits
 

@@ -22,7 +22,7 @@ import { javascript } from "@codemirror/lang-javascript";
 import { markdown } from "@codemirror/lang-markdown";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../../components/VpsCombobox";
@@ -167,6 +167,36 @@ export function FileBrowserPanel({
   useEffect(() => {
     writeBrowserState({ path: currentPath, targetClientId, showHidden });
   }, [currentPath, targetClientId, showHidden]);
+
+  useLayoutEffect(() => {
+    setPendingConfirmation(null);
+  }, [
+    activeCommand,
+    browserClipboard,
+    chmodMode,
+    chownGroup,
+    chownOwner,
+    createContent,
+    createMode,
+    createType,
+    currentPath,
+    editorContent,
+    editorMode,
+    editorPath,
+    newName,
+    pathInput,
+    recursive,
+    renamePathValue,
+    selectedPath,
+    targetClientId,
+    uploadDestination,
+    uploadExistingPolicy,
+    uploadFile,
+    uploadGroup,
+    uploadMode,
+    uploadOwner,
+    uploadOwnershipPolicy,
+  ]);
 
   function selectTargetClientId(value: string) {
     setTargetClientId(value);
